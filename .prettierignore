@@ -1,0 +1,6 @@
+dist
+node_modules
+coverage
+pnpm-lock.yaml
+packages/python-sdk
+.claude/

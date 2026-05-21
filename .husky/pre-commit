@@ -1,0 +1,1 @@
+pnpm secrets:scan:staged && ./scripts/check-docs-drift.sh && pnpm lint && pnpm format:check && pnpm typecheck

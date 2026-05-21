@@ -1,0 +1,49 @@
+# Helio MCP Governance Proxy — Docker Compose
+#
+# Usage:
+#   cd docker && docker compose up
+#
+# This starts the Helio proxy with a mock MCP echo server for
+# demonstration purposes. Open http://localhost:3100 for the dashboard.
+#
+# Send tool calls through the proxy:
+#   curl -s -X POST http://localhost:3000/mcp \
+#     -H 'Content-Type: application/json' \
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
+
+services:
+  helio:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      # Host-side bound to 127.0.0.1 so the quickstart demo is not
+      # exposed on the LAN. See docker/README.md for the security model
+      # and how to opt in to LAN or remote access.
+      - '127.0.0.1:3000:3000' # MCP proxy (agent edge)
+      - '127.0.0.1:3100:3100' # Dashboard UI + approval REST API
+    environment:
+      # Required — generate with: openssl rand -hex 32
+      # Set in docker/.env (copied from docker/.env.example).
+      # The :? syntax fails `docker compose up` at parse time if unset.
+      HELIO_DASHBOARD_SECRET: '${HELIO_DASHBOARD_SECRET:?Set HELIO_DASHBOARD_SECRET in docker/.env — generate with: openssl rand -hex 32}'
+    volumes:
+      - ./helio.docker.yaml:/config/helio.yaml:ro
+      - helio-data:/data
+    depends_on:
+      mcp-server:
+        condition: service_started
+    restart: unless-stopped
+
+  mcp-server:
+    image: node:22-slim
+    working_dir: /app
+    volumes:
+      - ./mcp-echo-server.mjs:/app/server.mjs:ro
+    command: ['node', '/app/server.mjs']
+    expose:
+      - '8080'
+    restart: unless-stopped
+
+volumes:
+  helio-data:

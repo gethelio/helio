@@ -1,0 +1,33 @@
+{
+  "name": "helio",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @gethelio/proxy --filter @gethelio/dashboard dev",
+    "build": "pnpm --filter @gethelio/proxy build",
+    "test": "pnpm test:js && pnpm test:python-sdk",
+    "test:js": "pnpm -r test",
+    "test:python-sdk": "python3 -m pytest packages/python-sdk/tests",
+    "lint": "eslint .",
+    "typecheck": "pnpm -r typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "secrets:scan": "bash ./scripts/secret-scan-ci.sh",
+    "secrets:scan:staged": "bash ./scripts/secret-scan-staged.sh",
+    "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "husky": "9.1.7",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.57.1"
+  }
+}

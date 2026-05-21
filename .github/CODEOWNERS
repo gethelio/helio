@@ -1,0 +1,9 @@
+# Supply chain critical paths — require code owner review
+pnpm-lock.yaml @olivrg
+pnpm-workspace.yaml @olivrg
+packages/*/package.json @olivrg
+package.json @olivrg
+.github/workflows/ @olivrg
+.github/CODEOWNERS @olivrg
+.npmrc @olivrg
+docker/Dockerfile @olivrg

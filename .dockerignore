@@ -1,0 +1,52 @@
+# Dependencies (rebuilt inside container)
+node_modules/
+**/node_modules/
+
+# Build artifacts (rebuilt inside container)
+dist/
+**/dist/
+
+# VCS
+.git/
+.gitignore
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local state
+.local/
+.claude/
+.env
+.env.*
+
+# Python SDK (not needed for proxy image)
+packages/python-sdk/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Test / coverage artifacts
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+tmp/
+.cache/
+
+# macOS
+.DS_Store
+
+# Generated benchmark report
+docs/benchmark-results.md
+
+# Optional: exclude non-runtime project content
+docs/
+examples/

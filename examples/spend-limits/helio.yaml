@@ -1,0 +1,82 @@
+# Spend Limits configuration
+#
+# Cap monetary spend across payment and refund tools using sliding
+# window tracking. See README.md for details on how spend tracking works.
+
+version: '1'
+
+upstream:
+  url: 'http://localhost:8080/mcp'
+  transport: streamable-http
+
+listen:
+  port: 3000
+  host: '127.0.0.1'
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
+  allow_open_mode: true
+
+policies:
+  default: allow
+  rules:
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive operations are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request manual action.'
+
+    # Spend limit on payments — max $500 per hour, shared across all sessions
+    - name: limit-payments
+      match:
+        tool: 'create_payment'
+      action: spend_limit
+      limits:
+        max_spend:
+          field: '$.amount'
+          limit: 500
+          currency: 'USD'
+          window: 1h
+          key: tool
+      feedback:
+        message: 'Payment spend limit exceeded.'
+        suggestion: 'Wait for the current window to reset or reduce the payment amount.'
+
+    # Spend limit on refunds — max $200 per hour, per session
+    - name: limit-refunds
+      match:
+        tool: 'create_refund'
+      action: spend_limit
+      limits:
+        max_spend:
+          field: '$.amount'
+          limit: 200
+          currency: 'USD'
+          window: 1h
+          key: session
+      feedback:
+        message: 'Refund spend limit exceeded for this session.'
+        suggestion: 'Start a new session or wait for the window to reset.'
+
+    - name: allow-reads
+      match:
+        annotations:
+          readOnlyHint: true
+      action: allow
+
+approval:
+  timeout: 300s
+  default_on_timeout: deny
+  channels:
+    - type: dashboard
+
+audit:
+  storage: sqlite
+  path: ./helio-audit.db
+  retention: 90d
+  include_responses: true

@@ -1,0 +1,85 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+node_modules
+**/node_modules/
+.pnpm-store/
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+dist/
+dist
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env*.local
+.env
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# misc local untracked files
+.local/
+docs/.local/
+# local Claude Code state, except the shared project config
+.claude/*
+!/.claude/settings.json
+
+# generated benchmark report (machine-specific)
+docs/benchmark-results.md
+
+# runtime-generated audit databases
+helio-audit.db
+*.db
+*.db-wal
+*.db-shm
+
+# python
+packages/python-sdk/src/helio/_version.py
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hatch/
+*.pyo
+*.pyd
+.python-version
+
+
+.gstack/

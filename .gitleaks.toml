@@ -1,0 +1,16 @@
+title = 'Helio gitleaks configuration'
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = 'Known placeholder values in docs/examples'
+regexes = [
+  '''xoxb-your-bot-token''',
+  '''xoxb-your-actual-bot-token''',
+  '''replace-with-openssl-rand-hex-32-output''',
+  '''C0123456789''',
+]
+paths = [
+  '''^docs/images/.*\.png$''',
+]

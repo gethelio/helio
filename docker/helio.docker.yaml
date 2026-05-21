@@ -1,0 +1,58 @@
+# Helio Docker configuration
+#
+# This config is used by docker-compose.yml. It demonstrates governance
+# with a mix of policies: read-only tools are allowed, destructive tools
+# are denied, and everything else falls through to the default (allow).
+#
+# The dashboard approval channel is enabled so you can see the approvals
+# page working in the UI at http://localhost:3100.
+
+version: '1'
+
+upstream:
+  url: 'http://mcp-server:8080/mcp'
+  transport: streamable-http
+
+listen:
+  port: 3000
+  host: '0.0.0.0'
+
+dashboard:
+  enabled: true
+  port: 3100
+  host: '0.0.0.0'
+  # Required whenever `flag_destructive: require_approval` or any
+  # `require_approval` rule is used. Plumbed in through docker-compose via
+  # the HELIO_DASHBOARD_SECRET env var. Generate with: openssl rand -hex 32
+  api_secret: '${HELIO_DASHBOARD_SECRET}'
+
+policies:
+  default: allow
+  flag_destructive: require_approval
+  rules:
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive actions are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request approval.'
+
+    - name: allow-reads
+      match:
+        annotations:
+          readOnlyHint: true
+      action: allow
+
+approval:
+  timeout: 120s
+  default_on_timeout: deny
+  channels:
+    - type: dashboard
+
+audit:
+  storage: sqlite
+  path: /data/helio-audit.db
+  retention: 90d
+  include_responses: true

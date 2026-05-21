@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Python SDK — httpx is the only runtime dep, pytest + respx are pins.
+  # Dependabot's native `pip` ecosystem reads pyproject.toml PEP 621
+  # metadata and proposes weekly bumps so the published PyPI package
+  # does not silently rot.
+  - package-ecosystem: pip
+    directory: /packages/python-sdk
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

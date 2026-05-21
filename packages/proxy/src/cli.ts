@@ -1,0 +1,872 @@
+/* eslint-disable no-console -- CLI entry point, console is the intended output */
+import { Command } from 'commander'
+import { writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { VERSION } from './version.js'
+import { loadConfig, ConfigError, ConfigWatcher } from './config/index.js'
+import { createApp, startServer, startSidebandServer } from './server.js'
+import { UpstreamForwarder, SseUpstreamForwarder } from './upstream/index.js'
+import { StdioForwarder } from './transport/stdio-wrapper.js'
+import { compilePolicies, PolicyParseError } from './policy/index.js'
+import { GovernedForwarder } from './policy/governed-forwarder.js'
+import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
+import { AuditStore, AuditWriter } from './audit/index.js'
+import { EvidenceStore, createSidebandApp } from './evidence/index.js'
+import {
+  ApprovalQueue,
+  ApprovalRouter,
+  createChannels,
+  createSlackActionApp,
+} from './approval/index.js'
+import { RateLimiter } from './policy/index.js'
+import { SpendLimiter } from './policy/index.js'
+import { parseDuration } from './config/schema.js'
+import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
+import type { AuditRecord } from './audit/index.js'
+import { CSV_HEADERS, csvEscape } from './audit/csv.js'
+import type { McpForwarder } from './mcp/types.js'
+import type { ServerHandle } from './server.js'
+import {
+  warnIfWebhookChannelUnreachable,
+  warnIfSdkSidebandExposed,
+  warnIfDashboardOpenMode,
+} from './startup-warnings.js'
+import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
+
+// ---------------------------------------------------------------------------
+// Process-level error handlers — ensure crashes are logged, and let every
+// registered crash-drain hook (audit writer, etc.) flush before exit so the
+// enforcement trail survives an unhandled rejection or an uncaught exception.
+// ---------------------------------------------------------------------------
+
+/** Upper bound on how long the crash drain can run before we give up and
+ *  exit anyway. Bounds the worst case if a future hook hangs. */
+const CRASH_DRAIN_TIMEOUT_MS = 2_000
+
+function exitAfterDrain(): void {
+  const watchdog = new Promise<void>((resolve) => {
+    setTimeout(resolve, CRASH_DRAIN_TIMEOUT_MS).unref()
+  })
+  void Promise.race([drainForCrash(), watchdog]).finally(() => {
+    process.exit(1)
+  })
+}
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[helio] Unhandled promise rejection:', reason)
+  exitAfterDrain()
+})
+
+process.on('uncaughtException', (err) => {
+  console.error('[helio] Uncaught exception:', err)
+  exitAfterDrain()
+})
+
+const DEFAULT_CONFIG_PATH = 'helio.yaml'
+const SHUTDOWN_TIMEOUT_MS = 5_000
+const BUNDLED_DASHBOARD_ASSETS_DIR = 'dashboard-assets'
+// Test hook to simulate missing bundled assets without mutating dist/ on disk.
+const DASHBOARD_ASSETS_TEST_OVERRIDE_ENV = 'HELIO_DASHBOARD_ASSETS_DIR_TEST_OVERRIDE'
+const DASHBOARD_ASSETS_RECOVERY_MESSAGE_FOR_START =
+  'Run "pnpm --filter @gethelio/proxy build" before starting Helio. ' +
+  'If you installed @gethelio/proxy from npm and see this, please file a bug - bundled assets should always be present.'
+const DASHBOARD_ASSETS_RECOVERY_MESSAGE_FOR_VALIDATE =
+  'Run "pnpm --filter @gethelio/proxy build" before validating. ' +
+  'If you installed @gethelio/proxy from npm and see this, please file a bug - bundled assets should always be present.'
+
+function resolveDashboardAssetsDir(): string {
+  const isVitestRuntime =
+    process.env['VITEST'] === 'true' || typeof process.env['VITEST_WORKER_ID'] === 'string'
+  const override = process.env[DASHBOARD_ASSETS_TEST_OVERRIDE_ENV]
+  if (isVitestRuntime && override && override.trim().length > 0) {
+    return override
+  }
+  const distDir = dirname(fileURLToPath(import.meta.url))
+  return resolve(distDir, BUNDLED_DASHBOARD_ASSETS_DIR)
+}
+
+function getBundledDashboardDistPath(): string | null {
+  const assetsDir = resolveDashboardAssetsDir()
+  const indexPath = resolve(assetsDir, 'index.html')
+  const assetsSubdirPath = resolve(assetsDir, 'assets')
+  return existsSync(indexPath) && existsSync(assetsSubdirPath) ? assetsDir : null
+}
+
+// ---------------------------------------------------------------------------
+// Config template for `helio init`
+// ---------------------------------------------------------------------------
+
+function renderConfigTemplate(apiSecret: string): string {
+  return `# Helio MCP Governance Proxy configuration
+# Docs: https://github.com/gethelio/helio
+
+version: "1"
+
+upstream:
+  # URL of the upstream MCP server
+  url: "http://localhost:8080/mcp"
+  # Transport: streamable-http (default), sse, or stdio
+  transport: streamable-http
+
+# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
+# not change to 0.0.0.0 without putting an authenticating reverse proxy in
+# front. dashboard.api_secret is the manual dashboard login secret and also
+# supports machine Bearer auth for sideband API clients. Store it safely; it
+# stays valid until you rotate it. Rotate by editing this file and restarting
+# (or hot-reloading) the proxy. Rotation invalidates active dashboard sessions.
+dashboard:
+  enabled: true
+  port: 3100
+  host: 127.0.0.1
+  api_secret: "${apiSecret}"
+
+# listen:
+#   port: 3000
+#   host: 127.0.0.1
+
+# policies:
+#   default: allow
+#   dry_run: false
+#   rules: []
+
+# approval:
+#   timeout: 300s
+#   default_on_timeout: deny
+#   channels: []
+
+# audit:
+#   storage: sqlite
+#   path: ./helio-audit.db
+#   retention: 90d
+#   include_responses: true
+
+# sdk:
+#   enabled: false
+#   port: 3200
+#   host: 127.0.0.1
+# When enabled, the proxy generates a per-boot Bearer token and prints it
+# to stderr. Pass HELIO_SDK_TOKEN to your SDK clients, or pre-set it in
+# the proxy's environment for a stable cross-restart value.
+`
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+interface StartOptions {
+  config: string
+  /** When true, do not start the config file watcher. Overrides the YAML. */
+  noHotReload?: boolean
+}
+
+/** Upper bound to wait for startup cache priming before serving requests. */
+const ANNOTATION_PRIME_INITIAL_WAIT_MS = 1_500
+/** Base delay for background retry/backoff when startup priming fails. */
+const ANNOTATION_PRIME_RETRY_BASE_MS = 1_000
+/** Maximum backoff delay for annotation cache prime retries. */
+const ANNOTATION_PRIME_RETRY_MAX_MS = 30_000
+/** Random jitter added to retry delay to avoid synchronized retries. */
+const ANNOTATION_PRIME_RETRY_JITTER_MS = 250
+
+interface AnnotationPrimeController {
+  stop(): void
+}
+
+function computePrimeRetryDelayMs(attempt: number): number {
+  const exponent = Math.max(0, attempt - 1)
+  const baseDelay = Math.min(
+    ANNOTATION_PRIME_RETRY_MAX_MS,
+    ANNOTATION_PRIME_RETRY_BASE_MS * 2 ** exponent,
+  )
+  const jitter = Math.floor(Math.random() * ANNOTATION_PRIME_RETRY_JITTER_MS)
+  return Math.min(ANNOTATION_PRIME_RETRY_MAX_MS, baseDelay + jitter)
+}
+
+/**
+ * Prime the annotation cache during startup, then keep retrying in the
+ * background until success. Failures remain fail-closed by policy defaults.
+ */
+async function startAnnotationPrimeLoop(
+  governedForwarder: GovernedForwarder,
+): Promise<AnnotationPrimeController> {
+  let stopped = false
+  let primed = false
+  let retryAttempt = 0
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+
+  const clearRetryTimer = () => {
+    if (!retryTimer) return
+    clearTimeout(retryTimer)
+    retryTimer = undefined
+  }
+
+  const stop = () => {
+    stopped = true
+    clearRetryTimer()
+  }
+
+  const scheduleRetry = () => {
+    if (stopped || primed || retryTimer) return
+    retryAttempt += 1
+    const delayMs = computePrimeRetryDelayMs(retryAttempt)
+    console.error(
+      `[helio] Annotation cache prime retry ${String(retryAttempt)} scheduled in ${String(delayMs)}ms`,
+    )
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined
+      void runPrimeAttempt('retry')
+    }, delayMs)
+    retryTimer.unref()
+  }
+
+  const handlePrimeResult = (phase: 'initial' | 'retry', result: AnnotationCachePrimeResult) => {
+    if (stopped || primed) return
+
+    if (result.success) {
+      primed = true
+      clearRetryTimer()
+      const prefix =
+        phase === 'initial'
+          ? '[helio] Annotation cache primed'
+          : `[helio] Annotation cache primed after retry ${String(retryAttempt)}`
+      console.error(`${prefix}: ${String(result.toolsCached)} tools cached`)
+      return
+    }
+
+    const reason = result.reason ?? 'unknown reason'
+    if (phase === 'initial') {
+      console.error(
+        `[helio] Annotation cache priming failed: ${reason} — undocumented tools will be denied (fail-closed) until priming succeeds`,
+      )
+    } else {
+      console.error(
+        `[helio] Annotation cache prime retry ${String(retryAttempt)} failed: ${reason} — still fail-closed`,
+      )
+    }
+    scheduleRetry()
+  }
+
+  const runPrimeAttempt = async (phase: 'initial' | 'retry') => {
+    const result = await governedForwarder.primeAnnotationCache()
+    handlePrimeResult(phase, result)
+  }
+
+  const initialAttempt = runPrimeAttempt('initial')
+  const initialOutcome = await Promise.race([
+    initialAttempt.then(() => 'completed' as const),
+    new Promise<'timeout'>((resolve) => {
+      setTimeout(() => {
+        resolve('timeout')
+      }, ANNOTATION_PRIME_INITIAL_WAIT_MS).unref()
+    }),
+  ])
+
+  if (initialOutcome === 'timeout') {
+    console.error(
+      `[helio] Annotation cache priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms; continuing startup fail-closed and retrying in background`,
+    )
+    scheduleRetry()
+  }
+
+  return { stop }
+}
+
+async function startCommand(configPath: string, options: StartOptions): Promise<void> {
+  let config
+  try {
+    config = await loadConfig(configPath)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      if (err.details) {
+        for (const detail of err.details) {
+          console.error(`  ${detail.path}: ${detail.message}`)
+        }
+      }
+      process.exit(1)
+    }
+    throw err
+  }
+
+  const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
+  if (config.dashboard.enabled && !bundledDashboardDistPath) {
+    console.error(
+      'Error: dashboard.enabled is true but bundled dashboard assets are missing. ' +
+        DASHBOARD_ASSETS_RECOVERY_MESSAGE_FOR_START,
+    )
+    process.exit(1)
+  }
+
+  // Create the right forwarder based on upstream transport
+  let forwarder: McpForwarder
+  let closeForwarder: (() => Promise<void>) | undefined
+
+  switch (config.upstream.transport) {
+    case 'streamable-http': {
+      forwarder = new UpstreamForwarder({
+        url: config.upstream.url,
+        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+      })
+      break
+    }
+    case 'stdio': {
+      if (!config.upstream.command) {
+        console.error('Error: "command" is required for stdio transport')
+        process.exit(1)
+      }
+      const stdio = new StdioForwarder({
+        command: config.upstream.command,
+        args: config.upstream.args,
+        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+      })
+      await stdio.start()
+      forwarder = stdio
+      closeForwarder = () => stdio.close()
+      break
+    }
+    case 'sse': {
+      const sse = new SseUpstreamForwarder({
+        url: config.upstream.url,
+        connectTimeoutMs: parseDuration(config.upstream.connect_timeout),
+        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+      })
+      await sse.connect()
+      forwarder = sse
+      closeForwarder = () => sse.close()
+      break
+    }
+  }
+
+  // Compile policies and wrap the forwarder with governance
+  const { policy, warnings } = compilePolicies(config.policies)
+  for (const w of warnings) {
+    const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
+    console.error(`Warning: policy ${label}: ${w.message}`)
+  }
+
+  // Create dashboard event bus (used by all components for real-time events)
+  const eventBus = new DashboardEventBus()
+
+  // Create audit writer
+  const auditStore = new AuditStore({
+    path: config.audit.path,
+    retention: config.audit.retention,
+    includeResponses: config.audit.include_responses,
+  })
+  const auditWriter = new AuditWriter({
+    store: auditStore,
+    onPersist: (record, id) => {
+      eventBus.emit('action', {
+        id,
+        tool_name: record.tool_name,
+        policy_decision: record.policy_decision,
+        block_reason: record.block_reason,
+        approval_status: record.approval_status,
+        session_id: record.session_id,
+        agent_id: record.agent_id,
+        environment: record.environment,
+        timestamp: record.timestamp,
+        total_duration_ms: record.total_duration_ms,
+        approval_wait_ms: record.approval_wait_ms,
+        proxy_compute_ms: record.proxy_compute_ms,
+        flagged_destructive: record.flagged_destructive,
+        dry_run: record.dry_run,
+        matched_rule: record.matched_rule,
+        matched_rule_index: record.matched_rule_index,
+      })
+    },
+  })
+  registerCrashDrainHook(() => {
+    try {
+      auditWriter.flush()
+    } catch (err) {
+      console.error('[helio] crash-drain audit flush failed:', err)
+    }
+  })
+
+  // Create evidence store (zero-cost Map when SDK is not enabled)
+  const evidenceStore = new EvidenceStore()
+
+  // Create approval router
+  const approvalQueue = new ApprovalQueue()
+  const channels = createChannels(config.approval.channels)
+  const approvalRouter = new ApprovalRouter({
+    defaultTimeoutMs: parseDuration(config.approval.timeout),
+    defaultOnTimeout: config.approval.default_on_timeout,
+    channels,
+    queue: approvalQueue,
+    onSubmit: (ticket) => {
+      eventBus.emit('approval_requested', {
+        ticket_id: ticket.id,
+        tool_name: ticket.tool_name,
+        channel: ticket.channel_name,
+        requested_at: ticket.requested_at,
+      })
+    },
+    onResolve: (ticket) => {
+      eventBus.emit('approval_resolved', {
+        ticket_id: ticket.id,
+        status: ticket.status,
+        resolved_by: ticket.resolved_by,
+        resolved_at: ticket.resolved_at ?? new Date().toISOString(),
+      })
+    },
+    onNotifyFailure: (event) => {
+      eventBus.emit('approval_notification_failed', event)
+    },
+  })
+
+  // Create rate and spend limiters
+  const rateLimiter = new RateLimiter({
+    onWarning: (state) => {
+      eventBus.emit('limit_warning', {
+        key: state.key,
+        type: 'rate',
+        current: state.current,
+        limit: state.limit,
+        utilization: state.current / state.limit,
+      })
+    },
+  })
+  const spendLimiter = new SpendLimiter({
+    onWarning: (state) => {
+      eventBus.emit('limit_warning', {
+        key: state.key,
+        type: 'spend',
+        current: state.current_spend,
+        limit: state.limit,
+        utilization: state.current_spend / state.limit,
+      })
+    },
+  })
+
+  const governedForwarder = new GovernedForwarder(forwarder, policy, {
+    environment: config.environment,
+    auditWriter,
+    evidenceStore,
+    approvalRouter,
+    rateLimiter,
+    spendLimiter,
+  })
+
+  const annotationPrime = await startAnnotationPrimeLoop(governedForwarder)
+
+  // Conditionally create Slack action handler if any Slack channels exist
+  const hasSlackChannels = [...channels.values()].some((ch) => ch.type === 'slack')
+  const slackActionApp = hasSlackChannels
+    ? createSlackActionApp({ router: approvalRouter, channels })
+    : undefined
+
+  const app = createApp(config, governedForwarder, {
+    slackActionApp,
+  })
+  const handle = startServer(app, config)
+
+  // Conditionally start the sideband server for SDK communication.
+  //
+  // Authentication: the sideband speaks to the Python SDK and must not
+  // accept requests from arbitrary local processes or browser pages. We
+  // generate a fresh 32-byte hex token on every start and export it via
+  // the `HELIO_SDK_TOKEN` env var for the SDK to pick up. If the operator
+  // sets `HELIO_SDK_TOKEN` explicitly (e.g. for stable cross-restart
+  // tokens or in test environments), we respect that instead — rotating a
+  // pre-set secret is the operator's responsibility.
+  let sidebandHandle: ServerHandle | undefined
+  let sidebandToken: string | undefined
+  let sidebandTokenSource: 'generated' | 'env' | undefined
+  if (config.sdk.enabled) {
+    sidebandToken = process.env['HELIO_SDK_TOKEN']
+    if (!sidebandToken || sidebandToken.length === 0) {
+      sidebandToken = randomBytes(32).toString('hex')
+      process.env['HELIO_SDK_TOKEN'] = sidebandToken
+      sidebandTokenSource = 'generated'
+    } else {
+      sidebandTokenSource = 'env'
+    }
+    const sidebandApp = createSidebandApp(evidenceStore, { token: sidebandToken })
+    sidebandHandle = startSidebandServer(sidebandApp, config.sdk.port, config.sdk.host)
+  }
+
+  // Conditionally start the dashboard API server
+  let dashboardHandle: ServerHandle | undefined
+  let closeDashboardApp: (() => void) | undefined
+  if (config.dashboard.enabled) {
+    const dashboardApp = createDashboardAppWithLifecycle(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter,
+        spendLimiter,
+        evidenceStore,
+        eventBus,
+      },
+      {
+        apiSecret: config.dashboard.api_secret,
+        staticDir: bundledDashboardDistPath ?? undefined,
+        sseHeartbeatMs: parseDuration(config.dashboard.sse_heartbeat_interval),
+      },
+    )
+    closeDashboardApp = dashboardApp.close
+    dashboardHandle = startSidebandServer(
+      dashboardApp.app,
+      config.dashboard.port,
+      config.dashboard.host,
+    )
+  }
+
+  const ruleCount = policy.rules.length
+  console.error(
+    `Helio proxy listening on http://${config.listen.host}:${String(config.listen.port)}`,
+  )
+  console.error(
+    `Policies: ${String(ruleCount)} rule${ruleCount !== 1 ? 's' : ''} loaded (default: ${policy.defaultAction})`,
+  )
+  if (config.upstream.transport === 'stdio') {
+    console.error(`Upstream: ${config.upstream.command ?? ''} (stdio)`)
+  } else {
+    console.error(`Upstream: ${config.upstream.url} (${config.upstream.transport})`)
+  }
+  console.error(`Audit: ${config.audit.path} (retention: ${config.audit.retention})`)
+  if (sidebandHandle) {
+    console.error(`SDK sideband listening on http://${config.sdk.host}:${String(config.sdk.port)}`)
+    if (sidebandToken) {
+      const source =
+        sidebandTokenSource === 'env'
+          ? 'reusing HELIO_SDK_TOKEN from environment'
+          : 'generated per-boot HELIO_SDK_TOKEN'
+      console.error(
+        `SDK token (${source}; pass as HELIO_SDK_TOKEN env var to your SDK clients):\n  ${sidebandToken}`,
+      )
+    }
+  }
+  if (dashboardHandle) {
+    console.error(
+      `Dashboard API listening on http://${config.dashboard.host}:${String(config.dashboard.port)}`,
+    )
+  }
+  warnIfWebhookChannelUnreachable(config)
+  warnIfSdkSidebandExposed(config)
+  warnIfDashboardOpenMode(config)
+  const channelCount = config.approval.channels.length
+  console.error(
+    `Approvals: timeout ${config.approval.timeout}, default on timeout: ${config.approval.default_on_timeout}, ${String(channelCount)} channel${channelCount !== 1 ? 's' : ''} configured`,
+  )
+  console.error(`Rate limits: enabled`)
+  console.error(`Spend limits: enabled`)
+  if (policy.dryRun) {
+    console.error(`Dry-run: ENABLED (no requests will be forwarded to upstream)`)
+  }
+  console.error(`Config: ${configPath}`)
+
+  // Hot-reload is enabled by default. The CLI flag takes precedence over
+  // the config file so operators can pin the policy for a single start
+  // without editing YAML. When disabled, config edits require a restart.
+  const hotReloadEnabled =
+    options.noHotReload === true ? false : (config.policies.hot_reload ?? true)
+
+  let configWatcher: ConfigWatcher | undefined
+  if (hotReloadEnabled) {
+    configWatcher = new ConfigWatcher({
+      configPath,
+      initialConfig: config,
+      onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths) => {
+        governedForwarder.updatePolicy(newPolicy)
+        const count = newPolicy.rules.length
+        console.error(
+          `[helio] Policy reloaded: ${String(count)} rule${count !== 1 ? 's' : ''} (default: ${newPolicy.defaultAction})`,
+        )
+        for (const w of reloadWarnings) {
+          const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
+          console.error(`[helio] Warning: policy ${label}: ${w.message}`)
+        }
+        if (newPolicy.dryRun) {
+          console.error(`[helio] Dry-run mode is ENABLED`)
+        }
+        if (restartRequiredPaths.length > 0) {
+          const changed = restartRequiredPaths.join(', ')
+          console.error(
+            `[helio] Restart required: non-reloadable fields changed (${changed}). ` +
+              'The running process still uses startup values for these fields.',
+          )
+        }
+      },
+      onError: (error) => {
+        console.error(`[helio] Config reload failed (keeping current policy): ${error.message}`)
+      },
+    })
+    configWatcher.start()
+    console.error(`Watching ${configPath} for policy changes`)
+  } else {
+    console.error(
+      `[helio] Hot-reload disabled — config changes to ${configPath} will require a restart`,
+    )
+  }
+
+  registerShutdown(
+    handle,
+    annotationPrime,
+    closeForwarder,
+    auditWriter,
+    configWatcher,
+    sidebandHandle,
+    evidenceStore,
+    approvalRouter,
+    approvalQueue,
+    rateLimiter,
+    spendLimiter,
+    closeDashboardApp,
+    dashboardHandle,
+    eventBus,
+  )
+}
+
+async function initCommand(outputPath: string, force: boolean): Promise<void> {
+  if (existsSync(outputPath) && !force) {
+    console.error(`Error: ${outputPath} already exists. Use --force to overwrite.`)
+    process.exit(1)
+  }
+
+  const apiSecret = randomBytes(32).toString('hex')
+  await writeFile(outputPath, renderConfigTemplate(apiSecret), 'utf-8')
+
+  console.error(`Created ${outputPath}`)
+  console.error('')
+  console.error('Generated dashboard.api_secret (also stored in the file above):')
+  console.error(`  ${apiSecret}`)
+  console.error('')
+  console.error('Use this as the dashboard login secret (and optional Bearer credential')
+  console.error('for sideband API clients at default 127.0.0.1:3100). Rotate in-file.')
+}
+
+async function validateCommand(configPath: string): Promise<void> {
+  try {
+    const config = await loadConfig(configPath)
+
+    // Also compile policies to catch invalid globs, regex patterns, etc.
+    const { warnings } = compilePolicies(config.policies)
+    for (const w of warnings) {
+      const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
+      console.error(`Warning: policy ${label}: ${w.message}`)
+    }
+
+    if (config.dashboard.enabled && !getBundledDashboardDistPath()) {
+      console.error(
+        'Invalid config: dashboard.enabled is true but bundled dashboard assets are missing. ' +
+          DASHBOARD_ASSETS_RECOVERY_MESSAGE_FOR_VALIDATE,
+      )
+      process.exit(1)
+    }
+
+    const ruleCount = config.policies.rules.length
+    console.error(
+      `Config is valid: ${configPath} (${String(ruleCount)} policy rule${ruleCount !== 1 ? 's' : ''})`,
+    )
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Invalid config: ${err.message}`)
+      if (err.details) {
+        for (const detail of err.details) {
+          console.error(`  ${detail.path}: ${detail.message}`)
+        }
+      }
+      process.exit(1)
+    }
+    if (err instanceof PolicyParseError) {
+      console.error(`Invalid policy: ${err.message}`)
+      process.exit(1)
+    }
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+interface ExportOptions {
+  config: string
+  format: string
+  tool?: string
+  decision?: string
+  reason?: string
+  session?: string
+  from?: string
+  to?: string
+  limit: string
+}
+
+async function exportCommand(opts: ExportOptions): Promise<void> {
+  let config
+  try {
+    config = await loadConfig(opts.config)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
+
+  const store = new AuditStore({
+    path: config.audit.path,
+    retention: config.audit.retention,
+    includeResponses: config.audit.include_responses,
+    cleanupIntervalMs: 0, // No cleanup timer for one-shot CLI
+  })
+
+  try {
+    const result = store.list(
+      {
+        tool_name: opts.tool,
+        policy_decision: opts.decision,
+        block_reason: opts.reason,
+        session_id: opts.session,
+        from: opts.from,
+        to: opts.to,
+      },
+      { limit: Number(opts.limit), order: 'asc' },
+    )
+
+    if (opts.format === 'csv') {
+      writeCsv(result.records)
+    } else {
+      console.log(JSON.stringify(result.records, null, 2))
+    }
+
+    console.error(`Exported ${String(result.records.length)} of ${String(result.total)} records`)
+  } finally {
+    store.close()
+  }
+}
+
+function writeCsv(records: readonly AuditRecord[]): void {
+  console.log(CSV_HEADERS.join(','))
+
+  for (const r of records) {
+    const values = CSV_HEADERS.map((h) => {
+      const val: unknown = r[h]
+      if (val === null || val === undefined) return ''
+      if (typeof val === 'boolean') return val ? 'true' : 'false'
+      if (typeof val === 'number') return String(val)
+      if (typeof val === 'string') return csvEscape(val)
+      return ''
+    })
+    console.log(values.join(','))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+function registerShutdown(
+  handle: ServerHandle,
+  annotationPrime?: AnnotationPrimeController,
+  closeForwarder?: () => Promise<void>,
+  auditWriter?: AuditWriter,
+  configWatcher?: ConfigWatcher,
+  sidebandHandle?: ServerHandle,
+  evidenceStore?: EvidenceStore,
+  approvalRouter?: ApprovalRouter,
+  approvalQueue?: ApprovalQueue,
+  rateLimiter?: RateLimiter,
+  spendLimiter?: SpendLimiter,
+  closeDashboardApp?: () => void,
+  dashboardHandle?: ServerHandle,
+  eventBus?: DashboardEventBus,
+): void {
+  let isShuttingDown = false
+  const shutdown = () => {
+    if (isShuttingDown) return
+    isShuttingDown = true
+    console.error('\n[helio] Shutting down...')
+    const forceShutdownTimer = setTimeout(() => {
+      console.error('[helio] Forced shutdown after timeout')
+      process.exit(1)
+    }, SHUTDOWN_TIMEOUT_MS)
+    forceShutdownTimer.unref()
+
+    const closeAll = async () => {
+      if (annotationPrime) annotationPrime.stop()
+      if (configWatcher) configWatcher.close()
+      if (closeDashboardApp) closeDashboardApp()
+      if (eventBus) eventBus.close()
+      if (rateLimiter) rateLimiter.close()
+      if (spendLimiter) spendLimiter.close()
+      if (approvalRouter) approvalRouter.close()
+      if (approvalQueue) approvalQueue.close()
+      if (dashboardHandle) await dashboardHandle.close()
+      if (sidebandHandle) await sidebandHandle.close()
+      await handle.close()
+      if (evidenceStore) evidenceStore.close()
+      if (auditWriter) auditWriter.close()
+      if (closeForwarder) await closeForwarder()
+    }
+
+    void closeAll()
+      .then(() => {
+        clearTimeout(forceShutdownTimer)
+        process.exit(0)
+      })
+      .catch((err: unknown) => {
+        clearTimeout(forceShutdownTimer)
+        console.error('[helio] Error during shutdown:', err)
+        process.exit(1)
+      })
+  }
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+}
+
+// ---------------------------------------------------------------------------
+// Program
+// ---------------------------------------------------------------------------
+
+const program = new Command()
+  .name('helio')
+  .description('Helio MCP governance proxy')
+  .version(VERSION)
+
+program
+  .command('start')
+  .description('Load config and start the proxy server')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option('--no-hot-reload', 'Disable policy hot-reload — config edits will require a restart')
+  .action((opts: { config: string; hotReload?: boolean }) =>
+    startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }),
+  )
+
+program
+  .command('init')
+  .description('Scaffold a helio.yaml config file with commented defaults')
+  .option('-o, --output <path>', 'Output file path', DEFAULT_CONFIG_PATH)
+  .option('-f, --force', 'Overwrite existing file', false)
+  .action((opts: { output: string; force: boolean }) => initCommand(opts.output, opts.force))
+
+program
+  .command('validate')
+  .description('Validate a helio.yaml config file')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .action((opts: { config: string }) => validateCommand(opts.config))
+
+program
+  .command('export')
+  .description('Export audit records to JSON or CSV')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option('-f, --format <format>', 'Output format: json or csv', 'json')
+  .option('--tool <name>', 'Filter by tool name')
+  .option('--decision <decision>', 'Filter by policy decision')
+  .option('--reason <reason>', 'Filter by block reason')
+  .option('--session <id>', 'Filter by session ID')
+  .option('--from <iso>', 'Start time (ISO 8601)')
+  .option('--to <iso>', 'End time (ISO 8601)')
+  .option('--limit <n>', 'Max records to export', '1000')
+  .action((opts: ExportOptions) => exportCommand(opts))
+
+program.parse()

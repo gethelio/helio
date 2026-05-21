@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="348" viewBox="0 0 960 348" font-family="'Inter', 'Helvetica Neue', Arial, sans-serif" role="img" aria-labelledby="hiw-title hiw-desc">
+  <title id="hiw-title">How Helio works</title>
+  <desc id="hiw-desc">An MCP client sends tool calls through Helio, which applies a policy engine, evidence grounding, approval workflows, rate and spend limits, an audit trail, and self-repair feedback before forwarding them to the MCP server. An optional thin Python SDK connects to Helio over a sideband.</desc>
+
+  <defs>
+    <marker id="hiw-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#64748b"/>
+    </marker>
+    <marker id="hiw-arr-soft" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- backdrop -->
+  <rect x="0.75" y="0.75" width="958.5" height="346.5" rx="12" fill="#fafafa" stroke="#e5e7eb" stroke-width="1.5"/>
+
+  <!-- ============ Helio ============ -->
+  <rect x="300" y="26" width="360" height="296" rx="16" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+
+  <!-- brand mark -->
+  <g transform="translate(318 41) scale(0.8)" fill="#0f172a" opacity="0.86">
+    <path d="M19.1639 4.2114L16.7167 3.55566L14.6544 11.2523L12.7926 4.30373L10.3453 4.95946L12.3569 12.4669L7.34639 7.45637L5.55489 9.24787L11.0508 14.7438L4.20652 12.9099L3.55078 15.3571L11.029 17.3609C10.9434 16.9916 10.8981 16.6068 10.8981 16.2115C10.8981 13.413 13.1668 11.1443 15.9653 11.1443C18.7638 11.1443 21.0324 13.413 21.0324 16.2115C21.0324 16.6043 20.9877 16.9867 20.9031 17.3538L27.6995 19.1749L28.3552 16.7277L20.8472 14.7159L27.6919 12.8818L27.0362 10.4346L19.5285 12.4463L24.539 7.4358L22.7475 5.6443L17.3278 11.064L19.1639 4.2114Z"/>
+    <path d="M20.896 17.3823C20.6861 18.2694 20.2432 19.0662 19.6354 19.7047L24.5591 24.6284L26.3506 22.8369L20.896 17.3823Z"/>
+    <path d="M19.5857 19.7562C18.9706 20.3844 18.1932 20.8533 17.3215 21.0949L19.1131 27.7813L21.5603 27.1255L19.5857 19.7562Z"/>
+    <path d="M17.2301 21.1194C16.8256 21.2233 16.4017 21.2786 15.9648 21.2786C15.4968 21.2786 15.0436 21.2151 14.6133 21.0963L12.8201 27.7889L15.2673 28.4446L17.2301 21.1194Z"/>
+    <path d="M14.5268 21.0717C13.6684 20.8181 12.9048 20.3432 12.3023 19.7132L7.3665 24.649L9.158 26.4405L14.5268 21.0717Z"/>
+    <path d="M12.2616 19.6695C11.6694 19.0355 11.238 18.2493 11.0326 17.3759L4.2141 19.2029L4.86983 21.6501L12.2616 19.6695Z"/>
+  </g>
+  <text x="349" y="61" fill="#0f172a" font-size="21" font-weight="700">Helio</text>
+  <text x="349" y="78" fill="#94a3b8" font-size="11.5">Governance proxy</text>
+
+  <line x1="322" y1="92" x2="638" y2="92" stroke="#eef2f6" stroke-width="1.5"/>
+
+  <!-- capabilities -->
+  <g font-size="13.5" font-weight="500" fill="#334155">
+    <circle cx="332" cy="120" r="2.6" fill="#94a3b8"/><text x="346" y="124.5">Policy engine</text>
+    <circle cx="332" cy="153" r="2.6" fill="#94a3b8"/><text x="346" y="157.5">Evidence grounding</text>
+    <circle cx="332" cy="186" r="2.6" fill="#94a3b8"/><text x="346" y="190.5">Approval workflows</text>
+    <circle cx="332" cy="219" r="2.6" fill="#94a3b8"/><text x="346" y="223.5">Rate &amp; spend limits</text>
+    <circle cx="332" cy="252" r="2.6" fill="#94a3b8"/><text x="346" y="256.5">Audit trail</text>
+    <circle cx="332" cy="285" r="2.6" fill="#94a3b8"/><text x="346" y="289.5">Self-repair feedback</text>
+  </g>
+
+  <!-- ============ MCP Client ============ -->
+  <rect x="40" y="86" width="156" height="68" rx="12" fill="#111929"/>
+  <text x="118" y="116" text-anchor="middle" fill="#f8fafc" font-size="14.5" font-weight="600">MCP Client</text>
+  <text x="118" y="133" text-anchor="middle" fill="#94a3b8" font-size="11">Agent</text>
+
+  <!-- ============ MCP Server ============ -->
+  <rect x="764" y="86" width="156" height="68" rx="12" fill="#111929"/>
+  <text x="842" y="116" text-anchor="middle" fill="#f8fafc" font-size="14.5" font-weight="600">MCP Server</text>
+  <text x="842" y="133" text-anchor="middle" fill="#94a3b8" font-size="11">Tools</text>
+
+  <!-- ============ optional SDK ============ -->
+  <text x="118" y="212" text-anchor="middle" fill="#94a3b8" font-size="10.5" font-weight="600" letter-spacing="1.2">OPTIONAL</text>
+  <rect x="40" y="224" width="156" height="62" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="118" y="251" text-anchor="middle" fill="#0f172a" font-size="13.5" font-weight="600">Python SDK</text>
+  <text x="118" y="268" text-anchor="middle" fill="#94a3b8" font-size="10">thin · annotates calls</text>
+
+  <!-- ============ flows ============ -->
+  <line x1="196" y1="111" x2="300" y2="111" stroke="#64748b" stroke-width="1.5" marker-end="url(#hiw-arr)"/>
+  <line x1="300" y1="129" x2="196" y2="129" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3.5" marker-end="url(#hiw-arr-soft)"/>
+  <line x1="660" y1="111" x2="764" y2="111" stroke="#64748b" stroke-width="1.5" marker-end="url(#hiw-arr)"/>
+  <line x1="764" y1="129" x2="660" y2="129" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5 3.5" marker-end="url(#hiw-arr-soft)"/>
+  <text x="247" y="248" text-anchor="middle" fill="#94a3b8" font-size="9.5">sideband</text>
+  <line x1="196" y1="255" x2="300" y2="255" stroke="#64748b" stroke-width="1.5" marker-end="url(#hiw-arr)"/>
+</svg>

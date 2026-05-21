@@ -1,0 +1,8 @@
+{
+  "name": "@gethelio/example-slack-approvals",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node start.mjs"
+  }
+}

@@ -1,0 +1,72 @@
+# Slack Approvals configuration
+#
+# Route write operations to Slack for human approval before execution.
+# Destructive operations are denied outright. Read-only tools pass through.
+# See README.md for Slack app setup instructions.
+
+version: '1'
+
+upstream:
+  url: 'http://localhost:8080/mcp'
+  transport: streamable-http
+
+listen:
+  port: 3000
+  host: '127.0.0.1'
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Required whenever any rule uses `require_approval`. Generate a fresh
+  # secret with `openssl rand -hex 32` and put it in `.env` as
+  # HELIO_DASHBOARD_SECRET (see `.env.example`). The proxy refuses to
+  # start while this resolves to an empty string, so a forgotten or
+  # blank value can never be mistaken for a working install. Rotate by
+  # generating a new value and restarting the proxy.
+  api_secret: '${HELIO_DASHBOARD_SECRET}'
+
+policies:
+  default: allow
+  rules:
+    # Deny destructive tools before they reach the approval rule
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive operations are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request manual action.'
+
+    # Non-read-only tools require Slack approval
+    - name: approve-writes
+      match:
+        annotations:
+          readOnlyHint: false
+      action: require_approval
+      approval:
+        channel: slack
+        timeout: 300s
+
+    # Read-only tools pass through immediately
+    - name: allow-reads
+      match:
+        annotations:
+          readOnlyHint: true
+      action: allow
+
+approval:
+  timeout: 300s
+  default_on_timeout: deny
+  channels:
+    - type: slack
+      bot_token: '${HELIO_SLACK_BOT_TOKEN}'
+      signing_secret: '${HELIO_SLACK_SIGNING_SECRET}'
+      channel: '${HELIO_SLACK_CHANNEL}'
+    - type: dashboard
+
+audit:
+  storage: sqlite
+  path: ./helio-audit.db
+  retention: 90d
+  include_responses: true

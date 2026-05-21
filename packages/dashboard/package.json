@@ -1,0 +1,43 @@
+{
+  "name": "@gethelio/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dashboard UI for the Helio MCP governance proxy",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gethelio/helio.git",
+    "directory": "packages/dashboard"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-router": "7.13.2",
+    "recharts": "3.8.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.2.2",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "25.5.0",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "4.7.0",
+    "jsdom": "29.0.1",
+    "tailwindcss": "4.2.2",
+    "typescript": "5.9.3",
+    "vite": "6.4.2",
+    "vitest": "3.2.4"
+  }
+}
