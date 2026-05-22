@@ -159,6 +159,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/python-sdk/dist/
+          skip-existing: true
 
   docker:
     name: Docker Build & Push
