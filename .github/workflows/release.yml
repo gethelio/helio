@@ -91,6 +91,7 @@ jobs:
     environment: npm
     permissions:
       contents: read
+      id-token: write
 
     steps:
       - name: Checkout
