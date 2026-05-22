@@ -107,6 +107,9 @@ jobs:
           cache: 'pnpm'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -123,10 +126,8 @@ jobs:
         run: scripts/set-release-version.sh "$VERSION"
 
       - name: Publish @gethelio/proxy
-        run: pnpm --filter @gethelio/proxy publish --no-git-checks --provenance --access
-          public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+        working-directory: packages/proxy
 
   publish-pypi:
     name: Publish to PyPI
