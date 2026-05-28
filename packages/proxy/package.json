@@ -46,14 +46,14 @@
     "prepack": "pnpm run check:dashboard-assets"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.28.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@types/better-sqlite3": "7.6.13",
     "@types/js-yaml": "4.0.9",
-    "@types/node": "25.5.0",
-    "@types/picomatch": "4.0.2",
+    "@types/node": "25.9.1",
+    "@types/picomatch": "4.0.3",
     "tsup": "8.5.1",
-    "tsx": "4.21.0",
-    "vitest": "3.2.4"
+    "tsx": "4.22.3",
+    "vitest": "4.1.7"
   },
   "dependencies": {
     "@hono/node-server": "1.19.13",
