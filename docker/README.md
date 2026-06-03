@@ -3,6 +3,10 @@
 Runs the Helio proxy, a mock MCP echo server, and the dashboard via
 Docker Compose. Designed for a 5-minute demo on your local machine.
 
+> Looking to run Helio in its own container **next to a coding agent or dev
+> container**, with network isolation so the agent can't bypass governance? See
+> [Running Helio as a Sidecar](../docs/deployment-sidecar.md).
+
 ## Setup (one-time)
 
 1. Copy the example env file:

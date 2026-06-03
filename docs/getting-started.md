@@ -222,6 +222,8 @@ docker compose up
 
 This starts the proxy, a demo MCP echo server, and the dashboard. By default both published ports are bound to `127.0.0.1` on the host (not the LAN) so the quickstart is safe on untrusted networks. See [`docker/README.md`](../docker/README.md) for the security model and how to opt in to LAN or remote access.
 
+To run Helio in its own container **next to a coding agent or dev container** — so the agent is forced through governance and can't reach the MCP server directly — see [Running Helio as a Sidecar](./deployment-sidecar.md).
+
 ## Production Checklist
 
 The quickstart above is safe by default on a single-operator workstation. Before running Helio anywhere reachable from other people or machines, work through this checklist:
@@ -236,6 +238,7 @@ The quickstart above is safe by default on a single-operator workstation. Before
 ## Next Steps
 
 - [Configuration Reference](./configuration.md) — Every `helio.yaml` field with defaults and types
+- [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent / dev container so it can't bypass governance
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard
 - [Audit Trail](./audit.md) — What's recorded, how to search, and how to export
