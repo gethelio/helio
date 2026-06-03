@@ -1,5 +1,6 @@
 import type { McpForwarder, McpRequest, ForwardResult } from '../mcp/types.js'
 import { parseUpstreamResponse } from './response.js'
+import { describeUnreachableUpstream } from './connection-error.js'
 
 /** Options for constructing an UpstreamForwarder. */
 export interface UpstreamForwarderOptions {
@@ -69,7 +70,7 @@ export class UpstreamForwarder implements McpForwarder {
       if (isTimeout) {
         throw new Error(`upstream request timed out after ${String(this.requestTimeoutMs)}ms`)
       }
-      throw error
+      throw describeUnreachableUpstream(error, this.url) ?? error
     }
     const durationMs = performance.now() - start
 

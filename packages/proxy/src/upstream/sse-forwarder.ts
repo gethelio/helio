@@ -1,4 +1,5 @@
 import { PendingRequests } from '../mcp/pending-requests.js'
+import { describeUnreachableUpstream } from './connection-error.js'
 import type {
   McpForwarder,
   McpRequest,
@@ -148,7 +149,7 @@ export class SseUpstreamForwarder implements McpForwarder {
               )
               return
             }
-            reject(asError)
+            reject(describeUnreachableUpstream(err, this.url) ?? asError)
           }
         })
     })
@@ -203,7 +204,7 @@ export class SseUpstreamForwarder implements McpForwarder {
             `upstream notification POST timed out after ${String(this.requestTimeoutMs)}ms`,
           )
         }
-        throw asError
+        throw describeUnreachableUpstream(error, this.postUrl) ?? asError
       }
       if (!res.ok) {
         throw new Error(`upstream notification POST failed: HTTP ${String(res.status)}`)
@@ -253,9 +254,10 @@ export class SseUpstreamForwarder implements McpForwarder {
       const asError = error instanceof Error ? error : new Error(String(error))
       const isTimeout = asError.name === 'TimeoutError'
       const isAborted = request.signal?.aborted === true
+      const networkFailure = describeUnreachableUpstream(error, this.postUrl) ?? asError
       const postFailure = isTimeout
         ? new Error(`upstream request POST timed out after ${String(this.requestTimeoutMs)}ms`)
-        : asError
+        : networkFailure
       this.pending.reject(
         requestId,
         isAborted ? new Error('request aborted by downstream client') : postFailure,

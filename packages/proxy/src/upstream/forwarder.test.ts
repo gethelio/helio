@@ -184,6 +184,23 @@ describe('UpstreamForwarder', () => {
     await expect(forwarder.forward(makeRequest())).rejects.toThrow('network failure')
   })
 
+  it('translates a connection-refused fetch failure into actionable guidance', async () => {
+    restore()
+    globalThis.fetch = () => {
+      const wrapper = new TypeError('fetch failed')
+      ;(wrapper as { cause?: unknown }).cause = Object.assign(new Error('connect'), {
+        code: 'ECONNREFUSED',
+      })
+      return Promise.reject(wrapper)
+    }
+
+    const forwarder = new UpstreamForwarder({ url: 'http://localhost:8080/mcp' })
+
+    await expect(forwarder.forward(makeRequest())).rejects.toThrow(
+      /Upstream MCP server at http:\/\/localhost:8080\/mcp is unreachable \(ECONNREFUSED\) — is it running\?/,
+    )
+  })
+
   it('uses a composed request signal when downstream signal is present', async () => {
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
     const controller = new AbortController()

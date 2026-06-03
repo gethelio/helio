@@ -86,6 +86,12 @@ function makeRequest(id: number, method: string): McpRequest {
   return { jsonrpc: '2.0', id, method }
 }
 
+function fetchFailed(code: string): TypeError {
+  const wrapper = new TypeError('fetch failed')
+  ;(wrapper as { cause?: unknown }).cause = Object.assign(new Error('connect failed'), { code })
+  return wrapper
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -250,6 +256,57 @@ describe('SseUpstreamForwarder', () => {
     await expect(forwarder.forward(makeRequest(1, 'tools/list'))).rejects.toThrow(
       'upstream request POST failed: HTTP 500',
     )
+  })
+
+  it('translates request POST fetch failures into actionable unreachable guidance', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+      if (method === 'POST') {
+        return Promise.reject(fetchFailed('ECONNREFUSED'))
+      }
+      return originalFetch(input, init)
+    }
+
+    try {
+      await expect(forwarder.forward(makeRequest(1, 'tools/list'))).rejects.toThrow(
+        /is unreachable \(ECONNREFUSED\) — is it running\?/,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('translates notification POST fetch failures into actionable unreachable guidance', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+      if (method === 'POST') {
+        return Promise.reject(fetchFailed('ECONNREFUSED'))
+      }
+      return originalFetch(input, init)
+    }
+
+    try {
+      const notification: McpRequest = { jsonrpc: '2.0', method: 'notifications/ping' }
+      await expect(forwarder.forward(notification)).rejects.toThrow(
+        /is unreachable \(ECONNREFUSED\) — is it running\?/,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('rejects immediately when downstream signal is already aborted', async () => {
