@@ -11,13 +11,17 @@ import type { ApprovalChannel } from './types.js'
 // Mock @slack/web-api
 // ---------------------------------------------------------------------------
 
-const mockPostMessage = vi.fn().mockResolvedValue({ ok: true, ts: '1234.5678' })
-const mockUpdate = vi.fn().mockResolvedValue({ ok: true })
+const { mockPostMessage, mockUpdate } = vi.hoisted(() => ({
+  mockPostMessage: vi.fn().mockResolvedValue({ ok: true, ts: '1234.5678' }),
+  mockUpdate: vi.fn().mockResolvedValue({ ok: true }),
+}))
 
 vi.mock('@slack/web-api', () => ({
-  WebClient: vi.fn().mockImplementation(() => ({
-    chat: { postMessage: mockPostMessage, update: mockUpdate },
-  })),
+  WebClient: vi.fn(function MockWebClient() {
+    return {
+      chat: { postMessage: mockPostMessage, update: mockUpdate },
+    }
+  }),
 }))
 
 // ---------------------------------------------------------------------------

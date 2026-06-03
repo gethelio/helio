@@ -162,7 +162,7 @@ keep the upstream server off the network your dev container is attached to.
   "dockerComposeFile": "../compose.yaml",
   "service": "agent", // VS Code attaches to the agent service above
   "workspaceFolder": "/workspace",
-  "forwardPorts": [3100] // dashboard only; do not forward the upstream MCP port
+  "forwardPorts": [3100], // dashboard only; do not forward the upstream MCP port
 }
 ```
 

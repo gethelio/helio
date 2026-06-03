@@ -4,9 +4,11 @@ import { WebhookChannel } from './webhook.js'
 import { SlackChannel } from './slack.js'
 
 vi.mock('@slack/web-api', () => ({
-  WebClient: vi.fn().mockImplementation(() => ({
-    chat: { postMessage: vi.fn(), update: vi.fn() },
-  })),
+  WebClient: vi.fn(function MockWebClient() {
+    return {
+      chat: { postMessage: vi.fn(), update: vi.fn() },
+    }
+  }),
 }))
 
 describe('createChannels', () => {

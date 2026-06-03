@@ -9,7 +9,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  consoleErrorSpy.mockRestore()
   vi.restoreAllMocks()
 })
 

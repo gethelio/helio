@@ -267,7 +267,9 @@ describe('SseUpstreamForwarder', () => {
 
     const originalFetch = globalThis.fetch
     globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : 'GET')
+      ).toUpperCase()
       if (method === 'POST') {
         return Promise.reject(fetchFailed('ECONNREFUSED'))
       }
@@ -292,7 +294,9 @@ describe('SseUpstreamForwarder', () => {
 
     const originalFetch = globalThis.fetch
     globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : 'GET')
+      ).toUpperCase()
       if (method === 'POST') {
         return Promise.reject(fetchFailed('ECONNREFUSED'))
       }

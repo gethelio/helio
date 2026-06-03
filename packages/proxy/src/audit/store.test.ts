@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
               includeResponses: true,
               cleanupIntervalMs: 0,
             }),
-        ).toThrowError(
+        ).toThrow(
           /Audit DB schema mismatch: missing required columns .*"block_reason".*Delete ".*audit\.db".*then restart Helio\./,
         )
       } finally {
@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
               includeResponses: true,
               cleanupIntervalMs: 0,
             }),
-        ).toThrowError(
+        ).toThrow(
           /Audit DB schema mismatch: missing required columns .*"upstream_http_status".*Delete ".*audit\.db".*then restart Helio\./,
         )
       } finally {

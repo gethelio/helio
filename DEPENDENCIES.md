@@ -76,3 +76,7 @@ Action versions are pinned to major version tags (e.g., `@v4`). Dependabot propo
 ### pnpm overrides
 
 The `pnpm-workspace.yaml` file includes overrides to patch known vulnerabilities in transitive dependencies when upstream packages haven't released fixes yet.
+
+Current security-patch overrides include `axios` pinned at `1.17.0` to address NO_PROXY bypass and proxy gadget advisories inherited via `@slack/web-api`.
+
+Vitest is pinned at `4.1.8` across JS workspaces to stay above the `GHSA-5xrq-8626-4rwp` floor, and dashboard `react-router` is pinned at `7.16.0` to stay above current `GHSA-49rj-9fvp-4h2h` / `GHSA-8x6r-g9mw-2r78` fixes.

@@ -9,13 +9,17 @@ import type { ApprovalChannel, ApprovalTicket } from './types.js'
 // Mock @slack/web-api
 // ---------------------------------------------------------------------------
 
-const mockPostMessage = vi.fn()
-const mockUpdate = vi.fn()
+const { mockPostMessage, mockUpdate } = vi.hoisted(() => ({
+  mockPostMessage: vi.fn(),
+  mockUpdate: vi.fn(),
+}))
 
 vi.mock('@slack/web-api', () => ({
-  WebClient: vi.fn().mockImplementation(() => ({
-    chat: { postMessage: mockPostMessage, update: mockUpdate },
-  })),
+  WebClient: vi.fn(function MockWebClient() {
+    return {
+      chat: { postMessage: mockPostMessage, update: mockUpdate },
+    }
+  }),
 }))
 
 // ---------------------------------------------------------------------------
