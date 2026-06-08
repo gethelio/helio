@@ -72,6 +72,21 @@ approval:
 
 > **Note:** Webhook notification errors are logged but never block the approval flow. The ticket remains resolvable via the REST API regardless of whether the webhook delivery succeeds.
 
+#### Email approvals via webhook relay
+
+Helio does not include a native email approval channel. To deliver approvals by email, point a `webhook` channel at an email-sending service or a small relay that you operate.
+
+A typical relay flow is:
+
+1. Receive the webhook `approval_requested` payload.
+2. Render an email with the ticket summary and two action links: **Approve** and **Deny**.
+3. When a recipient clicks a link, have the relay call the dashboard callback API with `Authorization: Bearer <api_secret>`:
+   - `POST /api/approvals/:id/approve` with `{ "approved_by": "email-relay" }`
+   - `POST /api/approvals/:id/deny` with `{ "denied_by": "email-relay", "reason": "Denied from email" }`
+4. Return a short confirmation page from the relay so the email recipient sees the final decision.
+
+Use relay-hosted links rather than putting secrets directly in email URLs. The relay should keep the API secret server-side, verify who is allowed to act on the email, and then perform the POST to Helio.
+
 ### Slack
 
 The Slack channel sends a Block Kit message with interactive Approve and Deny buttons to a Slack channel. When a user clicks a button, Helio resolves the ticket and updates the message with the result.
