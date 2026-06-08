@@ -141,6 +141,13 @@ That's it. Every tool call now passes through Helio with a full audit trail, rat
 
 Want human-in-the-loop approvals for write operations? See [docs/approvals.md](./docs/approvals.md) for the full Slack and dashboard approval flow, or copy [examples/slack-approvals/](./examples/slack-approvals/) as a starting point.
 
+Standalone examples:
+
+- [Basic](./examples/basic/) - Log, allow, and deny tool calls with a local MCP echo server
+- [Rate Limits](./examples/rate-limits/) - Cap repeated tool calls with sliding-window limits
+- [Spend Limits](./examples/spend-limits/) - Cap cumulative spend across payment and refund tools
+- [Slack Approvals](./examples/slack-approvals/) - Route sensitive actions to Slack approval workflows
+
 ## Features
 
 ### Policy Engine
