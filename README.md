@@ -259,6 +259,7 @@ Helio works with any MCP-compatible agent or framework:
 - **[Getting Started](./docs/getting-started.md)**: Install and configure in 5 minutes
 - **[Configuration Reference](./docs/configuration.md)**: Every YAML option explained
 - **[Policy Guide](./docs/policies.md)**: How to write rules with examples
+- **[Policy Recipes](./docs/policy-recipes.md)**: Copy-paste snippets for common governance policies
 - **[Approval Workflows](./docs/approvals.md)**: Slack, webhook, and dashboard approvals
 - **[Audit Trail](./docs/audit.md)**: What's recorded, how to search, how to export
 
