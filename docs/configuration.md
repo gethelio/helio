@@ -96,6 +96,10 @@ sdk:
 
 Connection to the MCP server that Helio proxies.
 
+> **v0.1 proxies exactly one upstream MCP server.** `upstream` is a single
+> object, not a list — multiple/named upstreams and routing are not yet
+> supported.
+
 | Field             | Type     | Required    | Default           | Description                                                                |
 | ----------------- | -------- | ----------- | ----------------- | -------------------------------------------------------------------------- |
 | `url`             | string   | Yes         | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`).         |
