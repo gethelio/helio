@@ -1,6 +1,7 @@
 import type { McpForwarder, McpRequest, ForwardResult } from '../mcp/types.js'
 import { parseUpstreamResponse } from './response.js'
 import { describeUnreachableUpstream } from './connection-error.js'
+import { mergeUpstreamHeaders } from './merge-headers.js'
 
 /** Options for constructing an UpstreamForwarder. */
 export interface UpstreamForwarderOptions {
@@ -30,13 +31,14 @@ export class UpstreamForwarder implements McpForwarder {
   }
 
   async forward(request: McpRequest): Promise<ForwardResult> {
-    const requestHeaders = request.headers ?? {}
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      ...this.staticHeaders,
-      ...requestHeaders,
-    }
+    const headers = mergeUpstreamHeaders(
+      {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      request.headers ?? {},
+      this.staticHeaders,
+    )
 
     if (request.sessionId) {
       headers['mcp-session-id'] = request.sessionId

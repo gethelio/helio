@@ -1,5 +1,6 @@
 import { PendingRequests } from '../mcp/pending-requests.js'
 import { describeUnreachableUpstream } from './connection-error.js'
+import { mergeUpstreamHeaders } from './merge-headers.js'
 import type {
   McpForwarder,
   McpRequest,
@@ -168,12 +169,11 @@ export class SseUpstreamForwarder implements McpForwarder {
     if (request.id !== undefined) body['id'] = request.id
     if (request.params !== undefined) body['params'] = request.params
 
-    const requestHeaders = request.headers ?? {}
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      ...this.staticHeaders,
-      ...requestHeaders,
-    }
+    const headers = mergeUpstreamHeaders(
+      { 'content-type': 'application/json' },
+      request.headers ?? {},
+      this.staticHeaders,
+    )
 
     if (request.sessionId) {
       headers['mcp-session-id'] = request.sessionId

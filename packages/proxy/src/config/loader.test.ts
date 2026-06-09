@@ -115,6 +115,22 @@ approval:
     })
   })
 
+  it('interpolates ${VAR} inside upstream.headers', async () => {
+    const yaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080"
+  headers:
+    Authorization: "Bearer \${UPSTREAM_TOKEN}"
+dashboard:
+  enabled: false
+`
+    const filePath = await writeTempYaml('helio.yaml', yaml)
+    const config = await loadConfig(filePath, { UPSTREAM_TOKEN: 'tok-123' })
+
+    expect(config.upstream.headers).toEqual({ Authorization: 'Bearer tok-123' })
+  })
+
   it('throws ConfigError for non-existent file', async () => {
     await expect(loadConfig('/tmp/nonexistent-helio.yaml')).rejects.toThrow(ConfigError)
     await expect(loadConfig('/tmp/nonexistent-helio.yaml')).rejects.toThrow(

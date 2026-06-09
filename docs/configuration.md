@@ -29,6 +29,8 @@ upstream:
   connect_timeout: '10s' # SSE connect timeout
   request_timeout: '30s' # Upstream request timeout
   forward_headers: [] # Caller x-* headers allowed upstream (default: none)
+  # headers:
+  #   Authorization: 'Bearer ${UPSTREAM_TOKEN}' # Static upstream auth (HTTP transports)
 
 listen:
   port: 3000 # Proxy listening port
@@ -100,15 +102,16 @@ Connection to the MCP server that Helio proxies.
 > object, not a list — multiple/named upstreams and routing are not yet
 > supported.
 
-| Field             | Type     | Required    | Default           | Description                                                                |
-| ----------------- | -------- | ----------- | ----------------- | -------------------------------------------------------------------------- |
-| `url`             | string   | Yes         | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`).         |
-| `transport`       | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio`.                  |
-| `command`         | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`. |
-| `args`            | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                            |
-| `connect_timeout` | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                         |
-| `request_timeout` | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                               |
-| `forward_headers` | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward upstream.            |
+| Field             | Type     | Required    | Default           | Description                                                                                                                                      |
+| ----------------- | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `url`             | string   | Yes         | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`).                                                                               |
+| `transport`       | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio`.                                                                                        |
+| `command`         | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                       |
+| `args`            | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                                                                                                  |
+| `connect_timeout` | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                                                                                               |
+| `request_timeout` | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                                                                                                     |
+| `forward_headers` | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward upstream.                                                                                  |
+| `headers`         | object   | No          | `{}`              | Static headers sent on every upstream request (HTTP transports). Values support `${VAR}` interpolation. Reserved transport headers are rejected. |
 
 **Transport options:**
 
@@ -128,6 +131,22 @@ upstream:
 ```
 
 > **Note:** The `url` field is required by the schema but ignored when `transport` is `stdio`. Any value (e.g. `stdio://`) works as a placeholder.
+
+#### Static request headers
+
+Attach static headers to every upstream request with `upstream.headers` — for example an operator-provided API credential. Values support `${VAR}` interpolation, so secrets stay out of the file:
+
+```yaml
+upstream:
+  url: 'https://api.example.com/mcp'
+  transport: streamable-http
+  headers:
+    Authorization: 'Bearer ${UPSTREAM_TOKEN}'
+```
+
+Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, and `host` are rejected — Helio owns those.
+
+On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
 
 #### Startup annotation cache priming
 

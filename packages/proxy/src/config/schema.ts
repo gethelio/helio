@@ -48,6 +48,7 @@ const upstreamSchema = z
     connect_timeout: durationSchema.default('10s'),
     request_timeout: durationSchema.default('30s'),
     forward_headers: z.array(z.string().min(1)).default([]),
+    headers: z.record(z.string(), z.string()).default({}),
   })
   .refine((data) => data.transport !== 'stdio' || data.command !== undefined, {
     message: '"command" is required when transport is "stdio"',
@@ -60,6 +61,25 @@ const upstreamSchema = z
           code: 'custom',
           path: ['forward_headers', index],
           message: 'Forwarded caller headers must start with "x-"',
+        })
+      }
+    }
+
+    // Reserved transport/protocol headers must not be operator-overridden via
+    // upstream.headers — the forwarders own these.
+    const reserved = new Set([
+      'mcp-session-id',
+      'mcp-protocol-version',
+      'content-type',
+      'content-length',
+      'host',
+    ])
+    for (const name of Object.keys(data.headers)) {
+      if (reserved.has(name.toLowerCase())) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['headers', name],
+          message: `upstream.headers must not set reserved header "${name}"`,
         })
       }
     }

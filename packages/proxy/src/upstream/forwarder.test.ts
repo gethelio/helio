@@ -136,6 +136,18 @@ describe('UpstreamForwarder', () => {
     expect(calls[0]?.headers['authorization']).toBe('Bearer tok123')
   })
 
+  it('static config headers override caller-forwarded headers', async () => {
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      headers: { Authorization: 'Bearer static-token' },
+    })
+
+    await forwarder.forward(makeRequest({ headers: { authorization: 'Bearer caller-token' } }))
+
+    expect(calls[0]?.headers['authorization']).toBe('Bearer static-token')
+    expect(calls[0]?.headers).not.toHaveProperty('Authorization')
+  })
+
   it('omits sessionId and headers from the JSON-RPC body', async () => {
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
 

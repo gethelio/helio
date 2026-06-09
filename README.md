@@ -108,6 +108,8 @@ dashboard:
   api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
 
+If your upstream requires a static credential (for example `Authorization: Bearer …` on a hosted MCP server), set [`upstream.headers`](docs/configuration.md#static-request-headers) — values support `${VAR}` interpolation so secrets stay out of the file.
+
 About `dashboard.api_secret`:
 
 - **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains a generated `api_secret` (a literal 32-byte hex value, also printed when you ran `init`). It's set — skip this step.

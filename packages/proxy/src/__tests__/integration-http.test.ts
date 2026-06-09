@@ -1,6 +1,7 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest'
 import { Hono } from 'hono'
 import { createApp } from '../server.js'
+import { createForwarderFromConfig } from '../cli-forwarder.js'
 import { UpstreamForwarder } from '../upstream/forwarder.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { compilePolicies } from '../policy/parser.js'
@@ -651,5 +652,45 @@ describe('Audit response capture (Streamable HTTP)', () => {
     } finally {
       await proxy.close()
     }
+  })
+})
+
+describe('Static upstream headers', () => {
+  let upstreamServer: ManagedServer
+  let proxy: ManagedServer
+  let proxyUrl: string
+  let capturedAuth: string | undefined
+
+  beforeAll(async () => {
+    const upstreamApp = new Hono()
+    upstreamApp.post('/mcp', (c) => {
+      capturedAuth = c.req.header('authorization')
+      return c.json({ jsonrpc: '2.0', id: 1, result: { tools: [] } })
+    })
+    upstreamServer = startOnDynamicPort(upstreamApp)
+
+    const config = makeConfig({
+      upstream: {
+        url: `http://127.0.0.1:${String(upstreamServer.port)}/mcp`,
+        transport: 'streamable-http',
+        request_timeout: '30s',
+        headers: { Authorization: 'Bearer integration-token' },
+      },
+    })
+
+    const { forwarder } = await createForwarderFromConfig(config)
+    const app = createApp(config, forwarder)
+    proxy = startOnDynamicPort(app)
+    proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
+  })
+
+  afterAll(async () => {
+    await proxy.close()
+    await upstreamServer.close()
+  })
+
+  it('forwards the configured static Authorization header to upstream', async () => {
+    await sendMcpRequest(proxyUrl, 'tools/list')
+    expect(capturedAuth).toBe('Bearer integration-token')
   })
 })

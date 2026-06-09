@@ -8,8 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import { loadConfig, ConfigError, ConfigWatcher } from './config/index.js'
 import { createApp, startServer, startSidebandServer } from './server.js'
-import { UpstreamForwarder, SseUpstreamForwarder } from './upstream/index.js'
-import { StdioForwarder } from './transport/stdio-wrapper.js'
+import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
 import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
@@ -27,7 +26,6 @@ import { parseDuration } from './config/schema.js'
 import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
 import type { AuditRecord } from './audit/index.js'
 import { CSV_HEADERS, csvEscape } from './audit/csv.js'
-import type { McpForwarder } from './mcp/types.js'
 import type { ServerHandle } from './server.js'
 import {
   warnIfWebhookChannelUnreachable,
@@ -110,6 +108,8 @@ upstream:
   url: "http://localhost:8080/mcp"
   # Transport: streamable-http (default), sse, or stdio
   transport: streamable-http
+#   headers:
+#     Authorization: "Bearer \${UPSTREAM_TOKEN}"
 
 # Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
 # not change to 0.0.0.0 without putting an authenticating reverse proxy in
@@ -302,44 +302,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   }
 
   // Create the right forwarder based on upstream transport
-  let forwarder: McpForwarder
-  let closeForwarder: (() => Promise<void>) | undefined
-
-  switch (config.upstream.transport) {
-    case 'streamable-http': {
-      forwarder = new UpstreamForwarder({
-        url: config.upstream.url,
-        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
-      })
-      break
-    }
-    case 'stdio': {
-      if (!config.upstream.command) {
-        console.error('Error: "command" is required for stdio transport')
-        process.exit(1)
-      }
-      const stdio = new StdioForwarder({
-        command: config.upstream.command,
-        args: config.upstream.args,
-        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
-      })
-      await stdio.start()
-      forwarder = stdio
-      closeForwarder = () => stdio.close()
-      break
-    }
-    case 'sse': {
-      const sse = new SseUpstreamForwarder({
-        url: config.upstream.url,
-        connectTimeoutMs: parseDuration(config.upstream.connect_timeout),
-        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
-      })
-      await sse.connect()
-      forwarder = sse
-      closeForwarder = () => sse.close()
-      break
-    }
-  }
+  const { forwarder, close: closeForwarder } = await createForwarderFromConfig(config)
 
   // Compile policies and wrap the forwarder with governance
   const { policy, warnings } = compilePolicies(config.policies)
