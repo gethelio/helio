@@ -54,7 +54,7 @@ This single package includes the built-in dashboard UI bundle.
 
 ### 2. Configure
 
-`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it and point `upstream.url` at your existing MCP server. A fuller example with policies, audit, and a dashboard secret:
+`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it and point `upstream.url` at your existing MCP server. Helio v0.1 proxies a single upstream MCP server. A fuller example with policies, audit, and a dashboard secret:
 
 ```yaml
 version: '1'
