@@ -144,6 +144,8 @@ upstream:
 
 Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, and `host` are rejected — Helio owns those.
 
+On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
+
 #### Startup annotation cache priming
 
 At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`.
