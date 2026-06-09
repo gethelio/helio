@@ -1,5 +1,5 @@
 import { parseDuration } from './config/schema.js'
-import { UpstreamForwarder, SseUpstreamForwarder } from './upstream/index.js'
+import { SseUpstreamForwarder, StreamableHttpForwarder } from './upstream/index.js'
 import { StdioForwarder } from './transport/stdio-wrapper.js'
 import type { HelioConfig } from './config/index.js'
 import type { McpForwarder } from './mcp/types.js'
@@ -17,13 +17,16 @@ export interface BuiltForwarder {
 export async function createForwarderFromConfig(config: HelioConfig): Promise<BuiltForwarder> {
   switch (config.upstream.transport) {
     case 'streamable-http': {
-      return {
-        forwarder: new UpstreamForwarder({
-          url: config.upstream.url,
-          headers: config.upstream.headers,
-          requestTimeoutMs: parseDuration(config.upstream.request_timeout),
-        }),
-      }
+      // connect() is a no-op (upstream sessions are established lazily), so
+      // upstream.connect_timeout does not apply to this transport — the
+      // initialize handshake is bounded by request_timeout instead.
+      const http = new StreamableHttpForwarder({
+        url: config.upstream.url,
+        headers: config.upstream.headers,
+        requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+      })
+      await http.connect()
+      return { forwarder: http, close: () => http.close() }
     }
     case 'sse': {
       const sse = new SseUpstreamForwarder({
