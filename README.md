@@ -108,11 +108,14 @@ dashboard:
   api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
 
-If you use the `${HELIO_DASHBOARD_SECRET}` placeholder above, set it before `start`:
+About `dashboard.api_secret`:
 
-```bash
-export HELIO_DASHBOARD_SECRET="$(openssl rand -hex 32)"
-```
+- **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains a generated `api_secret` (a literal 32-byte hex value, also printed when you ran `init`). It's set — skip this step.
+- **If you authored `helio.yaml` by hand** using the `${HELIO_DASHBOARD_SECRET}` placeholder shown above, set the variable before `start`:
+
+  ```bash
+  export HELIO_DASHBOARD_SECRET="$(openssl rand -hex 32)"
+  ```
 
 ### 3. Start Helio
 
