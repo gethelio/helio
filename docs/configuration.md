@@ -29,6 +29,8 @@ upstream:
   connect_timeout: '10s' # SSE connect timeout
   request_timeout: '30s' # Upstream request timeout
   forward_headers: [] # Caller x-* headers allowed upstream (default: none)
+  # headers:
+  #   Authorization: 'Bearer ${UPSTREAM_TOKEN}' # Static upstream auth (HTTP transports)
 
 listen:
   port: 3000 # Proxy listening port

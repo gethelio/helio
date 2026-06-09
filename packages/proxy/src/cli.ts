@@ -108,6 +108,8 @@ upstream:
   url: "http://localhost:8080/mcp"
   # Transport: streamable-http (default), sse, or stdio
   transport: streamable-http
+#   headers:
+#     Authorization: "Bearer \${UPSTREAM_TOKEN}"
 
 # Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
 # not change to 0.0.0.0 without putting an authenticating reverse proxy in
