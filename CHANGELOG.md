@@ -21,6 +21,34 @@ Maintainer notes:
 
 _Nothing yet._
 
+## [0.2.0] - 2026-06-09
+
+### Added
+
+- **Static upstream headers.** A new `upstream.headers` map attaches
+  operator-defined static headers (e.g.
+  `Authorization: Bearer ${UPSTREAM_TOKEN}`) to every upstream request, so Helio
+  can front an authenticated MCP server without the caller supplying
+  credentials. Values support `${VAR}` interpolation, keeping secrets out of
+  `helio.yaml`. Applies to the HTTP transports (`streamable-http`, `sse`);
+  `stdio` has no request headers. Header names are matched case-insensitively.
+
+### Security
+
+- Configured `upstream.headers` take precedence over any caller-supplied header
+  on a name conflict, so a downstream caller cannot override an operator-provided
+  credential such as `Authorization`. Reserved transport/protocol headers (`mcp-session-id`, `mcp-protocol-version`,
+  `content-type`, `content-length`, `host`) are rejected by config validation.
+
+## [0.1.1] - 2026-06-04
+
+### Changed
+
+- **Clearer upstream-unreachable errors.** When the upstream MCP server cannot
+  be reached (connection refused, DNS failure, or timeout), Helio now returns a
+  diagnostic message naming the likely cause and remediation instead of an
+  opaque fetch error.
+
 ## [0.1.0] - 2026-05-19
 
 Helio's first public release.
@@ -109,5 +137,7 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/gethelio/helio/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/gethelio/helio/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gethelio/helio/releases/tag/v0.1.0
