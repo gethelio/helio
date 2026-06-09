@@ -54,13 +54,14 @@ This single package includes the built-in dashboard UI bundle.
 
 ### 2. Configure
 
-Create a `helio.yaml` in your project root:
+`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it and point `upstream.url` at your existing MCP server. A fuller example with policies, audit, and a dashboard secret:
 
 ```yaml
 version: '1'
 
 upstream:
-  url: 'http://localhost:3001/mcp' # Your existing MCP server
+  url: 'http://localhost:8080/mcp' # Your existing MCP server
+  transport: streamable-http # streamable-http (default), sse, or stdio
 
 listen:
   port: 3000 # Helio listens here
