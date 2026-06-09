@@ -468,7 +468,152 @@ describe('GovernedForwarder', () => {
       const prime = await governed.primeAnnotationCache()
       expect(prime.success).toBe(false)
       expect(prime.toolsCached).toBe(0)
-      expect(prime.reason).toBe('upstream tools/list response had unexpected shape')
+      expect(prime.reason).toMatch(/missing result\.tools/i)
+    })
+
+    it('classifies a JSON-RPC error payload from the prime tools/list', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 200,
+              headers: {},
+              body: {
+                jsonrpc: '2.0',
+                id: 'helio-prime-annotations',
+                error: { code: -32600, message: 'Bad Request' },
+              },
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/JSON-RPC error/i)
+      expect(result.reason).toContain('Bad Request')
+    })
+
+    it('classifies a non-tools/list result shape', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 200,
+              headers: {},
+              body: { jsonrpc: '2.0', id: 1, result: { notTools: true } },
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/missing result\.tools/i)
+    })
+
+    it('classifies an HTTP error status from the prime tools/list', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 400,
+              headers: { 'content-type': 'application/json' },
+              body: { error: 'session required' },
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/HTTP 400/)
+      expect(result.reason).toMatch(/session|initialize/i)
+    })
+
+    it('classifies a bare string error field from a non-conforming upstream', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+              body: { jsonrpc: '2.0', id: 1, error: 'Not initialized' },
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/JSON-RPC error/i)
+      expect(result.reason).toContain('Not initialized')
+    })
+
+    it('classifies a non-JSON body from the prime tools/list', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 200,
+              headers: { 'content-type': 'text/plain' },
+              body: 'plain text',
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/non-JSON body/i)
+      expect(result.reason).toContain('text/plain')
+    })
+
+    it('never treats an HTTP error as a successful prime, even with a tools-shaped body', async () => {
+      const inner = {
+        forward: () =>
+          Promise.resolve({
+            response: {
+              status: 404,
+              headers: { 'content-type': 'application/json' },
+              body: {
+                jsonrpc: '2.0',
+                id: 'helio-prime-annotations',
+                result: { tools: [{ name: 't1', annotations: {} }] },
+              },
+            },
+            durationMs: 1,
+          }),
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(false)
+      expect(result.reason).toMatch(/HTTP 404/)
+    })
+
+    it('routes the prime through forwardInternal when the inner forwarder provides it', async () => {
+      const forwardSpy = vi.fn()
+      const forwardInternalSpy = vi.fn().mockResolvedValue({
+        response: {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: {
+            jsonrpc: '2.0',
+            id: 'helio-prime-annotations',
+            result: { tools: [{ name: 't1', annotations: {} }] },
+          },
+        },
+        durationMs: 1,
+      })
+      const inner = {
+        forward: forwardSpy,
+        forwardInternal: forwardInternalSpy,
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      const result = await gf.primeAnnotationCache()
+      expect(result.success).toBe(true)
+      expect(forwardInternalSpy).toHaveBeenCalledOnce()
+      expect(forwardSpy).not.toHaveBeenCalled()
     })
 
     it('primeAnnotationCache returns failure when upstream forwarding throws', async () => {
