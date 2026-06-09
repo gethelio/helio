@@ -74,6 +74,7 @@ describe('helioConfigSchema', () => {
       expect(result.data.upstream.connect_timeout).toBe('10s')
       expect(result.data.upstream.request_timeout).toBe('30s')
       expect(result.data.upstream.forward_headers).toEqual([])
+      expect(result.data.upstream.headers).toEqual({})
       expect(result.data.listen.port).toBe(3000)
       expect(result.data.listen.host).toBe('127.0.0.1')
       expect(result.data.dashboard.enabled).toBe(false)
@@ -164,6 +165,44 @@ describe('helioConfigSchema', () => {
           upstream: {
             url: 'http://localhost:8080',
             forward_headers: ['authorization'],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('accepts a string-to-string headers map', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            headers: { Authorization: 'Bearer abc' },
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.upstream.headers).toEqual({ Authorization: 'Bearer abc' })
+    })
+
+    it('rejects non-string header values', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            headers: { 'X-Count': 3 },
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects reserved protocol headers (case-insensitive)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            headers: { 'Mcp-Session-Id': 'bad', 'content-type': 'text/plain' },
           },
         }),
       )

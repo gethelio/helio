@@ -42,6 +42,7 @@ function makeConfig(upstreamUrl: string): HelioConfig {
       connect_timeout: '10s',
       request_timeout: '30s',
       forward_headers: [],
+      headers: {},
     },
     listen: { port: 0, host: '127.0.0.1' },
     dashboard: {

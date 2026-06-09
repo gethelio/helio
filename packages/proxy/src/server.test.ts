@@ -27,6 +27,7 @@ const minimalConfig = {
     connect_timeout: '10s',
     request_timeout: '30s',
     forward_headers: [],
+    headers: {},
   },
   listen: { port: 3000, host: '127.0.0.1' },
   dashboard: {
