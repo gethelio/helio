@@ -19,7 +19,22 @@ Maintainer notes:
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`streamable-http` upstream is now a real session-aware MCP client.**
+  Previously the proxy forwarded upstream requests as stateless JSON-RPC POSTs,
+  so spec-compliant session-enforcing servers (e.g. stock FastMCP, the official
+  MCP SDK servers) rejected Helio's startup prime with HTTP 400 and the proxy
+  looped fail-closed; upstream `text/event-stream` responses were also rejected
+  outright. The proxy now forwards each downstream client's `initialize`
+  handshake and session id transparently, establishes its own managed upstream
+  session for Helio-internal traffic (the startup annotation prime), sends
+  `MCP-Protocol-Version` on upstream requests, and parses both
+  `application/json` and `text/event-stream` POST responses. No upstream server
+  configuration changes are required.
+- **Annotation-prime failures are now classified.** Startup prime retry logs
+  distinguish upstream HTTP errors, JSON-RPC error payloads, non-JSON bodies,
+  and missing `result.tools`, instead of always reporting "unexpected shape".
 
 ## [0.2.0] - 2026-06-09
 
