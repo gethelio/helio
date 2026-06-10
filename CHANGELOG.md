@@ -19,6 +19,10 @@ Maintainer notes:
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] - 2026-06-10
+
 ### Deprecated
 
 - **`UpstreamForwarder` is deprecated.** It is now a compatibility alias of
