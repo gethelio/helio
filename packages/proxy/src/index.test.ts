@@ -35,7 +35,9 @@ describe('proxy', () => {
     expect(proxy.createApprovalApp).toBeTypeOf('function')
 
     // Transport
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- the deprecated compat alias must stay exported
     expect(proxy.UpstreamForwarder).toBeTypeOf('function')
+    expect(proxy.StreamableHttpForwarder).toBeTypeOf('function')
     expect(proxy.StdioForwarder).toBeTypeOf('function')
   })
 })

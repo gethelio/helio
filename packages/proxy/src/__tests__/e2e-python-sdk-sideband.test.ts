@@ -9,7 +9,7 @@ import { startHttpMcpServer } from './helpers/mcp-test-server.js'
 import { startOnDynamicPort, makeConfig, sendMcpRequest } from './helpers/test-utils.js'
 import type { ManagedServer } from './helpers/test-utils.js'
 import { createApp } from '../server.js'
-import { UpstreamForwarder } from '../upstream/forwarder.js'
+import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.js'
 import { compilePolicies } from '../policy/parser.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { EvidenceStore, createSidebandApp } from '../evidence/index.js'
@@ -91,7 +91,7 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
       },
     })
 
-    const forwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const { policy } = compilePolicies(config.policies)
     const governed = new GovernedForwarder(forwarder, policy, { evidenceStore })
     const app = createApp(config, governed)

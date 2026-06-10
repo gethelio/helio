@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest'
 import { Hono } from 'hono'
 import { createApp } from '../server.js'
 import { createForwarderFromConfig } from '../cli-forwarder.js'
-import { UpstreamForwarder } from '../upstream/forwarder.js'
+import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { compilePolicies } from '../policy/parser.js'
 import { AuditStore } from '../audit/store.js'
@@ -26,7 +26,7 @@ describe('Streamable HTTP integration', () => {
       },
     })
 
-    const forwarder = new UpstreamForwarder({
+    const forwarder = new StreamableHttpForwarder({
       url: config.upstream.url,
       headers: {},
     })
@@ -191,7 +191,7 @@ describe('Streamable HTTP integration', () => {
       },
     })
 
-    const forwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const app = createApp(config, forwarder)
     const badProxy = startOnDynamicPort(app)
 
@@ -227,7 +227,7 @@ describe('Streamable HTTP integration', () => {
         transport: 'streamable-http',
       },
     })
-    const forwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const app = createApp(config, forwarder)
     const proxy = startOnDynamicPort(app)
 
@@ -281,7 +281,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
       },
       policies: policiesConfig as ReturnType<typeof makeConfig>['policies'],
     })
-    const rawForwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const { policy } = compilePolicies(config.policies)
     const governed = new GovernedForwarder(rawForwarder, policy, {
       environment: config.environment,
@@ -445,7 +445,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
       },
       policies: policiesConfig as ReturnType<typeof makeConfig>['policies'],
     })
-    const rawForwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const { policy } = compilePolicies(config.policies)
 
     const auditStore = new AuditStore({

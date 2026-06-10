@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { startHttpMcpServer } from './helpers/mcp-test-server.js'
 import { startOnDynamicPort, makeConfig, sendMcpRequest } from './helpers/test-utils.js'
 import { createApp } from '../server.js'
-import { UpstreamForwarder } from '../upstream/forwarder.js'
+import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.js'
 import { compilePolicies } from '../policy/index.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { AuditStore, AuditWriter } from '../audit/index.js'
@@ -53,7 +53,7 @@ function createGovernedProxyWithAudit(
     environment: options?.environment,
   })
 
-  const rawForwarder = new UpstreamForwarder({ url: config.upstream.url })
+  const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
   const { policy } = compilePolicies(config.policies)
 
   const auditStore = new AuditStore({
@@ -345,7 +345,7 @@ policies:
       upstream: { url: upstreamUrl, transport: 'streamable-http' },
       policies: { default: 'allow', rules: [] },
     })
-    const rawForwarder = new UpstreamForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
     const { policy } = compilePolicies(config.policies)
 
     auditStore = new AuditStore({

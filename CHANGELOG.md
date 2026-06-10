@@ -19,6 +19,15 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`UpstreamForwarder` is deprecated.** It is now a compatibility alias of
+  `StreamableHttpForwarder` and behaves identically (including SSE response
+  parsing and managed internal session support), so older imports keep
+  working with the fixed behavior. Library consumers should construct
+  `StreamableHttpForwarder` directly; the alias will be removed in a future
+  release.
+
 ### Fixed
 
 - **`streamable-http` upstream is now a real session-aware MCP client.**
