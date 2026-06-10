@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createApp } from '../server.js'
-import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.js'
+import { createForwarderFromConfig } from '../cli-forwarder.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { compilePolicies } from '../policy/parser.js'
 import { startSessionEnforcingHttpMcpServer } from './helpers/mcp-test-server.js'
@@ -8,37 +8,41 @@ import { startOnDynamicPort, makeConfig, sendMcpRequest } from './helpers/test-u
 import type { ManagedServer } from './helpers/test-utils.js'
 
 describe('Streamable HTTP session-enforcing upstream', () => {
-  let upstream: { port: number; close: () => Promise<void> }
-  let proxy: ManagedServer
+  let upstream: { port: number; close: () => Promise<void> } | undefined
+  let upstreamPort = 0
+  let proxy: ManagedServer | undefined
   let proxyUrl: string
-  let forwarder: StreamableHttpForwarder
+  let governedForwarder: GovernedForwarder
+  let closeForwarder: (() => Promise<void>) | undefined
 
   beforeAll(async () => {
     upstream = await startSessionEnforcingHttpMcpServer()
+    upstreamPort = upstream.port
     const config = makeConfig({
       upstream: {
-        url: `http://127.0.0.1:${String(upstream.port)}/mcp`,
+        url: `http://127.0.0.1:${String(upstreamPort)}/mcp`,
         transport: 'streamable-http',
+        request_timeout: '30s',
       },
     })
-    forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
-    await forwarder.connect()
-    proxy = startOnDynamicPort(createApp(config, forwarder))
+    const built = await createForwarderFromConfig(config)
+    closeForwarder = built.close
+    governedForwarder = new GovernedForwarder(
+      built.forwarder,
+      compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
+    )
+    proxy = startOnDynamicPort(createApp(config, governedForwarder))
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 
   afterAll(async () => {
-    await proxy.close()
-    await forwarder.close()
-    await upstream.close()
+    if (proxy) await proxy.close()
+    await closeForwarder?.()
+    if (upstream) await upstream.close()
   })
 
-  it('primes annotations against a session-enforcing SSE upstream', async () => {
-    const gf = new GovernedForwarder(
-      forwarder,
-      compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
-    )
-    const result = await gf.primeAnnotationCache()
+  it('primes annotations against a session-enforcing SSE upstream through production wiring', async () => {
+    const result = await governedForwarder.primeAnnotationCache()
     expect(result.success).toBe(true)
     expect(result.toolsCached).toBeGreaterThan(0)
   })
@@ -74,7 +78,7 @@ describe('Streamable HTTP session-enforcing upstream', () => {
     // Call the upstream directly (bypassing the proxy) with a bare tools/list —
     // this documents that the fixture genuinely enforces sessions and that the
     // old sessionless client would still fail against it.
-    const res = await fetch(`http://127.0.0.1:${String(upstream.port)}/mcp`, {
+    const res = await fetch(`http://127.0.0.1:${String(upstreamPort)}/mcp`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

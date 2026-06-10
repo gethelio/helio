@@ -31,6 +31,16 @@ describe('parseSseChunk', () => {
     )
     expect(events).toEqual([{ event: 'message', data: '{"id":1}' }])
   })
+
+  it('accepts event/data fields with no space after colon', () => {
+    const events: Array<{ event: string; data: string }> = []
+    parseSseChunk(
+      'event:message\ndata:{"id":1}\n\n',
+      { event: '', data: '', remainder: '' },
+      (event, data) => events.push({ event, data }),
+    )
+    expect(events).toEqual([{ event: 'message', data: '{"id":1}' }])
+  })
 })
 
 describe('readSseJsonRpcResponse', () => {

@@ -32,10 +32,12 @@ export function parseSseChunk(
         event = ''
         data = ''
       }
-    } else if (line.startsWith('event: ')) {
-      event = line.slice(7)
-    } else if (line.startsWith('data: ')) {
-      data = data ? data + '\n' + line.slice(6) : line.slice(6)
+    } else if (line.startsWith('event:')) {
+      const value = line.slice(6).replace(/^ /, '')
+      event = value
+    } else if (line.startsWith('data:')) {
+      const value = line.slice(5).replace(/^ /, '')
+      data = data ? data + '\n' + value : value
     }
     // Ignore id:, retry:, and comment lines (starting with :)
   }

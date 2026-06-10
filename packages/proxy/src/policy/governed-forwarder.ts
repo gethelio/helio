@@ -1,4 +1,10 @@
-import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mcp/types.js'
+import type {
+  McpForwarder,
+  McpForwarderWithInternal,
+  McpRequest,
+  ForwardResult,
+  McpResponse,
+} from '../mcp/types.js'
 import { INTERNAL_ERROR } from '../mcp/types.js'
 import type { CompiledPolicy } from './types.js'
 import { evaluatePolicy } from './engine.js'
@@ -155,9 +161,7 @@ export class GovernedForwarder implements McpForwarder {
       id: 'helio-prime-annotations',
       method: 'tools/list',
     }
-    const internal = this.inner as McpForwarder & {
-      forwardInternal?: (request: McpRequest) => Promise<ForwardResult>
-    }
+    const internal: McpForwarderWithInternal = this.inner
 
     try {
       const result =

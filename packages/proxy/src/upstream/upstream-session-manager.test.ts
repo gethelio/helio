@@ -52,6 +52,33 @@ describe('UpstreamSessionManager', () => {
     expect(methods.filter((m) => m === 'initialize')).toHaveLength(1)
   })
 
+  it('stores negotiated protocol version and uses it for notifications/initialized', async () => {
+    const seenProtocolHeaders: string[] = []
+    globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-03-26' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-negotiated' },
+            },
+          ),
+        )
+      }
+      seenProtocolHeaders.push(headers['mcp-protocol-version'] ?? '')
+      return Promise.resolve(new Response(null, { status: 202 }))
+    }
+
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    const session = await mgr.ensureInternalSession()
+    expect(session.protocolVersion).toBe('2025-03-26')
+    expect(seenProtocolHeaders).toEqual(['2025-03-26'])
+  })
+
   it('reports a timeout with the configured duration when initialize times out', async () => {
     globalThis.fetch = (): Promise<Response> => {
       const timeoutError = new Error('The operation was aborted due to timeout')
@@ -103,6 +130,47 @@ describe('UpstreamSessionManager', () => {
     await expect(mgr.ensureInternalSession()).resolves.toMatchObject({ sessionId: 'U-Retry' })
   })
 
+  it('fails initialization when initialize returns HTTP 200 with JSON-RPC error', async () => {
+    let calls = 0
+    globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      if (body.method === 'initialize') {
+        calls += 1
+        if (calls === 1) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 0,
+                error: { code: -32000, message: 'session bootstrap denied' },
+              }),
+              {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+              },
+            ),
+          )
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-AfterError' },
+            },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(null, { status: 202 }))
+    }
+
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(/initialize returned JSON-RPC error/i)
+    await expect(mgr.ensureInternalSession()).resolves.toMatchObject({ sessionId: 'U-AfterError' })
+    expect(calls).toBe(2)
+  })
+
   it('fails initialization when notifications/initialized fails', async () => {
     globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const raw = typeof init?.body === 'string' ? init.body : '{}'
@@ -120,5 +188,110 @@ describe('UpstreamSessionManager', () => {
 
     const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
     await expect(mgr.ensureInternalSession()).rejects.toThrow(/notifications\/initialized failed/i)
+  })
+
+  it('fails initialization when notifications/initialized returns JSON-RPC error', async () => {
+    globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' },
+            },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'notification rejected' },
+          }),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          },
+        ),
+      )
+    }
+
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(
+      /notifications\/initialized returned JSON-RPC error/i,
+    )
+  })
+
+  it('fails initialization when notifications/initialized SSE stream contains a JSON-RPC error', async () => {
+    globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' },
+            },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(
+          'event: message\ndata: {"jsonrpc":"2.0","error":{"code":-32000,"message":"sse rejected"}}\n\n',
+          {
+            status: 200,
+            headers: { 'content-type': 'text/event-stream' },
+          },
+        ),
+      )
+    }
+
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(
+      /notifications\/initialized returned JSON-RPC error: sse rejected/i,
+    )
+  })
+
+  it('times out when notifications/initialized SSE stream never closes', async () => {
+    globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' },
+            },
+          ),
+        )
+      }
+      const neverClosing = new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise<void>(() => undefined)
+        },
+      })
+      return Promise.resolve(
+        new Response(neverClosing, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      )
+    }
+
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      requestTimeoutMs: 25,
+    })
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(
+      /notifications\/initialized SSE response timed out after 25ms/i,
+    )
   })
 })

@@ -1,8 +1,10 @@
 import { mergeUpstreamHeaders } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
+import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
 
 /** Protocol version Helio offers when it owns the upstream session. */
 export const HELIO_MCP_PROTOCOL_VERSION = '2025-06-18'
+const MAX_SSE_ERROR_SCAN_BYTES = 256 * 1024
 
 /** A live upstream session Helio established for its own sessionless requests. */
 export interface UpstreamSession {
@@ -107,13 +109,21 @@ export class UpstreamSessionManager {
     }
 
     const sessionId = res.headers.get('mcp-session-id') ?? undefined
-    // Drain the initialize body so the connection is free for reuse.
-    await res.text().catch(() => undefined)
+    const initializeEnvelope = await this.readRequiredJsonRpcEnvelope(
+      res,
+      initBody.id,
+      'initialize',
+    )
+    const initializeError = extractJsonRpcErrorMessage(initializeEnvelope)
+    if (initializeError) {
+      throw new Error(`upstream initialize returned JSON-RPC error: ${initializeError}`)
+    }
+    const negotiatedProtocolVersion = extractNegotiatedProtocolVersion(initializeEnvelope)
 
     // Per spec, the client confirms with notifications/initialized.
     const notifyHeaders = { ...headers }
     if (sessionId) notifyHeaders['mcp-session-id'] = sessionId
-    notifyHeaders['mcp-protocol-version'] = HELIO_MCP_PROTOCOL_VERSION
+    notifyHeaders['mcp-protocol-version'] = negotiatedProtocolVersion
     const notifyRes = await fetch(this.url, {
       method: 'POST',
       headers: notifyHeaders,
@@ -125,10 +135,172 @@ export class UpstreamSessionManager {
     if (!notifyRes.ok) {
       throw new Error(`upstream notifications/initialized failed: HTTP ${String(notifyRes.status)}`)
     }
-    await notifyRes.text().catch(() => undefined)
+    const notifyError = await this.readOptionalJsonRpcError(notifyRes)
+    if (notifyError) {
+      throw new Error(`upstream notifications/initialized returned JSON-RPC error: ${notifyError}`)
+    }
 
-    // protocolVersion is the version Helio offered, not the upstream-negotiated
-    // value (the initialize body is drained unread); reconcile when needed.
-    return { sessionId, protocolVersion: HELIO_MCP_PROTOCOL_VERSION }
+    return { sessionId, protocolVersion: negotiatedProtocolVersion }
   }
+
+  private async readRequiredJsonRpcEnvelope(
+    res: Response,
+    requestId: string | number | null,
+    step: string,
+  ): Promise<Record<string, unknown>> {
+    const contentType = res.headers.get('content-type') ?? ''
+    if (contentType.includes('text/event-stream')) {
+      const payload = await readSseJsonRpcResponse(res, requestId)
+      return payload as unknown as Record<string, unknown>
+    }
+
+    const raw = await res.text()
+    if (!raw.trim()) {
+      throw new Error(`upstream ${step} returned an empty body`)
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new Error(`upstream ${step} returned non-JSON body`)
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error(`upstream ${step} returned non-object JSON`)
+    }
+    return parsed as Record<string, unknown>
+  }
+
+  private async readOptionalJsonRpcError(res: Response): Promise<string | undefined> {
+    const contentType = res.headers.get('content-type') ?? ''
+    if (contentType.includes('text/event-stream')) {
+      if (!res.body) return undefined
+      let errorMessage: string | undefined
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let state = { event: '', data: '', remainder: '' }
+      let scannedBytes = 0
+      const deadline = Date.now() + this.requestTimeoutMs
+
+      const onEvent = (event: string, data: string): void => {
+        if (errorMessage) return
+        if (event && event !== 'message') return
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(data)
+        } catch {
+          return
+        }
+        if (typeof parsed !== 'object' || parsed === null) return
+        errorMessage = extractJsonRpcErrorMessage(parsed as Record<string, unknown>)
+      }
+
+      for (;;) {
+        const remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(
+            `upstream notifications/initialized SSE response timed out after ${String(this.requestTimeoutMs)}ms`,
+          )
+        }
+        let chunk: SseReadChunk
+        try {
+          chunk = await readSseChunkWithTimeout(reader, remainingMs)
+        } catch {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(
+            `upstream notifications/initialized SSE response timed out after ${String(this.requestTimeoutMs)}ms`,
+          )
+        }
+        const { done, value } = chunk
+        if (value !== undefined) {
+          scannedBytes += value.byteLength
+          if (scannedBytes > MAX_SSE_ERROR_SCAN_BYTES) {
+            await reader.cancel().catch(() => undefined)
+            throw new Error(
+              `upstream notifications/initialized SSE response exceeded ${String(MAX_SSE_ERROR_SCAN_BYTES)} bytes`,
+            )
+          }
+          state = parseSseChunk(decoder.decode(value, { stream: true }), state, onEvent)
+          if (errorMessage) {
+            await reader.cancel().catch(() => undefined)
+            return errorMessage
+          }
+        }
+        if (done) {
+          const tail = decoder.decode()
+          if (tail) {
+            state = parseSseChunk(tail, state, onEvent)
+          }
+          return errorMessage
+        }
+      }
+    }
+
+    const raw = await res.text()
+    if (!raw.trim()) return undefined
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    return extractJsonRpcErrorMessage(parsed as Record<string, unknown>)
+  }
+}
+
+async function readSseChunkWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): Promise<SseReadChunk> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+  try {
+    const result = await Promise.race<unknown>([
+      reader.read() as Promise<unknown>,
+      new Promise<unknown>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`sse read timed out after ${String(timeoutMs)}ms`))
+        }, timeoutMs)
+      }),
+    ])
+    if (!isSseReadChunk(result)) {
+      throw new Error('upstream notifications/initialized SSE response returned invalid chunk')
+    }
+    return result
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+  }
+}
+
+interface SseReadChunk {
+  readonly done: boolean
+  readonly value: Uint8Array | undefined
+}
+
+function isSseReadChunk(value: unknown): value is SseReadChunk {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as { done?: unknown; value?: unknown }
+  if (typeof candidate.done !== 'boolean') return false
+  if (candidate.value === undefined) return true
+  return candidate.value instanceof Uint8Array
+}
+
+function extractJsonRpcErrorMessage(payload: Record<string, unknown>): string | undefined {
+  const error = payload['error']
+  if (typeof error === 'string') return error
+  if (typeof error !== 'object' || error === null) return undefined
+  const message = (error as Record<string, unknown>)['message']
+  if (typeof message === 'string' && message.trim()) return message
+  return 'unknown JSON-RPC error'
+}
+
+function extractNegotiatedProtocolVersion(payload: Record<string, unknown>): string {
+  const result = payload['result']
+  if (typeof result !== 'object' || result === null) {
+    return HELIO_MCP_PROTOCOL_VERSION
+  }
+  const protocolVersion = (result as Record<string, unknown>)['protocolVersion']
+  return typeof protocolVersion === 'string' && protocolVersion.trim()
+    ? protocolVersion
+    : HELIO_MCP_PROTOCOL_VERSION
 }

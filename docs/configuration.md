@@ -115,7 +115,7 @@ Connection to the MCP server that Helio proxies.
 
 **Transport options:**
 
-- **`streamable-http`** (default) — MCP Streamable HTTP. The MCP server exposes an HTTP endpoint. Helio acts as a full session-aware MCP client: it forwards each downstream client's `initialize` handshake and session id transparently, sends `MCP-Protocol-Version` on upstream requests, and accepts both `application/json` and `text/event-stream` (SSE) responses. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work without any server-side configuration changes.
+- **`streamable-http`** (default) — MCP Streamable HTTP. The MCP server exposes an HTTP endpoint. Helio acts as a full session-aware MCP client: it forwards each downstream client's `initialize` handshake and session id transparently, sends `MCP-Protocol-Version` on upstream requests, and accepts both `application/json` and `text/event-stream` (SSE) responses (including SSE field lines with or without a space after `:`). For Helio-managed internal session traffic, protocol version is taken from the upstream-negotiated `initialize` result; in direct forwarder/library usage, Helio preserves an already-present `mcp-protocol-version` request header. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work without any server-side configuration changes.
 - **`sse`** — Server-Sent Events transport for older MCP clients. Uses GET for the event stream and POST for messages.
 - **`stdio`** — Spawns the MCP server as a child process and communicates over stdin/stdout. Useful for local servers that don't expose an HTTP endpoint.
 

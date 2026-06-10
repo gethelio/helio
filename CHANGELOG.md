@@ -35,6 +35,20 @@ Maintainer notes:
 - **Annotation-prime failures are now classified.** Startup prime retry logs
   distinguish upstream HTTP errors, JSON-RPC error payloads, non-JSON bodies,
   and missing `result.tools`, instead of always reporting "unexpected shape".
+- **`streamable-http` handshake and parser behavior are hardened.** Helio now
+  validates JSON-RPC envelopes for internal `initialize` and
+  `notifications/initialized` handshakes (including HTTP 200 responses) and
+  fails closed on JSON-RPC errors instead of caching a poisoned internal
+  session. The managed internal session now uses the upstream-negotiated
+  protocol version, and direct forwarder/library usage preserves an
+  already-present `mcp-protocol-version` request header. SSE parsing now
+  accepts field lines with and without a space after `:` (for example
+  `data:<json>` and `data: <json>`).
+- **Internal handshake SSE error scanning now streams with guardrails.**
+  `notifications/initialized` SSE responses are scanned incrementally instead
+  of buffering whole bodies, with an explicit read timeout and byte cap. This
+  prevents pathological never-closing/oversized streams from stalling startup
+  handshake error classification.
 
 ## [0.2.0] - 2026-06-09
 

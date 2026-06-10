@@ -54,12 +54,12 @@ export class StreamableHttpForwarder implements McpForwarder {
     // `initialize` is transport machinery: forward verbatim, never inject a
     // managed session, and let the response's Mcp-Session-Id flow downstream.
     if (request.method === 'initialize') {
-      return this.send(request, request.sessionId, /* protocolHeader */ false)
+      return this.send(request, request.sessionId, /* protocolVersion */ undefined)
     }
 
     // Downstream-driven and external sessionless callers alike are transparent
     // passthrough: forward whatever session the caller did (or did not) supply.
-    return this.send(request, request.sessionId, true)
+    return this.send(request, request.sessionId, HELIO_MCP_PROTOCOL_VERSION)
   }
 
   /**
@@ -69,12 +69,22 @@ export class StreamableHttpForwarder implements McpForwarder {
   async forwardInternal(request: McpRequest): Promise<ForwardResult> {
     const session = await this.sessions.ensureInternalSession()
     try {
-      return await this.send(request, session.sessionId, true, /* internalManaged */ true)
+      return await this.send(
+        request,
+        session.sessionId,
+        session.protocolVersion,
+        /* internalManaged */ true,
+      )
     } catch (error) {
       if (error instanceof UpstreamSessionExpiredError) {
         this.sessions.invalidateInternalSession()
         const fresh = await this.sessions.ensureInternalSession()
-        return this.send(request, fresh.sessionId, true, /* internalManaged */ true)
+        return this.send(
+          request,
+          fresh.sessionId,
+          fresh.protocolVersion,
+          /* internalManaged */ true,
+        )
       }
       throw error
     }
@@ -83,7 +93,7 @@ export class StreamableHttpForwarder implements McpForwarder {
   private async send(
     request: McpRequest,
     sessionId: string | undefined,
-    protocolHeader: boolean,
+    protocolVersion: string | undefined,
     internalManaged = false,
   ): Promise<ForwardResult> {
     const headers = mergeUpstreamHeaders(
@@ -95,7 +105,9 @@ export class StreamableHttpForwarder implements McpForwarder {
       this.staticHeaders,
     )
     if (sessionId) headers['mcp-session-id'] = sessionId
-    if (protocolHeader) headers['mcp-protocol-version'] = HELIO_MCP_PROTOCOL_VERSION
+    if (protocolVersion && headers['mcp-protocol-version'] === undefined) {
+      headers['mcp-protocol-version'] = protocolVersion
+    }
 
     const body: Record<string, unknown> = {
       jsonrpc: request.jsonrpc,

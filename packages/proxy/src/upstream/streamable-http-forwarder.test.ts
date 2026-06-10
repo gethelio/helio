@@ -56,6 +56,26 @@ describe('StreamableHttpForwarder', () => {
     expect(seen['mcp-session-id']).toBe('S1')
   })
 
+  it('does not override downstream-supplied mcp-protocol-version', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        sessionId: 'S1',
+        headers: { 'mcp-protocol-version': '2025-03-26' },
+      }),
+    )
+    expect(seen['mcp-protocol-version']).toBe('2025-03-26')
+  })
+
   it('relays the upstream Mcp-Session-Id response header', async () => {
     globalThis.fetch = () =>
       Promise.resolve(
@@ -161,6 +181,42 @@ describe('StreamableHttpForwarder', () => {
     expect(initCount).toBe(2)
     // The retried call must carry the freshly minted session U-2
     expect(toolsListSessions[1]).toBe('U-2')
+  })
+
+  it('uses the negotiated internal protocol version on managed-session requests', async () => {
+    const seenProtocolHeaders: string[] = []
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-03-26' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' },
+            },
+          ),
+        )
+      }
+      if (body.method === 'notifications/initialized') {
+        return Promise.resolve(new Response(null, { status: 202 }))
+      }
+
+      seenProtocolHeaders.push(headers['mcp-protocol-version'] ?? '')
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forwardInternal(req())
+    expect(seenProtocolHeaders).toEqual(['2025-03-26'])
   })
 
   // -------------------------------------------------------------------------
