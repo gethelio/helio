@@ -71,6 +71,16 @@ export interface McpForwarder {
   forward(request: McpRequest): Promise<ForwardResult>
 }
 
+/**
+ * Optional extension for forwarders that support Helio-internal routing.
+ *
+ * `forwardInternal` is used by startup/maintenance paths (e.g. annotation
+ * cache priming) that may require transport-specific session handling.
+ */
+export interface McpForwarderWithInternal extends McpForwarder {
+  forwardInternal?(request: McpRequest): Promise<ForwardResult>
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

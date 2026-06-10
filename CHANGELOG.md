@@ -19,7 +19,45 @@ Maintainer notes:
 
 ## [Unreleased]
 
-_Nothing yet._
+### Deprecated
+
+- **`UpstreamForwarder` is deprecated.** It is now a compatibility alias of
+  `StreamableHttpForwarder` and behaves identically (including SSE response
+  parsing and managed internal session support), so older imports keep
+  working with the fixed behavior. Library consumers should construct
+  `StreamableHttpForwarder` directly; the alias will be removed in a future
+  release.
+
+### Fixed
+
+- **`streamable-http` upstream is now a real session-aware MCP client.**
+  Previously the proxy forwarded upstream requests as stateless JSON-RPC POSTs,
+  so spec-compliant session-enforcing servers (e.g. stock FastMCP, the official
+  MCP SDK servers) rejected Helio's startup prime with HTTP 400 and the proxy
+  looped fail-closed; upstream `text/event-stream` responses were also rejected
+  outright. The proxy now forwards each downstream client's `initialize`
+  handshake and session id transparently, establishes its own managed upstream
+  session for Helio-internal traffic (the startup annotation prime), sends
+  `MCP-Protocol-Version` on upstream requests, and parses both
+  `application/json` and `text/event-stream` POST responses. No upstream server
+  configuration changes are required.
+- **Annotation-prime failures are now classified.** Startup prime retry logs
+  distinguish upstream HTTP errors, JSON-RPC error payloads, non-JSON bodies,
+  and missing `result.tools`, instead of always reporting "unexpected shape".
+- **`streamable-http` handshake and parser behavior are hardened.** Helio now
+  validates JSON-RPC envelopes for internal `initialize` and
+  `notifications/initialized` handshakes (including HTTP 200 responses) and
+  fails closed on JSON-RPC errors instead of caching a poisoned internal
+  session. The managed internal session now uses the upstream-negotiated
+  protocol version, and direct forwarder/library usage preserves an
+  already-present `mcp-protocol-version` request header. SSE parsing now
+  accepts field lines with and without a space after `:` (for example
+  `data:<json>` and `data: <json>`).
+- **Internal handshake SSE error scanning now streams with guardrails.**
+  `notifications/initialized` SSE responses are scanned incrementally instead
+  of buffering whole bodies, with an explicit read timeout and byte cap. This
+  prevents pathological never-closing/oversized streams from stalling startup
+  handshake error classification.
 
 ## [0.2.0] - 2026-06-09
 

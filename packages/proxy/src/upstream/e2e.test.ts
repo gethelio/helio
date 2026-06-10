@@ -4,7 +4,7 @@ import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
 import { createApp } from '../server.js'
-import { UpstreamForwarder } from './forwarder.js'
+import { StreamableHttpForwarder } from './streamable-http-forwarder.js'
 import type { HelioConfig } from '../config/index.js'
 
 // ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ describe('upstream forwarder e2e', () => {
 
     // Start proxy pointing at upstream
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
-    const forwarder = new UpstreamForwarder({ url: upstreamUrl })
+    const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
     const proxy = startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
@@ -168,7 +168,7 @@ describe('upstream forwarder e2e', () => {
     servers.push(upstream.server)
 
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
-    const forwarder = new UpstreamForwarder({ url: upstreamUrl })
+    const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
     const proxy = startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
@@ -194,7 +194,7 @@ describe('upstream forwarder e2e', () => {
     servers.push(upstream.server)
 
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
-    const forwarder = new UpstreamForwarder({ url: upstreamUrl })
+    const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
     const proxy = startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
@@ -211,7 +211,7 @@ describe('upstream forwarder e2e', () => {
 
   it('returns normalized JSON-RPC error when upstream is unreachable', async () => {
     // Point at a port where nothing is listening
-    const forwarder = new UpstreamForwarder({ url: 'http://127.0.0.1:19999/mcp' })
+    const forwarder = new StreamableHttpForwarder({ url: 'http://127.0.0.1:19999/mcp' })
     const proxyApp = createApp(makeConfig('http://127.0.0.1:19999/mcp'), forwarder)
     const proxy = startOnDynamicPort(proxyApp)
     servers.push(proxy.server)

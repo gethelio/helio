@@ -1,4 +1,10 @@
-import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mcp/types.js'
+import type {
+  McpForwarder,
+  McpForwarderWithInternal,
+  McpRequest,
+  ForwardResult,
+  McpResponse,
+} from '../mcp/types.js'
 import { INTERNAL_ERROR } from '../mcp/types.js'
 import type { CompiledPolicy } from './types.js'
 import { evaluatePolicy } from './engine.js'
@@ -143,6 +149,11 @@ export class GovernedForwarder implements McpForwarder {
    *
    * This path is intended for startup warm-up and intentionally bypasses policy
    * and audit handling. Runtime tools/list requests still flow through forward().
+   *
+   * When the inner forwarder exposes `forwardInternal` (duck-typed), the prime
+   * request is routed through it so session-enforcing servers (e.g. Streamable
+   * HTTP upstreams) receive the request on the managed internal session rather
+   * than as a sessionless call that they would reject with HTTP 400.
    */
   async primeAnnotationCache(): Promise<AnnotationCachePrimeResult> {
     const syntheticToolsList: McpRequest = {
@@ -150,15 +161,28 @@ export class GovernedForwarder implements McpForwarder {
       id: 'helio-prime-annotations',
       method: 'tools/list',
     }
+    const internal: McpForwarderWithInternal = this.inner
 
     try {
-      const result = await this.inner.forward(syntheticToolsList)
+      const result =
+        typeof internal.forwardInternal === 'function'
+          ? await internal.forwardInternal(syntheticToolsList)
+          : await this.inner.forward(syntheticToolsList)
+      // An HTTP error is never a usable tools/list, even if the error body
+      // happens to contain a result.tools-shaped payload.
+      if (result.response.status >= 400) {
+        return {
+          success: false,
+          toolsCached: this.annotationCache.size,
+          reason: classifyPrimeFailure(result.response),
+        }
+      }
       const updated = this.annotationCache.update(result.response.body)
       if (!updated) {
         return {
           success: false,
           toolsCached: this.annotationCache.size,
-          reason: 'upstream tools/list response had unexpected shape',
+          reason: classifyPrimeFailure(result.response),
         }
       }
       return { success: true, toolsCached: this.annotationCache.size }
@@ -996,6 +1020,30 @@ function makeErrorResult(
 function hasJsonRpcError(result: ForwardResult): boolean {
   const body = result.response.body as Record<string, unknown> | undefined
   return body?.['error'] !== undefined
+}
+
+/** Produce an actionable reason when a prime tools/list response is unusable. */
+function classifyPrimeFailure(response: McpResponse): string {
+  if (response.status >= 400) {
+    return `upstream returned HTTP ${String(response.status)} to tools/list (session/initialize may be required)`
+  }
+  const rawBody = response.body
+  if (typeof rawBody !== 'object' || rawBody === null) {
+    return `upstream tools/list returned a non-JSON body (content-type ${response.headers['content-type'] ?? 'unknown'})`
+  }
+  const body = rawBody as Record<string, unknown>
+  const error = body['error']
+  if (typeof error === 'string') {
+    // Non-conforming upstreams sometimes return a bare string error.
+    return `upstream tools/list returned a JSON-RPC error: ${error}`
+  }
+  if (error !== null && typeof error === 'object') {
+    const message = (error as Record<string, unknown>)['message']
+    if (typeof message === 'string') {
+      return `upstream tools/list returned a JSON-RPC error: ${message}`
+    }
+  }
+  return 'upstream tools/list response was missing result.tools'
 }
 
 function extractBlockReason(result: ForwardResult): string | null {

@@ -1,6 +1,8 @@
 import { PendingRequests } from '../mcp/pending-requests.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
+import { parseSseChunk } from './sse-parse.js'
+import type { SseParserState, SseEventHandler } from './sse-parse.js'
 import type {
   McpForwarder,
   McpRequest,
@@ -27,51 +29,6 @@ export interface SseUpstreamForwarderOptions {
   requestTimeoutMs?: number
   /** Timeout in milliseconds while establishing the SSE connection. */
   connectTimeoutMs?: number
-}
-
-// ---------------------------------------------------------------------------
-// SSE line-based parser
-// ---------------------------------------------------------------------------
-
-interface SseParserState {
-  event: string
-  data: string
-  remainder: string
-}
-
-type SseEventHandler = (event: string, data: string) => void
-
-/**
- * Process a chunk of SSE text, calling `onEvent` for each complete event.
- * Returns updated parser state for the next chunk.
- */
-function parseSseChunk(
-  chunk: string,
-  state: SseParserState,
-  onEvent: SseEventHandler,
-): SseParserState {
-  let { event, data, remainder } = state
-  const text = remainder + chunk
-  const lines = text.split('\n')
-  remainder = lines.pop() ?? ''
-
-  for (const line of lines) {
-    if (line === '') {
-      // Blank line = end of event
-      if (event || data) {
-        onEvent(event, data)
-        event = ''
-        data = ''
-      }
-    } else if (line.startsWith('event: ')) {
-      event = line.slice(7)
-    } else if (line.startsWith('data: ')) {
-      data = data ? data + '\n' + line.slice(6) : line.slice(6)
-    }
-    // Ignore id:, retry:, and comment lines (starting with :)
-  }
-
-  return { event, data, remainder }
 }
 
 // ---------------------------------------------------------------------------

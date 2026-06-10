@@ -15,7 +15,7 @@ import type { ManagedServer } from './helpers/test-utils.js'
 import { parseDuration } from '../config/index.js'
 import type { PoliciesConfig } from '../config/index.js'
 import { createApp } from '../server.js'
-import { UpstreamForwarder } from '../upstream/forwarder.js'
+import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.js'
 import { compilePolicies } from '../policy/index.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { AuditStore, AuditWriter } from '../audit/index.js'
@@ -223,7 +223,7 @@ beforeAll(async () => {
 
   // 7. Compile policies + create governed forwarder
   const { policy } = compilePolicies(policiesConfig)
-  const rawForwarder = new UpstreamForwarder({ url: upstreamUrl })
+  const rawForwarder = new StreamableHttpForwarder({ url: upstreamUrl })
   const governed = new GovernedForwarder(rawForwarder, policy, {
     auditWriter,
     evidenceStore,

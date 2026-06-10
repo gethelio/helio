@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
-import type { AddressInfo, Server } from 'node:net'
+import type { Server } from 'node:http'
+import { randomUUID } from 'node:crypto'
+import type { AddressInfo } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { z } from 'zod'
@@ -199,11 +201,85 @@ export async function startHttpMcpServer(): Promise<{
   })
 }
 
+/**
+ * Start a session-enforcing MCP server over Streamable HTTP that replies with
+ * `text/event-stream` — i.e. the FastMCP-class shape that the stateless stub
+ * could not reproduce. Sessionless, pre-initialize requests get HTTP 400.
+ */
+export async function startSessionEnforcingHttpMcpServer(): Promise<{
+  port: number
+  close: () => Promise<void>
+}> {
+  const transports = new Map<string, StreamableHTTPServerTransport>()
+
+  const httpServer = createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/mcp') {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    void (async () => {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(chunk as Buffer)
+      let parsedBody: unknown
+      try {
+        parsedBody = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }))
+        return
+      }
+
+      const sessionId = req.headers['mcp-session-id'] as string | undefined
+      let transport = sessionId ? transports.get(sessionId) : undefined
+
+      if (!transport) {
+        const isInit =
+          typeof parsedBody === 'object' &&
+          parsedBody !== null &&
+          (parsedBody as { method?: string }).method === 'initialize'
+        if (!isInit) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Bad Request: no valid session' },
+            }),
+          )
+          return
+        }
+        const newTransport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          enableJsonResponse: false, // reply with text/event-stream
+          onsessioninitialized: (sid: string) => {
+            transports.set(sid, newTransport)
+          },
+        })
+        transport = newTransport
+        const server = createMcpTestServer()
+        await server.connect(transport)
+      }
+
+      await transport.handleRequest(req, res, parsedBody)
+    })()
+  })
+
+  return new Promise((resolve) => {
+    httpServer.listen(0, '127.0.0.1', () => {
+      const port = (httpServer.address() as AddressInfo).port
+      resolve({ port, close: () => closeHttpServer(httpServer) })
+    })
+  })
+}
+
 function closeHttpServer(server: Server): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     server.close((err) => {
       if (err) reject(err)
       else resolve()
     })
+    // Release any keep-alive sockets held by fetch connection pools so
+    // close() does not block on idle connections.
+    server.closeIdleConnections()
   })
 }

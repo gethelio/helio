@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { UpstreamForwarder } from './forwarder.js'
 import type { McpRequest } from '../mcp/types.js'
 
+/* eslint-disable @typescript-eslint/no-deprecated -- compatibility tests cover deprecated alias behavior */
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -249,19 +251,37 @@ describe('UpstreamForwarder', () => {
     )
   })
 
-  it('rejects upstream text/event-stream responses in streamable-http mode', async () => {
+  it('parses upstream text/event-stream responses', async () => {
     restore()
-    const capture = installCapturingFetch(
-      new Response('event: message\ndata: {}\n\n', {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-    )
-    calls = capture.calls
-    restore = capture.restore
+    const original = globalThis.fetch
+    globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const hdrs: Record<string, string> = {}
+      if (init?.headers && typeof init.headers === 'object' && !Array.isArray(init.headers)) {
+        for (const [k, v] of Object.entries(init.headers as Record<string, string>)) {
+          hdrs[k] = v
+        }
+      }
+      calls.push({
+        url: input,
+        method: init?.method,
+        headers: hdrs,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+        signal: (init?.signal as AbortSignal | undefined) ?? null,
+      })
+      return Promise.resolve(
+        new Response('event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      )
+    }
+    restore = () => {
+      globalThis.fetch = original
+    }
 
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
-    await expect(forwarder.forward(makeRequest())).rejects.toThrow('text/event-stream')
+    const result = await forwarder.forward(makeRequest())
+    expect((result.response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
 
   it('parses upstream JSON response into McpResponse', async () => {
