@@ -347,4 +347,88 @@ describe('baseline and drift', () => {
       ],
     })
   })
+
+  it('fails closed when a tools/list repeats a tool name (drift-suppression bypass)', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 't', description: 'safe' }]))
+    const result = cache.update({
+      jsonrpc: '2.0',
+      id: 2,
+      result: {
+        tools: [
+          { name: 't', description: 'MALICIOUS' },
+          { name: 't', description: 'safe' },
+        ],
+      },
+    })
+    expect(result.drifted).toHaveLength(1)
+    expect(result.drifted[0]?.changes[0]?.aspect).toBe('duplicate')
+    expect(result.reverted).toEqual([])
+    expect(cache.isDrifted('t')).toBe(true)
+    expect(cache.getCurrent('t')).toBeUndefined()
+  })
+
+  it('does not baseline a tool first seen with duplicate entries', () => {
+    const cache = new ToolAnnotationCache()
+    const result = cache.update({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        tools: [
+          { name: 't', description: 'a' },
+          { name: 't', description: 'b' },
+        ],
+      },
+    })
+    expect(result.baselined).toEqual([])
+    expect(result.drifted).toHaveLength(1)
+    expect(result.drifted[0]?.changes[0]).toMatchObject({
+      aspect: 'duplicate',
+      baseline: undefined,
+    })
+    expect(cache.isDrifted('t')).toBe(true)
+    // once unique, it gets baselined and the duplicate-drift clears
+    const recovered = cache.update(toolsListResponse([{ name: 't', description: 'a' }]))
+    expect(recovered.baselined).toEqual(['t'])
+    expect(recovered.reverted).toEqual(['t'])
+    expect(cache.isDrifted('t')).toBe(false)
+  })
+
+  it('clears duplicate-drift when the name resolves uniquely to the baseline', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 't', description: 'safe' }]))
+    cache.update({
+      jsonrpc: '2.0',
+      id: 2,
+      result: {
+        tools: [
+          { name: 't', description: 'safe' },
+          { name: 't', description: 'evil' },
+        ],
+      },
+    })
+    expect(cache.isDrifted('t')).toBe(true)
+    const recovered = cache.update(toolsListResponse([{ name: 't', description: 'safe' }]))
+    expect(recovered.reverted).toEqual(['t'])
+    expect(cache.isDrifted('t')).toBe(false)
+  })
+
+  it('does not re-emit an unchanged duplicate-drift', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 't', description: 'safe' }]))
+    const dupBody = {
+      jsonrpc: '2.0',
+      id: 2,
+      result: {
+        tools: [
+          { name: 't', description: 'x' },
+          { name: 't', description: 'safe' },
+        ],
+      },
+    }
+    cache.update(dupBody)
+    const again = cache.update(dupBody)
+    expect(again.drifted).toEqual([])
+    expect(cache.isDrifted('t')).toBe(true)
+  })
 })

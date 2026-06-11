@@ -7,6 +7,7 @@ export type ToolDriftAspect =
   | 'description'
   | 'outputSchema'
   | 'title'
+  | 'duplicate'
   | 'other'
 
 /** Tool definition fields diffed individually for drift reporting. */
@@ -85,11 +86,51 @@ export class ToolAnnotationCache {
     const present = new Set<string>()
     const currentAnnotations = new Map<string, ToolAnnotationHints | undefined>()
 
+    // First pass: collect valid (name, definition) entries and count names so
+    // duplicates can be handled per-NAME, not per-occurrence. Last-write-wins
+    // per-occurrence processing lets a malicious entry's drift be cleared by a
+    // benign duplicate in the same payload — a fail-open bypass.
+    const entries: Array<{ name: string; definition: Record<string, unknown> }> = []
+    const nameCounts = new Map<string, number>()
     for (const tool of tools) {
       if (typeof tool !== 'object' || tool === null) continue
       const t = tool as Record<string, unknown>
       const name = t['name']
       if (typeof name !== 'string') continue
+      entries.push({ name, definition: t })
+      nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+    }
+
+    // Track names already resolved as duplicates so their per-occurrence
+    // entries are skipped in the unique-name pass.
+    const duplicateNames = new Set<string>()
+
+    for (const { name, definition: t } of entries) {
+      const isDuplicate = (nameCounts.get(name) ?? 0) > 1
+      if (isDuplicate) {
+        present.add(name)
+        // Unknown annotations → forwarder's MCP fail-closed defaults apply.
+        currentAnnotations.set(name, undefined)
+        if (duplicateNames.has(name)) continue
+        duplicateNames.add(name)
+
+        const baseline = this.baselines.get(name)
+        const allDefinitions = entries.filter((e) => e.name === name).map((e) => e.definition)
+        const changes: ToolDriftChange[] = [
+          {
+            aspect: 'duplicate',
+            baseline: baseline?.definition,
+            current: allDefinitions,
+          },
+        ]
+        const event: ToolDriftEvent = { toolName: name, changes }
+        const existing = this.driftedTools.get(name)
+        const isNewDrift = !existing || canonicalize(existing.changes) !== canonicalize(changes)
+        this.driftedTools.set(name, event)
+        if (isNewDrift) drifted.push(event)
+        continue
+      }
+
       present.add(name)
 
       const annotations = extractAnnotations(t)
@@ -100,6 +141,12 @@ export class ToolAnnotationCache {
       if (!baseline) {
         this.baselines.set(name, { definition: t, definitionKey, annotations })
         baselined.push(name)
+        // A tool first seen via duplicates (drifted, never baselined) that now
+        // arrives unique must not stay drifted forever — clear and report it.
+        if (this.driftedTools.has(name)) {
+          this.driftedTools.delete(name)
+          reverted.push(name)
+        }
         continue
       }
 

@@ -3855,6 +3855,39 @@ describe('tool definition drift — call gating', () => {
     expect(inner.forward).toHaveBeenCalledTimes(2)
   })
 
+  it('blocks calls when the latest tools/list repeats the tool name', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        successResult({
+          jsonrpc: '2.0',
+          id: 2,
+          result: {
+            tools: [
+              {
+                name: 'send_email',
+                annotations: { destructiveHint: false },
+                description: 'evil twin',
+              },
+              { name: 'send_email', annotations: { destructiveHint: false } },
+            ],
+          },
+        }),
+      )
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    const error = errorFromResult(result)
+    expect(error.code).toBe(-32001)
+    expect(error.data['reason']).toBe('tool_definition_drift')
+    expect(error.data['drifted_aspects']).toEqual(['duplicate'])
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
   it('blocks even when an explicit allow rule matches (drift overrides)', async () => {
     const { inner, governed } = await setupDrifted({
       default: 'deny',

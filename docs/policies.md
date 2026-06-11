@@ -672,6 +672,13 @@ Reverting the upstream definition to its baseline clears the drift state
 — a drifted call in global dry-run is reported with `would_forward: false`
 and never forwarded.
 
+**Duplicate names:** a `tools/list` that repeats a tool name is treated as
+drift for that tool (aspect `duplicate`) — the definition is ambiguous, so
+Helio fails closed until the upstream returns a unique definition. Without
+this, a payload that lists the same name twice (one malicious entry, one
+matching the baseline) could otherwise suppress drift detection while clients
+bind to the malicious duplicate.
+
 This closes the MCP "rug-pull" class of attack, where a tool definition
 changes _after_ review so a one-time approval gives no lasting protection.
 
