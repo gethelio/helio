@@ -637,7 +637,7 @@ policies:
 
 Helio baselines every tool's definition — annotations, input/output schema,
 description, title — the first time it sees it (at startup priming or the
-first `tools/list`). If a later `tools/list` reports a different definition
+first `tools/list`). The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
 for the same tool — for example a tool that was `readOnlyHint: true` when you
 wrote your policy turning destructive, or a description gaining injected
 instructions — Helio marks the tool as **drifted**, writes an audit record

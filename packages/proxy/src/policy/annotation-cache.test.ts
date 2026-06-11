@@ -319,4 +319,32 @@ describe('baseline and drift', () => {
     expect(cache.has('t')).toBe(true)
     expect(cache.get('t')).toEqual({ readOnlyHint: true })
   })
+
+  it('detects changes hidden under a __proto__ key', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 't' }]))
+    const body = JSON.parse(
+      '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t","__proto__":{"evil":true}}]}}',
+    ) as unknown
+    const result = cache.update(body)
+    expect(result.drifted).toHaveLength(1)
+    expect(result.drifted[0]?.changes[0]?.aspect).toBe('other')
+  })
+
+  it('getDrift returns the active drift event', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 't', annotations: { readOnlyHint: true } }]))
+    expect(cache.getDrift('t')).toBeUndefined()
+    cache.update(toolsListResponse([{ name: 't', annotations: { readOnlyHint: false } }]))
+    expect(cache.getDrift('t')).toEqual({
+      toolName: 't',
+      changes: [
+        {
+          aspect: 'annotations',
+          baseline: { readOnlyHint: true },
+          current: { readOnlyHint: false },
+        },
+      ],
+    })
+  })
 })

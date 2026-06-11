@@ -181,7 +181,12 @@ function extractAnnotations(tool: Record<string, unknown>): ToolAnnotationHints 
 
 /** Deterministic JSON encoding with recursively sorted object keys. */
 function canonicalize(value: unknown): string {
-  return JSON.stringify(sortKeysDeep(value))
+  // JSON.stringify returns undefined for top-level `undefined` at runtime even
+  // though its TS overloads type the return as `string` for non-undefined
+  // inputs. The explicit widening annotation keeps the coalesce legitimate.
+  const encoded: string | undefined = JSON.stringify(sortKeysDeep(value))
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- see above: runtime diverges from TS overload
+  return encoded ?? ''
 }
 
 function sortKeysDeep(value: unknown): unknown {
@@ -190,7 +195,16 @@ function sortKeysDeep(value: unknown): unknown {
     const source = value as Record<string, unknown>
     const out: Record<string, unknown> = {}
     for (const key of Object.keys(source).sort()) {
-      out[key] = sortKeysDeep(source[key])
+      // Object.defineProperty (not assignment) so a JSON-parsed "__proto__"
+      // key becomes an own property instead of silently setting the
+      // prototype — otherwise content under that key never registers as
+      // drift, a blind spot in a security control.
+      Object.defineProperty(out, key, {
+        value: sortKeysDeep(source[key]),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
     }
     return out
   }
