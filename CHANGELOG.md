@@ -17,7 +17,7 @@ Maintainer notes:
 - Keep entries user-visible and operator-relevant (new behavior, defaults,
   security posture, and breaking changes).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-11
 
 ### Added
 
