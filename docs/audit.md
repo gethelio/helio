@@ -33,6 +33,18 @@ Each audit record contains the following fields:
 | `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                   |
 | `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                |
 
+## Tool Definition Drift Records
+
+In addition to tool-call records, Helio writes immediate audit records when a tool's definition changes after its baseline was captured at startup. These records describe changes to the upstream definition, not tool calls.
+
+**`policy_decision: tool_drift`** — A tool's definition changed after baseline. `evidence_chain.tool_drift.changes` is an array of per-aspect before/after diffs: each entry has `aspect` (e.g. `annotations`, `inputSchema`, `description`), `baseline`, and `current`. Because no tool call occurred, `tool_input` is empty and all upstream fields (`upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`) are null.
+
+**`policy_decision: tool_drift_reverted`** — A previously drifted tool's definition returned to its baseline. `evidence_chain` is null; `tool_input` is empty and upstream fields are null.
+
+Both record types are written via `pushImmediate` so they appear in the audit trail before any subsequent tool call that may be gated on the drift state.
+
+> **Note:** Baselines are per-process. Restarting Helio re-baselines all tool definitions. Review any outstanding `tool_drift` records before restarting to ensure you understand what changed.
+
 ## Storage Backend
 
 Audit records are stored in a local SQLite database using WAL (Write-Ahead Logging) mode for optimal concurrent read/write performance.

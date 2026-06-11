@@ -10,6 +10,7 @@ import type { CompiledPolicy } from './types.js'
 import { evaluatePolicy } from './engine.js'
 import type { PolicyDecision } from './engine.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
+import type { ToolDriftEvent, ToolCacheUpdateResult } from './annotation-cache.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { EvidenceStore } from '../evidence/store.js'
@@ -177,8 +178,8 @@ export class GovernedForwarder implements McpForwarder {
           reason: classifyPrimeFailure(result.response),
         }
       }
-      const updated = this.annotationCache.update(result.response.body).updated
-      if (!updated) {
+      const update = this.applyToolDefinitionUpdate(result.response.body, undefined)
+      if (!update.updated) {
         return {
           success: false,
           toolsCached: this.annotationCache.size,
@@ -204,12 +205,79 @@ export class GovernedForwarder implements McpForwarder {
     // Forward the request
     const result = await this.inner.forward(request)
 
-    // Intercept tools/list responses to cache annotations
+    // Intercept tools/list responses to diff tool definitions
     if (request.method === 'tools/list') {
-      this.annotationCache.update(result.response.body)
+      this.applyToolDefinitionUpdate(result.response.body, request.sessionId)
     }
 
     return result
+  }
+
+  /**
+   * Apply a tools/list response to the definition cache and surface any
+   * drift: console warning + immediate audit record per event. Single entry
+   * point for both runtime tools/list responses and startup priming, so the
+   * cache is updated exactly once per response.
+   */
+  private applyToolDefinitionUpdate(
+    responseBody: unknown,
+    sessionId: string | undefined,
+  ): ToolCacheUpdateResult {
+    const update = this.annotationCache.update(responseBody)
+    if (!update.updated) return update
+
+    for (const drift of update.drifted) {
+      const aspects = drift.changes.map((change) => change.aspect).join(', ')
+      // eslint-disable-next-line no-console -- Intentional operational warning
+      console.error(
+        `[helio] Tool definition drift detected: "${drift.toolName}" changed (${aspects}) after baseline — calls governed by policies.on_tool_drift (${this.policy.onToolDrift ?? 'block'})`,
+      )
+      this.writeDriftAuditRecord(drift, sessionId, 'tool_drift')
+    }
+    for (const toolName of update.reverted) {
+      // eslint-disable-next-line no-console -- Intentional operational warning
+      console.error(
+        `[helio] Tool definition drift cleared: "${toolName}" returned to its baseline definition`,
+      )
+      this.writeDriftAuditRecord({ toolName, changes: [] }, sessionId, 'tool_drift_reverted')
+    }
+    return update
+  }
+
+  /** Write an immediate audit record for a drift event (not a tool call). */
+  private writeDriftAuditRecord(
+    drift: ToolDriftEvent,
+    sessionId: string | undefined,
+    decision: 'tool_drift' | 'tool_drift_reverted',
+  ): void {
+    if (!this.auditWriter) return
+    this.auditWriter.pushImmediate({
+      timestamp: new Date().toISOString(),
+      session_id: sessionId ?? null,
+      agent_id: null,
+      environment: this.environment ?? null,
+      tool_name: drift.toolName,
+      tool_input: {},
+      policy_decision: decision,
+      block_reason: null,
+      matched_rule: null,
+      matched_rule_index: null,
+      evidence_chain:
+        decision === 'tool_drift'
+          ? ({ tool_drift: { changes: drift.changes } } as Record<string, unknown>)
+          : null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: null,
+      upstream_error: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      total_duration_ms: 0,
+      approval_wait_ms: 0,
+      proxy_compute_ms: 0,
+      flagged_destructive: false,
+      dry_run: false,
+    })
   }
 
   private async handleToolsCall(request: McpRequest): Promise<ForwardResult> {

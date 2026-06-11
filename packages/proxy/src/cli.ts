@@ -233,7 +233,9 @@ async function startAnnotationPrimeLoop(
         phase === 'initial'
           ? '[helio] Annotation cache primed'
           : `[helio] Annotation cache primed after retry ${String(retryAttempt)}`
-      console.error(`${prefix}: ${String(result.toolsCached)} tools cached`)
+      console.error(
+        `${prefix}: ${String(result.toolsCached)} tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)`,
+      )
       return
     }
 

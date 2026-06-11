@@ -711,7 +711,9 @@ audit:
           readyMarker: /Annotation cache primed:/,
           timeoutMs: 8_000,
         })
-        expect(stderr).toContain('Annotation cache primed: 2 tools cached')
+        expect(stderr).toContain(
+          'Annotation cache primed: 2 tool definitions baselined for drift detection',
+        )
         expect(upstream.calls.some((call) => call.method === 'tools/list')).toBe(true)
       } finally {
         await upstream.close()

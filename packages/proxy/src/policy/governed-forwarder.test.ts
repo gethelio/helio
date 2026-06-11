@@ -59,7 +59,7 @@ function successResult(body: unknown): ForwardResult {
 
 /** Build a tools/list ForwardResult containing tool entries. */
 function toolsListResult(
-  tools: Array<{ name: string; annotations?: Record<string, boolean> }>,
+  tools: Array<{ name: string; annotations?: Record<string, boolean>; inputSchema?: unknown }>,
 ): ForwardResult {
   return successResult({
     jsonrpc: '2.0',
@@ -3727,5 +3727,99 @@ describe('GovernedForwarder', () => {
         expect(payload['dry_run']).toBe(true)
       })
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tool definition drift — detection and audit
+// ---------------------------------------------------------------------------
+
+/** Minimal fake AuditWriter capturing pushed records. */
+function fakeAuditWriter() {
+  return {
+    push: vi.fn(),
+    pushImmediate: vi.fn(),
+  } as unknown as AuditWriter & {
+    push: ReturnType<typeof vi.fn>
+    pushImmediate: ReturnType<typeof vi.fn>
+  }
+}
+
+describe('tool definition drift — detection and audit', () => {
+  it('audits a tool_drift record when a definition changes after baseline', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    await governed.forward(toolsListRequest())
+    expect(auditWriter.pushImmediate).not.toHaveBeenCalled()
+
+    await governed.forward(toolsListRequest(2))
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['policy_decision']).toBe('tool_drift')
+    expect(record['tool_name']).toBe('send_email')
+    expect(record['evidence_chain']).toMatchObject({
+      tool_drift: {
+        changes: [
+          {
+            aspect: 'annotations',
+            baseline: { destructiveHint: false },
+            current: { destructiveHint: true },
+          },
+        ],
+      },
+    })
+  })
+
+  it('audits a tool_drift_reverted record when the definition reverts', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsListRequest(3))
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(2)
+    const reverted = auditWriter.pushImmediate.mock.calls[1]?.[0] as Record<string, unknown>
+    expect(reverted['policy_decision']).toBe('tool_drift_reverted')
+    expect(reverted['tool_name']).toBe('t')
+  })
+
+  it('detects drift across primeAnnotationCache and a later tools/list', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', inputSchema: { type: 'object' } }]))
+      .mockResolvedValueOnce(
+        toolsListResult([
+          { name: 't', inputSchema: { type: 'object', properties: { exfil: {} } } },
+        ]),
+      )
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    const prime = await governed.primeAnnotationCache()
+    expect(prime.success).toBe(true)
+    await governed.forward(toolsListRequest())
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['policy_decision']).toBe('tool_drift')
   })
 })
