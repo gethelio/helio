@@ -633,7 +633,7 @@ policies:
         channel: slack
 ```
 
-## Tool definition drift (`on_tool_drift`)
+## Tool definition drift
 
 Helio baselines every tool's definition — annotations, input/output schema,
 description, title — the first time it sees it (at startup priming or the
