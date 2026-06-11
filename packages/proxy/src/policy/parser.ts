@@ -36,6 +36,7 @@ export function compilePolicies(config: PoliciesConfig): CompilePoliciesResult {
     defaultAction: config.default,
     flagDestructive: config.flag_destructive,
     ...(config.dry_run && { dryRun: true }),
+    ...(config.on_tool_drift && { onToolDrift: config.on_tool_drift }),
     rules,
   }
 

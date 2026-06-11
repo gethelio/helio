@@ -232,6 +232,19 @@ const policiesSchema = z
     dry_run: z.boolean().default(false),
     rules: z.array(policyRuleSchema).default([]),
     /**
+     * How to treat calls to a tool whose definition (annotations, schemas,
+     * description) has drifted from the baseline Helio captured on first
+     * sight.
+     * - "block": deny the call until the proxy is restarted (re-baselines)
+     *   or the upstream reverts. Conservative default when omitted.
+     * - "require_approval": escalate the call through the approval channel.
+     * - "log": audit the drift; rules evaluate against both baseline and
+     *   current annotations and the stricter decision wins.
+     * Kept optional (like hot_reload) so PoliciesConfig literal fixtures
+     * don't need the field; undefined is treated as "block".
+     */
+    on_tool_drift: z.enum(['block', 'require_approval', 'log']).optional(),
+    /**
      * Whether `helio start` should watch the config file for changes and
      * reconcile policy state on every save. Defaults to `true` when omitted.
      * Set to `false` (or pass `--no-hot-reload` on the CLI) to pin the policy
@@ -328,6 +341,7 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
 
   const requiresSecret =
     cfg.policies.flag_destructive === 'require_approval' ||
+    cfg.policies.on_tool_drift === 'require_approval' ||
     cfg.policies.rules.some((rule) => rule.action === 'require_approval')
   const hasSecret = hasDashboardApiSecret(cfg.dashboard.api_secret)
 
@@ -338,9 +352,9 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
         path: ['dashboard', 'api_secret'],
         message:
           'dashboard.api_secret is required when any rule uses require_approval or ' +
-          'policies.flag_destructive is "require_approval". Generate one with: ' +
-          '`openssl rand -hex 32` and set it under `dashboard.api_secret` in your ' +
-          'helio.yaml. (See docs/approvals.md.)',
+          'policies.flag_destructive or policies.on_tool_drift is "require_approval". ' +
+          'Generate one with: `openssl rand -hex 32` and set it under ' +
+          '`dashboard.api_secret` in your helio.yaml. (See docs/approvals.md.)',
       })
     }
   }

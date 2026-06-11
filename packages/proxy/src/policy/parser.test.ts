@@ -1097,6 +1097,27 @@ describe('full complex rule', () => {
 })
 
 // ---------------------------------------------------------------------------
+// on_tool_drift compilation
+// ---------------------------------------------------------------------------
+
+describe('on_tool_drift compilation', () => {
+  it('compiles on_tool_drift to onToolDrift', () => {
+    const { policy } = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      rules: [],
+      on_tool_drift: 'log',
+    })
+    expect(policy.onToolDrift).toBe('log')
+  })
+
+  it('leaves onToolDrift undefined when omitted (block at use site)', () => {
+    const { policy } = compilePolicies({ default: 'allow', dry_run: false, rules: [] })
+    expect(policy.onToolDrift).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // PolicyParseError
 // ---------------------------------------------------------------------------
 

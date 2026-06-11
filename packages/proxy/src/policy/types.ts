@@ -110,6 +110,11 @@ export interface CompiledPolicy {
   readonly defaultAction: 'allow' | 'deny'
   readonly flagDestructive?: 'log' | 'require_approval'
   readonly dryRun?: boolean
+  /**
+   * Response to tool definition drift (issue #25). Undefined means "block"
+   * at the use site — conservative by default.
+   */
+  readonly onToolDrift?: 'block' | 'require_approval' | 'log'
   readonly rules: readonly CompiledPolicyRule[]
 }
 

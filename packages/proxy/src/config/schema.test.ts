@@ -886,6 +886,49 @@ describe('helioConfigSchema', () => {
     })
   })
 
+  // -------------------------------------------------------------------------
+  // Policies — on_tool_drift
+  // -------------------------------------------------------------------------
+
+  describe('policies.on_tool_drift', () => {
+    it.each(['block', 'log'] as const)('accepts %s', (mode) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { on_tool_drift: mode } }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts require_approval when dashboard.api_secret is set', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          policies: { on_tool_drift: 'require_approval' },
+          dashboard: { api_secret: 'a'.repeat(64) },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects require_approval without dashboard.api_secret', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { on_tool_drift: 'require_approval' } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects unknown values', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { on_tool_drift: 'ignore' } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('is optional', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (result.success) expect(result.data.policies.on_tool_drift).toBeUndefined()
+    })
+  })
+
   describe('dashboard open mode enforcement', () => {
     it('rejects dashboard enabled without api_secret unless allow_open_mode is true', () => {
       const result = helioConfigSchema.safeParse({
