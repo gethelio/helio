@@ -15,6 +15,13 @@ import type {
 } from './types.js'
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** policy_decision values that describe upstream definition changes, not tool calls. */
+const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
+
+// ---------------------------------------------------------------------------
 // Schema DDL
 // ---------------------------------------------------------------------------
 
@@ -450,7 +457,7 @@ export class AuditStore {
       .prepare(
         `SELECT
            COUNT(*) as total,
-           COALESCE(SUM(CASE WHEN block_reason IS NULL THEN 1 ELSE 0 END), 0) as allowed_total,
+           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
            COALESCE(SUM(CASE WHEN block_reason IS NOT NULL THEN 1 ELSE 0 END), 0) as blocked_total,
            COALESCE(SUM(CASE WHEN dry_run = 1 THEN 1 ELSE 0 END), 0) as dry_run_total,
            COALESCE(SUM(CASE WHEN dry_run = 0 THEN 1 ELSE 0 END), 0) as applied_total
@@ -486,11 +493,15 @@ export class AuditStore {
       )
       .all(...params) as Array<{ reason: string; count: number }>
 
-    // Top tools (limit 10)
+    // Top tools (limit 10) — drift events are excluded: they describe definition
+    // changes, not tool calls, and would inflate tool-usage rankings.
+    const toolsClause = clause
+      ? `${clause} AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL}`
+      : `WHERE policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL}`
     const top_tools = this.db
       .prepare(
         `SELECT tool_name, COUNT(*) as count
-         FROM audit_records ${clause}
+         FROM audit_records ${toolsClause}
          GROUP BY tool_name
          ORDER BY count DESC
          LIMIT 10`,

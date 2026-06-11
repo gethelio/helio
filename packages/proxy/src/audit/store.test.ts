@@ -676,6 +676,45 @@ CREATE TABLE IF NOT EXISTS audit_records (
     })
   })
 
+  describe('aggregate with drift-event records', () => {
+    it('excludes tool_drift records from allowed_total and top_tools', () => {
+      const s = createStore()
+      s.insert(
+        makeRecord({ tool_name: 'get_weather', policy_decision: 'allow', block_reason: null }),
+      ) // a normal allowed call
+      s.insert(
+        makeRecord({
+          tool_name: 'send_email',
+          policy_decision: 'tool_drift',
+          block_reason: null,
+          tool_input: {},
+        }),
+      )
+      s.insert(
+        makeRecord({
+          tool_name: 'send_email',
+          policy_decision: 'tool_drift_reverted',
+          block_reason: null,
+          tool_input: {},
+        }),
+      )
+
+      const stats = s.aggregate()
+      expect(stats.total).toBe(3) // drift events remain visible in totals
+      expect(stats.allowed_total).toBe(1) // but do not count as allowed calls
+      expect(stats.blocked_total).toBe(0)
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', count: 1 }])
+      expect(stats.by_decision).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ decision: 'tool_drift', count: 1 }),
+          expect.objectContaining({ decision: 'tool_drift_reverted', count: 1 }),
+        ]),
+      )
+
+      s.close()
+    })
+  })
+
   // -------------------------------------------------------------------------
   // Purge
   // -------------------------------------------------------------------------

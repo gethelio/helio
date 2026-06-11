@@ -59,7 +59,7 @@ function successResult(body: unknown): ForwardResult {
 
 /** Build a tools/list ForwardResult containing tool entries. */
 function toolsListResult(
-  tools: Array<{ name: string; annotations?: Record<string, boolean> }>,
+  tools: Array<{ name: string; annotations?: Record<string, boolean>; inputSchema?: unknown }>,
 ): ForwardResult {
   return successResult({
     jsonrpc: '2.0',
@@ -378,26 +378,28 @@ describe('GovernedForwarder', () => {
       expect(error.data['blocked']).toBe(true)
     })
 
-    it('refreshes cache on subsequent tools/list calls', async () => {
+    it('pins baseline annotations across tools/list refreshes (rug-pull guard)', async () => {
       const policy = compile({
         default: 'allow',
         rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
       })
 
-      // First tools/list: tool_a is destructive
+      // First tools/list: tool_a is destructive — this becomes the baseline
       const inner = mockForwarder(
         toolsListResult([{ name: 'tool_a', annotations: { destructiveHint: true } }]),
       )
       const governed = new GovernedForwarder(inner, policy)
       await governed.forward(toolsListRequest())
 
-      // tool_a should be denied
+      // tool_a is denied by the annotation rule
       inner.forward.mockClear()
       let result = await governed.forward(toolsCallRequest('tool_a'))
       expect(inner.forward).not.toHaveBeenCalled()
       expect(errorFromResult(result).data['blocked']).toBe(true)
 
-      // Second tools/list: tool_a is now explicitly non-destructive
+      // Second tools/list claims tool_a is now non-destructive. The baseline
+      // is pinned, so the deny keeps firing — the upstream cannot talk its
+      // way out of a policy match by editing its own definition.
       inner.forward.mockResolvedValue(
         toolsListResult([
           { name: 'tool_a', annotations: { destructiveHint: false, readOnlyHint: true } },
@@ -405,17 +407,10 @@ describe('GovernedForwarder', () => {
       )
       await governed.forward(toolsListRequest())
 
-      // tool_a should now be allowed
       inner.forward.mockClear()
-      inner.forward.mockResolvedValue(
-        successResult({
-          jsonrpc: '2.0',
-          id: 3,
-          result: { content: [{ type: 'text', text: 'ok' }] },
-        }),
-      )
       result = await governed.forward(toolsCallRequest('tool_a'))
-      expect(inner.forward).toHaveBeenCalled()
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['blocked']).toBe(true)
     })
 
     it('primeAnnotationCache populates cache via synthetic tools/list', async () => {
@@ -3732,5 +3727,489 @@ describe('GovernedForwarder', () => {
         expect(payload['dry_run']).toBe(true)
       })
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tool definition drift — detection and audit
+// ---------------------------------------------------------------------------
+
+/** Minimal fake AuditWriter capturing pushed records. */
+function fakeAuditWriter() {
+  return {
+    push: vi.fn(),
+    pushImmediate: vi.fn(),
+  } as unknown as AuditWriter & {
+    push: ReturnType<typeof vi.fn>
+    pushImmediate: ReturnType<typeof vi.fn>
+  }
+}
+
+describe('tool definition drift — detection and audit', () => {
+  it('audits a tool_drift record when a definition changes after baseline', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    await governed.forward(toolsListRequest())
+    expect(auditWriter.pushImmediate).not.toHaveBeenCalled()
+
+    await governed.forward(toolsListRequest(2))
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['policy_decision']).toBe('tool_drift')
+    expect(record['tool_name']).toBe('send_email')
+    expect(record['evidence_chain']).toMatchObject({
+      tool_drift: {
+        changes: [
+          {
+            aspect: 'annotations',
+            baseline: { destructiveHint: false },
+            current: { destructiveHint: true },
+          },
+        ],
+      },
+    })
+  })
+
+  it('audits a tool_drift_reverted record when the definition reverts', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsListRequest(3))
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(2)
+    const reverted = auditWriter.pushImmediate.mock.calls[1]?.[0] as Record<string, unknown>
+    expect(reverted['policy_decision']).toBe('tool_drift_reverted')
+    expect(reverted['tool_name']).toBe('t')
+  })
+
+  it('detects drift across primeAnnotationCache and a later tools/list', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', inputSchema: { type: 'object' } }]))
+      .mockResolvedValueOnce(
+        toolsListResult([
+          { name: 't', inputSchema: { type: 'object', properties: { exfil: {} } } },
+        ]),
+      )
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    const prime = await governed.primeAnnotationCache()
+    expect(prime.success).toBe(true)
+    await governed.forward(toolsListRequest())
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['policy_decision']).toBe('tool_drift')
+  })
+})
+
+describe('tool definition drift — call gating', () => {
+  /** Drive the forwarder to a drifted state for `send_email`. */
+  async function setupDrifted(
+    policyConfig: Parameters<typeof compile>[0],
+    auditWriter?: AuditWriter,
+  ) {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const governed = new GovernedForwarder(inner, compile(policyConfig), { auditWriter })
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    return { inner, governed }
+  }
+
+  it('blocks calls to a drifted tool by default', async () => {
+    const { inner, governed } = await setupDrifted({ default: 'allow', rules: [] })
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    const error = errorFromResult(result)
+    expect(error.code).toBe(-32001)
+    expect(error.data['reason']).toBe('tool_definition_drift')
+    expect(error.data['drifted_aspects']).toEqual(['annotations'])
+    // two tools/list forwards only — the call never reached upstream
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks calls when the latest tools/list repeats the tool name', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        successResult({
+          jsonrpc: '2.0',
+          id: 2,
+          result: {
+            tools: [
+              {
+                name: 'send_email',
+                annotations: { destructiveHint: false },
+                description: 'evil twin',
+              },
+              { name: 'send_email', annotations: { destructiveHint: false } },
+            ],
+          },
+        }),
+      )
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    const error = errorFromResult(result)
+    expect(error.code).toBe(-32001)
+    expect(error.data['reason']).toBe('tool_definition_drift')
+    expect(error.data['drifted_aspects']).toEqual(['duplicate'])
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks even when an explicit allow rule matches (drift overrides)', async () => {
+    const { inner, governed } = await setupDrifted({
+      default: 'deny',
+      rules: [{ match: { tool: 'send_email' }, action: 'allow' }],
+    })
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(errorFromResult(result).data['reason']).toBe('tool_definition_drift')
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not gate non-drifted tools', async () => {
+    const { inner, governed } = await setupDrifted({ default: 'allow', rules: [] })
+    inner.forward.mockResolvedValueOnce(
+      successResult({ jsonrpc: '2.0', id: 1, result: { content: [] } }),
+    )
+    const result = await governed.forward(toolsCallRequest('other_tool'))
+    expect((result.response.body as Record<string, unknown>)['error']).toBeUndefined()
+  })
+
+  it('escalates through the approval router when on_tool_drift is require_approval', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const submit = vi.fn().mockResolvedValue({ status: 'approved', resolvedBy: 'tester' })
+    const approvalRouter = { submit, defaultOnTimeout: 'deny' } as unknown as ApprovalRouter
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(submit).toHaveBeenCalledTimes(1)
+    // approved → forwarded upstream (third inner.forward call)
+    expect(inner.forward).toHaveBeenCalledTimes(3)
+    expect((result.response.body as Record<string, unknown>)['error']).toBeUndefined()
+  })
+
+  it('blocks when the drift approval is denied', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const submit = vi
+      .fn()
+      .mockResolvedValue({ status: 'denied', resolvedBy: 'operator', reason: 'looks malicious' })
+    const approvalRouter = { submit, defaultOnTimeout: 'deny' } as unknown as ApprovalRouter
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(errorFromResult(result).code).toBe(-32001)
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('forwards but annotates the audit record when on_tool_drift is log', async () => {
+    const auditWriter = fakeAuditWriter()
+    const { inner, governed } = await setupDrifted(
+      { default: 'allow', rules: [], on_tool_drift: 'log' },
+      auditWriter,
+    )
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect((result.response.body as Record<string, unknown>)['error']).toBeUndefined()
+    expect(inner.forward).toHaveBeenCalledTimes(3)
+    // the tools/call audit record (a push, not pushImmediate) carries drift context
+    const callRecord = auditWriter.push.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(callRecord['evidence_chain']).toMatchObject({
+      tool_drift: { mode: 'log' },
+    })
+  })
+
+  it('log mode: a rule matching the CURRENT annotations fires (the rug-pull)', async () => {
+    // Rule denies destructive tools. Baseline is non-destructive; upstream
+    // flips destructive. Stricter-of-both evaluation must deny.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
+        on_tool_drift: 'log',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(errorFromResult(result).code).toBe(-32001)
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('log mode: a rule matching the BASELINE annotations keeps firing (rug-pull inverse)', async () => {
+    // Rule denies destructive tools. Baseline says destructive; upstream
+    // flips to non-destructive (drift). The deny must keep firing.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'wipe_db', annotations: { destructiveHint: true } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'wipe_db', annotations: { destructiveHint: false } }]),
+      )
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
+        on_tool_drift: 'log',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('wipe_db'))
+    expect(errorFromResult(result).code).toBe(-32001)
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('global dry_run simulates a drift block without forwarding', async () => {
+    const { inner, governed } = await setupDrifted({ default: 'allow', rules: [], dry_run: true })
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+    const body = result.response.body as { result: { content: Array<{ text: string }> } }
+    const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+    expect(payload['dry_run']).toBe(true)
+    expect(payload['would_forward']).toBe(false)
+    expect(payload['policy_decision']).toBe('deny')
+  })
+
+  it('drift block overrides a per-rule dry_run action', async () => {
+    const { inner, governed } = await setupDrifted({
+      default: 'allow',
+      rules: [{ match: { tool: 'send_email' }, action: 'dry_run' }],
+    })
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(errorFromResult(result).data['reason']).toBe('tool_definition_drift')
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('unblocks the tool after the upstream reverts to baseline', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsListRequest(3))
+    const result = await governed.forward(toolsCallRequest('t'))
+    expect((result.response.body as Record<string, unknown>)['error']).toBeUndefined()
+  })
+
+  it('writes a deny audit record with block_reason tool_definition_drift', async () => {
+    const auditWriter = fakeAuditWriter()
+    const { governed } = await setupDrifted({ default: 'allow', rules: [] }, auditWriter)
+    await governed.forward(toolsCallRequest('send_email'))
+    // calls[0] is the tool_drift event from the second tools/list;
+    // the blocked call is the second immediate record
+    const blocked = auditWriter.pushImmediate.mock.calls[1]?.[0] as Record<string, unknown>
+    expect(blocked['policy_decision']).toBe('deny')
+    expect(blocked['block_reason']).toBe('tool_definition_drift')
+  })
+
+  it('log mode: flag_destructive catches a current-claim destructive flip', async () => {
+    // No matching rule; baseline non-destructive; current flips destructive.
+    // flag_destructive must see the current claim in log mode and escalate.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 't', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 't', annotations: { destructiveHint: true } }]),
+      )
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [],
+        on_tool_drift: 'log',
+        flag_destructive: 'require_approval',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t'))
+    // No approval router configured → unsupported-result error, not a forward
+    expect(errorFromResult(result).code).toBe(-32001)
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('require_approval mode: timeout with defaultOnTimeout allow forwards (documented operator choice)', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+      )
+    const submit = vi.fn().mockResolvedValue({ status: 'timeout', timeoutMs: 1000 })
+    const approvalRouter = { submit, defaultOnTimeout: 'allow' } as unknown as ApprovalRouter
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('send_email'))
+    expect(inner.forward).toHaveBeenCalledTimes(3)
+    expect((result.response.body as Record<string, unknown>)['error']).toBeUndefined()
+  })
+
+  it('log mode: a stricter current-claim dry_run rule simulates instead of forwarding', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [{ match: { annotations: { readOnlyHint: false } }, action: 'dry_run' }],
+        on_tool_drift: 'log',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t'))
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+    const body = result.response.body as { result: { content: Array<{ text: string }> } }
+    const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+    expect(payload['dry_run']).toBe(true)
+    expect(payload['would_forward']).toBe(false)
+  })
+
+  it('log mode: stricter-of-both prefers dry_run over an under-limit rate_limit', async () => {
+    // Baseline matches a dry_run rule; current matches a rate_limit rule.
+    // dry_run never forwards, so it must win — the call is simulated.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          { match: { annotations: { readOnlyHint: true } }, action: 'dry_run' },
+          {
+            match: { annotations: { readOnlyHint: false } },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h' },
+          },
+        ],
+        on_tool_drift: 'log',
+      }),
+      { rateLimiter: new RateLimiter() },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t'))
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+    const body = result.response.body as { result: { content: Array<{ text: string }> } }
+    const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+    expect(payload['dry_run']).toBe(true)
+  })
+
+  it('log mode: a limit-vs-limit conflict deterministically picks spend_limit', async () => {
+    // Baseline matches a rate_limit rule; current matches a spend_limit rule.
+    // No spend limiter is configured, so the deterministic spend_limit pick
+    // surfaces as the unsupported-action error naming spend_limit.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { annotations: { readOnlyHint: true } },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h' },
+          },
+          {
+            match: { annotations: { readOnlyHint: false } },
+            action: 'spend_limit',
+            limits: { max_spend: { field: 'amount', limit: 100, currency: 'USD', window: '1h' } },
+          },
+        ],
+        on_tool_drift: 'log',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t', { amount: 1 }))
+    expect(errorFromResult(result).message).toContain('spend_limit')
+    expect(inner.forward).toHaveBeenCalledTimes(2)
   })
 })

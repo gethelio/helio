@@ -150,12 +150,12 @@ On a name conflict, static `upstream.headers` take precedence over caller-forwar
 
 #### Startup annotation cache priming
 
-At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`.
+At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`, and establishes the per-tool definition baselines used for [drift detection](./policies.md#tool-definition-drift).
 
 If priming succeeds quickly, startup logs:
 
 ```
-[helio] Annotation cache primed: <n> tools cached
+[helio] Annotation cache primed: <n> tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)
 ```
 
 If upstream is unavailable or slow, Helio continues boot, logs a fail-closed warning, and retries priming in the background with backoff:
@@ -207,13 +207,14 @@ If a rule sets `match.environment` but top-level `environment` is missing, confi
 
 Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation.
 
-| Field              | Type    | Required | Default | Description                                                                                                  |
-| ------------------ | ------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| `default`          | string  | No       | `allow` | Action when no rule matches: `allow` or `deny`.                                                              |
-| `flag_destructive` | string  | No       | —       | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval). |
-| `dry_run`          | boolean | No       | `false` | Enable global dry-run mode. No requests are forwarded to upstream.                                           |
-| `hot_reload`       | boolean | No       | `true`  | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).   |
-| `rules`            | array   | No       | `[]`    | Ordered list of policy rules. First matching rule wins.                                                      |
+| Field              | Type    | Required | Default | Description                                                                                                                                                                                                     |
+| ------------------ | ------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default`          | string  | No       | `allow` | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
+| `flag_destructive` | string  | No       | —       | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
+| `on_tool_drift`    | string  | No       | `block` | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
+| `dry_run`          | boolean | No       | `false` | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
+| `hot_reload`       | boolean | No       | `true`  | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
+| `rules`            | array   | No       | `[]`    | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
 
 Each rule in the `rules` array has the following structure:
 
