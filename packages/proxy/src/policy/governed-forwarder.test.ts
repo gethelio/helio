@@ -4146,4 +4146,70 @@ describe('tool definition drift — call gating', () => {
     expect(payload['dry_run']).toBe(true)
     expect(payload['would_forward']).toBe(false)
   })
+
+  it('log mode: stricter-of-both prefers dry_run over an under-limit rate_limit', async () => {
+    // Baseline matches a dry_run rule; current matches a rate_limit rule.
+    // dry_run never forwards, so it must win — the call is simulated.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          { match: { annotations: { readOnlyHint: true } }, action: 'dry_run' },
+          {
+            match: { annotations: { readOnlyHint: false } },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h' },
+          },
+        ],
+        on_tool_drift: 'log',
+      }),
+      { rateLimiter: new RateLimiter() },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t'))
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+    const body = result.response.body as { result: { content: Array<{ text: string }> } }
+    const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+    expect(payload['dry_run']).toBe(true)
+  })
+
+  it('log mode: a limit-vs-limit conflict deterministically picks spend_limit', async () => {
+    // Baseline matches a rate_limit rule; current matches a spend_limit rule.
+    // No spend limiter is configured, so the deterministic spend_limit pick
+    // surfaces as the unsupported-action error naming spend_limit.
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: true } }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: 't', annotations: { readOnlyHint: false } }]))
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { annotations: { readOnlyHint: true } },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h' },
+          },
+          {
+            match: { annotations: { readOnlyHint: false } },
+            action: 'spend_limit',
+            limits: { max_spend: { field: 'amount', limit: 100, currency: 'USD', window: '1h' } },
+          },
+        ],
+        on_tool_drift: 'log',
+      }),
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    const result = await governed.forward(toolsCallRequest('t', { amount: 1 }))
+    expect(errorFromResult(result).message).toContain('spend_limit')
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
 })

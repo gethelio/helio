@@ -1126,20 +1126,23 @@ function collectAllowedEvidenceKeys(policy: CompiledPolicy): string[] {
 }
 
 /**
- * Strictness ranking for policy actions — higher wins in stricter-of-both.
- *
- * The ranking encodes enforcement intent (how strongly the operator constrained
- * the action), not upstream-reachability. deny and require_approval always
- * dominate because they represent explicit operator constraints; dry_run ranking
- * below the limit actions is intentional because log mode is advisory by
- * operator choice, not a safety constraint.
+ * Strictness ranking for policy actions — higher wins in stricter-of-both
+ * (log-mode drift evaluation). The ranking encodes whether an action can
+ * reach upstream and how strongly the operator constrained it:
+ * - deny and require_approval dominate everything (require_approval may
+ *   forward, but only through an explicit human gate);
+ * - dry_run outranks the limit actions and allow because it never forwards;
+ * - between the two limit actions, cross-conflicts (baseline matches one,
+ *   current matches the other) deterministically pick spend_limit. Log mode
+ *   is advisory by operator choice; operators needing hard guarantees use
+ *   the default "block".
  */
 const ACTION_SEVERITY: Record<PolicyAction, number> = {
   deny: 5,
   require_approval: 4,
-  spend_limit: 3,
-  rate_limit: 2,
-  dry_run: 1,
+  dry_run: 3,
+  spend_limit: 2,
+  rate_limit: 1,
   allow: 0,
 }
 

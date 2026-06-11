@@ -656,7 +656,10 @@ policies:
 - `log`: drift is audited and calls proceed, but policy rules are evaluated
   against **both** the baseline annotations (the definition you reviewed) and
   the current upstream claim — the stricter decision wins, so a drifted tool
-  can never weaken enforcement in either direction. Logged calls carry the
+  can never weaken enforcement in either direction. When stricter-of-both
+  compares actions, `dry_run` outranks the limit actions (`rate_limit`,
+  `spend_limit`) because it never forwards, and a conflict between `rate_limit`
+  and `spend_limit` resolves to `spend_limit`. Logged calls carry the
   drift detail in the audit record's `evidence_chain.tool_drift` field (the
   active `mode` plus the per-aspect `changes`). The recorded `mode` is
   snapshotted when the call is gated, so it reflects the mode that was active
