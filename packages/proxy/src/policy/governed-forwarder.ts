@@ -177,7 +177,7 @@ export class GovernedForwarder implements McpForwarder {
           reason: classifyPrimeFailure(result.response),
         }
       }
-      const updated = this.annotationCache.update(result.response.body)
+      const updated = this.annotationCache.update(result.response.body).updated
       if (!updated) {
         return {
           success: false,

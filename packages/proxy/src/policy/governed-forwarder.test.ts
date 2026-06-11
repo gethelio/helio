@@ -378,26 +378,28 @@ describe('GovernedForwarder', () => {
       expect(error.data['blocked']).toBe(true)
     })
 
-    it('refreshes cache on subsequent tools/list calls', async () => {
+    it('pins baseline annotations across tools/list refreshes (rug-pull guard)', async () => {
       const policy = compile({
         default: 'allow',
         rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
       })
 
-      // First tools/list: tool_a is destructive
+      // First tools/list: tool_a is destructive — this becomes the baseline
       const inner = mockForwarder(
         toolsListResult([{ name: 'tool_a', annotations: { destructiveHint: true } }]),
       )
       const governed = new GovernedForwarder(inner, policy)
       await governed.forward(toolsListRequest())
 
-      // tool_a should be denied
+      // tool_a is denied by the annotation rule
       inner.forward.mockClear()
       let result = await governed.forward(toolsCallRequest('tool_a'))
       expect(inner.forward).not.toHaveBeenCalled()
       expect(errorFromResult(result).data['blocked']).toBe(true)
 
-      // Second tools/list: tool_a is now explicitly non-destructive
+      // Second tools/list claims tool_a is now non-destructive. The baseline
+      // is pinned, so the deny keeps firing — the upstream cannot talk its
+      // way out of a policy match by editing its own definition.
       inner.forward.mockResolvedValue(
         toolsListResult([
           { name: 'tool_a', annotations: { destructiveHint: false, readOnlyHint: true } },
@@ -405,17 +407,10 @@ describe('GovernedForwarder', () => {
       )
       await governed.forward(toolsListRequest())
 
-      // tool_a should now be allowed
       inner.forward.mockClear()
-      inner.forward.mockResolvedValue(
-        successResult({
-          jsonrpc: '2.0',
-          id: 3,
-          result: { content: [{ type: 'text', text: 'ok' }] },
-        }),
-      )
       result = await governed.forward(toolsCallRequest('tool_a'))
-      expect(inner.forward).toHaveBeenCalled()
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['blocked']).toBe(true)
     })
 
     it('primeAnnotationCache populates cache via synthetic tools/list', async () => {

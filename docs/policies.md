@@ -633,6 +633,47 @@ policies:
         channel: slack
 ```
 
+## Tool definition drift (`on_tool_drift`)
+
+Helio baselines every tool's definition — annotations, input/output schema,
+description, title — the first time it sees it (at startup priming or the
+first `tools/list`). If a later `tools/list` reports a different definition
+for the same tool — for example a tool that was `readOnlyHint: true` when you
+wrote your policy turning destructive, or a description gaining injected
+instructions — Helio marks the tool as **drifted**, writes an audit record
+(`policy_decision: tool_drift`), and gates subsequent calls to it:
+
+```yaml
+policies:
+  on_tool_drift: block # block (default) | require_approval | log
+```
+
+- `block` (default): calls to a drifted tool are denied with
+  `tool_definition_drift` feedback until the proxy is restarted (which
+  re-baselines) or the upstream reverts the change.
+- `require_approval`: each call to a drifted tool is escalated through the
+  approval channel.
+- `log`: drift is audited and calls proceed, but policy rules are evaluated
+  against **both** the baseline annotations (the definition you reviewed) and
+  the current upstream claim — the stricter decision wins, so a drifted tool
+  can never weaken enforcement in either direction.
+
+Policy rules always see the baseline annotations for non-drifted tools.
+Reverting the upstream definition to its baseline clears the drift state
+(audited as `tool_drift_reverted`).
+
+**Precedence:** drift gating overrides explicit `allow` rules and per-rule
+`action: dry_run`. Global `policies.dry_run: true` still simulates everything
+— a drifted call in global dry-run is reported with `would_forward: false`
+and never forwarded.
+
+This closes the MCP "rug-pull" class of attack, where a tool definition
+changes _after_ review so a one-time approval gives no lasting protection.
+
+**Limitation:** baselines are per-process. A restart re-baselines from
+whatever the upstream currently reports, so review drift audit records before
+restarting.
+
 ## See Also
 
 - [Configuration Reference](./configuration.md) — Full `helio.yaml` schema
