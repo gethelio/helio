@@ -19,7 +19,24 @@ Maintainer notes:
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Tool definition drift detection (#25).** Every tool's full definition
+  (annotations, input/output schema, description, title) is baselined on first
+  sight and diffed on every `tools/list`. Drift is audited (`tool_drift` /
+  `tool_drift_reverted` records) and calls to drifted tools are gated by the
+  new `policies.on_tool_drift` option (`block` | `require_approval` | `log`).
+
+### Changed
+
+- **Conservative default:** `on_tool_drift` defaults to `block` — a tool whose
+  definition changes mid-session is denied until the proxy restarts or the
+  upstream reverts. Set `policies.on_tool_drift: log` for observe-mode, which
+  still evaluates rules against both the baseline and current annotations and
+  applies the stricter decision. Policy evaluation now uses baseline annotations
+  rather than the most recent `tools/list` claim.
+- Dashboard aggregates (`allowed_total`, `top_tools`) exclude drift-event
+  records so they keep representing tool-call outcomes.
 
 ## [0.3.0] - 2026-06-10
 
