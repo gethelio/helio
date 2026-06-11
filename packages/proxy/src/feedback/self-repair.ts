@@ -3,6 +3,7 @@ import type { PolicyDecision } from '../policy/engine.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/grounding.js'
 import type { RateLimitResult } from '../policy/rate-limiter.js'
 import type { SpendLimitResult } from '../policy/spend-limiter.js'
+import type { ToolDriftEvent } from '../policy/annotation-cache.js'
 
 // ---------------------------------------------------------------------------
 // Block reasons — the discriminant for self-repair feedback.
@@ -20,6 +21,7 @@ export type BlockReason =
   | 'approval_timeout'
   | 'client_disconnected'
   | 'shutdown_cancelled'
+  | 'tool_definition_drift'
 
 // ---------------------------------------------------------------------------
 // Feedback types — discriminated union keyed on `reason`.
@@ -118,6 +120,13 @@ export interface SpendLimitedFeedback extends SelfRepairFeedbackBase {
   readonly reset_at: string // ISO 8601
 }
 
+/** The tool's definition drifted from its baseline (MCP rug-pull guard). */
+export interface ToolDriftFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'tool_definition_drift'
+  readonly action: 'deny' | 'require_approval'
+  readonly drifted_aspects: readonly string[]
+}
+
 /** Discriminated union of all self-repair feedback types. */
 export type SelfRepairFeedback =
   | PolicyDeniedFeedback
@@ -130,6 +139,7 @@ export type SelfRepairFeedback =
   | ShutdownCancelledFeedback
   | RateLimitedFeedback
   | SpendLimitedFeedback
+  | ToolDriftFeedback
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -385,6 +395,27 @@ export function buildRateLimitedFeedback(
     reset_at: resetAt,
     suggestion,
     retry_allowed: true,
+  }
+}
+
+/** Build self-repair feedback when a tool's definition drifted from baseline. */
+export function buildToolDriftFeedback(
+  drift: ToolDriftEvent,
+  action: 'deny' | 'require_approval',
+): ToolDriftFeedback {
+  const aspects = drift.changes.map((change) => change.aspect)
+  return {
+    blocked: true,
+    reason: 'tool_definition_drift',
+    rule: null,
+    ruleIndex: null,
+    action,
+    drifted_aspects: aspects,
+    suggestion:
+      `The definition of "${drift.toolName}" changed upstream (${aspects.join(', ')}) after ` +
+      'Helio baselined it. An operator must review the change; restarting the proxy ' +
+      're-baselines, or the upstream can revert the change.',
+    retry_allowed: false,
   }
 }
 

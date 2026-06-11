@@ -10,10 +10,12 @@ import {
   buildShutdownCancelledFeedback,
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
+  buildToolDriftFeedback,
 } from './self-repair.js'
 import type { PolicyDecision } from '../policy/engine.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/index.js'
 import type { CompiledPolicyRule } from '../policy/types.js'
+import type { ToolDriftEvent } from '../policy/annotation-cache.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -690,5 +692,37 @@ describe('buildSpendLimitedFeedback', () => {
       )
       expect(feedback.suggestion).toBe('Submit a positive integer in pence.')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildToolDriftFeedback
+// ---------------------------------------------------------------------------
+
+describe('buildToolDriftFeedback', () => {
+  const drift: ToolDriftEvent = {
+    toolName: 'send_email',
+    changes: [
+      {
+        aspect: 'annotations',
+        baseline: { destructiveHint: false },
+        current: { destructiveHint: true },
+      },
+    ],
+  }
+
+  it('builds deny feedback with drifted aspects', () => {
+    const feedback = buildToolDriftFeedback(drift, 'deny')
+    expect(feedback.blocked).toBe(true)
+    expect(feedback.reason).toBe('tool_definition_drift')
+    expect(feedback.action).toBe('deny')
+    expect(feedback.drifted_aspects).toEqual(['annotations'])
+    expect(feedback.retry_allowed).toBe(false)
+    expect(feedback.suggestion).toContain('send_email')
+  })
+
+  it('builds require_approval feedback', () => {
+    const feedback = buildToolDriftFeedback(drift, 'require_approval')
+    expect(feedback.action).toBe('require_approval')
   })
 })
