@@ -150,12 +150,12 @@ On a name conflict, static `upstream.headers` take precedence over caller-forwar
 
 #### Startup annotation cache priming
 
-At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`.
+At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`, and establishes the per-tool definition baselines used for [drift detection](./policies.md#tool-definition-drift).
 
 If priming succeeds quickly, startup logs:
 
 ```
-[helio] Annotation cache primed: <n> tools cached
+[helio] Annotation cache primed: <n> tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)
 ```
 
 If upstream is unavailable or slow, Helio continues boot, logs a fail-closed warning, and retries priming in the background with backoff:
