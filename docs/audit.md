@@ -43,6 +43,8 @@ In addition to tool-call records, Helio writes immediate audit records when a to
 
 Both record types are written via `pushImmediate` so they appear in the audit trail before any subsequent tool call that may be gated on the drift state.
 
+Drift events are excluded from the dashboard's allowed-call totals and top-tools rankings; they remain visible in the feed, overall totals, and the by-decision breakdown.
+
 > **Note:** Baselines are per-process. Restarting Helio re-baselines all tool definitions. Review any outstanding `tool_drift` records before restarting to ensure you understand what changed.
 
 ## Storage Backend
