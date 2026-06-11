@@ -656,7 +656,9 @@ policies:
 - `log`: drift is audited and calls proceed, but policy rules are evaluated
   against **both** the baseline annotations (the definition you reviewed) and
   the current upstream claim — the stricter decision wins, so a drifted tool
-  can never weaken enforcement in either direction.
+  can never weaken enforcement in either direction. Logged calls carry the
+  drift detail in the audit record's `evidence_chain.tool_drift` field (the
+  active `mode` plus the per-aspect `changes`).
 
 Policy rules always see the baseline annotations for non-drifted tools.
 Reverting the upstream definition to its baseline clears the drift state

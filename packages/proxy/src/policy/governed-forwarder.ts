@@ -6,7 +6,7 @@ import type {
   McpResponse,
 } from '../mcp/types.js'
 import { INTERNAL_ERROR } from '../mcp/types.js'
-import type { CompiledPolicy } from './types.js'
+import type { CompiledPolicy, PolicyAction } from './types.js'
 import { evaluatePolicy } from './engine.js'
 import type { PolicyDecision } from './engine.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
@@ -27,6 +27,7 @@ import {
   buildShutdownCancelledFeedback,
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
+  buildToolDriftFeedback,
 } from '../feedback/self-repair.js'
 import type { ApprovalRouter } from '../approval/router.js'
 import type { ApprovalOutcome } from '../approval/types.js'
@@ -297,6 +298,8 @@ export class GovernedForwarder implements McpForwarder {
         : undefined
 
     const annotations = this.annotationCache.get(toolName)
+    const driftEvent = this.annotationCache.getDrift(toolName)
+    const driftMode = this.policy.onToolDrift ?? 'block'
 
     let decision = evaluatePolicy(this.policy, {
       toolName,
@@ -305,9 +308,28 @@ export class GovernedForwarder implements McpForwarder {
       environment: this.environment,
     })
 
+    // In log mode a drifted tool is evaluated against BOTH the baseline
+    // annotations (what the operator reviewed) and the current upstream
+    // claim — the stricter decision wins, so a definition flip cannot weaken
+    // enforcement in either direction.
+    if (driftEvent && driftMode === 'log') {
+      const currentDecision = evaluatePolicy(this.policy, {
+        toolName,
+        annotations: this.annotationCache.getCurrent(toolName),
+        toolArguments,
+        environment: this.environment,
+      })
+      decision = stricterDecision(decision, currentDecision)
+    }
+
     // Irreversible action detection: when no explicit rule matched,
     // check if the tool is destructive and apply flag_destructive behavior.
-    const isDestructive = annotations?.destructiveHint ?? true // MCP default
+    const baselineDestructive = annotations?.destructiveHint ?? true // MCP default
+    const currentDestructive =
+      driftEvent && driftMode === 'log'
+        ? (this.annotationCache.getCurrent(toolName)?.destructiveHint ?? true)
+        : false
+    const isDestructive = baselineDestructive || currentDestructive
     let flaggedDestructive = false
 
     if (isDestructive && !decision.matchedRule && this.policy.flagDestructive) {
@@ -323,6 +345,21 @@ export class GovernedForwarder implements McpForwarder {
           matchedRule: undefined,
           reason: `Destructive tool "${toolName}" auto-escalated by flag_destructive policy`,
         }
+      }
+    }
+
+    // Tool definition drift gate: a drifted tool no longer matches the
+    // definition the operator reviewed, so on_tool_drift overrides whatever
+    // rule evaluation produced ("log" leaves the decision untouched).
+    let driftBlocked = false
+    if (driftEvent && driftMode !== 'log') {
+      driftBlocked = driftMode === 'block'
+      decision = {
+        action: driftMode === 'block' ? 'deny' : 'require_approval',
+        matchedRule: undefined,
+        reason: `Tool "${toolName}" definition drifted from baseline (${driftEvent.changes
+          .map((change) => change.aspect)
+          .join(', ')})`,
       }
     }
 
@@ -412,6 +449,8 @@ export class GovernedForwarder implements McpForwarder {
         result = this.makeSessionRequiredBlockResult(request, decision)
       } else if (evidenceBlocked) {
         result = this.makeEvidenceBlockResult(request, decision, evidenceResult, dependencyResult)
+      } else if (driftBlocked && driftEvent) {
+        result = this.makeDriftBlockResult(request, driftEvent)
       } else if (decision.action === 'allow') {
         result = await this.inner.forward(request)
       } else if (decision.action === 'deny') {
@@ -489,6 +528,7 @@ export class GovernedForwarder implements McpForwarder {
       spendLimitResult,
       isDryRun,
       forwardingError,
+      driftEvent,
     )
 
     return result
@@ -813,6 +853,7 @@ export class GovernedForwarder implements McpForwarder {
     spendLimitResult?: SpendLimitResult,
     isDryRun?: boolean,
     forwardingError?: Error,
+    driftEvent?: ToolDriftEvent,
   ): void {
     if (!this.auditWriter) return
 
@@ -883,6 +924,16 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
+    if (driftEvent) {
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        tool_drift: {
+          mode: this.policy.onToolDrift ?? 'block',
+          changes: driftEvent.changes,
+        },
+      }
+    }
+
     const blockReason = extractBlockReason(result)
 
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
@@ -922,6 +973,16 @@ export class GovernedForwarder implements McpForwarder {
     } else {
       this.auditWriter.push(record)
     }
+  }
+
+  private makeDriftBlockResult(request: McpRequest, drift: ToolDriftEvent): ForwardResult {
+    const feedback = buildToolDriftFeedback(drift, 'deny')
+    return makeErrorResult(
+      request,
+      POLICY_DENIED,
+      `Tool definition drift: "${drift.toolName}" changed after baseline`,
+      { ...feedback },
+    )
   }
 
   private makeDenyResult(request: McpRequest, decision: PolicyDecision): ForwardResult {
@@ -1062,6 +1123,21 @@ function collectAllowedEvidenceKeys(policy: CompiledPolicy): string[] {
     }
   }
   return [...keys]
+}
+
+/** Strictness ranking for policy actions — higher wins in stricter-of-both. */
+const ACTION_SEVERITY: Record<PolicyAction, number> = {
+  deny: 5,
+  require_approval: 4,
+  spend_limit: 3,
+  rate_limit: 2,
+  dry_run: 1,
+  allow: 0,
+}
+
+/** Pick the stricter of two policy decisions (ties keep the first). */
+function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDecision {
+  return ACTION_SEVERITY[b.action] > ACTION_SEVERITY[a.action] ? b : a
 }
 
 /** Build a ForwardResult containing a JSON-RPC error response. */
