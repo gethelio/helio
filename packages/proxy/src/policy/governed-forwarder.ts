@@ -528,7 +528,7 @@ export class GovernedForwarder implements McpForwarder {
       spendLimitResult,
       isDryRun,
       forwardingError,
-      driftEvent,
+      driftEvent ? { event: driftEvent, mode: driftMode } : undefined,
     )
 
     return result
@@ -853,7 +853,7 @@ export class GovernedForwarder implements McpForwarder {
     spendLimitResult?: SpendLimitResult,
     isDryRun?: boolean,
     forwardingError?: Error,
-    driftEvent?: ToolDriftEvent,
+    drift?: { event: ToolDriftEvent; mode: 'block' | 'require_approval' | 'log' },
   ): void {
     if (!this.auditWriter) return
 
@@ -924,12 +924,12 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    if (driftEvent) {
+    if (drift) {
       evidenceChain = {
         ...(evidenceChain ?? {}),
         tool_drift: {
-          mode: this.policy.onToolDrift ?? 'block',
-          changes: driftEvent.changes,
+          mode: drift.mode,
+          changes: drift.event.changes,
         },
       }
     }
@@ -1125,7 +1125,15 @@ function collectAllowedEvidenceKeys(policy: CompiledPolicy): string[] {
   return [...keys]
 }
 
-/** Strictness ranking for policy actions — higher wins in stricter-of-both. */
+/**
+ * Strictness ranking for policy actions — higher wins in stricter-of-both.
+ *
+ * The ranking encodes enforcement intent (how strongly the operator constrained
+ * the action), not upstream-reachability. deny and require_approval always
+ * dominate because they represent explicit operator constraints; dry_run ranking
+ * below the limit actions is intentional because log mode is advisory by
+ * operator choice, not a safety constraint.
+ */
 const ACTION_SEVERITY: Record<PolicyAction, number> = {
   deny: 5,
   require_approval: 4,

@@ -658,7 +658,10 @@ policies:
   the current upstream claim — the stricter decision wins, so a drifted tool
   can never weaken enforcement in either direction. Logged calls carry the
   drift detail in the audit record's `evidence_chain.tool_drift` field (the
-  active `mode` plus the per-aspect `changes`).
+  active `mode` plus the per-aspect `changes`). The recorded `mode` is
+  snapshotted when the call is gated, so it reflects the mode that was active
+  at gate time even if the policy is hot-reloaded before the audit record is
+  written.
 
 Policy rules always see the baseline annotations for non-drifted tools.
 Reverting the upstream definition to its baseline clears the drift state
