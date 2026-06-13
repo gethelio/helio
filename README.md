@@ -42,6 +42,14 @@ Two integration paths:
 1. **Proxy only**: Point your MCP client at Helio instead of your MCP server. Zero code changes. Immediate governance.
 2. **Proxy + SDK**: Add the thin Python SDK to annotate tool calls with evidence context and action dependencies. Richer governance, under 500 lines of code.
 
+### Enforcement grades
+
+Helio governs at the strongest grade each path physically allows, and records it per call:
+
+- **Structural** (stdio MCP) — Helio owns the only path to the tool; the agent cannot route around it.
+- **Network** (HTTP MCP) — structural given you control the upstream's egress.
+- **Host-enforced** (hook adapters via the [adapter API](docs/adapter-api.md), e.g. OpenClaw) — for frameworks that run tools in-process and expose hooks rather than an MCP transport. The framework's hook gate enforces; Helio decides. This is a cooperative, lower grade than the proxy path, and Helio labels it as such rather than overclaiming. Helio's decisions still cannot be evicted from the agent's context or prompt-injected, and any attempt to route around them is visible in the audit trail.
+
 ## Quick Start (5 minutes)
 
 ### 1. Install

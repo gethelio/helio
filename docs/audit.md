@@ -31,6 +31,9 @@ Each audit record contains the following fields:
 | `proxy_compute_ms`     | number         | Proxy compute time excluding approval wait and upstream processing.                                                                                 |
 | `flagged_destructive`  | boolean        | Whether the tool was flagged as potentially destructive (`destructiveHint: true`).                                                                  |
 | `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                   |
+| `record_kind`          | string         | Record category: `tool_call` (default), `drift_event`, `install_scan`, or `evaluation_expired` (a sideband decision that was never audited).        |
+| `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.        |
+| `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                  |
 | `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                |
 
 ## Tool Definition Drift Records
