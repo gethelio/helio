@@ -68,6 +68,39 @@ describe('Approval REST API', () => {
   })
 
   // -----------------------------------------------------------------------
+  // Native (adapter-owned) tickets are not operator-resolvable — issue #12
+  // -----------------------------------------------------------------------
+
+  describe('native ticket guard', () => {
+    it('rejects approve/deny/break-glass on native tickets with 409 native_ticket', async () => {
+      const { router: r, post } = setup()
+      router = r
+      const ticket = r.createNativeTicket({
+        tool_name: 'send',
+        tool_input: {},
+        matched_rule: undefined,
+        session_id: null,
+        origin: 'openclaw',
+      })
+
+      for (const [path, body] of [
+        [`/${ticket.id}/approve`, { approved_by: 'op' }],
+        [`/${ticket.id}/deny`, { denied_by: 'op' }],
+        [`/${ticket.id}/break-glass`, { approved_by: 'op', reason: 'x' }],
+      ] as const) {
+        const res = await post(path, body)
+        expect(res.status).toBe(409)
+        const json = (await res.json()) as { error: string; resolve_in: string }
+        expect(json.error).toBe('native_ticket')
+        expect(json.resolve_in).toBe('openclaw')
+      }
+
+      // The ticket stays pending — no operator decision leaked into it.
+      expect(r.resolveNativeTicket(ticket.id, 'approved', 'tg')).toBe(true)
+    })
+  })
+
+  // -----------------------------------------------------------------------
   // GET /
   // -----------------------------------------------------------------------
 

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { ApprovalRouter } from './router.js'
+import { NATIVE_CHANNEL_PREFIX } from './router.js'
 import type { ApprovalQueue } from './queue.js'
 import type { ApprovalStatus } from './types.js'
 import { verifyBearer } from '../auth/bearer.js'
@@ -33,6 +34,7 @@ const APPROVAL_STATUSES = [
   'break_glass',
   'client_disconnected',
   'shutdown_cancelled',
+  'cancelled',
 ] as const
 const approvalStatusSet = new Set<ApprovalStatus>(APPROVAL_STATUSES)
 
@@ -162,6 +164,18 @@ export function createApprovalApp(
     if (!ticket) {
       return c.json({ error: 'Ticket not found' }, 404)
     }
+    if (ticket.channel_name.startsWith(NATIVE_CHANNEL_PREFIX)) {
+      // Adapter-owned approval (issue #12, D10): a dashboard decision cannot
+      // reach the adapter's native UI, so resolving here would record control
+      // that never propagated. Direct the operator to the owning surface.
+      return c.json(
+        {
+          error: 'native_ticket',
+          resolve_in: ticket.channel_name.slice(NATIVE_CHANNEL_PREFIX.length),
+        },
+        409,
+      )
+    }
     if (ticket.status !== 'pending') {
       return c.json({ error: 'Ticket already resolved', status: ticket.status }, 409)
     }
@@ -195,6 +209,18 @@ export function createApprovalApp(
     if (!ticket) {
       return c.json({ error: 'Ticket not found' }, 404)
     }
+    if (ticket.channel_name.startsWith(NATIVE_CHANNEL_PREFIX)) {
+      // Adapter-owned approval (issue #12, D10): a dashboard decision cannot
+      // reach the adapter's native UI, so resolving here would record control
+      // that never propagated. Direct the operator to the owning surface.
+      return c.json(
+        {
+          error: 'native_ticket',
+          resolve_in: ticket.channel_name.slice(NATIVE_CHANNEL_PREFIX.length),
+        },
+        409,
+      )
+    }
     if (ticket.status !== 'pending') {
       return c.json({ error: 'Ticket already resolved', status: ticket.status }, 409)
     }
@@ -227,6 +253,18 @@ export function createApprovalApp(
     const ticket = queue.get(ticketId)
     if (!ticket) {
       return c.json({ error: 'Ticket not found' }, 404)
+    }
+    if (ticket.channel_name.startsWith(NATIVE_CHANNEL_PREFIX)) {
+      // Adapter-owned approval (issue #12, D10): a dashboard decision cannot
+      // reach the adapter's native UI, so resolving here would record control
+      // that never propagated. Direct the operator to the owning surface.
+      return c.json(
+        {
+          error: 'native_ticket',
+          resolve_in: ticket.channel_name.slice(NATIVE_CHANNEL_PREFIX.length),
+        },
+        409,
+      )
     }
     if (ticket.status !== 'pending') {
       return c.json({ error: 'Ticket already resolved', status: ticket.status }, 409)

@@ -747,4 +747,107 @@ describe('ApprovalRouter', () => {
       expect(outcome.status).toBe('denied')
     })
   })
+
+  // -----------------------------------------------------------------------
+  // Native (adapter-owned) tickets — issue #12, D10
+  // -----------------------------------------------------------------------
+
+  describe('native tickets', () => {
+    function createNativeRouter() {
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const channel = mockChannel()
+      const submitted: ApprovalTicket[] = []
+      const resolved: ApprovalTicket[] = []
+      const router = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels: new Map([['dashboard', channel]]),
+        queue,
+        onSubmit: (t) => submitted.push(t),
+        onResolve: (t) => resolved.push(t),
+      })
+      return { router, queue, channel, submitted, resolved }
+    }
+
+    it('creates a native:<origin> ticket and fires onSubmit but not the channel', () => {
+      const { router, queue, channel, submitted } = createNativeRouter()
+
+      const ticket = router.createNativeTicket({
+        tool_name: 'send',
+        tool_input: { text: 'hi' },
+        matched_rule: makeRule(),
+        session_id: 's1',
+        origin: 'openclaw',
+      })
+
+      expect(ticket.channel_name).toBe('native:openclaw')
+      expect(queue.get(ticket.id)?.status).toBe('pending')
+      expect(submitted).toHaveLength(1) // approval_requested SSE flows
+      expect(channel.calls).toHaveLength(0) // no double-notify
+    })
+
+    it('does not start a timeout timer (no auto-resolution)', () => {
+      vi.useFakeTimers()
+      const { router, queue } = createNativeRouter()
+      const ticket = router.createNativeTicket({
+        tool_name: 'send',
+        tool_input: {},
+        matched_rule: makeRule({ approval: { channel: 'dashboard', timeoutMs: 1000 } }),
+        session_id: null,
+        origin: 'openclaw',
+      })
+      vi.advanceTimersByTime(5000)
+      expect(queue.get(ticket.id)?.status).toBe('pending') // never auto-timed-out
+    })
+
+    it('resolveNativeTicket resolves and fires onResolve', () => {
+      const { router, queue, resolved } = createNativeRouter()
+      const ticket = router.createNativeTicket({
+        tool_name: 'send',
+        tool_input: {},
+        matched_rule: makeRule(),
+        session_id: null,
+        origin: 'openclaw',
+      })
+
+      const ok = router.resolveNativeTicket(ticket.id, 'approved', 'telegram:@oli')
+      expect(ok).toBe(true)
+      expect(queue.get(ticket.id)?.status).toBe('approved')
+      expect(queue.get(ticket.id)?.resolved_by).toBe('telegram:@oli')
+      expect(resolved).toHaveLength(1)
+    })
+
+    it('supports the cancelled resolution', () => {
+      const { router, queue } = createNativeRouter()
+      const ticket = router.createNativeTicket({
+        tool_name: 'send',
+        tool_input: {},
+        matched_rule: makeRule(),
+        session_id: null,
+        origin: 'openclaw',
+      })
+      expect(router.resolveNativeTicket(ticket.id, 'cancelled')).toBe(true)
+      expect(queue.get(ticket.id)?.status).toBe('cancelled')
+    })
+
+    it('refuses to resolve a router-managed (submit) ticket as native', async () => {
+      const { router, queue } = createNativeRouter()
+      const promise = router.submit(submitParams())
+      const ticketId = queue.listPending()[0]?.id as string
+
+      // The submit ticket is not native; resolveNativeTicket must refuse it so
+      // the held promise is never left hanging.
+      expect(router.resolveNativeTicket(ticketId, 'approved', 'x')).toBe(false)
+      expect(queue.get(ticketId)?.status).toBe('pending')
+
+      // Clean up the still-pending promise.
+      router.approve(ticketId, 'admin')
+      await promise
+    })
+
+    it('returns false for an unknown ticket id', () => {
+      const { router } = createNativeRouter()
+      expect(router.resolveNativeTicket('nope', 'approved')).toBe(false)
+    })
+  })
 })

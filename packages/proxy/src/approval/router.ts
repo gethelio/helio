@@ -16,6 +16,14 @@ import type { CompiledPolicyRule } from '../policy/types.js'
 // human decision arrives (via REST API) or the timeout fires.
 // ---------------------------------------------------------------------------
 
+/**
+ * Channel-name prefix marking a ticket as adapter-owned (native sideband
+ * approval). The full channel_name is `native:<origin>` (e.g.
+ * `native:openclaw`). Dashboard approve/deny endpoints refuse these tickets;
+ * only the adapter can resolve them via the sideband. (issue #12, D10.)
+ */
+export const NATIVE_CHANNEL_PREFIX = 'native:'
+
 /** Internal state for a pending approval. */
 interface PendingApproval {
   readonly resolve: (outcome: ApprovalOutcome) => void
@@ -57,6 +65,21 @@ export interface ApprovalSubmitParams {
   readonly tool_input: Record<string, unknown>
   readonly matched_rule: CompiledPolicyRule | undefined
   readonly session_id: string | null
+}
+
+/** Resolution statuses a native (sideband) ticket can be moved to. */
+export type NativeResolution = 'approved' | 'denied' | 'timeout' | 'cancelled'
+
+/** Parameters for creating a native (adapter-owned) approval ticket. */
+export interface NativeTicketParams {
+  readonly tool_name: string
+  readonly tool_input: Record<string, unknown>
+  readonly matched_rule: CompiledPolicyRule | undefined
+  readonly session_id: string | null
+  /** Adapter origin (e.g. "openclaw"); stored as channel_name `native:<origin>`. */
+  readonly origin: string
+  /** Ticket timeout in ms (rule timeout, else the router default). */
+  readonly timeout_ms?: number
 }
 
 export class ApprovalRouter {
@@ -195,6 +218,70 @@ export class ApprovalRouter {
   }
 
   /**
+   * Create a native (adapter-owned) approval ticket without holding a Promise.
+   *
+   * Used by the sideband governance path (issue #12, D10): when `/evaluate`
+   * yields `require_approval`, the adapter runs the approval in its own UI
+   * (e.g. OpenClaw's Telegram dialog), so Helio must NOT block, start
+   * timeout/escalation timers, or notify a channel — doing so would
+   * double-notify. We still create the queue ticket and fire `onSubmit` so the
+   * dashboard's `approval_requested` SSE event flows and the ticket is visible.
+   *
+   * The ticket's `channel_name` is `native:<origin>`, which marks it as
+   * adapter-owned: the dashboard approve/deny endpoints refuse it (it can only
+   * be resolved through the adapter), and {@link resolveNativeTicket} is the
+   * resolution path.
+   */
+  createNativeTicket(params: NativeTicketParams): ApprovalTicket {
+    const rule = params.matched_rule
+    const timeoutMs = params.timeout_ms ?? rule?.approval?.timeoutMs ?? this.defaultTimeoutMs
+
+    const ticket = this.queue.add({
+      tool_name: params.tool_name,
+      tool_input: params.tool_input,
+      matched_rule: rule?.name ?? null,
+      rule_index: rule?.index ?? null,
+      channel_name: `${NATIVE_CHANNEL_PREFIX}${params.origin}`,
+      session_id: params.session_id,
+      timeout_ms: timeoutMs,
+    })
+
+    this.onSubmit?.(ticket)
+    return ticket
+  }
+
+  /**
+   * Resolve a native ticket created by {@link createNativeTicket}.
+   *
+   * Resolves the queue ticket and fires `onResolve` (→ `approval_resolved`
+   * SSE), with no held Promise to settle. Refuses tickets that have a pending
+   * router Promise (those are MCP-path tickets; resolving them here would leave
+   * the held request hanging) and tickets that are not `native:`-prefixed.
+   *
+   * @returns `true` if resolved, `false` if not found, already resolved, not a
+   *          native ticket, or router-managed.
+   */
+  resolveNativeTicket(
+    ticketId: string,
+    status: NativeResolution,
+    resolvedBy?: string,
+    options?: { denial_reason?: string },
+  ): boolean {
+    if (this.pending.has(ticketId)) return false // router-managed; not ours
+    const ticket = this.queue.get(ticketId)
+    if (!ticket || !ticket.channel_name.startsWith(NATIVE_CHANNEL_PREFIX)) return false
+
+    const resolved = this.queue.resolve(ticketId, status, resolvedBy, {
+      denial_reason: options?.denial_reason,
+    })
+    if (!resolved) return false
+
+    const updated = this.queue.get(ticketId)
+    if (updated) this.onResolve?.(updated)
+    return true
+  }
+
+  /**
    * Approve a pending ticket. Resolves the held Promise so the governed
    * forwarder can forward the request upstream.
    *
@@ -239,6 +326,11 @@ export class ApprovalRouter {
       reason,
       ticketId,
     })
+  }
+
+  /** Look up a ticket by id (delegates to the queue). */
+  getTicket(ticketId: string): ApprovalTicket | undefined {
+    return this.queue.get(ticketId)
   }
 
   /** Clean up all pending timers and resolve all pending promises. */

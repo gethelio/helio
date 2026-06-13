@@ -14,6 +14,7 @@ const COLORS: Record<ApprovalStatus, string> = {
   break_glass: 'bg-purple-50 text-purple-700 ring-purple-600/20',
   client_disconnected: 'bg-gray-100 text-gray-700 ring-gray-500/20',
   shutdown_cancelled: 'bg-slate-100 text-slate-700 ring-slate-500/20',
+  cancelled: 'bg-slate-100 text-slate-700 ring-slate-500/20',
 }
 
 export const ApprovalStatusBadge = memo(function ApprovalStatusBadge({
