@@ -55,6 +55,27 @@ export interface AuditRecord {
   readonly flagged_destructive: boolean
   /** Whether this record was produced in dry-run mode. */
   readonly dry_run: boolean
+  /**
+   * Record category discriminator (issues #12/#16). `'tool_call'` is the
+   * default for governed tool calls; `'drift_event'` for tool-definition drift
+   * records; `'install_scan'` for sideband install evaluations; and
+   * `'evaluation_expired'` for sideband evaluations whose `/audit` never
+   * arrived (the bypass/tamper signal — block_reason stays null so they do not
+   * count as enforcement blocks).
+   */
+  readonly record_kind: 'tool_call' | 'drift_event' | 'install_scan' | 'evaluation_expired'
+  /**
+   * Enforcement origin: `'mcp'` for the proxy path, or an adapter-supplied
+   * origin string (e.g. `'openclaw'`) for sideband-governed calls. Surfaces
+   * the enforcement-grade ladder (structural vs host-enforced) per record.
+   */
+  readonly origin: string
+  /**
+   * Adapter-supplied context object (reserved keys: `channel_id`, `sender_id`,
+   * `sender_name`, `conversation_id`). Null for MCP-origin records. Backs
+   * `match.metadata.*` (#13) and the dashboard metadata columns (#16).
+   */
+  readonly metadata: Record<string, unknown> | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
 }
@@ -85,6 +106,10 @@ export interface AuditQueryFilters {
   readonly flagged_destructive?: boolean
   /** Include only dry-run records (true) or non-dry-run records (false). */
   readonly dry_run?: boolean
+  /** Filter by record kind (tool_call / drift_event / install_scan / evaluation_expired). */
+  readonly record_kind?: string
+  /** Filter by enforcement origin (e.g. 'mcp', 'openclaw'). */
+  readonly origin?: string
   /** Include only records where upstream HTTP status is >= this value. */
   readonly upstream_status_min?: number
   /** Include only records where upstream HTTP status is <= this value. */

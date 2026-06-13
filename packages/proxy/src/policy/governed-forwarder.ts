@@ -277,6 +277,9 @@ export class GovernedForwarder implements McpForwarder {
       proxy_compute_ms: 0,
       flagged_destructive: false,
       dry_run: false,
+      record_kind: 'drift_event',
+      origin: 'mcp',
+      metadata: null,
     })
   }
 
@@ -843,6 +846,9 @@ export class GovernedForwarder implements McpForwarder {
       proxy_compute_ms: proxyComputeMs,
       flagged_destructive: flaggedDestructive,
       dry_run: isDryRun ?? false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
     }
 
     // Security-critical decisions — denies, approval resolutions, and

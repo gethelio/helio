@@ -1077,6 +1077,9 @@ audit:
         proxy_compute_ms: 2,
         flagged_destructive: false,
         dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
       }
       return {
         ...defaults,
