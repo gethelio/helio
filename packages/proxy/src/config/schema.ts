@@ -316,6 +316,13 @@ const sdkSchema = z.object({
   enabled: z.boolean().default(false),
   port: z.number().int().min(1).max(65535).default(3200),
   host: z.string().default('127.0.0.1'),
+  /**
+   * How long a sideband `/evaluate` decision waits for its `/audit` before the
+   * proxy finalizes it as `evaluation_expired` (issue #12, D4). Bounds the
+   * pending-evaluation registry; an adapter crash cannot silently drop a
+   * decided-allowed call from the trail.
+   */
+  evaluation_ttl: durationSchema.default('10m'),
 })
 
 // ---------------------------------------------------------------------------

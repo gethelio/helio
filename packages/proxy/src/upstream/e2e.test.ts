@@ -60,7 +60,7 @@ function makeConfig(upstreamUrl: string): HelioConfig {
       retention: '90d',
       include_responses: true,
     },
-    sdk: { enabled: false, port: 3200, host: '127.0.0.1' },
+    sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
   } as HelioConfig
 }
 
