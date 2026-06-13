@@ -129,7 +129,8 @@ export class ApprovalQueue {
       | 'timeout'
       | 'break_glass'
       | 'client_disconnected'
-      | 'shutdown_cancelled',
+      | 'shutdown_cancelled'
+      | 'cancelled',
     resolvedBy?: string,
     options?: { denial_reason?: string; break_glass_reason?: string },
   ): boolean {

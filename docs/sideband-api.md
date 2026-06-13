@@ -4,6 +4,8 @@ The dashboard sideband is a read/write REST + SSE surface served on a separate p
 
 > **Why a separate port?** The sideband is deliberately isolated from the `/mcp` port. This is what prevents an agent speaking `/mcp` from self-approving its own pending tickets — the approval REST API is mounted exclusively on this sideband, not on the MCP port.
 
+> **Not the same as the SDK sideband.** This document covers the **dashboard sideband** (`:3100`), the operator read/write surface. There is a second, separate **SDK sideband** (`:3200`, `sdk.*`) that serves the Python SDK's evidence routes and the [adapter governance API](./adapter-api.md) (`/evaluate`, `/audit`, `/install-scan`, `/approval/:id/resolve`) for hook-based adapters like OpenClaw. Different server, different port, different token.
+
 ## Overview
 
 - **Default port:** `127.0.0.1:3100` (configurable via `dashboard.port`).

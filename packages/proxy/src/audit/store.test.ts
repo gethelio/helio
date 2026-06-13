@@ -36,6 +36,9 @@ function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
     proxy_compute_ms: 5,
     flagged_destructive: false,
     dry_run: false,
+    record_kind: 'tool_call',
+    origin: 'mcp',
+    metadata: null,
   }
   return {
     ...defaults,
@@ -281,6 +284,32 @@ CREATE TABLE IF NOT EXISTS audit_records (
       const input = { nested: { deep: [1, 2, 3] }, flag: true }
       const record = insertAndGet(store, makeRecord({ tool_input: input }))
       expect(record.tool_input).toEqual(input)
+    })
+
+    it('round-trips record_kind, origin, and metadata (issue #12)', () => {
+      const metadata = { channel_id: 'C1', sender_id: 'U7', nested: { a: 1 } }
+      const record = insertAndGet(
+        store,
+        makeRecord({ record_kind: 'install_scan', origin: 'openclaw', metadata }),
+      )
+      expect(record.record_kind).toBe('install_scan')
+      expect(record.origin).toBe('openclaw')
+      expect(record.metadata).toEqual(metadata)
+    })
+
+    it('stores null metadata as null, not the string "null"', () => {
+      const record = insertAndGet(store, makeRecord({ metadata: null }))
+      expect(record.metadata).toBeNull()
+    })
+
+    it('filters by record_kind and origin', () => {
+      store.insert(makeRecord({ record_kind: 'tool_call', origin: 'mcp' }))
+      store.insert(makeRecord({ record_kind: 'install_scan', origin: 'openclaw' }))
+      store.insert(makeRecord({ record_kind: 'install_scan', origin: 'openclaw' }))
+
+      expect(store.list({ record_kind: 'install_scan' }).total).toBe(2)
+      expect(store.list({ origin: 'mcp' }).total).toBe(1)
+      expect(store.list({ origin: 'openclaw' }).total).toBe(2)
     })
 
     it('stores upstream_response when includeResponses is true', () => {

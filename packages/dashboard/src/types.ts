@@ -75,6 +75,7 @@ export type ApprovalStatus =
   | 'break_glass'
   | 'client_disconnected'
   | 'shutdown_cancelled'
+  | 'cancelled'
 
 export interface ApprovalTicket {
   readonly id: string

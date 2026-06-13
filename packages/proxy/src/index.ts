@@ -35,6 +35,16 @@ export type {
 } from './policy/index.js'
 export { EvidenceStore, createSidebandApp } from './evidence/index.js'
 export type { EvidenceEntry, SessionState, EvidenceStoreOptions } from './evidence/index.js'
+export { GovernanceService } from './sideband/governance-service.js'
+export { GovernanceConfigError } from './sideband/errors.js'
+export type {
+  GovernanceServiceOptions,
+  WireDecision,
+  EvaluateInput,
+  AuditInput,
+  InstallScanInput,
+  ResolveApprovalInput,
+} from './sideband/governance-service.js'
 export { AuditStore, AuditWriter } from './audit/index.js'
 export type {
   AuditRecord,

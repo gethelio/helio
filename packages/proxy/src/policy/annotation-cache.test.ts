@@ -432,3 +432,69 @@ describe('baseline and drift', () => {
     expect(cache.isDrifted('t')).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// updateSingle() — incremental per-tool merge for the sideband governance
+// path (issue #12, D6). Must NOT wipe other tools' present/current state.
+// ---------------------------------------------------------------------------
+
+describe('updateSingle', () => {
+  it('baselines a single tool on first sight', () => {
+    const cache = new ToolAnnotationCache()
+    const r = cache.updateSingle({ name: 'send', annotations: { destructiveHint: true } })
+    expect(r.updated).toBe(true)
+    expect(r.baselined).toEqual(['send'])
+    expect(r.drifted).toEqual([])
+    expect(cache.has('send')).toBe(true)
+    expect(cache.get('send')).toEqual({ destructiveHint: true })
+  })
+
+  it('does not touch other tools’ current annotations (no wholesale wipe)', () => {
+    const cache = new ToolAnnotationCache()
+    cache.updateSingle({ name: 'a', annotations: { readOnlyHint: true } })
+    cache.updateSingle({ name: 'b', annotations: { destructiveHint: true } })
+
+    // A later single update for 'a' must leave 'b' present and queryable —
+    // the F3 regression: update() would have rebuilt present/current and
+    // dropped 'b' from the current-annotations map.
+    cache.updateSingle({ name: 'a', annotations: { readOnlyHint: true } })
+    expect(cache.has('b')).toBe(true)
+    expect(cache.getCurrent('b')).toEqual({ destructiveHint: true })
+    expect(cache.getCurrent('a')).toEqual({ readOnlyHint: true })
+  })
+
+  it('detects drift when a tool’s definition changes after baseline', () => {
+    const cache = new ToolAnnotationCache()
+    cache.updateSingle({ name: 'send', description: 'original' })
+    const r = cache.updateSingle({ name: 'send', description: 'tampered' })
+    expect(r.drifted).toHaveLength(1)
+    expect(r.drifted[0]?.toolName).toBe('send')
+    expect(r.drifted[0]?.changes.map((c) => c.aspect)).toContain('description')
+    expect(cache.isDrifted('send')).toBe(true)
+  })
+
+  it('reverts drift when the definition returns to baseline', () => {
+    const cache = new ToolAnnotationCache()
+    cache.updateSingle({ name: 'send', description: 'original' })
+    cache.updateSingle({ name: 'send', description: 'tampered' })
+    const r = cache.updateSingle({ name: 'send', description: 'original' })
+    expect(r.reverted).toEqual(['send'])
+    expect(cache.isDrifted('send')).toBe(false)
+  })
+
+  it('does not re-emit an unchanged drift', () => {
+    const cache = new ToolAnnotationCache()
+    cache.updateSingle({ name: 'send', description: 'original' })
+    cache.updateSingle({ name: 'send', description: 'tampered' })
+    const again = cache.updateSingle({ name: 'send', description: 'tampered' })
+    expect(again.drifted).toEqual([])
+    expect(cache.isDrifted('send')).toBe(true)
+  })
+
+  it('ignores malformed input', () => {
+    const cache = new ToolAnnotationCache()
+    expect(cache.updateSingle(null).updated).toBe(false)
+    expect(cache.updateSingle({ noName: true }).updated).toBe(false)
+    expect(cache.size).toBe(0)
+  })
+})

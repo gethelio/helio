@@ -1,4 +1,5 @@
 import type { ToolAnnotationHints } from './types.js'
+import { canonicalize } from '../util/canonical-json.js'
 
 /** Aspects of a tool definition reported in drift events. */
 export type ToolDriftAspect =
@@ -185,6 +186,82 @@ export class ToolAnnotationCache {
   }
 
   /**
+   * Incrementally merge a single tool definition into the cache (issue #12, D6).
+   *
+   * Unlike {@link update}, this touches only the named tool: it adds to (never
+   * rebuilds) the `present` set and `currentAnnotations` map. The sideband
+   * governance path feeds adapter-origin tools one definition at a time (each
+   * `/evaluate` carries at most one), so routing them through the whole-list
+   * `update()` would wipe every other tool's current-annotation snapshot on
+   * each call and silently degrade the stricter-of-both log-mode drift
+   * evaluation. The MCP whole-list path is unaffected — it keeps calling
+   * `update()`. Each origin owns its own cache instance, so the accumulate
+   * semantics here never mix with update()'s replace semantics.
+   *
+   * `toolDefinition` must already be in MCP shape (`inputSchema`/`outputSchema`
+   * camelCase); the governance service maps the wire `tool` object before
+   * calling. Returns the same result shape as `update()` (for one tool).
+   */
+  updateSingle(toolDefinition: unknown): ToolCacheUpdateResult {
+    if (typeof toolDefinition !== 'object' || toolDefinition === null) {
+      return { updated: false, baselined: [], drifted: [], reverted: [] }
+    }
+    const t = toolDefinition as Record<string, unknown>
+    const name = t['name']
+    if (typeof name !== 'string') {
+      return { updated: false, baselined: [], drifted: [], reverted: [] }
+    }
+
+    const baselined: string[] = []
+    const drifted: ToolDriftEvent[] = []
+    const reverted: string[] = []
+
+    this.present.add(name)
+    const annotations = extractAnnotations(t)
+    this.currentAnnotations.set(name, annotations)
+    const definitionKey = canonicalize(t)
+
+    const baseline = this.baselines.get(name)
+    if (!baseline) {
+      this.baselines.set(name, { definition: t, definitionKey, annotations })
+      baselined.push(name)
+      if (this.driftedTools.has(name)) {
+        this.driftedTools.delete(name)
+        reverted.push(name)
+      }
+      return { updated: true, baselined, drifted, reverted }
+    }
+
+    if (definitionKey === baseline.definitionKey) {
+      if (this.driftedTools.has(name)) {
+        this.driftedTools.delete(name)
+        reverted.push(name)
+      }
+      return { updated: true, baselined, drifted, reverted }
+    }
+
+    const changes: ToolDriftChange[] = []
+    for (const field of ASPECT_FIELDS) {
+      const baselineValue = baseline.definition[field]
+      const currentValue = t[field]
+      if (canonicalize(baselineValue) !== canonicalize(currentValue)) {
+        changes.push({ aspect: field, baseline: baselineValue, current: currentValue })
+      }
+    }
+    if (changes.length === 0) {
+      changes.push({ aspect: 'other', baseline: baseline.definition, current: t })
+    }
+
+    const event: ToolDriftEvent = { toolName: name, changes }
+    const existing = this.driftedTools.get(name)
+    const isNewDrift = !existing || canonicalize(existing.changes) !== canonicalize(changes)
+    this.driftedTools.set(name, event)
+    if (isNewDrift) drifted.push(event)
+
+    return { updated: true, baselined, drifted, reverted }
+  }
+
+  /**
    * Get the **baseline** annotations for a tool — the definition first seen,
    * not the latest upstream claim. Returns `undefined` if the tool has no
    * annotations or was never seen.
@@ -224,38 +301,6 @@ function extractAnnotations(tool: Record<string, unknown>): ToolAnnotationHints 
   return annotations && typeof annotations === 'object'
     ? (annotations as ToolAnnotationHints)
     : undefined
-}
-
-/** Deterministic JSON encoding with recursively sorted object keys. */
-function canonicalize(value: unknown): string {
-  // JSON.stringify returns undefined for top-level `undefined` at runtime even
-  // though its TS overloads type the return as `string` for non-undefined
-  // inputs. The explicit widening annotation keeps the coalesce legitimate.
-  const encoded: string | undefined = JSON.stringify(sortKeysDeep(value))
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- see above: runtime diverges from TS overload
-  return encoded ?? ''
-}
-
-function sortKeysDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeysDeep)
-  if (value !== null && typeof value === 'object') {
-    const source = value as Record<string, unknown>
-    const out: Record<string, unknown> = {}
-    for (const key of Object.keys(source).sort()) {
-      // Object.defineProperty (not assignment) so a JSON-parsed "__proto__"
-      // key becomes an own property instead of silently setting the
-      // prototype — otherwise content under that key never registers as
-      // drift, a blind spot in a security control.
-      Object.defineProperty(out, key, {
-        value: sortKeysDeep(source[key]),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      })
-    }
-    return out
-  }
-  return value
 }
 
 /**

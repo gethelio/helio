@@ -196,6 +196,68 @@ export class SpendLimiter {
   }
 
   /**
+   * Unconditionally record a spend against the limit.
+   *
+   * Unlike check(), this always appends the amount — even when it pushes the
+   * window past the limit — because the spend it represents has already been
+   * incurred. The sideband peeks at /evaluate and commits here at /audit once
+   * the external call ran (issue #12, D3).
+   *
+   * Throws on a negative or non-finite amount: such amounts are rejected at
+   * /evaluate, so one reaching record() is a logic bug we surface loudly rather
+   * than silently corrupt the sliding-window sum. Warnings fire only while the
+   * post-append spend stays within the limit (parity with check()).
+   */
+  record(params: SpendLimitCheckParams): SpendLimitResult {
+    const { key, amount, limit, windowMs } = params
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new RangeError(
+        `SpendLimiter.record() received an invalid amount (${String(amount)}); ` +
+          'invalid amounts must be rejected at /evaluate, never committed',
+      )
+    }
+
+    const now = this.now()
+    const windowStart = now - windowMs
+
+    let bucket = this.buckets.get(key)
+    if (!bucket) {
+      bucket = { entries: [], limit, currency: '', windowMs }
+      this.buckets.set(key, bucket)
+    }
+
+    // Update stored config (may change on policy hot-reload)
+    bucket.limit = limit
+    bucket.windowMs = windowMs
+
+    // Evict expired entries, then append unconditionally.
+    bucket.entries = bucket.entries.filter((e) => e.timestamp > windowStart)
+    bucket.entries.push({ timestamp: now, amount })
+    const currentSpend = bucket.entries.reduce((sum, e) => sum + e.amount, 0)
+    const resetAtMs = (bucket.entries[0]?.timestamp ?? now) + windowMs
+
+    if (this.onWarning && currentSpend <= limit && currentSpend / limit >= this.warningThreshold) {
+      this.onWarning({
+        key,
+        current_spend: currentSpend,
+        limit,
+        currency: bucket.currency,
+        window_ms: windowMs,
+        reset_at_ms: resetAtMs,
+      })
+    }
+
+    return {
+      allowed: currentSpend <= limit,
+      currentSpend,
+      limit,
+      windowMs,
+      resetAtMs,
+    }
+  }
+
+  /**
    * Check the spend limit without recording the spend (non-destructive).
    *
    * Used by dry-run mode to determine what would happen without consuming

@@ -298,25 +298,28 @@ Audit rows also include:
 
 ### sdk
 
-Configuration for the Python SDK sideband API, used for evidence grounding.
+Configuration for the SDK sideband API, used for evidence grounding (Python SDK) and the [adapter governance API](./adapter-api.md) (hook-based adapters such as OpenClaw).
 
-| Field     | Type    | Required | Default     | Description                          |
-| --------- | ------- | -------- | ----------- | ------------------------------------ |
-| `enabled` | boolean | No       | `false`     | Enable the SDK sideband HTTP server. |
-| `port`    | integer | No       | `3200`      | Sideband server port (1–65535).      |
-| `host`    | string  | No       | `127.0.0.1` | Sideband server bind address.        |
+| Field            | Type    | Required | Default     | Description                                                                                                       |
+| ---------------- | ------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| `enabled`        | boolean | No       | `false`     | Enable the SDK sideband HTTP server.                                                                              |
+| `port`           | integer | No       | `3200`      | Sideband server port (1–65535).                                                                                   |
+| `host`           | string  | No       | `127.0.0.1` | Sideband server bind address.                                                                                     |
+| `evaluation_ttl` | string  | No       | `10m`       | How long a governance `/evaluate` decision waits for its `/audit` before being finalized as `evaluation_expired`. |
 
 #### Sideband authentication
 
-When `sdk.enabled` is `true`, Helio generates a fresh 32-byte hex Bearer token on every `helio start` and prints it to stderr:
+When `sdk.enabled` is `true`, Helio generates two fresh 32-byte hex Bearer tokens on every `helio start` (unless set in the environment) and prints them to stderr:
 
 ```
 SDK sideband listening on http://127.0.0.1:3200
 SDK token (pass as HELIO_SDK_TOKEN env var to your SDK clients):
   <hex>
+Adapter token (governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):
+  <hex>
 ```
 
-The token is also written into `process.env.HELIO_SDK_TOKEN` so child processes spawned by the proxy inherit it. Every sideband request except `GET /healthz` must carry `Authorization: Bearer <token>`; mismatches return `401`. The sideband additionally rejects any request that carries an `Origin` header (including `Origin: null`) and blocks `OPTIONS` preflights with `403`, so a malicious local HTML file cannot talk to it through a browser.
+The tokens are scoped: `HELIO_SDK_TOKEN` authorizes the evidence/context routes, and `HELIO_ADAPTER_TOKEN` authorizes the governance routes (`/evaluate`, `/audit`, `/install-scan`, `/approval/:id/resolve`). An SDK client cannot drive policy decisions, and an adapter cannot write evidence. Both are written into `process.env` so child processes inherit them. Every sideband request except `GET /healthz` must carry the matching `Authorization: Bearer <token>`; mismatches return `401`. The sideband rejects any request carrying an `Origin` header (including `Origin: null`), blocks `OPTIONS` preflights with `403`, and rejects request bodies over 1 MiB with `413`.
 
 Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of generating one. Rotation, revocation, and key management are not part of the v0.1.0 trust model; a restart with a new token is the rotation primitive.
 

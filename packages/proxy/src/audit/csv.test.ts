@@ -31,6 +31,9 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     proxy_compute_ms: 1.2,
     flagged_destructive: false,
     dry_run: false,
+    record_kind: 'tool_call',
+    origin: 'mcp',
+    metadata: null,
     created_at: '2025-01-15T10:00:00.100Z',
   }
   return {

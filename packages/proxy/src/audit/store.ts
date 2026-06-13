@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS audit_records (
   proxy_compute_ms  REAL NOT NULL,
   flagged_destructive INTEGER NOT NULL DEFAULT 0,
   dry_run           INTEGER NOT NULL DEFAULT 0,
+  record_kind       TEXT NOT NULL DEFAULT 'tool_call',
+  origin            TEXT NOT NULL DEFAULT 'mcp',
+  metadata          TEXT,
   created_at        TEXT NOT NULL
 );
 `
@@ -61,6 +64,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_policy_decision  ON audit_records (policy_d
 CREATE INDEX IF NOT EXISTS idx_audit_session_id       ON audit_records (session_id);
 CREATE INDEX IF NOT EXISTS idx_audit_block_reason     ON audit_records (block_reason);
 CREATE INDEX IF NOT EXISTS idx_audit_upstream_status_created_at ON audit_records (upstream_http_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_record_kind     ON audit_records (record_kind);
+CREATE INDEX IF NOT EXISTS idx_audit_origin          ON audit_records (origin);
 `
 
 const INSERT_SQL = `
@@ -70,14 +75,14 @@ INSERT INTO audit_records (
   approved_by, upstream_response, upstream_error, upstream_latency_ms,
   upstream_http_status,
   total_duration_ms, approval_wait_ms, proxy_compute_ms,
-  flagged_destructive, dry_run, created_at
+  flagged_destructive, dry_run, record_kind, origin, metadata, created_at
 ) VALUES (
   @id, @timestamp, @session_id, @agent_id, @environment, @tool_name, @tool_input,
   @policy_decision, @block_reason, @matched_rule, @matched_rule_index, @evidence_chain, @approval_status,
   @approved_by, @upstream_response, @upstream_error, @upstream_latency_ms,
   @upstream_http_status,
   @total_duration_ms, @approval_wait_ms, @proxy_compute_ms,
-  @flagged_destructive, @dry_run, @created_at
+  @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @created_at
 )
 `
 
@@ -89,6 +94,9 @@ const REQUIRED_AUDIT_COLUMNS = [
   'approval_wait_ms',
   'proxy_compute_ms',
   'upstream_http_status',
+  'record_kind',
+  'origin',
+  'metadata',
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -119,6 +127,9 @@ interface RawAuditRow {
   proxy_compute_ms: number
   flagged_destructive: number
   dry_run: number
+  record_kind: string
+  origin: string
+  metadata: string | null
   created_at: string
 }
 
@@ -155,6 +166,9 @@ function deserializeRow(row: RawAuditRow): AuditRecord {
     proxy_compute_ms: row.proxy_compute_ms,
     flagged_destructive: row.flagged_destructive === 1,
     dry_run: row.dry_run === 1,
+    record_kind: row.record_kind as AuditRecord['record_kind'],
+    origin: row.origin,
+    metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
     created_at: row.created_at,
   }
 }
@@ -180,6 +194,14 @@ function buildWhereClause(filters: AuditQueryFilters): {
   }
   if (filters.blocked !== undefined) {
     conditions.push(filters.blocked ? 'block_reason IS NOT NULL' : 'block_reason IS NULL')
+  }
+  if (filters.record_kind !== undefined) {
+    conditions.push('record_kind = ?')
+    params.push(filters.record_kind)
+  }
+  if (filters.origin !== undefined) {
+    conditions.push('origin = ?')
+    params.push(filters.origin)
   }
   if (filters.session_id !== undefined) {
     conditions.push('session_id = ?')
@@ -364,6 +386,9 @@ export class AuditStore {
       proxy_compute_ms: record.proxy_compute_ms,
       flagged_destructive: record.flagged_destructive ? 1 : 0,
       dry_run: record.dry_run ? 1 : 0,
+      record_kind: record.record_kind,
+      origin: record.origin,
+      metadata: record.metadata ? JSON.stringify(record.metadata) : null,
       created_at: now,
     })
 

@@ -80,9 +80,8 @@ export class AuditWriter {
    * is scheduled. This keeps request-path latency bounded even under bursty
    * write load.
    */
-  push(record: Omit<AuditRecord, 'id' | 'created_at'>): void {
+  push(record: Omit<AuditRecord, 'id' | 'created_at'>, id: string = randomUUID()): void {
     if (this.closed) return
-    const id = randomUUID()
     this.buffer.push({ id, record })
     this.onPush?.(record, id)
     if (this.buffer.length >= this.bufferSize) {
@@ -98,9 +97,8 @@ export class AuditWriter {
    * A fatal-process crash still invokes the crash-drain hook, which calls
    * `flush()` synchronously before exit.
    */
-  pushImmediate(record: Omit<AuditRecord, 'id' | 'created_at'>): void {
+  pushImmediate(record: Omit<AuditRecord, 'id' | 'created_at'>, id: string = randomUUID()): void {
     if (this.closed) return
-    const id = randomUUID()
     this.buffer.push({ id, record })
     this.onPush?.(record, id)
     this.scheduleFlushSoon()

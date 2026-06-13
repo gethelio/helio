@@ -33,6 +33,9 @@ function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
     proxy_compute_ms: 5,
     flagged_destructive: false,
     dry_run: false,
+    record_kind: 'tool_call',
+    origin: 'mcp',
+    metadata: null,
   }
   return {
     ...defaults,

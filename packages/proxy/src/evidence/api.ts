@@ -1,8 +1,14 @@
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { z } from 'zod'
 import type { EvidenceStore } from './store.js'
 import { verifyBearer } from '../auth/bearer.js'
 import { formatZodErrors } from '../util/format-zod-errors.js'
+import type { GovernanceService } from '../sideband/governance-service.js'
+import { createGovernanceApp, isGovernancePath } from '../sideband/governance-api.js'
+
+/** Max request body accepted on the sideband (issue #12, D1/F7). */
+const SIDEBAND_BODY_LIMIT_BYTES = 1 * 1_024 * 1_024
 
 // ---------------------------------------------------------------------------
 // Request body schemas
@@ -29,12 +35,24 @@ const postContextBody = z.object({
 /** Options for constructing the SDK sideband Hono app. */
 export interface SidebandAppOptions {
   /**
-   * Bearer token that every request must carry in its `Authorization`
-   * header (except `GET /healthz`). When omitted or empty, the sideband
-   * runs open — useful for local development when the operator has
-   * explicitly disabled the per-boot token via env.
+   * Bearer token for the evidence/context/session routes (the SDK scope).
+   * When omitted or empty, those routes run open — useful for local
+   * development when the operator has disabled the per-boot token via env.
    */
   readonly token?: string
+  /**
+   * Bearer token for the governance routes (the adapter scope, issue #12/F6).
+   * Distinct from `token` so an SDK client cannot drive policy decisions and
+   * an adapter cannot write evidence it was not granted. When omitted, the
+   * governance routes run open (and only mount if `governance` is provided).
+   */
+  readonly adapterToken?: string
+  /**
+   * The governance service backing `/evaluate`, `/audit`, `/install-scan`, and
+   * `/approval/:id/resolve`. When omitted, those routes return 503
+   * `governance_unavailable` (evidence-only deployments, and existing tests).
+   */
+  readonly governance?: GovernanceService
 }
 
 /**
@@ -60,7 +78,9 @@ export interface SidebandAppOptions {
  */
 export function createSidebandApp(store: EvidenceStore, options: SidebandAppOptions = {}): Hono {
   const app = new Hono()
-  const token = options.token && options.token.length > 0 ? options.token : undefined
+  const sdkToken = options.token && options.token.length > 0 ? options.token : undefined
+  const adapterToken =
+    options.adapterToken && options.adapterToken.length > 0 ? options.adapterToken : undefined
 
   // CORS guard — applied globally, fires before auth. The SDK never sends
   // an Origin header; any request that does is browser-originated traffic
@@ -76,25 +96,39 @@ export function createSidebandApp(store: EvidenceStore, options: SidebandAppOpti
     await next()
   })
 
-  // Bearer auth — applied globally when a token is configured, but
-  // `/healthz` stays open so container/orchestrator probes can succeed
-  // without the secret.
-  if (token) {
-    app.use('*', async (c, next) => {
-      if (c.req.path === '/healthz') {
-        await next()
-        return
-      }
-      const authHeader = c.req.header('authorization')
-      if (!verifyBearer(authHeader, token)) {
-        return c.json({ error: 'Unauthorized' }, 401)
-      }
+  // Body-size limit — bounds memory before any handler parses a body
+  // (issue #12, F7). 1 MiB is generous for evidence payloads and tool inputs;
+  // per-field caps (4 KiB metadata, 64 KiB tool_input) are enforced downstream.
+  app.use(
+    '*',
+    bodyLimit({
+      maxSize: SIDEBAND_BODY_LIMIT_BYTES,
+      onError: (c) => c.json({ error: 'request_body_too_large' }, 413),
+    }),
+  )
+
+  // Scoped bearer auth — `/healthz` stays open for probes. Governance routes
+  // require the adapter-scope token; everything else requires the SDK-scope
+  // token. A scope whose token is unset runs open (local dev / disabled-token
+  // posture), matching the prior single-token behavior.
+  app.use('*', async (c, next) => {
+    if (c.req.path === '/healthz') {
       await next()
-    })
-  }
+      return
+    }
+    const expected = isGovernancePath(c.req.path) ? adapterToken : sdkToken
+    if (expected && !verifyBearer(c.req.header('authorization'), expected)) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+    await next()
+  })
 
   // Health check
   app.get('/healthz', (c) => c.json({ status: 'ok' }))
+
+  // Governance routes (issue #12) — /evaluate, /audit, /install-scan,
+  // /approval/:id/resolve. Mounted at root; return 503 when no service.
+  app.route('/', createGovernanceApp(options.governance))
 
   // POST /evidence — SDK reports evidence from a tool output
   app.post('/evidence', async (c) => {

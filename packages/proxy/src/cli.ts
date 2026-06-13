@@ -14,6 +14,7 @@ import { GovernedForwarder } from './policy/governed-forwarder.js'
 import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
 import { AuditStore, AuditWriter } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
+import { GovernanceService } from './sideband/governance-service.js'
 import {
   ApprovalQueue,
   ApprovalRouter,
@@ -443,6 +444,8 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   let sidebandHandle: ServerHandle | undefined
   let sidebandToken: string | undefined
   let sidebandTokenSource: 'generated' | 'env' | undefined
+  let adapterToken: string | undefined
+  let governanceService: GovernanceService | undefined
   if (config.sdk.enabled) {
     sidebandToken = process.env['HELIO_SDK_TOKEN']
     if (!sidebandToken || sidebandToken.length === 0) {
@@ -452,7 +455,37 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     } else {
       sidebandTokenSource = 'env'
     }
-    const sidebandApp = createSidebandApp(evidenceStore, { token: sidebandToken })
+
+    // Governance routes carry a SEPARATE adapter-scope token (issue #12, D1):
+    // an SDK client must not be able to drive policy decisions, nor an adapter
+    // write evidence it was not granted. Same per-boot/env provisioning as the
+    // SDK token.
+    adapterToken = process.env['HELIO_ADAPTER_TOKEN']
+    if (!adapterToken || adapterToken.length === 0) {
+      adapterToken = randomBytes(32).toString('hex')
+      process.env['HELIO_ADAPTER_TOKEN'] = adapterToken
+    }
+
+    // The service reuses the SAME limiter/queue/router/writer instances as the
+    // MCP path — one budget, both doors. A counter consumed via /audit is
+    // visible to a subsequent MCP tools/call and vice versa.
+    governanceService = new GovernanceService({
+      policy,
+      environment: config.environment,
+      evidenceStore,
+      approvalRouter,
+      rateLimiter,
+      spendLimiter,
+      auditWriter,
+      approvalTimeoutMs: parseDuration(config.approval.timeout),
+      ttlMs: parseDuration(config.sdk.evaluation_ttl),
+    })
+
+    const sidebandApp = createSidebandApp(evidenceStore, {
+      token: sidebandToken,
+      adapterToken,
+      governance: governanceService,
+    })
     sidebandHandle = startSidebandServer(sidebandApp, config.sdk.port, config.sdk.host)
   }
 
@@ -508,6 +541,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         `SDK token (${source}; pass as HELIO_SDK_TOKEN env var to your SDK clients):\n  ${sidebandToken}`,
       )
     }
+    if (adapterToken) {
+      console.error(
+        `Adapter token (governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):\n  ${adapterToken}`,
+      )
+    }
   }
   if (dashboardHandle) {
     console.error(
@@ -541,6 +579,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       initialConfig: config,
       onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths) => {
         governedForwarder.updatePolicy(newPolicy)
+        governanceService?.updatePolicy(newPolicy)
         const count = newPolicy.rules.length
         console.error(
           `[helio] Policy reloaded: ${String(count)} rule${count !== 1 ? 's' : ''} (default: ${newPolicy.defaultAction})`,
@@ -587,6 +626,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     closeDashboardApp,
     dashboardHandle,
     eventBus,
+    governanceService,
   )
 }
 
@@ -745,6 +785,7 @@ function registerShutdown(
   closeDashboardApp?: () => void,
   dashboardHandle?: ServerHandle,
   eventBus?: DashboardEventBus,
+  governanceService?: GovernanceService,
 ): void {
   let isShuttingDown = false
   const shutdown = () => {
@@ -762,6 +803,7 @@ function registerShutdown(
       if (configWatcher) configWatcher.close()
       if (closeDashboardApp) closeDashboardApp()
       if (eventBus) eventBus.close()
+      if (governanceService) governanceService.close()
       if (rateLimiter) rateLimiter.close()
       if (spendLimiter) spendLimiter.close()
       if (approvalRouter) approvalRouter.close()

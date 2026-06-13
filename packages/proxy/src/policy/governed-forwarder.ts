@@ -6,15 +6,14 @@ import type {
   McpResponse,
 } from '../mcp/types.js'
 import { INTERNAL_ERROR } from '../mcp/types.js'
-import type { CompiledPolicy, PolicyAction } from './types.js'
-import { evaluatePolicy } from './engine.js'
+import type { CompiledPolicy } from './types.js'
 import type { PolicyDecision } from './engine.js'
+import { decide } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
 import type { ToolDriftEvent, ToolCacheUpdateResult } from './annotation-cache.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { EvidenceStore } from '../evidence/store.js'
-import { checkEvidence, checkDependencies } from '../evidence/grounding.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/grounding.js'
 import {
   buildPolicyDeniedFeedback,
@@ -278,6 +277,9 @@ export class GovernedForwarder implements McpForwarder {
       proxy_compute_ms: 0,
       flagged_destructive: false,
       dry_run: false,
+      record_kind: 'drift_event',
+      origin: 'mcp',
+      metadata: null,
     })
   }
 
@@ -297,144 +299,28 @@ export class GovernedForwarder implements McpForwarder {
         ? (params['arguments'] as Record<string, unknown>)
         : undefined
 
-    const annotations = this.annotationCache.get(toolName)
-    const driftEvent = this.annotationCache.getDrift(toolName)
-    const driftMode = this.policy.onToolDrift ?? 'block'
-
-    let decision = evaluatePolicy(this.policy, {
+    const {
+      decision,
+      driftEvent,
+      driftMode,
+      driftBlocked,
+      flaggedDestructive,
+      evidenceResult,
+      dependencyResult,
+      evidenceBlocked,
+      sessionBlocked,
+      isDryRun,
+    } = decide({
       toolName,
-      annotations,
       toolArguments,
+      sessionId: request.sessionId,
+      policy: this.policy,
       environment: this.environment,
+      evidenceStore: this.evidenceStore,
+      baselineAnnotations: this.annotationCache.get(toolName),
+      currentAnnotations: this.annotationCache.getCurrent(toolName),
+      driftEvent: this.annotationCache.getDrift(toolName),
     })
-
-    // In log mode a drifted tool is evaluated against BOTH the baseline
-    // annotations (what the operator reviewed) and the current upstream
-    // claim — the stricter decision wins, so a definition flip cannot weaken
-    // enforcement in either direction.
-    if (driftEvent && driftMode === 'log') {
-      const currentDecision = evaluatePolicy(this.policy, {
-        toolName,
-        annotations: this.annotationCache.getCurrent(toolName),
-        toolArguments,
-        environment: this.environment,
-      })
-      decision = stricterDecision(decision, currentDecision)
-    }
-
-    // Irreversible action detection: when no explicit rule matched,
-    // check if the tool is destructive and apply flag_destructive behavior.
-    const baselineDestructive = annotations?.destructiveHint ?? true // MCP default
-    const currentDestructive =
-      driftEvent && driftMode === 'log'
-        ? (this.annotationCache.getCurrent(toolName)?.destructiveHint ?? true)
-        : false
-    const isDestructive = baselineDestructive || currentDestructive
-    let flaggedDestructive = false
-
-    if (isDestructive && !decision.matchedRule && this.policy.flagDestructive) {
-      flaggedDestructive = true
-
-      if (this.policy.flagDestructive === 'log') {
-        // eslint-disable-next-line no-console -- Intentional operational warning
-        console.error(`[helio] Destructive tool detected: ${toolName} (no matching rule)`)
-      } else {
-        // require_approval — override the decision to escalate
-        decision = {
-          action: 'require_approval',
-          matchedRule: undefined,
-          reason: `Destructive tool "${toolName}" auto-escalated by flag_destructive policy`,
-        }
-      }
-    }
-
-    // Tool definition drift gate: a drifted tool no longer matches the
-    // definition the operator reviewed, so on_tool_drift overrides whatever
-    // rule evaluation produced ("log" leaves the decision untouched).
-    let driftBlocked = false
-    if (driftEvent && driftMode !== 'log') {
-      driftBlocked = driftMode === 'block'
-      decision = {
-        action: driftMode === 'block' ? 'deny' : 'require_approval',
-        matchedRule: undefined,
-        reason: `Tool "${toolName}" definition drifted from baseline (${driftEvent.changes
-          .map((change) => change.aspect)
-          .join(', ')})`,
-      }
-    }
-
-    // Capture original action before evidence checks may override to 'deny'
-    const originalAction = decision.action
-
-    // Evidence grounding + dependency chain checks.
-    // Gate all non-deny actions (allow, require_approval, dry_run, etc.)
-    let evidenceResult: EvidenceCheckResult | undefined
-    let dependencyResult: DependencyCheckResult | undefined
-    let evidenceBlocked = false
-    let sessionBlocked = false
-
-    const requiresGroundedSession =
-      decision.action !== 'deny' &&
-      !!decision.matchedRule &&
-      ((decision.matchedRule.evidence?.requires.length ?? 0) > 0 ||
-        (decision.matchedRule.requires?.length ?? 0) > 0)
-
-    if (requiresGroundedSession && !request.sessionId) {
-      sessionBlocked = true
-      evidenceBlocked = true
-      decision = {
-        action: 'deny',
-        matchedRule: decision.matchedRule,
-        reason: 'Mcp-Session-Id is required for evidence/dependency-gated policy rules',
-      }
-    }
-
-    if (
-      decision.action !== 'deny' &&
-      this.evidenceStore &&
-      request.sessionId &&
-      decision.matchedRule
-    ) {
-      const rule = decision.matchedRule
-
-      // Check evidence.requires
-      if (rule.evidence?.requires.length) {
-        evidenceResult = checkEvidence(
-          this.evidenceStore,
-          request.sessionId,
-          rule.evidence.requires,
-        )
-        if (!evidenceResult.satisfied) {
-          evidenceBlocked = true
-          const problemKeys = [...evidenceResult.missing, ...evidenceResult.expired]
-          decision = {
-            action: 'deny',
-            matchedRule: rule,
-            reason: `Required evidence not satisfied: ${problemKeys.join(', ')}`,
-          }
-        }
-      }
-
-      // Check requires (dependency chains) — only if evidence check passed
-      if (!evidenceBlocked && rule.requires?.length) {
-        dependencyResult = checkDependencies(this.evidenceStore, request.sessionId, rule.requires, {
-          requireSuccess: rule.requiresSuccess ?? true,
-        })
-        if (!dependencyResult.satisfied) {
-          evidenceBlocked = true
-          decision = {
-            action: 'deny',
-            matchedRule: rule,
-            reason: `Required tool calls not completed: ${dependencyResult.missing.join(', ')}`,
-          }
-        }
-      }
-    }
-
-    // Dry-run detection: per-rule (action: dry_run) or global (policies.dry_run: true)
-    const isPerRuleDryRun = originalAction === 'dry_run'
-    const isGlobalDryRun = this.policy.dryRun === true
-    const isDryRun = (isPerRuleDryRun || isGlobalDryRun) && !sessionBlocked
 
     let result: ForwardResult
     let approvalOutcome: ApprovalOutcome | undefined
@@ -960,6 +846,9 @@ export class GovernedForwarder implements McpForwarder {
       proxy_compute_ms: proxyComputeMs,
       flagged_destructive: flaggedDestructive,
       dry_run: isDryRun ?? false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
     }
 
     // Security-critical decisions — denies, approval resolutions, and
@@ -1123,32 +1012,6 @@ function collectAllowedEvidenceKeys(policy: CompiledPolicy): string[] {
     }
   }
   return [...keys]
-}
-
-/**
- * Strictness ranking for policy actions — higher wins in stricter-of-both
- * (log-mode drift evaluation). The ranking encodes whether an action can
- * reach upstream and how strongly the operator constrained it:
- * - deny and require_approval dominate everything (require_approval may
- *   forward, but only through an explicit human gate);
- * - dry_run outranks the limit actions and allow because it never forwards;
- * - between the two limit actions, cross-conflicts (baseline matches one,
- *   current matches the other) deterministically pick spend_limit. Log mode
- *   is advisory by operator choice; operators needing hard guarantees use
- *   the default "block".
- */
-const ACTION_SEVERITY: Record<PolicyAction, number> = {
-  deny: 5,
-  require_approval: 4,
-  dry_run: 3,
-  spend_limit: 2,
-  rate_limit: 1,
-  allow: 0,
-}
-
-/** Pick the stricter of two policy decisions (ties keep the first). */
-function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDecision {
-  return ACTION_SEVERITY[b.action] > ACTION_SEVERITY[a.action] ? b : a
 }
 
 /** Build a ForwardResult containing a JSON-RPC error response. */

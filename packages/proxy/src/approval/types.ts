@@ -16,6 +16,13 @@ export type ApprovalStatus =
   | 'break_glass'
   | 'client_disconnected'
   | 'shutdown_cancelled'
+  /**
+   * The approver's native UI cancelled the request (e.g. an OpenClaw
+   * `/approve` dialog dismissed without a decision). Distinct from
+   * `client_disconnected`, which the router reserves for the requesting agent
+   * aborting the held MCP request. Sideband (native) approvals only. (#12.)
+   */
+  | 'cancelled'
 
 /** A failed attempt to deliver an approval notification. */
 export interface ApprovalNotificationFailure {
