@@ -558,4 +558,76 @@ describe('SpendLimiter', () => {
       limiter.close()
     })
   })
+
+  // -------------------------------------------------------------------------
+  // record() — unconditional commit path for the sideband /audit endpoint
+  // (issue #12, D3). The spend already happened, so this always appends —
+  // even past the limit — and throws on invalid amounts (which must have been
+  // rejected at /evaluate; reaching record() with one is a logic bug).
+  // -------------------------------------------------------------------------
+
+  describe('record', () => {
+    it('appends even when the spend exceeds the limit', () => {
+      const { limiter } = createLimiter()
+
+      limiter.check({ key: 'tool:pay', amount: 18, limit: 20, windowMs: 60_000 })
+      // A spend of 5 would exceed via check() and be rejected, but it executed.
+      const r = limiter.record({ key: 'tool:pay', amount: 5, limit: 20, windowMs: 60_000 })
+      expect(r.currentSpend).toBe(23)
+      expect(r.allowed).toBe(false) // over limit, but recorded
+      expect(limiter.getKeyState('tool:pay')?.current_spend).toBe(23)
+    })
+
+    it('creates the bucket on first record', () => {
+      const { limiter } = createLimiter()
+
+      const r = limiter.record({ key: 'tool:new', amount: 4.5, limit: 20, windowMs: 60_000 })
+      expect(r.currentSpend).toBe(4.5)
+      expect(r.allowed).toBe(true)
+      expect(limiter.getKeyState('tool:new')?.current_spend).toBe(4.5)
+    })
+
+    it('evicts expired entries before appending', () => {
+      const { limiter, advance } = createLimiter()
+
+      limiter.record({ key: 'tool:s', amount: 10, limit: 20, windowMs: 1_000 })
+      advance(2_000)
+      const r = limiter.record({ key: 'tool:s', amount: 3, limit: 20, windowMs: 1_000 })
+      expect(r.currentSpend).toBe(3)
+    })
+
+    it('throws on a negative or non-finite amount', () => {
+      const { limiter } = createLimiter()
+
+      expect(() => limiter.record({ key: 'k', amount: -1, limit: 20, windowMs: 1_000 })).toThrow(
+        RangeError,
+      )
+      expect(() => limiter.record({ key: 'k', amount: NaN, limit: 20, windowMs: 1_000 })).toThrow(
+        RangeError,
+      )
+      expect(() =>
+        limiter.record({ key: 'k', amount: Infinity, limit: 20, windowMs: 1_000 }),
+      ).toThrow(RangeError)
+      // No bucket state was created by the rejected attempts.
+      expect(limiter.getKeyState('k')).toBeUndefined()
+    })
+
+    it('emits onWarning while within the limit but not past it', () => {
+      const time = 1_000_000
+      const warnings: number[] = []
+      const limiter = new SpendLimiter({
+        now: () => time,
+        cleanupIntervalMs: 0,
+        warningThreshold: 0.8,
+        onWarning: (s) => warnings.push(s.current_spend),
+      })
+
+      limiter.record({ key: 'tool:w', amount: 10, limit: 20, windowMs: 60_000 }) // 10/20
+      expect(warnings).toHaveLength(0)
+      limiter.record({ key: 'tool:w', amount: 6, limit: 20, windowMs: 60_000 }) // 16/20 -> 0.8
+      expect(warnings).toEqual([16])
+      limiter.record({ key: 'tool:w', amount: 10, limit: 20, windowMs: 60_000 }) // 26/20 over
+      expect(warnings).toEqual([16]) // no warning on the over-limit append
+    })
+  })
 })

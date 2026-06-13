@@ -151,6 +151,54 @@ export class RateLimiter {
   }
 
   /**
+   * Unconditionally record a call against the rate limit.
+   *
+   * Unlike check(), this always appends the timestamp — even when the bucket
+   * is already at/over the limit — because the call it represents has already
+   * executed. The sideband splits decision from execution: /evaluate peeks
+   * (non-destructive), and /audit calls record() once the external call ran,
+   * so refusing to record at the limit (as check() does) would let real calls
+   * escape accounting and under-count subsequent peeks. (issue #12, D3.)
+   *
+   * Warnings fire only while the post-append count stays within the limit —
+   * exact parity with check(), which never warns on its over-limit path — so a
+   * burst of over-limit audits cannot flood the dashboard's limit_warning feed.
+   */
+  record(params: RateLimitCheckParams): RateLimitResult {
+    const { key, maxCalls, windowMs } = params
+    const now = this.now()
+    const windowStart = now - windowMs
+
+    let bucket = this.buckets.get(key)
+    if (!bucket) {
+      bucket = { timestamps: [], maxCalls, windowMs }
+      this.buckets.set(key, bucket)
+    }
+
+    // Update stored config (may change on policy hot-reload)
+    bucket.maxCalls = maxCalls
+    bucket.windowMs = windowMs
+
+    // Evict expired timestamps, then append unconditionally.
+    bucket.timestamps = bucket.timestamps.filter((ts) => ts > windowStart)
+    bucket.timestamps.push(now)
+    const current = bucket.timestamps.length
+    const resetAtMs = (bucket.timestamps[0] ?? now) + windowMs
+
+    if (this.onWarning && current <= maxCalls && current / maxCalls >= this.warningThreshold) {
+      this.onWarning({ key, current, limit: maxCalls, window_ms: windowMs, reset_at_ms: resetAtMs })
+    }
+
+    return {
+      allowed: current <= maxCalls,
+      current,
+      limit: maxCalls,
+      windowMs,
+      resetAtMs,
+    }
+  }
+
+  /**
    * Check the rate limit without recording the call (non-destructive).
    *
    * Used by dry-run mode to determine what would happen without consuming

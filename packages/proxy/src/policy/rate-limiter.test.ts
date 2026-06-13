@@ -393,4 +393,79 @@ describe('RateLimiter', () => {
       limiter.close()
     })
   })
+
+  // -------------------------------------------------------------------------
+  // record() — unconditional commit path for the sideband /audit endpoint
+  // (issue #12, D3). The external call already executed, so unlike check()
+  // this always appends, even when the bucket is already at/over the limit.
+  // -------------------------------------------------------------------------
+
+  describe('record', () => {
+    it('appends even when already at/over the limit', () => {
+      const { limiter } = createLimiter()
+
+      // Fill to the limit via check().
+      limiter.check({ key: 'tool:send', maxCalls: 2, windowMs: 60_000 })
+      limiter.check({ key: 'tool:send', maxCalls: 2, windowMs: 60_000 })
+      expect(limiter.check({ key: 'tool:send', maxCalls: 2, windowMs: 60_000 }).allowed).toBe(false)
+
+      // record() commits past the limit — the call really happened.
+      const r = limiter.record({ key: 'tool:send', maxCalls: 2, windowMs: 60_000 })
+      expect(r.current).toBe(3)
+      expect(r.allowed).toBe(false) // over limit, but recorded
+      expect(limiter.getKeyState('tool:send')?.current).toBe(3)
+    })
+
+    it('creates the bucket on first record', () => {
+      const { limiter } = createLimiter()
+
+      const r = limiter.record({ key: 'tool:fresh', maxCalls: 5, windowMs: 60_000 })
+      expect(r.current).toBe(1)
+      expect(r.allowed).toBe(true)
+      expect(limiter.getKeyState('tool:fresh')?.current).toBe(1)
+    })
+
+    it('evicts expired timestamps before appending', () => {
+      const { limiter, advance } = createLimiter()
+
+      limiter.record({ key: 'tool:t', maxCalls: 3, windowMs: 1_000 })
+      advance(2_000) // first entry now expired
+      const r = limiter.record({ key: 'tool:t', maxCalls: 3, windowMs: 1_000 })
+      expect(r.current).toBe(1)
+    })
+
+    it('emits onWarning while within the limit', () => {
+      const time = 1_000_000
+      const warnings: Array<{ current: number }> = []
+      const limiter = new RateLimiter({
+        now: () => time,
+        cleanupIntervalMs: 0,
+        warningThreshold: 0.8,
+        onWarning: (s) => warnings.push({ current: s.current }),
+      })
+
+      limiter.record({ key: 'tool:w', maxCalls: 5, windowMs: 60_000 }) // 1/5
+      limiter.record({ key: 'tool:w', maxCalls: 5, windowMs: 60_000 }) // 2/5
+      limiter.record({ key: 'tool:w', maxCalls: 5, windowMs: 60_000 }) // 3/5
+      expect(warnings).toHaveLength(0)
+      limiter.record({ key: 'tool:w', maxCalls: 5, windowMs: 60_000 }) // 4/5 -> 0.8
+      expect(warnings).toEqual([{ current: 4 }])
+    })
+
+    it('does NOT emit onWarning on over-limit appends (no flood)', () => {
+      const time = 1_000_000
+      const warnings: number[] = []
+      const limiter = new RateLimiter({
+        now: () => time,
+        cleanupIntervalMs: 0,
+        warningThreshold: 0.8,
+        onWarning: (s) => warnings.push(s.current),
+      })
+
+      limiter.record({ key: 'tool:flood', maxCalls: 1, windowMs: 60_000 }) // 1/1 -> warns
+      limiter.record({ key: 'tool:flood', maxCalls: 1, windowMs: 60_000 }) // 2/1 over
+      limiter.record({ key: 'tool:flood', maxCalls: 1, windowMs: 60_000 }) // 3/1 over
+      expect(warnings).toEqual([1]) // only the within-limit append warned
+    })
+  })
 })
