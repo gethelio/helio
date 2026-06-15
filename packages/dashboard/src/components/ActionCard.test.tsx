@@ -20,6 +20,8 @@ const baseRecord: ActionEvent = {
   dry_run: false,
   matched_rule: 'rule-1',
   matched_rule_index: 1,
+  record_kind: 'tool_call',
+  origin: 'mcp',
 }
 
 describe('ActionCard', () => {
@@ -89,10 +91,8 @@ describe('ActionCard', () => {
       upstream_http_status: null,
       upstream_latency_ms: null,
       block_reason: null,
-      session_id: baseRecord.session_id,
-      agent_id: baseRecord.agent_id,
-      matched_rule: baseRecord.matched_rule,
       created_at: new Date().toISOString(),
+      metadata: null,
     }
 
     render(

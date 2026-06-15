@@ -33,6 +33,9 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     flagged_destructive: false,
     dry_run: false,
     created_at: '2025-01-15T10:00:00.100Z',
+    record_kind: 'tool_call',
+    origin: 'mcp',
+    metadata: null,
   }
   return {
     ...defaults,
