@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import type { AuditRecord } from '../audit/types.js'
 
 // ---------------------------------------------------------------------------
 // DashboardEventBus — typed event emitter for real-time dashboard updates.
@@ -27,6 +28,8 @@ export interface ActionEvent {
   readonly dry_run: boolean
   readonly matched_rule: string | null
   readonly matched_rule_index: number | null
+  readonly record_kind: AuditRecord['record_kind']
+  readonly origin: string
 }
 
 /** Payload for an approval_requested event. */

@@ -162,6 +162,8 @@ beforeAll(async () => {
         dry_run: record.dry_run,
         matched_rule: record.matched_rule,
         matched_rule_index: record.matched_rule_index,
+        record_kind: record.record_kind,
+        origin: record.origin,
       })
     },
   })

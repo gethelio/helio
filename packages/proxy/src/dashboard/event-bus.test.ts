@@ -24,6 +24,8 @@ function makeActionEvent(overrides: Partial<ActionEvent> = {}): ActionEvent {
     dry_run: false,
     matched_rule: null,
     matched_rule_index: null,
+    record_kind: 'tool_call',
+    origin: 'mcp',
   }
   return {
     ...defaults,
@@ -146,6 +148,16 @@ describe('DashboardEventBus', () => {
 
     bus.emit('action', makeActionEvent({ tool_name: 'test2', policy_decision: 'deny' }))
     expect(count).toBe(1) // No new event after unsubscribe
+  })
+
+  it('action event carries origin and record_kind (#16)', () => {
+    bus = new DashboardEventBus()
+    const received: ActionEvent[] = []
+    bus.on('action', (e) => received.push(e))
+    bus.emit('action', makeActionEvent({ origin: 'openclaw', record_kind: 'install_scan' }))
+    const evt = received[0]
+    expect(evt?.origin).toBe('openclaw')
+    expect(evt?.record_kind).toBe('install_scan')
   })
 
   it('close() removes all listeners', () => {

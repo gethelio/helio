@@ -889,6 +889,8 @@ describe('GET /api/events', () => {
       dry_run: false,
       matched_rule: null,
       matched_rule_index: null,
+      record_kind: 'tool_call',
+      origin: 'mcp',
     })
 
     const eventData = await readWithTimeout(1000)
