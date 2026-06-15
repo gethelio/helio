@@ -16,6 +16,9 @@ const originSchema = z
   .regex(/^[a-z0-9_-]{1,64}$/, 'origin must match ^[a-z0-9_-]{1,64}$')
   .default('sideband')
 
+// Reserved keys that have their own audit column (currently `agent_id`) are rejected
+// at the service layer (GovernanceService.evaluate/installScan), which also covers
+// direct embedders — so there is intentionally no route-level guard here.
 const metadataSchema = z.record(z.string(), z.unknown()).nullish()
 
 const toolDefinitionSchema = z.object({
