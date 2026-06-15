@@ -105,6 +105,10 @@ The dashboard provides two views for audit data:
 - Upstream HTTP status range (`upstream_status_min` / `upstream_status_max`)
 - Destructive flag
 - Dry-run flag
+- Origin (`mcp`, `openclaw`, or any adapter slug)
+- Record kind (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`)
+- Channel ID (`metadata.channel_id`)
+- Sender ID (`metadata.sender_id`)
 
 ## CLI Export
 
