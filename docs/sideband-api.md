@@ -327,7 +327,7 @@ Searchable, filtered, paginated audit log.
 | `channel_id`          | —       | —              | Filter by `metadata.channel_id` (adapter-supplied).                                           |
 | `sender_id`           | —       | —              | Filter by `metadata.sender_id` (adapter-supplied).                                            |
 
-`tool` uses substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, `origin`, `record_kind`, `channel_id`, and `sender_id` use exact equality matching.
+`tool`, `origin`, `channel_id`, and `sender_id` use substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, and `record_kind` use exact equality matching.
 
 **Response (200):**
 

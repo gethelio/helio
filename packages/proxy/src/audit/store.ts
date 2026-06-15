@@ -200,16 +200,16 @@ function buildWhereClause(filters: AuditQueryFilters): {
     params.push(filters.record_kind)
   }
   if (filters.origin !== undefined) {
-    conditions.push('origin = ?')
-    params.push(filters.origin)
+    conditions.push('origin LIKE ?')
+    params.push(`%${filters.origin}%`)
   }
   if (filters.channel_id !== undefined) {
-    conditions.push("json_extract(metadata, '$.channel_id') = ?")
-    params.push(filters.channel_id)
+    conditions.push("json_extract(metadata, '$.channel_id') LIKE ?")
+    params.push(`%${filters.channel_id}%`)
   }
   if (filters.sender_id !== undefined) {
-    conditions.push("json_extract(metadata, '$.sender_id') = ?")
-    params.push(filters.sender_id)
+    conditions.push("json_extract(metadata, '$.sender_id') LIKE ?")
+    params.push(`%${filters.sender_id}%`)
   }
   if (filters.session_id !== undefined) {
     conditions.push('session_id = ?')

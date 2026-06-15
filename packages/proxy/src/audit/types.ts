@@ -110,9 +110,9 @@ export interface AuditQueryFilters {
   readonly record_kind?: string
   /** Filter by enforcement origin (e.g. 'mcp', 'openclaw'). */
   readonly origin?: string
-  /** Filter by metadata.channel_id (adapter-supplied; JSON-extracted, exact match). */
+  /** Filter by metadata.channel_id (adapter-supplied; JSON-extracted, substring match). */
   readonly channel_id?: string
-  /** Filter by metadata.sender_id (adapter-supplied; JSON-extracted, exact match). */
+  /** Filter by metadata.sender_id (adapter-supplied; JSON-extracted, substring match). */
   readonly sender_id?: string
   /** Include only records where upstream HTTP status is >= this value. */
   readonly upstream_status_min?: number

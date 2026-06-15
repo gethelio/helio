@@ -840,6 +840,35 @@ CREATE TABLE IF NOT EXISTS audit_records (
       // alice's record must not appear
       expect(result.records.find((r) => r.id === aliceId)).toBeUndefined()
     })
+
+    it('matches origin by substring (partial input narrows as you type)', () => {
+      const store = createStore()
+      store.insert(makeRecord({ origin: 'openclaw' }))
+      store.insert(makeRecord({ origin: 'mcp' }))
+
+      // A partial slug ("open") must match "openclaw" — substring, not exact.
+      const result = store.list({ origin: 'open' })
+      expect(result.total).toBe(1)
+      expect(result.records[0]?.origin).toBe('openclaw')
+    })
+
+    it('matches metadata.channel_id/sender_id by substring', () => {
+      const store = createStore()
+      store.insert(
+        makeRecord({
+          origin: 'openclaw',
+          metadata: { channel_id: 'C-eng-releases', sender_id: 'U-alice' },
+        }),
+      )
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C-ops', sender_id: 'U-bob' } }),
+      )
+
+      expect(store.list({ channel_id: 'eng' }).total).toBe(1)
+      expect(store.list({ sender_id: 'alice' }).records[0]?.metadata).toMatchObject({
+        sender_id: 'U-alice',
+      })
+    })
   })
 
   // -------------------------------------------------------------------------
