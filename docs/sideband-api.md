@@ -306,24 +306,28 @@ Searchable, filtered, paginated audit log.
 
 **Query parameters:**
 
-| Parameter             | Default | Range          | Description                                   |
-| --------------------- | ------- | -------------- | --------------------------------------------- |
-| `limit`               | `50`    | `[1, 1000]`    | Page size.                                    |
-| `offset`              | `0`     | `[0, ∞)`       | Number of records to skip.                    |
-| `tool`                | —       | —              | Tool name substring filter (`LIKE %tool%`).   |
-| `decision`            | —       | —              | Filter by `policy_decision`.                  |
-| `reason`              | —       | —              | Filter by `block_reason`.                     |
-| `blocked`             | —       | `true`/`false` | Filter by whether `block_reason` is non-null. |
-| `session`             | —       | —              | Filter by session ID.                         |
-| `agent`               | —       | —              | Filter by agent ID.                           |
-| `from`                | —       | ISO 8601       | Lower bound on `created_at` (inclusive).      |
-| `to`                  | —       | ISO 8601       | Upper bound on `created_at` (inclusive).      |
-| `upstream_status_min` | —       | integer        | Minimum upstream HTTP status (inclusive).     |
-| `upstream_status_max` | —       | integer        | Maximum upstream HTTP status (inclusive).     |
-| `destructive`         | —       | `true`/`false` | Filter by the `flagged_destructive` column.   |
-| `dry_run`             | —       | `true`/`false` | Filter by the `dry_run` column.               |
+| Parameter             | Default | Range          | Description                                                                                   |
+| --------------------- | ------- | -------------- | --------------------------------------------------------------------------------------------- |
+| `limit`               | `50`    | `[1, 1000]`    | Page size.                                                                                    |
+| `offset`              | `0`     | `[0, ∞)`       | Number of records to skip.                                                                    |
+| `tool`                | —       | —              | Tool name substring filter (`LIKE %tool%`).                                                   |
+| `decision`            | —       | —              | Filter by `policy_decision`.                                                                  |
+| `reason`              | —       | —              | Filter by `block_reason`.                                                                     |
+| `blocked`             | —       | `true`/`false` | Filter by whether `block_reason` is non-null.                                                 |
+| `session`             | —       | —              | Filter by session ID.                                                                         |
+| `agent`               | —       | —              | Filter by agent ID.                                                                           |
+| `from`                | —       | ISO 8601       | Lower bound on `created_at` (inclusive).                                                      |
+| `to`                  | —       | ISO 8601       | Upper bound on `created_at` (inclusive).                                                      |
+| `upstream_status_min` | —       | integer        | Minimum upstream HTTP status (inclusive).                                                     |
+| `upstream_status_max` | —       | integer        | Maximum upstream HTTP status (inclusive).                                                     |
+| `destructive`         | —       | `true`/`false` | Filter by the `flagged_destructive` column.                                                   |
+| `dry_run`             | —       | `true`/`false` | Filter by the `dry_run` column.                                                               |
+| `origin`              | —       | —              | Filter by enforcement origin (`mcp`, or an adapter slug like `openclaw`).                     |
+| `record_kind`         | —       | —              | Filter by record category (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`). |
+| `channel_id`          | —       | —              | Filter by `metadata.channel_id` (adapter-supplied).                                           |
+| `sender_id`           | —       | —              | Filter by `metadata.sender_id` (adapter-supplied).                                            |
 
-`tool` uses substring matching (`LIKE %value%`). `decision`, `reason`, `session`, and `agent` use exact equality matching.
+`tool` uses substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, `origin`, `record_kind`, `channel_id`, and `sender_id` use exact equality matching.
 
 **Response (200):**
 
@@ -366,21 +370,25 @@ Bulk export of audit records as a downloadable attachment. **Not a JSON envelope
 
 **Query parameters:**
 
-| Parameter             | Default | Description                                   |
-| --------------------- | ------- | --------------------------------------------- |
-| `format`              | `json`  | `json` or `csv`.                              |
-| `limit`               | `10000` | Maximum records. Capped at 10k.               |
-| `tool`                | —       | Filter by tool name substring.                |
-| `decision`            | —       | Filter by policy decision.                    |
-| `reason`              | —       | Filter by block reason.                       |
-| `blocked`             | —       | Filter by whether `block_reason` is non-null. |
-| `dry_run`             | —       | Filter by dry-run records (`true`/`false`).   |
-| `session`             | —       | Filter by session ID.                         |
-| `agent`               | —       | Filter by agent ID.                           |
-| `from`                | —       | Start time (ISO 8601).                        |
-| `to`                  | —       | End time (ISO 8601).                          |
-| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).     |
-| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).     |
+| Parameter             | Default | Description                                                                                   |
+| --------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `format`              | `json`  | `json` or `csv`.                                                                              |
+| `limit`               | `10000` | Maximum records. Capped at 10k.                                                               |
+| `tool`                | —       | Filter by tool name substring.                                                                |
+| `decision`            | —       | Filter by policy decision.                                                                    |
+| `reason`              | —       | Filter by block reason.                                                                       |
+| `blocked`             | —       | Filter by whether `block_reason` is non-null.                                                 |
+| `dry_run`             | —       | Filter by dry-run records (`true`/`false`).                                                   |
+| `session`             | —       | Filter by session ID.                                                                         |
+| `agent`               | —       | Filter by agent ID.                                                                           |
+| `from`                | —       | Start time (ISO 8601).                                                                        |
+| `to`                  | —       | End time (ISO 8601).                                                                          |
+| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).                                                     |
+| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).                                                     |
+| `origin`              | —       | Filter by enforcement origin (`mcp`, or an adapter slug like `openclaw`).                     |
+| `record_kind`         | —       | Filter by record category (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`). |
+| `channel_id`          | —       | Filter by `metadata.channel_id` (adapter-supplied).                                           |
+| `sender_id`           | —       | Filter by `metadata.sender_id` (adapter-supplied).                                            |
 
 See [Audit Trail → Dashboard API Export](./audit.md#dashboard-api-export) for full context and examples.
 
