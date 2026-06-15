@@ -78,6 +78,45 @@ describe('ActionCard', () => {
     expect(card?.className).toContain('border-l-red-400')
   })
 
+  it('shows origin and kind chip on the feed card summary (#16)', () => {
+    render(
+      <ActionCard
+        record={{ ...baseRecord, origin: 'openclaw', record_kind: 'install_scan' }}
+        expanded={false}
+        onToggle={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('OpenClaw')).toBeTruthy()
+    expect(screen.getByText('Install Scan')).toBeTruthy()
+  })
+
+  it('shows channel/sender in expanded detail when present (#16)', () => {
+    const expandedRecord: AuditRecord = {
+      ...baseRecord,
+      tool_input: {},
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: null,
+      upstream_error: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      block_reason: null,
+      created_at: new Date().toISOString(),
+      metadata: { channel_id: 'C1', sender_id: 'U1' },
+    }
+    render(
+      <ActionCard
+        record={baseRecord}
+        expanded={true}
+        onToggle={vi.fn()}
+        expandedRecord={expandedRecord}
+      />,
+    )
+    expect(screen.getByText(/C1/)).toBeTruthy()
+    expect(screen.getByText(/U1/)).toBeTruthy()
+  })
+
   it('truncates oversized detail payloads with an inline note', () => {
     const huge = 'x'.repeat(9_000)
     const expandedRecord: AuditRecord = {

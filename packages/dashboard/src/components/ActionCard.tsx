@@ -3,6 +3,7 @@ import type { AuditRecord, ActionEvent } from '../types'
 import { timeAgo, truncateId, formatLatency } from '../utils'
 import { PolicyBadge } from './PolicyBadge'
 import { DetailSection } from './DetailSection'
+import { OriginBadge } from './OriginBadge'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,6 +110,8 @@ export const ActionCard = memo(function ActionCard({
           {truncateId(record.agent_id ?? record.session_id)}
         </span>
 
+        <OriginBadge origin={record.origin} recordKind={record.record_kind} />
+
         <PolicyBadge
           policyDecision={record.policy_decision}
           blockReason={record.block_reason}
@@ -207,6 +210,22 @@ export const ActionCard = memo(function ActionCard({
                   </span>
                 </DetailSection>
               )}
+
+              {/* Adapter context (channel/sender from adapter metadata) */}
+              {detail.metadata &&
+                (typeof detail.metadata.channel_id === 'string' ||
+                  typeof detail.metadata.sender_id === 'string') && (
+                  <DetailSection label="Adapter Context">
+                    <div className="space-y-0.5 text-xs text-gray-600">
+                      {typeof detail.metadata.channel_id === 'string' && (
+                        <p>Channel: {detail.metadata.channel_id}</p>
+                      )}
+                      {typeof detail.metadata.sender_id === 'string' && (
+                        <p>Sender: {detail.metadata.sender_id}</p>
+                      )}
+                    </div>
+                  </DetailSection>
+                )}
 
               {/* Duration breakdown */}
               <DetailSection label="Duration">
