@@ -27,6 +27,20 @@ function defaultProps() {
   } as const
 }
 
+type RenderBarOverrides = Omit<Partial<Parameters<typeof AuditFilterBar>[0]>, 'filters'> & {
+  filters?: Partial<Parameters<typeof AuditFilterBar>[0]['filters']>
+}
+
+function renderBar(overrides: RenderBarOverrides = {}) {
+  const base = defaultProps()
+  const props = {
+    ...base,
+    ...overrides,
+    filters: { ...base.filters, ...(overrides.filters ?? {}) },
+  }
+  return render(<AuditFilterBar {...props} />)
+}
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
@@ -179,5 +193,69 @@ describe('AuditFilterBar', () => {
     if (!lastAll) throw new Error('no "All" buttons found')
     fireEvent.click(lastAll)
     expect(props.setBulkFilters).toHaveBeenCalledWith({ from: '', to: '' })
+  })
+
+  it('exposes an Install Denied block-reason option (#16)', () => {
+    renderBar()
+    expect(screen.getByRole('option', { name: 'Install Denied' })).toBeTruthy()
+  })
+
+  it('renders an origin free-text input and a record-kind select, calling setFilter (#16)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    fireEvent.change(screen.getByLabelText('Origin'), { target: { value: 'some_future_adapter' } })
+    expect(setFilter).toHaveBeenCalledWith('origin', 'some_future_adapter')
+    fireEvent.change(screen.getByLabelText('Record Kind'), { target: { value: 'install_scan' } })
+    expect(setFilter).toHaveBeenCalledWith('record_kind', 'install_scan')
+  })
+
+  it('renders channel and sender free-text inputs, calling setFilter (#16)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    fireEvent.change(screen.getByPlaceholderText('Channel ID…'), { target: { value: 'ch-abc' } })
+    expect(setFilter).toHaveBeenCalledWith('channel', 'ch-abc')
+    fireEvent.change(screen.getByPlaceholderText('Sender ID…'), { target: { value: 'user-42' } })
+    expect(setFilter).toHaveBeenCalledWith('sender', 'user-42')
+  })
+
+  it('includes origin/record_kind/channel_id/sender_id in export URL when set (#16)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('[]', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    const createObjectURLMock = vi.fn(() => 'blob:http://localhost/fake')
+    const revokeObjectURLMock = vi.fn()
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: createObjectURLMock,
+      revokeObjectURL: revokeObjectURLMock,
+    })
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined)
+
+    renderBar({
+      filters: {
+        origin: 'openclaw',
+        record_kind: 'install_scan',
+        channel: 'ch-1',
+        sender: 'user-1',
+      },
+    })
+    fireEvent.click(screen.getByText('Export'))
+    fireEvent.click(screen.getByText('Export JSON'))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const calledUrl: string = (fetchMock.mock.calls[0] as [string])[0]
+      expect(calledUrl).toContain('origin=openclaw')
+      expect(calledUrl).toContain('record_kind=install_scan')
+      expect(calledUrl).toContain('channel_id=ch-1')
+      expect(calledUrl).toContain('sender_id=user-1')
+    })
+
+    clickSpy.mockRestore()
   })
 })
