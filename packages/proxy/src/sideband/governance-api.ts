@@ -8,7 +8,7 @@ import { formatZodErrors } from '../util/format-zod-errors.js'
 
 // ---------------------------------------------------------------------------
 // Request schemas (issue #12). snake_case crosses the wire; the contract is
-// framework-neutral (D13) — no adapter-specific field names or enums.
+// framework-neutral — no adapter-specific field names or enums.
 // ---------------------------------------------------------------------------
 
 const originSchema = z
@@ -67,7 +67,7 @@ const resolveBody = z.object({
   scope: z.enum(['once', 'always']).optional(),
 })
 
-/** Max serialized size of the `metadata` object (D11/D15). */
+/** Max serialized size of the `metadata` object. */
 const MAX_METADATA_BYTES = 4 * 1_024
 
 // ---------------------------------------------------------------------------
@@ -192,7 +192,7 @@ function metadataTooLarge(metadata: Record<string, unknown> | null | undefined):
 }
 
 /**
- * SHA-256 over the canonical JSON of the semantic /audit fields (D5). Key
+ * SHA-256 over the canonical JSON of the semantic /audit fields. Key
  * order, whitespace, and omitted-vs-default fields cannot produce spurious
  * idempotency conflicts; a retry that recomputes duration_ms is an adapter bug
  * and correctly surfaces as a conflict.

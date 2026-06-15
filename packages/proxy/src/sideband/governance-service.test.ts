@@ -262,7 +262,7 @@ describe('GovernanceService.evaluate', () => {
     expect(approvalRouter?.getTicket(approval.id)?.channel_name).toBe('native:openclaw')
   })
 
-  describe('drift guard (D6)', () => {
+  describe('drift guard', () => {
     it('detects drift across two evaluates and gates per on_tool_drift: block', () => {
       const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
       const { service } = makeService({ policy })
@@ -286,7 +286,7 @@ describe('GovernanceService.evaluate', () => {
     })
   })
 
-  describe('memory budgets (D15)', () => {
+  describe('memory budgets', () => {
     it('rejects tool_input over 64 KiB with 413', () => {
       const { service } = makeService()
       const big = 'x'.repeat(70 * 1024)
@@ -740,7 +740,7 @@ describe('GovernanceService approvals and deadlines', () => {
 })
 
 // ---------------------------------------------------------------------------
-// actual_amount validation (§4 policy) and memory-budget overshoot
+// actual_amount validation and memory-budget overshoot
 // ---------------------------------------------------------------------------
 
 describe('GovernanceService /audit validation and budgets', () => {

@@ -9,10 +9,10 @@
 //   /approval/:id/resolve → record a natively-handled approval
 //
 // This service owns the decision pipeline reuse (shared with the MCP path),
-// the pending-evaluation registry with TTL + memory budgets (D4/D15), per-
-// origin drift caches (D6), idempotent finalize semantics (D5), and the
-// native-approval deadline rules (D10). It deliberately holds NO HTTP concern;
-// the route layer (governance-api.ts) validates and adapts.
+// the pending-evaluation registry with TTL + memory budgets, per-origin drift
+// caches, idempotent finalize semantics, and the native-approval deadline
+// rules. It deliberately holds NO HTTP concern; the route layer
+// (governance-api.ts) validates and adapts.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from 'node:crypto'
@@ -37,7 +37,7 @@ import type { SpendLimiter } from '../policy/spend-limiter.js'
 import { GovernanceConfigError } from './errors.js'
 
 // ---------------------------------------------------------------------------
-// Memory budgets (D15) — constants in v1, tunable later without contract change
+// Memory budgets (issue #12) — constants in v1, tunable later without contract change
 // ---------------------------------------------------------------------------
 
 const MAX_ORIGINS = 32
@@ -56,7 +56,7 @@ const SWEEP_INTERVAL_MS = 30_000
 // Wire-facing types (snake_case crosses the boundary; the route layer maps)
 // ---------------------------------------------------------------------------
 
-/** The outcome vocabulary adapters branch on (D8) — never internal rule actions. */
+/** The outcome vocabulary adapters branch on — never internal rule actions. */
 export type WireDecision =
   | 'allow'
   | 'deny'
@@ -181,9 +181,9 @@ export interface GovernanceServiceOptions {
   readonly now?: () => number
   /** Sweep interval (ms). 0 disables the periodic GC backstop. Default 30s. */
   readonly sweepIntervalMs?: number
-  /** Max pending evaluations (count). Default 10,000 (D15). Overridable for tests. */
+  /** Max pending evaluations (count). Default 10,000. Overridable for tests. */
   readonly maxPending?: number
-  /** Max pending-evaluation footprint (serialized bytes). Default 64 MiB (D15). */
+  /** Max pending-evaluation footprint (serialized bytes). Default 64 MiB. */
   readonly maxPendingBytes?: number
   /** Max distinct sender_id limit keys (issue #13). Default 50,000. Overridable for tests. */
   readonly maxSenderKeys?: number
@@ -214,7 +214,7 @@ export class GovernanceService {
   private readonly tombstones = new Map<string, Tombstone>()
   private readonly caches = new Map<string, ToolAnnotationCache>()
   /** Native approval ticket id → its pending evaluation id, for on-access
-   * deadline enforcement on the resolve path (R4-1). */
+   * deadline enforcement on the resolve path. */
   private readonly ticketToEvaluation = new Map<string, string>()
   private pendingBytes = 0
   private sweepTimer: ReturnType<typeof setInterval> | null = null
@@ -265,7 +265,7 @@ export class GovernanceService {
       return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
     }
 
-    // D15 budgets: tool_input size, origin cardinality, pending pressure.
+    // Memory budgets: tool_input size, origin cardinality, pending pressure.
     const inputBytes = byteLength(req.arguments ?? {})
     if (inputBytes > MAX_TOOL_INPUT_BYTES) {
       return { status: 413, body: { error: 'tool_input_too_large' } }
@@ -286,7 +286,7 @@ export class GovernanceService {
     const cache = this.cacheFor(req.origin)
     const toolName = req.tool.name
 
-    // Drift guard (D6): merge the supplied definition into the per-origin
+    // Drift guard: merge the supplied definition into the per-origin
     // cache. A first-seen tool past the per-origin cap is refused fail-closed;
     // updates to already-baselined tools always proceed.
     const hasDefinition = definitionProvided(req.tool)
@@ -374,7 +374,7 @@ export class GovernanceService {
       responseBody['tool_drift'] = { changes: pipeline.driftEvent.changes }
     }
 
-    // Terminal decisions (D5): audit immediately, tombstone, no pending entry.
+    // Terminal decisions: audit immediately, tombstone, no pending entry.
     if (isTerminalAtEvaluate(wire)) {
       const auditId = this.writeAudit({
         timestampIso,
@@ -469,7 +469,7 @@ export class GovernanceService {
   audit(req: AuditInput, payloadHash: string): ServiceResult {
     const id = req.evaluation_id
 
-    // Idempotency: a prior finalize leaves a tombstone (D5 response matrix).
+    // Idempotency: a prior finalize leaves a tombstone.
     const tomb = this.tombstones.get(id)
     if (tomb) {
       if (tomb.finalizedBy === 'expired') {
@@ -502,13 +502,13 @@ export class GovernanceService {
       return { status: 404, body: { error: 'evaluation_unknown' } }
     }
 
-    // On-access deadline enforcement (R4-1): apply any crossed deadline before
+    // On-access deadline enforcement: apply any crossed deadline before
     // handling, so behavior is deterministic regardless of sweep timing.
     if (this.enforceDeadlines(entry) === 'expired') {
       return { status: 404, body: { error: 'evaluation_expired' } }
     }
 
-    // require_approval must be resolved before auditing (D10). Retryable.
+    // require_approval must be resolved before auditing. Retryable.
     let approvalStatus: string | null = null
     let approvedBy: string | null = null
     if (entry.approvalTicketId) {
@@ -521,7 +521,7 @@ export class GovernanceService {
       approvedBy = ticket.resolved_by ?? null
     }
 
-    // Validate the optional post-hoc spend override (§4 actual_amount policy).
+    // Validate the optional post-hoc spend override.
     // Done before any state mutation: a bad value is an adapter bug we reject
     // explicitly rather than letting it throw inside the limiter.
     if (req.actual_amount !== undefined) {
@@ -535,7 +535,7 @@ export class GovernanceService {
 
     const callHappened = req.status === 'success' || req.status === 'error'
 
-    // Consume limit counters now (D3) — only when the call actually executed.
+    // Consume limit counters now — only when the call actually executed.
     let limitsChain: Record<string, unknown> | undefined
     if (callHappened && entry.limitPlan) {
       limitsChain = this.commitLimit(entry.limitPlan, req.actual_amount)
@@ -581,7 +581,7 @@ export class GovernanceService {
   }
 
   // -------------------------------------------------------------------------
-  // POST /install-scan (observational until #13 — D9)
+  // POST /install-scan — evaluates install-time policy (issue #13)
   // -------------------------------------------------------------------------
 
   installScan(req: InstallScanInput): ServiceResult {
@@ -666,7 +666,7 @@ export class GovernanceService {
   }
 
   // -------------------------------------------------------------------------
-  // POST /approval/:id/resolve (D10)
+  // POST /approval/:id/resolve
   // -------------------------------------------------------------------------
 
   resolveApproval(ticketId: string, req: ResolveApprovalInput): ServiceResult {
@@ -681,7 +681,7 @@ export class GovernanceService {
       return { status: 409, body: { error: 'not_a_native_ticket' } }
     }
 
-    // On-access deadline enforcement (R4-1): a resolve arriving after the
+    // On-access deadline enforcement: a resolve arriving after the
     // ticket/evaluation deadline but before the sweep must not succeed. Apply
     // any crossed deadline to the linked evaluation first, then read the ticket
     // post-transition — exactly as the /audit path does.
@@ -707,7 +707,7 @@ export class GovernanceService {
   }
 
   // -------------------------------------------------------------------------
-  // Sweep — GC backstop for callers that never return (D4/D10/R4-1)
+  // Sweep — GC backstop for callers that never return
   // -------------------------------------------------------------------------
 
   sweep(): void {
@@ -1063,7 +1063,7 @@ interface WriteAuditArgs {
 }
 
 function deriveBlockReason(args: WriteAuditArgs): string | null {
-  if (args.recordKind === 'evaluation_expired') return null // bypass signal, not a block (F4)
+  if (args.recordKind === 'evaluation_expired') return null // bypass signal, not a block
   // Install-time denials get their own block_reason so #16 can discriminate them
   // and so they count into blocked_total (issue #13).
   if (args.recordKind === 'install_scan') return args.wire === 'deny' ? 'install_denied' : null

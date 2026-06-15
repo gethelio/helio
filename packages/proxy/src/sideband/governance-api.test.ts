@@ -179,7 +179,7 @@ describe('sideband governance routes', () => {
     expect(res.status).toBe(403)
   })
 
-  describe('scoped tokens (F6)', () => {
+  describe('scoped tokens', () => {
     it('governance routes require the adapter token, not the SDK token', async () => {
       const ctx = setup({ tokens: true })
       store = ctx.store
