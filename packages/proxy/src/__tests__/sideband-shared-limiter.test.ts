@@ -72,4 +72,50 @@ describe('sideband ↔ MCP shared rate limiter', () => {
     rateLimiter.close()
     service.close()
   })
+
+  it('keys rate limits by sender_id across evaluate→audit loops, independently per sender', () => {
+    const policy = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      rules: [
+        {
+          name: 'rl',
+          match: { tool: 'send' },
+          action: 'rate_limit',
+          limits: { max_calls: 2, window: '60s', key: 'sender_id' },
+        },
+      ],
+    }).policy
+
+    const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+    const service = new GovernanceService({ policy, rateLimiter, sweepIntervalMs: 0 })
+
+    const runFor = (sender: string) => {
+      const ev = service.evaluate({
+        origin: 'openclaw',
+        agent_id: null,
+        session_id: null,
+        tool: { name: 'send' },
+        arguments: {},
+        metadata: { sender_id: sender },
+      })
+      const decision = ev.body['decision'] as string
+      if (decision === 'allow') {
+        service.audit({ evaluation_id: ev.body['evaluation_id'] as string, status: 'success' }, 'h')
+      }
+      return decision
+    }
+
+    // U1 consumes both of its slots, then is limited; U2 is on its own budget.
+    expect(runFor('U1')).toBe('allow')
+    expect(runFor('U1')).toBe('allow')
+    expect(runFor('U1')).toBe('rate_limited')
+    expect(rateLimiter.getKeyState('sender:U1')?.current).toBe(2)
+
+    expect(runFor('U2')).toBe('allow')
+    expect(rateLimiter.getKeyState('sender:U2')?.current).toBe(1)
+
+    rateLimiter.close()
+    service.close()
+  })
 })

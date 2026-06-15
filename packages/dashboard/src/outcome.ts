@@ -46,6 +46,11 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       return 'client_disconnected'
     case 'shutdown_cancelled':
       return 'shutdown_cancelled'
+    case 'install_denied':
+      // Install-time denial (issue #13). Rendered as a deny; #16 may add a
+      // dedicated chip. Pinned here so a blocked install never falls through to
+      // "allow" regardless of policy_decision.
+      return 'deny'
     default:
       break
   }

@@ -82,6 +82,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly spendLimiter: SpendLimiter | undefined
   private readonly annotationCache = new ToolAnnotationCache()
   private agentKeyWarned = false
+  private senderKeyWarned = false
 
   constructor(inner: McpForwarder, policy: CompiledPolicy, options?: GovernedForwarderOptions) {
     this.inner = inner
@@ -680,7 +681,7 @@ export class GovernedForwarder implements McpForwarder {
 
   /** Construct a limit bucket key based on the configured key type. */
   private buildLimitKey(
-    keyType: 'tool' | 'agent' | 'session' | undefined,
+    keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
     toolName: string,
     request: McpRequest,
   ): string {
@@ -694,6 +695,18 @@ export class GovernedForwarder implements McpForwarder {
           // eslint-disable-next-line no-console -- Intentional operational warning
           console.error(
             '[helio] Warning: limits.key "agent" is not yet supported, falling back to "tool"',
+          )
+        }
+        return `tool:${toolName}`
+      case 'sender_id':
+        // sender_id is an adapter (host-enforced) context field — absent on the
+        // MCP path, so fall back to tool scope. Config validation rejects this
+        // combination when the sideband is disabled (issue #13).
+        if (!this.senderKeyWarned) {
+          this.senderKeyWarned = true
+          // eslint-disable-next-line no-console -- Intentional operational warning
+          console.error(
+            '[helio] Warning: limits.key "sender_id" has no sender on the MCP path, falling back to "tool"',
           )
         }
         return `tool:${toolName}`

@@ -10,6 +10,7 @@ import type {
   CompiledPolicyRule,
   InputCondition,
   MatchContext,
+  MetadataCondition,
   ToolAnnotationHints,
   ToolMatcher,
 } from './types.js'
@@ -157,6 +158,42 @@ export function matchEnvironment(required: string, ctx: MatchContext): boolean {
   return ctx.environment === required
 }
 
+/**
+ * Test whether ALL metadata conditions match against the adapter-supplied context
+ * (issue #13 — `match.metadata.*`). Conditions are AND'd; every condition must pass.
+ *
+ * Returns false when `ctx.metadata` is absent and any condition exists — metadata is
+ * only present on the sideband (host-enforced) path, so a metadata rule is skipped
+ * (NOT denied) on the MCP path. Keys are read flat (no JSONPath traversal); the
+ * virtual `agent_id` key is merged into `ctx.metadata` upstream by the decision
+ * pipeline.
+ */
+export function matchMetadata(
+  conditions: readonly MetadataCondition[],
+  ctx: MatchContext,
+): boolean {
+  if (conditions.length === 0) return true
+  if (ctx.metadata === undefined) return false
+
+  for (const condition of conditions) {
+    const value = ctx.metadata[condition.key]
+    // Reuse the shared scalar evaluator; metadata reads a flat key rather than a
+    // JSONPath, so adapt the condition shape (path is irrelevant here).
+    const matched = evaluateCondition(
+      {
+        path: condition.key,
+        operator: condition.operator,
+        value: condition.value,
+        regex: condition.regex,
+      },
+      value,
+    )
+    if (!matched) return false
+  }
+
+  return true
+}
+
 // ---------------------------------------------------------------------------
 // Top-level rule matcher
 // ---------------------------------------------------------------------------
@@ -175,6 +212,7 @@ export function matchRule(rule: CompiledPolicyRule, ctx: MatchContext): boolean 
   if (match.annotations !== undefined && !matchAnnotations(match.annotations, ctx)) return false
   if (match.input !== undefined && !matchInput(match.input, ctx)) return false
   if (match.environment !== undefined && !matchEnvironment(match.environment, ctx)) return false
+  if (match.metadata !== undefined && !matchMetadata(match.metadata, ctx)) return false
 
   return true
 }

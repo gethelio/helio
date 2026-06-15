@@ -57,6 +57,7 @@ function makeService(opts?: {
   withApprovals?: boolean
   withEvidence?: boolean
   ttlMs?: number
+  maxSenderKeys?: number
 }): ServiceHarness {
   let time = 1_000_000
   const now = () => time
@@ -95,6 +96,7 @@ function makeService(opts?: {
     ttlMs: opts?.ttlMs ?? 600_000,
     now,
     sweepIntervalMs: 0,
+    ...(opts?.maxSenderKeys !== undefined && { maxSenderKeys: opts.maxSenderKeys }),
   })
 
   return { service, records, advance, rateLimiter, spendLimiter, approvalRouter, evidenceStore }
@@ -119,6 +121,67 @@ function auditInput(id: string, overrides?: Partial<AuditInput>): AuditInput {
 // ---------------------------------------------------------------------------
 // evaluate
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// match.metadata + reserved-key rejection (issue #13)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — match.metadata threading', () => {
+  const denyOnChannel = compile({
+    default: 'allow',
+    rules: [{ match: { metadata: { channel_id: 'C1' } }, action: 'deny' }],
+  })
+
+  it('a metadata-keyed rule denies when the matching context is supplied', () => {
+    const { service } = makeService({ policy: denyOnChannel })
+    const res = service.evaluate(evalInput({ metadata: { channel_id: 'C1' } }))
+    expect(res.body).toMatchObject({ decision: 'deny' })
+  })
+
+  it('the same rule is inert when the context differs / is absent', () => {
+    const { service } = makeService({ policy: denyOnChannel })
+    expect(service.evaluate(evalInput({ metadata: { channel_id: 'C2' } })).body).toMatchObject({
+      decision: 'allow',
+    })
+    expect(service.evaluate(evalInput({ metadata: null })).body).toMatchObject({
+      decision: 'allow',
+    })
+  })
+
+  it('matches the virtual agent_id key against the request agent_id', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ match: { metadata: { agent_id: 'main' } }, action: 'deny' }],
+    })
+    const { service } = makeService({ policy })
+    expect(service.evaluate(evalInput({ agent_id: 'main', metadata: null })).body).toMatchObject({
+      decision: 'deny',
+    })
+    expect(service.evaluate(evalInput({ agent_id: 'other', metadata: null })).body).toMatchObject({
+      decision: 'allow',
+    })
+  })
+
+  it('rejects a reserved agent_id key inside metadata at the SERVICE layer', () => {
+    const { service } = makeService()
+    const res = service.evaluate(evalInput({ metadata: { agent_id: 'spoofed' } }))
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'reserved_metadata_key', key: 'agent_id' })
+  })
+
+  it('rejects a reserved agent_id key inside install-scan metadata too', () => {
+    const { service } = makeService()
+    const res = service.installScan({
+      origin: 'openclaw',
+      agent_id: 'main',
+      session_id: null,
+      package: { name: 'left-pad', source: 'npm' },
+      metadata: { agent_id: 'spoofed' },
+    })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'reserved_metadata_key', key: 'agent_id' })
+  })
+})
 
 describe('GovernanceService.evaluate', () => {
   it('returns allow for a default-allow policy and creates a pending entry', () => {
@@ -199,7 +262,7 @@ describe('GovernanceService.evaluate', () => {
     expect(approvalRouter?.getTicket(approval.id)?.channel_name).toBe('native:openclaw')
   })
 
-  describe('drift guard (D6)', () => {
+  describe('drift guard', () => {
     it('detects drift across two evaluates and gates per on_tool_drift: block', () => {
       const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
       const { service } = makeService({ policy })
@@ -223,7 +286,7 @@ describe('GovernanceService.evaluate', () => {
     })
   })
 
-  describe('memory budgets (D15)', () => {
+  describe('memory budgets', () => {
     it('rejects tool_input over 64 KiB with 413', () => {
       const { service } = makeService()
       const big = 'x'.repeat(70 * 1024)
@@ -343,6 +406,249 @@ describe('GovernanceService.audit', () => {
 })
 
 // ---------------------------------------------------------------------------
+// deny_install (issue #13)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService.installScan — deny_install', () => {
+  const blockEvilNpm = compile({
+    default: 'allow',
+    rules: [],
+    install: {
+      default: 'allow',
+      rules: [
+        { name: 'block-evil', match: { name: 'evil-*', source: 'npm' }, action: 'deny_install' },
+      ],
+    },
+  })
+
+  const scan = (
+    service: GovernanceService,
+    pkg: { name: string; source?: string },
+    metadata: Record<string, unknown> | null = null,
+  ) =>
+    service.installScan({
+      origin: 'openclaw',
+      agent_id: 'main',
+      session_id: null,
+      package: pkg,
+      metadata,
+    })
+
+  it('denies a matching install — decision deny, install_denied, policy_decision deny', () => {
+    const { service, records } = makeService({ policy: blockEvilNpm })
+    const res = scan(service, { name: 'evil-pkg', source: 'npm' })
+    expect(res.status).toBe(200)
+    expect(res.body['decision']).toBe('deny')
+    expect(res.body['matched_rule']).toBe('block-evil')
+    const rec = records.at(-1)?.record
+    // policy_decision MUST be 'deny' (not 'deny_install'), else the dashboard
+    // renders the blocked install as "allow".
+    expect(rec?.policy_decision).toBe('deny')
+    expect(rec?.block_reason).toBe('install_denied')
+    expect(rec?.record_kind).toBe('install_scan')
+  })
+
+  it('allows a non-matching package name', () => {
+    const { service } = makeService({ policy: blockEvilNpm })
+    expect(scan(service, { name: 'left-pad', source: 'npm' }).body['decision']).toBe('allow')
+  })
+
+  it('respects the source matcher (evil-* but pip → no match)', () => {
+    const { service } = makeService({ policy: blockEvilNpm })
+    expect(scan(service, { name: 'evil-pkg', source: 'pip' }).body['decision']).toBe('allow')
+  })
+
+  it('honors install.default: deny', () => {
+    const denyAll = compile({
+      default: 'allow',
+      rules: [],
+      install: { default: 'deny', rules: [] },
+    })
+    const { service, records } = makeService({ policy: denyAll })
+    const res = scan(service, { name: 'anything', source: 'npm' })
+    expect(res.body['decision']).toBe('deny')
+    expect(records.at(-1)?.record.block_reason).toBe('install_denied')
+  })
+
+  it('can gate installs on metadata (sender_id)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [],
+      install: {
+        default: 'allow',
+        rules: [{ match: { metadata: { sender_id: 'U9' } }, action: 'deny_install' }],
+      },
+    })
+    const { service } = makeService({ policy })
+    expect(scan(service, { name: 'x', source: 'npm' }, { sender_id: 'U9' }).body['decision']).toBe(
+      'deny',
+    )
+    expect(scan(service, { name: 'x', source: 'npm' }, { sender_id: 'U1' }).body['decision']).toBe(
+      'allow',
+    )
+  })
+
+  it('still allows with the observational reason when no install rules exist', () => {
+    const { service } = makeService()
+    const res = scan(service, { name: 'left-pad', source: 'npm' })
+    expect(res.body['decision']).toBe('allow')
+    expect(res.body['reason']).toBe('no install-time rules defined')
+  })
+
+  it('picks up install rules added by a hot-reload (updatePolicy)', () => {
+    const { service } = makeService()
+    expect(scan(service, { name: 'evil-pkg', source: 'npm' }).body['decision']).toBe('allow')
+    service.updatePolicy(blockEvilNpm)
+    expect(scan(service, { name: 'evil-pkg', source: 'npm' }).body['decision']).toBe('deny')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sender_id limit scoping (issue #13)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — sender_id keyed limits', () => {
+  const rateBySender = compile({
+    default: 'allow',
+    rules: [
+      {
+        match: { tool: 'send' },
+        action: 'rate_limit',
+        limits: { max_calls: 1, window: '1m', key: 'sender_id' },
+      },
+    ],
+  })
+
+  function consume(service: GovernanceService, sender: string) {
+    const ev = service.evaluate(evalInput({ metadata: { sender_id: sender } }))
+    const id = ev.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+    return ev
+  }
+
+  it('keys the rate bucket by sender_id, not tool', () => {
+    const { service, rateLimiter } = makeService({ policy: rateBySender, withLimiters: true })
+    consume(service, 'U1')
+    expect(rateLimiter?.getKeyState('sender:U1')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('tool:send')).toBeUndefined()
+  })
+
+  it('gives different senders independent buckets', () => {
+    const { service } = makeService({ policy: rateBySender, withLimiters: true })
+    consume(service, 'U1') // U1 now at its limit
+    // U1's next call is rate_limited; U2 is unaffected.
+    expect(service.evaluate(evalInput({ metadata: { sender_id: 'U1' } })).body['decision']).toBe(
+      'rate_limited',
+    )
+    expect(service.evaluate(evalInput({ metadata: { sender_id: 'U2' } })).body['decision']).toBe(
+      'allow',
+    )
+  })
+
+  it('falls back to sender:unknown when sender_id is absent', () => {
+    const { service, rateLimiter } = makeService({ policy: rateBySender, withLimiters: true })
+    const ev = service.evaluate(evalInput({ metadata: null }))
+    const id = ev.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+    expect(rateLimiter?.getKeyState('sender:unknown')?.current).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sender-key reservation registry (issue #13)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — sender-key cardinality registry', () => {
+  // Rooms enough peek headroom that the limiter never blocks; the registry is
+  // what we're exercising.
+  const rateBySender = compile({
+    default: 'allow',
+    rules: [
+      {
+        match: { tool: 'send' },
+        action: 'rate_limit',
+        limits: { max_calls: 5, window: '1m', key: 'sender_id' },
+      },
+    ],
+  })
+
+  const evalSender = (sender: string) => evalInput({ metadata: { sender_id: sender } })
+
+  it('admits distinct senders up to the cap, then fails new ones closed with 503', () => {
+    const { service } = makeService({ policy: rateBySender, withLimiters: true, maxSenderKeys: 1 })
+    // First sender reserves the only slot.
+    expect(service.evaluate(evalSender('U1')).status).toBe(200)
+    // A different sender would mint a second key → fail closed.
+    const res = service.evaluate(evalSender('U2'))
+    expect(res.status).toBe(503)
+    expect(res.body['error']).toBe('limit_capacity_exhausted')
+    // The already-reserved sender keeps working (not a new key).
+    expect(service.evaluate(evalSender('U1')).status).toBe(200)
+  })
+
+  it('does not gate tool/session-keyed limits (no cross-door starvation)', () => {
+    const sessionRule = compile({
+      default: 'allow',
+      rules: [
+        {
+          match: { tool: 'send' },
+          action: 'rate_limit',
+          limits: { max_calls: 5, window: '1m', key: 'session' },
+        },
+      ],
+    })
+    const { service } = makeService({ policy: sessionRule, withLimiters: true, maxSenderKeys: 1 })
+    // Many distinct sessions never consume sender-registry slots.
+    expect(service.evaluate(evalInput({ session_id: 'sess-a' })).status).toBe(200)
+    expect(service.evaluate(evalInput({ session_id: 'sess-b' })).status).toBe(200)
+    expect(service.evaluate(evalInput({ session_id: 'sess-c' })).status).toBe(200)
+  })
+
+  it('releases a reservation when its evaluation expires (sweep prune)', () => {
+    const { service, advance } = makeService({
+      policy: rateBySender,
+      withLimiters: true,
+      maxSenderKeys: 1,
+      ttlMs: 1000,
+    })
+    service.evaluate(evalSender('U1')) // reserves U1 (pending, never audited)
+    expect(service.evaluate(evalSender('U2')).status).toBe(503)
+
+    advance(2000) // U1's evaluation passes TTL
+    service.sweep() // expires the pending entry and prunes the freed key
+
+    // The slot is now free for a new sender.
+    expect(service.evaluate(evalSender('U2')).status).toBe(200)
+  })
+
+  it('lazily prunes an emptied bucket on a capacity-pressured evaluate', () => {
+    const tightRate = compile({
+      default: 'allow',
+      rules: [
+        {
+          match: { tool: 'send' },
+          action: 'rate_limit',
+          limits: { max_calls: 1, window: '1m', key: 'sender_id' },
+        },
+      ],
+    })
+    const { service, advance } = makeService({
+      policy: tightRate,
+      withLimiters: true,
+      maxSenderKeys: 1,
+    })
+    // U1 consumes its bucket.
+    const ev = service.evaluate(evalSender('U1'))
+    service.audit(auditInput(ev.body['evaluation_id'] as string), 'h')
+
+    advance(61_000) // U1's window slides; its bucket is now empty/evictable
+
+    // A new sender at cap triggers a lazy prune of the dead U1 key → admitted.
+    expect(service.evaluate(evalSender('U2')).status).toBe(200)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // approvals + deadlines
 // ---------------------------------------------------------------------------
 
@@ -434,7 +740,7 @@ describe('GovernanceService approvals and deadlines', () => {
 })
 
 // ---------------------------------------------------------------------------
-// actual_amount validation (§4 policy) and memory-budget overshoot
+// actual_amount validation and memory-budget overshoot
 // ---------------------------------------------------------------------------
 
 describe('GovernanceService /audit validation and budgets', () => {

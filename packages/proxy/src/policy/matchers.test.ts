@@ -1,8 +1,21 @@
 import { describe, it, expect } from 'vitest'
 import { compilePolicies } from './parser.js'
-import { matchRule, matchTool, matchAnnotations, matchInput, matchEnvironment } from './matchers.js'
+import {
+  matchRule,
+  matchTool,
+  matchAnnotations,
+  matchInput,
+  matchEnvironment,
+  matchMetadata,
+} from './matchers.js'
 import type { PoliciesConfig } from '../config/schema.js'
-import type { AnnotationMatch, CompiledPolicyRule, InputCondition, MatchContext } from './types.js'
+import type {
+  AnnotationMatch,
+  CompiledPolicyRule,
+  InputCondition,
+  MatchContext,
+  MetadataCondition,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +44,73 @@ function toolMatcher(rule: CompiledPolicyRule) {
   if (!matcher) throw new Error('expected a tool matcher on the compiled rule')
   return matcher
 }
+
+/** Build a metadata condition tersely. */
+function meta(
+  key: string,
+  operator: MetadataCondition['operator'],
+  value: unknown,
+  regex?: RegExp,
+): MetadataCondition {
+  return { key, operator, value, ...(regex ? { regex } : {}) }
+}
+
+// ---------------------------------------------------------------------------
+// matchMetadata (issue #13 — match.metadata.*)
+// ---------------------------------------------------------------------------
+
+describe('matchMetadata', () => {
+  it('empty condition list always matches', () => {
+    expect(matchMetadata([], ctx({}))).toBe(true)
+    expect(matchMetadata([], ctx({ metadata: { channel_id: 'C1' } }))).toBe(true)
+  })
+
+  it('returns false when metadata is absent but a condition exists (skip, not match)', () => {
+    expect(matchMetadata([meta('channel_id', 'eq', 'C1')], ctx({}))).toBe(false)
+  })
+
+  it('eq matches when the metadata key equals the value', () => {
+    const conditions = [meta('channel_id', 'eq', 'C1')]
+    expect(matchMetadata(conditions, ctx({ metadata: { channel_id: 'C1' } }))).toBe(true)
+    expect(matchMetadata(conditions, ctx({ metadata: { channel_id: 'C2' } }))).toBe(false)
+  })
+
+  it('returns false when the specific keyed field is missing from present metadata', () => {
+    expect(
+      matchMetadata([meta('sender_id', 'eq', 'U1')], ctx({ metadata: { channel_id: 'C1' } })),
+    ).toBe(false)
+  })
+
+  it('neq matches a differing present value but not a missing one', () => {
+    const conditions = [meta('sender_id', 'neq', 'U1')]
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_id: 'U2' } }))).toBe(true)
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_id: 'U1' } }))).toBe(false)
+    // absent value is not "not equal" — it's absent
+    expect(matchMetadata(conditions, ctx({ metadata: { channel_id: 'C1' } }))).toBe(false)
+  })
+
+  it('contains matches a substring of a string value', () => {
+    const conditions = [meta('sender_name', 'contains', 'ali')]
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_name: 'alice' } }))).toBe(true)
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_name: 'bob' } }))).toBe(false)
+  })
+
+  it('regex matches against a precompiled pattern', () => {
+    const conditions = [meta('sender_id', 'regex', '^U0[0-9]+$', /^U0[0-9]+$/)]
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_id: 'U07' } }))).toBe(true)
+    expect(matchMetadata(conditions, ctx({ metadata: { sender_id: 'A07' } }))).toBe(false)
+  })
+
+  it('AND-combines multiple keyed conditions', () => {
+    const conditions = [meta('channel_id', 'eq', 'C1'), meta('sender_id', 'eq', 'U1')]
+    expect(
+      matchMetadata(conditions, ctx({ metadata: { channel_id: 'C1', sender_id: 'U1' } })),
+    ).toBe(true)
+    expect(
+      matchMetadata(conditions, ctx({ metadata: { channel_id: 'C1', sender_id: 'U2' } })),
+    ).toBe(false)
+  })
+})
 
 // ---------------------------------------------------------------------------
 // matchTool

@@ -11,13 +11,19 @@ import { compilePolicies } from '../policy/parser.js'
 const SDK_TOKEN = 'sdk-token-aaaaaaaaaaaaaaaa'
 const ADAPTER_TOKEN = 'adapter-token-bbbbbbbbbbbb'
 
-function setup(opts?: { withGovernance?: boolean; tokens?: boolean }) {
+function setup(opts?: {
+  withGovernance?: boolean
+  tokens?: boolean
+  policy?: Parameters<typeof compilePolicies>[0]
+}) {
   const store = new EvidenceStore({ cleanupIntervalMs: 0 })
-  const policy = compilePolicies({
-    default: 'allow',
-    dry_run: false,
-    rules: [{ name: 'no-send', match: { tool: 'blocked' }, action: 'deny' }],
-  }).policy
+  const policy = compilePolicies(
+    opts?.policy ?? {
+      default: 'allow',
+      dry_run: false,
+      rules: [{ name: 'no-send', match: { tool: 'blocked' }, action: 'deny' }],
+    },
+  ).policy
 
   const governance =
     opts?.withGovernance === false
@@ -80,6 +86,65 @@ describe('sideband governance routes', () => {
     expect(((await res.json()) as { error: string }).error).toBe('governance_unavailable')
   })
 
+  it('gates an evaluate on match.metadata.channel_id end-to-end', async () => {
+    const ctx = setup({
+      policy: {
+        default: 'allow',
+        dry_run: false,
+        rules: [{ name: 'block-chan', match: { metadata: { channel_id: 'C1' } }, action: 'deny' }],
+      },
+    })
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const denied = await ctx.post('/evaluate', evalBody({ metadata: { channel_id: 'C1' } }))
+    expect(((await denied.json()) as { decision: string }).decision).toBe('deny')
+
+    const allowed = await ctx.post('/evaluate', evalBody({ metadata: { channel_id: 'C2' } }))
+    expect(((await allowed.json()) as { decision: string }).decision).toBe('allow')
+  })
+
+  it('denies a matching install through /install-scan end-to-end (deny_install)', async () => {
+    const ctx = setup({
+      policy: {
+        default: 'allow',
+        dry_run: false,
+        rules: [],
+        install: {
+          default: 'allow',
+          rules: [
+            {
+              name: 'block-evil',
+              match: { name: 'evil-*', source: 'npm' },
+              action: 'deny_install',
+            },
+          ],
+        },
+      },
+    })
+    store = ctx.store
+    governance = ctx.governance ?? null
+    const res = await ctx.post('/install-scan', {
+      origin: 'openclaw',
+      package: { name: 'evil-pkg', source: 'npm' },
+    })
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { decision: string; matched_rule: string }
+    expect(json.decision).toBe('deny')
+    expect(json.matched_rule).toBe('block-evil')
+  })
+
+  it('rejects a reserved agent_id key inside metadata with 400', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+    const res = await ctx.post('/evaluate', evalBody({ metadata: { agent_id: 'spoofed' } }))
+    expect(res.status).toBe(400)
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: 'reserved_metadata_key',
+    })
+  })
+
   it('rejects malformed JSON with 400', async () => {
     const ctx = setup()
     store = ctx.store
@@ -114,7 +179,7 @@ describe('sideband governance routes', () => {
     expect(res.status).toBe(403)
   })
 
-  describe('scoped tokens (F6)', () => {
+  describe('scoped tokens', () => {
     it('governance routes require the adapter token, not the SDK token', async () => {
       const ctx = setup({ tokens: true })
       store = ctx.store

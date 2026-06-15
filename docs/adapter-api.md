@@ -76,7 +76,9 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
 
 The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limit` rule that still has headroom returns `"allow"` with a `limits.rate` block; only when the bucket is exhausted does it return `"rate_limited"`. There is no `modify` decision — argument rewriting has no engine support today.
 
-**Errors:** `400` validation / invalid JSON, `401` wrong-or-missing adapter token, `403` Origin header, `413` oversized `metadata`/`tool_input`/body, `400 origin_limit_exceeded` / `400 tool_baseline_limit` / `503 evaluation_backlog_full` (memory budgets), `503 governance_unavailable` (sideband running without the service).
+**Errors:** `400` validation / invalid JSON, `401` wrong-or-missing adapter token, `403` Origin header, `413` oversized `metadata`/`tool_input`/body, `400 reserved_metadata_key` (a reserved column key — currently `agent_id` — was passed inside `metadata`; use the top-level field), `400 origin_limit_exceeded` / `400 tool_baseline_limit` / `503 evaluation_backlog_full` / `503 limit_capacity_exhausted` (memory/cardinality budgets — see below), `503 governance_unavailable` (sideband running without the service).
+
+`match.metadata.*` rules and `sender_id`-scoped limits read the `metadata` object you supply here (well-known keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`; the virtual `agent_id` comes from the top-level field). See the [Policy Guide](./policies.md#metadata).
 
 ## `POST /audit`
 
@@ -108,16 +110,35 @@ Counters are consumed here (not at `/evaluate`), and only when the call actually
 - An evaluation that is never audited expires after `sdk.evaluation_ttl` (default `10m`) into an audit record with `record_kind: "evaluation_expired"`. This is a **bypass/tamper signal**, not a normal block — surface it in monitoring.
 - Because decision and execution are separate calls, two concurrent `/evaluate`s can both peek the last limit slot and both execute. Counters stay truthful after the fact (both `/audit`s record), but the host-enforced tier cannot close this window from the proxy side.
 
+### Memory and cardinality budgets
+
+A token-bearing adapter is in the threat model, so several caller-controlled growth vectors are bounded. Breaches fail closed (the call is refused, never silently dropped):
+
+| Budget                          | Limit           | On breach                                                                 |
+| ------------------------------- | --------------- | ------------------------------------------------------------------------- |
+| Distinct origins                | 32              | `400 origin_limit_exceeded`                                               |
+| Baselined tools per origin      | 1,024           | `400 tool_baseline_limit` (first-seen only; existing tools keep updating) |
+| `tool_input` (serialized)       | 64 KiB          | `413`                                                                     |
+| `metadata` (serialized)         | 4 KiB           | `413`                                                                     |
+| Pending evaluations             | 10,000 / 64 MiB | `503 evaluation_backlog_full`                                             |
+| Distinct `sender_id` limit keys | 50,000          | `503 limit_capacity_exhausted`                                            |
+
+The `sender_id` budget is a **reservation registry**: because `sender_id` is caller-minted, a new sender key is reserved at `/evaluate` (pre-execution, so it can fail closed) and released once its limiter bucket empties. It is scoped to `sender:*` keys only, so a flood of sender ids can never starve the structural MCP path's `tool`/`session` limits — the two doors share one limiter, but only the untrusted key family is capped.
+
 ## `POST /install-scan`
 
-Observational until install-time policy ships: always returns `decision: "allow"` with `reason: "no install-time rules defined"`, and writes an audit record with `record_kind: "install_scan"`. The request/response shape is final now so adapters and the dashboard build against a stable contract.
+Evaluates a package/skill install against the operator's `policies.install` rules (see the [Policy Guide](./policies.md#install-time-policy-deny_install)). When **no** `policies.install` block is configured it stays observational — always `decision: "allow"` with `reason: "no install-time rules defined"`. With rules, a matching `deny_install` returns `decision: "deny"` and writes an audit record with `record_kind: "install_scan"` and `block_reason: "install_denied"`. Either way the call is terminal — no `/audit` follow-up is expected.
 
 ```jsonc
 // Request
-{ "origin": "openclaw", "package": { "name": "left-pad", "version": "1.3.0", "source": "npm" } }
-// Response 200
+{ "origin": "openclaw", "package": { "name": "left-pad", "version": "1.3.0", "source": "npm" }, "metadata": { "sender_id": "U7" } }
+// Response 200 (allowed)
 { "evaluation_id": "…", "decision": "allow", "reason": "no install-time rules defined", "matched_rule": null }
+// Response 200 (denied by a deny_install rule)
+{ "evaluation_id": "…", "decision": "deny", "reason": "Matched \"block-evil\" → deny_install", "matched_rule": "block-evil", "feedback": { "message": "…" } }
 ```
+
+Install rules can match on the package `name` (glob), `source`, and `metadata.*` context (the same reserved keys). `metadata.agent_id` is rejected here too (see `/evaluate`).
 
 ## Approvals
 
@@ -140,7 +161,9 @@ Sideband activity shares the audit schema with the MCP path, plus three columns 
 
 - `record_kind` — `tool_call` | `drift_event` | `install_scan` | `evaluation_expired`.
 - `origin` — `mcp` for the proxy path, or the adapter origin string.
-- `metadata` — the adapter-supplied context object (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`).
+- `metadata` — the adapter-supplied context object (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). `agent_id` is **not** carried here — it has its own column and is rejected if placed in `metadata`.
+
+An install denied by a `deny_install` rule is recorded with `record_kind: install_scan`, `policy_decision: deny`, and `block_reason: install_denied`.
 
 See [Audit Trail](./audit.md) for the full record reference.
 

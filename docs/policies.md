@@ -163,6 +163,37 @@ policies:
 
 Changing top-level `environment` on a running process is restart-required. Hot-reload keeps the startup environment label and logs a restart warning.
 
+### metadata
+
+Match against the adapter-supplied **context** of a call — who sent it, in which channel, and so on. This is populated only on the **host-enforced (sideband) path** (see the [Adapter Governance API](./adapter-api.md)); MCP requests carry no metadata, so a rule with `match.metadata` is **inert on the MCP path** (it never matches there, and is skipped — not denied).
+
+Well-known keys: `channel_id`, `sender_id`, `sender_name`, `conversation_id`, and the virtual `agent_id` (read from the request's `agent_id` field, not the metadata object). Any other adapter-supplied key can be matched too.
+
+Each key takes either a bare string (exact match) or an operator object using the string operators `eq`, `neq`, `contains`, `regex`:
+
+```yaml
+policies:
+  rules:
+    # Block one Slack channel outright
+    - name: no-prod-channel
+      match:
+        metadata:
+          channel_id: 'C_PROD'
+      action: deny
+
+    # Require approval for a specific sender pattern, agent-scoped
+    - name: external-senders
+      match:
+        metadata:
+          sender_id: { regex: '^EXT-' }
+          agent_id: 'support-bot'
+      action: require_approval
+      approval:
+        channel: slack
+```
+
+All metadata conditions are AND-combined with each other and with the rest of the `match` block. A `regex` is validated for catastrophic backtracking at load time, exactly like `match.input` regexes. Because metadata is absent on the MCP path, prefer pairing a metadata `deny` rule with a separate MCP-path control if you need both doors covered.
+
 ## Actions
 
 | Action             | Description                                                                                          |
@@ -282,20 +313,49 @@ Returns a synthetic response showing what would have happened:
 }
 ```
 
+## Install-Time Policy (`deny_install`)
+
+Hook-based adapters can scan a package/skill **before it is installed** via the sideband [`POST /install-scan`](./adapter-api.md) endpoint. Install-time rules live in their own `policies.install` block — separate from `policies.rules`, because a package has no tool name, annotations, or arguments to match on:
+
+```yaml
+policies:
+  install:
+    default: allow # or deny — applied when no rule matches
+    rules:
+      - name: block-unverified-npm
+        match:
+          name: 'evil-*' # glob on the package name (same engine as match.tool)
+          source: npm # exact ecosystem match (npm | pip | …)
+        action: deny_install
+        feedback:
+          message: 'This package is blocked by policy.'
+      - name: gate-by-sender
+        match:
+          metadata: # install rules support match.metadata too
+            sender_id: { regex: '^EXT-' }
+        action: deny_install
+```
+
+- Rules are first-match-wins; if none match, `install.default` applies (defaults to `allow`).
+- `action` is `deny_install` or `allow`. A `deny_install` outcome returns `decision: "deny"` to the adapter and records an audit row with `record_kind: install_scan` and `block_reason: install_denied`.
+- When no `policies.install` block is configured, `/install-scan` stays **observational** (always allows) so adapters can call it safely before any rules exist.
+- Install-time policy is only reachable through the sideband; it has no effect on the MCP path.
+
 ## Rate Limits
 
 Rate limits use a **sliding window** algorithm to track calls per key. Configure them with the `limits` block on a `rate_limit` rule:
 
-| Field       | Type     | Required | Description                                                                                               |
-| ----------- | -------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `max_calls` | integer  | Yes      | Maximum number of calls allowed in the window.                                                            |
-| `window`    | duration | Yes      | Sliding window size (e.g. `1h`, `5m`, `30s`).                                                             |
-| `key`       | string   | No       | Aggregation scope: `tool` (default), `session`, or `agent` (currently unsupported; falls back to `tool`). |
+| Field       | Type     | Required | Description                                                                                                         |
+| ----------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `max_calls` | integer  | Yes      | Maximum number of calls allowed in the window.                                                                      |
+| `window`    | duration | Yes      | Sliding window size (e.g. `1h`, `5m`, `30s`).                                                                       |
+| `key`       | string   | No       | Aggregation scope: `tool` (default), `session`, `sender_id`, or `agent` (unsupported on MCP; falls back to `tool`). |
 
 **Key scoping:**
 
 - `tool` (default) — One shared limit per tool name, across all sessions.
 - `session` — Each MCP session has its own independent limit.
+- `sender_id` — One limit per adapter-supplied `sender_id` (host-enforced path). Requires the SDK sideband (`sdk.enabled: true`) — Helio **rejects** the config otherwise, since a sender-keyed limit is meaningless without a sender. On the MCP path (which has no sender) it falls back to `tool` with a one-time warning.
 - `agent` — Currently unsupported on MCP requests; Helio logs a warning and falls back to `tool`.
 
 **Important behaviors:**
@@ -322,13 +382,15 @@ Rate limits use a **sliding window** algorithm to track calls per key. Configure
 
 Spend limits track cumulative monetary amounts extracted from tool call arguments. Configure them with `limits.max_spend`:
 
-| Field      | Type     | Required | Description                                                                                               |
-| ---------- | -------- | -------- | --------------------------------------------------------------------------------------------------------- |
-| `field`    | string   | Yes      | JSONPath-style dot path to the amount field in tool arguments (e.g. `$.amount`).                          |
-| `limit`    | number   | Yes      | Maximum cumulative spend in the window.                                                                   |
-| `currency` | string   | Yes      | Currency label for display (e.g. `USD`, `EUR`).                                                           |
-| `window`   | duration | Yes      | Sliding window size.                                                                                      |
-| `key`      | string   | No       | Aggregation scope: `tool` (default), `session`, or `agent` (currently unsupported; falls back to `tool`). |
+| Field      | Type     | Required | Description                                                                                                         |
+| ---------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------- |
+| `field`    | string   | Yes      | JSONPath-style dot path to the amount field in tool arguments (e.g. `$.amount`).                                    |
+| `limit`    | number   | Yes      | Maximum cumulative spend in the window.                                                                             |
+| `currency` | string   | Yes      | Currency label for display (e.g. `USD`, `EUR`).                                                                     |
+| `window`   | duration | Yes      | Sliding window size.                                                                                                |
+| `key`      | string   | No       | Aggregation scope: `tool` (default), `session`, `sender_id`, or `agent` (unsupported on MCP; falls back to `tool`). |
+
+`key: sender_id` keys the budget per adapter-supplied sender (host-enforced path) and, like rate limits, requires `sdk.enabled: true` or the config is rejected.
 
 **Important behaviors:**
 

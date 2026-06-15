@@ -5,18 +5,23 @@ import type { PoliciesConfig, PolicyRule } from '../config/schema.js'
 import { PolicyParseError } from './errors.js'
 import type {
   CompiledApproval,
+  CompiledInstallPolicy,
   CompiledLimits,
   CompiledMatch,
   CompiledPolicy,
   CompiledPolicyRule,
   CompilePoliciesResult,
   InputCondition,
+  MetadataCondition,
   PolicyParseWarning,
   ToolMatcher,
 } from './types.js'
 
 /** Operators that can appear in an input condition object. */
 const INPUT_OPERATORS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'regex'] as const
+
+/** Operators that can appear in a metadata condition object (string subset). */
+const METADATA_OPERATORS = ['eq', 'neq', 'contains', 'regex'] as const
 
 /**
  * Compile a validated PoliciesConfig into engine-ready form.
@@ -38,9 +43,44 @@ export function compilePolicies(config: PoliciesConfig): CompilePoliciesResult {
     ...(config.dry_run && { dryRun: true }),
     ...(config.on_tool_drift && { onToolDrift: config.on_tool_drift }),
     rules,
+    ...(config.install && { install: compileInstallPolicy(config.install) }),
   }
 
   return { policy, warnings }
+}
+
+function compileInstallPolicy(
+  install: NonNullable<PoliciesConfig['install']>,
+): CompiledInstallPolicy {
+  return {
+    defaultAction: install.default,
+    rules: install.rules.map((rule, index) => {
+      const name =
+        rule.match.name !== undefined
+          ? compileToolMatcher(rule.match.name, index, rule.name)
+          : undefined
+      const metadata =
+        rule.match.metadata !== undefined
+          ? flattenMetadataConditions(rule.match.metadata, index, rule.name)
+          : undefined
+      return {
+        index,
+        ...(rule.name !== undefined && { name: rule.name }),
+        match: {
+          ...(name !== undefined && { name }),
+          ...(rule.match.source !== undefined && { source: rule.match.source }),
+          ...(metadata !== undefined && { metadata }),
+        },
+        action: rule.action,
+        ...(rule.feedback !== undefined && {
+          feedback: {
+            message: rule.feedback.message,
+            ...(rule.feedback.suggestion !== undefined && { suggestion: rule.feedback.suggestion }),
+          },
+        }),
+      }
+    }),
+  }
 }
 
 function compileRule(
@@ -87,6 +127,9 @@ function compileMatch(
       input: flattenInputConditions(match.input, ruleIndex, ruleName),
     }),
     ...(match.environment !== undefined && { environment: match.environment }),
+    ...(match.metadata !== undefined && {
+      metadata: flattenMetadataConditions(match.metadata, ruleIndex, ruleName),
+    }),
   }
 }
 
@@ -149,6 +192,57 @@ function flattenInputConditions(
         conditions.push({ path, operator: op, value, regex: compiledRegex })
       } else {
         conditions.push({ path, operator: op, value })
+      }
+    }
+  }
+
+  return conditions
+}
+
+function flattenMetadataConditions(
+  metadata: Record<string, string | Record<string, string | undefined>>,
+  ruleIndex: number,
+  ruleName?: string,
+): MetadataCondition[] {
+  const conditions: MetadataCondition[] = []
+
+  for (const [key, raw] of Object.entries(metadata)) {
+    // Bare-string shorthand → eq.
+    if (typeof raw === 'string') {
+      conditions.push({ key, operator: 'eq', value: raw })
+      continue
+    }
+
+    for (const op of METADATA_OPERATORS) {
+      const value = raw[op]
+      if (value === undefined) continue
+
+      if (op === 'regex') {
+        // Reuse the same ReDoS analyzer + compile path as input regexes so a
+        // fat-fingered metadata regex cannot hang the policy hot path.
+        if (!safeRegex(value)) {
+          throw new PolicyParseError(
+            `catastrophic regex "${value}" for metadata key "${key}": ` +
+              `pattern is vulnerable to ReDoS and has been rejected. ` +
+              `Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.`,
+            ruleIndex,
+            ruleName,
+          )
+        }
+        let compiledRegex: RegExp
+        try {
+          compiledRegex = new RegExp(value)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          throw new PolicyParseError(
+            `invalid regex "${value}" for metadata key "${key}": ${msg}`,
+            ruleIndex,
+            ruleName,
+          )
+        }
+        conditions.push({ key, operator: op, value, regex: compiledRegex })
+      } else {
+        conditions.push({ key, operator: op, value })
       }
     }
   }

@@ -35,6 +35,56 @@ const drift = (aspects: string[]): ToolDriftEvent => ({
 })
 
 // ---------------------------------------------------------------------------
+// match.metadata threading (issue #13)
+// ---------------------------------------------------------------------------
+
+describe('match.metadata threading (issue #13)', () => {
+  const denyOnChannel = (key: string, value: string) =>
+    compile({
+      default: 'allow',
+      rules: [{ match: { metadata: { [key]: value } }, action: 'deny' }],
+    })
+
+  it('a metadata-keyed rule matches when the keyed context is supplied', () => {
+    const policy = denyOnChannel('channel_id', 'C1')
+    const r = decide(input({ policy, metadata: { channel_id: 'C1' } }))
+    expect(r.decision.action).toBe('deny')
+  })
+
+  it('is inert when metadata is absent (MCP path) — falls through to default', () => {
+    const policy = denyOnChannel('channel_id', 'C1')
+    const r = decide(input({ policy }))
+    expect(r.decision.action).toBe('allow')
+  })
+
+  it('does not match when the supplied metadata value differs', () => {
+    const policy = denyOnChannel('channel_id', 'C1')
+    const r = decide(input({ policy, metadata: { channel_id: 'C2' } }))
+    expect(r.decision.action).toBe('allow')
+  })
+
+  it('matches the virtual agent_id key against the request agent id', () => {
+    const policy = denyOnChannel('agent_id', 'main')
+    const r = decide(input({ policy, agentId: 'main' }))
+    expect(r.decision.action).toBe('deny')
+  })
+
+  it('matches the virtual agent_id even with no metadata object present', () => {
+    const policy = denyOnChannel('agent_id', 'main')
+    // metadata undefined, only agentId provided
+    const r = decide(input({ policy, agentId: 'main', metadata: undefined }))
+    expect(r.decision.action).toBe('deny')
+  })
+
+  it('the request agent_id shadows a literal metadata.agent_id at match time', () => {
+    const policy = denyOnChannel('agent_id', 'main')
+    // even if a literal metadata.agent_id sneaks through, the virtual key wins
+    const r = decide(input({ policy, agentId: 'main', metadata: { agent_id: 'other' } }))
+    expect(r.decision.action).toBe('deny')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // decide()
 // ---------------------------------------------------------------------------
 

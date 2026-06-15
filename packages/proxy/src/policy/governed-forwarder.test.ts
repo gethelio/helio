@@ -2478,6 +2478,31 @@ describe('GovernedForwarder', () => {
       expect(errorFromResult(result).data['reason']).toBe('rate_limited')
     })
 
+    it('falls back to tool scope (with a one-time warning) for key: sender_id on the MCP path', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createRateLimiter()
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 1, window: '1m', key: 'sender_id' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
+
+      // No sender on MCP → both calls share the tool-scoped bucket; the second blocks.
+      await governed.forward(toolsCallRequest('get_weather'))
+      const result = await governed.forward(toolsCallRequest('get_weather'))
+      expect(errorFromResult(result).data['reason']).toBe('rate_limited')
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('sender_id'))
+
+      consoleSpy.mockRestore()
+    })
+
     it('allows calls again after window slides', async () => {
       const inner = mockForwarder()
       const { limiter, advance } = createRateLimiter()

@@ -6,35 +6,35 @@ Every `tools/call` request that passes through Helio is recorded in an audit tra
 
 Each audit record contains the following fields:
 
-| Field                  | Type           | Description                                                                                                                                         |
-| ---------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                   | string         | Unique record identifier (UUID v4).                                                                                                                 |
-| `timestamp`            | string         | ISO 8601 timestamp of when the proxy received the tool call.                                                                                        |
-| `session_id`           | string \| null | MCP session ID from the `Mcp-Session-Id` header.                                                                                                    |
-| `agent_id`             | string \| null | Agent identifier, if available.                                                                                                                     |
-| `environment`          | string \| null | Runtime environment label configured at proxy startup.                                                                                              |
-| `tool_name`            | string         | The name of the tool that was called.                                                                                                               |
-| `tool_input`           | object         | The full arguments passed to the tool call.                                                                                                         |
-| `policy_decision`      | string         | The policy engine's decision: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`.                                       |
-| `block_reason`         | string \| null | Structured deny/block reason (`evidence_missing`, `approval_timeout`, `client_disconnected`, `shutdown_cancelled`, etc.). Null when not blocked.    |
-| `matched_rule`         | string \| null | Name of the policy rule that matched, or null if the default action applied.                                                                        |
-| `matched_rule_index`   | number \| null | Rule index in config order that matched, or null when no rule matched.                                                                              |
-| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system.                                                                                   |
-| `approval_status`      | string \| null | Approval outcome: `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`. Null if no approval was required. |
-| `approved_by`          | string \| null | Identity of the human who resolved approval (`approved`, `denied`, or `break_glass`), when applicable.                                              |
-| `upstream_response`    | any \| null    | The upstream MCP server's response. Null for denied calls (no upstream request was made).                                                           |
-| `upstream_error`       | string \| null | Error message from the upstream server, if the call failed.                                                                                         |
-| `upstream_http_status` | number \| null | Upstream HTTP status code when an upstream response was received. Null on denied or connection-level forwarding failures.                           |
-| `upstream_latency_ms`  | number \| null | Time in milliseconds the upstream request took. Null for denied calls.                                                                              |
-| `total_duration_ms`    | number         | End-to-end duration from request receipt to final response.                                                                                         |
-| `approval_wait_ms`     | number         | Time spent waiting in the approval queue/timer. Zero when no approval hold occurred.                                                                |
-| `proxy_compute_ms`     | number         | Proxy compute time excluding approval wait and upstream processing.                                                                                 |
-| `flagged_destructive`  | boolean        | Whether the tool was flagged as potentially destructive (`destructiveHint: true`).                                                                  |
-| `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                   |
-| `record_kind`          | string         | Record category: `tool_call` (default), `drift_event`, `install_scan`, or `evaluation_expired` (a sideband decision that was never audited).        |
-| `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.        |
-| `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                  |
-| `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                |
+| Field                  | Type           | Description                                                                                                                                                                                          |
+| ---------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                   | string         | Unique record identifier (UUID v4).                                                                                                                                                                  |
+| `timestamp`            | string         | ISO 8601 timestamp of when the proxy received the tool call.                                                                                                                                         |
+| `session_id`           | string \| null | MCP session ID from the `Mcp-Session-Id` header.                                                                                                                                                     |
+| `agent_id`             | string \| null | Agent identifier, if available.                                                                                                                                                                      |
+| `environment`          | string \| null | Runtime environment label configured at proxy startup.                                                                                                                                               |
+| `tool_name`            | string         | The name of the tool that was called.                                                                                                                                                                |
+| `tool_input`           | object         | The full arguments passed to the tool call.                                                                                                                                                          |
+| `policy_decision`      | string         | The policy engine's decision: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`.                                                                                        |
+| `block_reason`         | string \| null | Structured deny/block reason (`evidence_missing`, `approval_timeout`, `client_disconnected`, `shutdown_cancelled`, `install_denied` for a `deny_install` install scan, etc.). Null when not blocked. |
+| `matched_rule`         | string \| null | Name of the policy rule that matched, or null if the default action applied.                                                                                                                         |
+| `matched_rule_index`   | number \| null | Rule index in config order that matched, or null when no rule matched.                                                                                                                               |
+| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system.                                                                                                                                    |
+| `approval_status`      | string \| null | Approval outcome: `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`. Null if no approval was required.                                                  |
+| `approved_by`          | string \| null | Identity of the human who resolved approval (`approved`, `denied`, or `break_glass`), when applicable.                                                                                               |
+| `upstream_response`    | any \| null    | The upstream MCP server's response. Null for denied calls (no upstream request was made).                                                                                                            |
+| `upstream_error`       | string \| null | Error message from the upstream server, if the call failed.                                                                                                                                          |
+| `upstream_http_status` | number \| null | Upstream HTTP status code when an upstream response was received. Null on denied or connection-level forwarding failures.                                                                            |
+| `upstream_latency_ms`  | number \| null | Time in milliseconds the upstream request took. Null for denied calls.                                                                                                                               |
+| `total_duration_ms`    | number         | End-to-end duration from request receipt to final response.                                                                                                                                          |
+| `approval_wait_ms`     | number         | Time spent waiting in the approval queue/timer. Zero when no approval hold occurred.                                                                                                                 |
+| `proxy_compute_ms`     | number         | Proxy compute time excluding approval wait and upstream processing.                                                                                                                                  |
+| `flagged_destructive`  | boolean        | Whether the tool was flagged as potentially destructive (`destructiveHint: true`).                                                                                                                   |
+| `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                                                                    |
+| `record_kind`          | string         | Record category: `tool_call` (default), `drift_event`, `install_scan`, or `evaluation_expired` (a sideband decision that was never audited).                                                         |
+| `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.                                                         |
+| `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                                                                   |
+| `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                                                                 |
 
 ## Tool Definition Drift Records
 
