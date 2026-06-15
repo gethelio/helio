@@ -163,4 +163,24 @@ describe('AuditTable', () => {
     fireEvent.change(screen.getByDisplayValue('25'), { target: { value: '50' } })
     expect(props.onLimitChange).toHaveBeenCalledWith(50)
   })
+
+  it('renders an Origin column with the friendly label and kind chip (#16)', () => {
+    const props = {
+      ...defaultProps(),
+      records: [makeRecord({ origin: 'openclaw', record_kind: 'install_scan' })],
+    }
+    render(<AuditTable {...props} />)
+    expect(screen.getByText('OpenClaw')).toBeTruthy()
+    expect(screen.getByText('Install Scan')).toBeTruthy()
+  })
+
+  it('renders channel_id/sender_id from metadata (#16)', () => {
+    const props = {
+      ...defaultProps(),
+      records: [makeRecord({ metadata: { channel_id: 'C123', sender_id: 'U1' } })],
+    }
+    render(<AuditTable {...props} />)
+    expect(screen.getByText('C123')).toBeTruthy()
+    expect(screen.getByText('U1')).toBeTruthy()
+  })
 })

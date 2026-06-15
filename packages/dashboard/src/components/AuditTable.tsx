@@ -1,5 +1,6 @@
 import type { AuditRecord } from '../types'
 import { formatTimestamp, truncateId, formatLatency } from '../utils'
+import { OriginBadge } from './OriginBadge'
 import { PolicyBadge } from './PolicyBadge'
 
 const PAGE_SIZES = [10, 25, 50] as const
@@ -62,10 +63,19 @@ export function AuditTable({
                   Tool
                 </th>
                 <th scope="col" className="pb-2 pr-4 font-medium">
+                  Origin
+                </th>
+                <th scope="col" className="pb-2 pr-4 font-medium">
                   Decision
                 </th>
                 <th scope="col" className="hidden pb-2 pr-4 font-medium sm:table-cell">
                   Session / Agent
+                </th>
+                <th scope="col" className="hidden pb-2 pr-4 font-medium md:table-cell">
+                  Channel
+                </th>
+                <th scope="col" className="hidden pb-2 pr-4 font-medium md:table-cell">
+                  Sender
                 </th>
                 <th scope="col" className="pb-2 pr-4 text-right font-medium">
                   Duration
@@ -93,6 +103,9 @@ export function AuditTable({
                     {record.tool_name}
                   </td>
                   <td className="py-2.5 pr-4">
+                    <OriginBadge origin={record.origin} recordKind={record.record_kind} />
+                  </td>
+                  <td className="py-2.5 pr-4">
                     <PolicyBadge
                       policyDecision={record.policy_decision}
                       blockReason={record.block_reason}
@@ -102,6 +115,16 @@ export function AuditTable({
                   </td>
                   <td className="hidden py-2.5 pr-4 text-xs text-gray-500 sm:table-cell">
                     {truncateId(record.agent_id ?? record.session_id)}
+                  </td>
+                  <td className="hidden py-2.5 pr-4 text-xs text-gray-500 md:table-cell">
+                    {typeof record.metadata?.channel_id === 'string'
+                      ? record.metadata.channel_id
+                      : '—'}
+                  </td>
+                  <td className="hidden py-2.5 pr-4 text-xs text-gray-500 md:table-cell">
+                    {typeof record.metadata?.sender_id === 'string'
+                      ? record.metadata.sender_id
+                      : '—'}
                   </td>
                   <td className="py-2.5 pr-4 text-right text-xs tabular-nums text-gray-500">
                     {formatLatency(record.total_duration_ms)}
