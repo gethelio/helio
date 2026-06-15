@@ -196,6 +196,133 @@ describe('annotation matching', () => {
 // Input condition flattening
 // ---------------------------------------------------------------------------
 
+describe('install policy compilation (issue #13)', () => {
+  it('compiles install rules with a name glob, source, and default', () => {
+    const { policy } = compilePolicies(
+      minimalPolicies({
+        install: {
+          default: 'allow',
+          rules: [
+            {
+              name: 'block-evil',
+              match: { name: 'evil-*', source: 'npm' },
+              action: 'deny_install',
+            },
+          ],
+        },
+      }),
+    )
+    expect(policy.install?.defaultAction).toBe('allow')
+    const rule = policy.install?.rules[0]
+    expect(rule?.action).toBe('deny_install')
+    expect(rule?.match.source).toBe('npm')
+    expect(rule?.match.name?.test('evil-pkg')).toBe(true)
+    expect(rule?.match.name?.test('left-pad')).toBe(false)
+  })
+
+  it('compiles install-rule metadata conditions', () => {
+    const { policy } = compilePolicies(
+      minimalPolicies({
+        install: {
+          default: 'deny',
+          rules: [{ match: { metadata: { sender_id: 'U9' } }, action: 'deny_install' }],
+        },
+      }),
+    )
+    expect(policy.install?.defaultAction).toBe('deny')
+    expect(policy.install?.rules[0]?.match.metadata?.[0]?.key).toBe('sender_id')
+  })
+
+  it('leaves install undefined when no install section is configured', () => {
+    const { policy } = compilePolicies(minimalPolicies({ rules: [] }))
+    expect(policy.install).toBeUndefined()
+  })
+})
+
+describe('metadata condition flattening (issue #13)', () => {
+  it('bare-string shorthand compiles to an eq condition', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { metadata: { channel_id: 'C123' } }, action: 'deny' }],
+      }),
+    )
+    const metadata = rule.match.metadata
+    expect(metadata).toBeDefined()
+    expect(metadata).toHaveLength(1)
+    expect(metadata?.[0]?.key).toBe('channel_id')
+    expect(metadata?.[0]?.operator).toBe('eq')
+    expect(metadata?.[0]?.value).toBe('C123')
+    expect(metadata?.[0]?.regex).toBeUndefined()
+  })
+
+  it('operator object compiles to the named operator', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { metadata: { sender_name: { contains: 'ali' } } }, action: 'deny' }],
+      }),
+    )
+    expect(rule.match.metadata?.[0]?.operator).toBe('contains')
+    expect(rule.match.metadata?.[0]?.value).toBe('ali')
+  })
+
+  it('the virtual agent_id key is a permitted metadata key', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { metadata: { agent_id: 'main' } }, action: 'deny' }],
+      }),
+    )
+    expect(rule.match.metadata?.[0]?.key).toBe('agent_id')
+    expect(rule.match.metadata?.[0]?.operator).toBe('eq')
+  })
+
+  it('multiple keys flatten to multiple conditions', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [
+          {
+            match: { metadata: { channel_id: 'C1', sender_id: { regex: '^U0[0-9]+$' } } },
+            action: 'deny',
+          },
+        ],
+      }),
+    )
+    expect(rule.match.metadata).toHaveLength(2)
+  })
+
+  it('regex operator pre-compiles to a RegExp', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { metadata: { sender_id: { regex: '^U0[0-9]+$' } } }, action: 'deny' }],
+      }),
+    )
+    const cond = rule.match.metadata?.[0]
+    expect(cond?.operator).toBe('regex')
+    expect(cond?.regex).toBeInstanceOf(RegExp)
+    expect(cond?.regex?.test('U07')).toBe(true)
+    expect(cond?.regex?.test('A07')).toBe(false)
+  })
+
+  it('rejects a catastrophic regex at compile time (reuses the safe-regex analyzer)', () => {
+    expect(() =>
+      compilePolicies(
+        minimalPolicies({
+          rules: [{ match: { metadata: { sender_id: { regex: '^(a+)+$' } } }, action: 'deny' }],
+        }),
+      ),
+    ).toThrow(PolicyParseError)
+  })
+
+  it('invalid regex throws PolicyParseError', () => {
+    expect(() =>
+      compilePolicies(
+        minimalPolicies({
+          rules: [{ match: { metadata: { sender_id: { regex: '[invalid(' } } }, action: 'deny' }],
+        }),
+      ),
+    ).toThrow(PolicyParseError)
+  })
+})
+
 describe('input condition flattening', () => {
   it('single path, single operator', () => {
     const { rule } = firstRule(

@@ -40,6 +40,23 @@ export interface InputCondition {
   readonly regex?: RegExp
 }
 
+/**
+ * A single flattened metadata condition (issue #13 — `match.metadata.*`).
+ *
+ * Mirrors InputCondition but matches a flat top-level key of the adapter-supplied
+ * context object (no JSONPath traversal), and is restricted to the string-friendly
+ * operator subset — metadata values (channel_id, sender_id, …) are strings, so the
+ * numeric comparators are deliberately excluded.
+ */
+export interface MetadataCondition {
+  /** The metadata key to read (e.g. "channel_id", "sender_id", or virtual "agent_id"). */
+  readonly key: string
+  readonly operator: 'eq' | 'neq' | 'contains' | 'regex'
+  readonly value: unknown
+  /** Pre-compiled RegExp when operator is 'regex'. */
+  readonly regex?: RegExp
+}
+
 /** Compiled match block for a policy rule. */
 export interface CompiledMatch {
   readonly tool?: ToolMatcher
@@ -47,6 +64,8 @@ export interface CompiledMatch {
   /** Flattened list of input conditions (one entry per path+operator pair). */
   readonly input?: readonly InputCondition[]
   readonly environment?: string
+  /** Flattened list of metadata conditions (one entry per key+operator pair). */
+  readonly metadata?: readonly MetadataCondition[]
 }
 
 /** Compiled approval configuration with durations as milliseconds. */
@@ -63,14 +82,14 @@ export interface CompiledSpendLimit {
   readonly limit: number
   readonly currency: string
   readonly windowMs: number
-  readonly key?: 'tool' | 'agent' | 'session'
+  readonly key?: 'tool' | 'agent' | 'session' | 'sender_id'
 }
 
 /** Compiled rate/spend limit configuration. */
 export interface CompiledLimits {
   readonly maxCalls?: number
   readonly windowMs?: number
-  readonly key?: 'tool' | 'agent' | 'session'
+  readonly key?: 'tool' | 'agent' | 'session' | 'sender_id'
   readonly maxSpend?: CompiledSpendLimit
 }
 
@@ -105,6 +124,31 @@ export interface CompiledPolicyRule {
   readonly feedback?: { readonly message: string; readonly suggestion?: string }
 }
 
+/** Compiled match block for an install-time rule (issue #13). */
+export interface CompiledInstallMatch {
+  /** Glob matcher on the package name. */
+  readonly name?: ToolMatcher
+  /** Exact ecosystem/source match (npm | pip | …). */
+  readonly source?: string
+  /** Flattened metadata conditions (sender/channel-gated installs). */
+  readonly metadata?: readonly MetadataCondition[]
+}
+
+/** A compiled install-time rule. */
+export interface CompiledInstallRule {
+  readonly index: number
+  readonly name?: string
+  readonly match: CompiledInstallMatch
+  readonly action: 'deny_install' | 'allow'
+  readonly feedback?: { readonly message: string; readonly suggestion?: string }
+}
+
+/** Compiled install-time policy (issue #13). */
+export interface CompiledInstallPolicy {
+  readonly defaultAction: 'allow' | 'deny'
+  readonly rules: readonly CompiledInstallRule[]
+}
+
 /** Top-level compiled policy — what the engine consumes. */
 export interface CompiledPolicy {
   readonly defaultAction: 'allow' | 'deny'
@@ -116,6 +160,8 @@ export interface CompiledPolicy {
    */
   readonly onToolDrift?: 'block' | 'require_approval' | 'log'
   readonly rules: readonly CompiledPolicyRule[]
+  /** Install-time policy (issue #13 — deny_install). Undefined ⇒ observational. */
+  readonly install?: CompiledInstallPolicy
 }
 
 /** A non-fatal warning produced during policy compilation. */
@@ -163,4 +209,11 @@ export interface MatchContext {
   readonly toolArguments?: Readonly<Record<string, unknown>>
   /** The configured environment label (e.g. "production", "staging"). */
   readonly environment?: string
+  /**
+   * Adapter-supplied context for `match.metadata.*` (issue #13). Present only on
+   * the sideband (host-enforced) path; always absent on the MCP path, so metadata
+   * rules are inert there by construction. The virtual `agent_id` key (from the
+   * request column) is merged in by the decision pipeline, not stored here twice.
+   */
+  readonly metadata?: Readonly<Record<string, unknown>>
 }

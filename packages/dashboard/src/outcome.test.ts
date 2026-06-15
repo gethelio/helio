@@ -35,6 +35,12 @@ describe('outcome helpers', () => {
     expect(deriveDisplayOutcome({ block_reason: 'shutdown_cancelled' })).toBe('shutdown_cancelled')
   })
 
+  it('renders an install_denied block_reason as deny independent of policy_decision', () => {
+    // Belt-and-braces: even if policy_decision is not 'deny', a blocked install
+    // must never render as "allow".
+    expect(deriveDisplayOutcome({ block_reason: 'install_denied' })).toBe('deny')
+  })
+
   it('derives dry_run with highest priority', () => {
     expect(
       deriveDisplayOutcome({

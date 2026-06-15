@@ -59,6 +59,62 @@ describe('parseDuration', () => {
 // ---------------------------------------------------------------------------
 
 describe('helioConfigSchema', () => {
+  describe('sender_id limit key requires the sideband (issue #13)', () => {
+    const senderRateRule = {
+      match: { tool: 'send' },
+      action: 'rate_limit',
+      limits: { max_calls: 1, window: '1m', key: 'sender_id' },
+    }
+    const senderSpendRule = {
+      match: { tool: 'pay' },
+      action: 'spend_limit',
+      limits: {
+        max_spend: { field: '$.amt', limit: 5, currency: 'USD', window: '1h', key: 'sender_id' },
+      },
+    }
+
+    it('rejects limits.key: sender_id when sdk.enabled is false (default)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { rules: [senderRateRule] } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects max_spend.key: sender_id when sdk.enabled is false', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { rules: [senderSpendRule] } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('accepts sender_id keys when sdk.enabled is true', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          sdk: { enabled: true },
+          policies: { rules: [senderRateRule, senderSpendRule] },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('still accepts session/tool keys with sdk disabled', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          policies: {
+            rules: [
+              {
+                match: { tool: 'send' },
+                action: 'rate_limit',
+                limits: { max_calls: 1, window: '1m', key: 'session' },
+              },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
   describe('minimal config', () => {
     it('parses with dashboard explicitly disabled', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())

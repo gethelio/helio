@@ -16,11 +16,16 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from 'node:crypto'
-import type { CompiledPolicy, PolicyAction, CompiledLimits } from '../policy/types.js'
+import type {
+  CompiledPolicy,
+  PolicyAction,
+  CompiledLimits,
+  CompiledInstallRule,
+} from '../policy/types.js'
 import { decide } from '../policy/decision-pipeline.js'
 import { ToolAnnotationCache } from '../policy/annotation-cache.js'
 import type { ToolDriftChange } from '../policy/annotation-cache.js'
-import { resolvePath } from '../policy/matchers.js'
+import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
@@ -40,6 +45,10 @@ const MAX_TOOLS_PER_ORIGIN = 1_024
 const MAX_TOOL_INPUT_BYTES = 64 * 1_024
 const MAX_PENDING_COUNT = 10_000
 const MAX_PENDING_BYTES = 64 * 1_024 * 1_024
+// Distinct sender_id (caller-controlled) limit keys held in the shared limiters.
+// Capped here in the service (NOT in the limiters) so the evaluate/audit split can
+// reserve pre-execution and the MCP door is never gated (issue #13).
+const MAX_SENDER_KEYS = 50_000
 
 const SWEEP_INTERVAL_MS = 30_000
 
@@ -176,6 +185,8 @@ export interface GovernanceServiceOptions {
   readonly maxPending?: number
   /** Max pending-evaluation footprint (serialized bytes). Default 64 MiB (D15). */
   readonly maxPendingBytes?: number
+  /** Max distinct sender_id limit keys (issue #13). Default 50,000. Overridable for tests. */
+  readonly maxSenderKeys?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +206,10 @@ export class GovernanceService {
   private readonly now: () => number
   private readonly maxPending: number
   private readonly maxPendingBytes: number
+  private readonly maxSenderKeys: number
 
+  /** Distinct sender_id limit keys with live state (reservation registry, issue #13). */
+  private readonly senderKeys = new Set<string>()
   private readonly pending = new Map<string, PendingEvaluation>()
   private readonly tombstones = new Map<string, Tombstone>()
   private readonly caches = new Map<string, ToolAnnotationCache>()
@@ -219,6 +233,7 @@ export class GovernanceService {
     this.now = options.now ?? Date.now
     this.maxPending = options.maxPending ?? MAX_PENDING_COUNT
     this.maxPendingBytes = options.maxPendingBytes ?? MAX_PENDING_BYTES
+    this.maxSenderKeys = options.maxSenderKeys ?? MAX_SENDER_KEYS
     this.assertApprovalRouter(this.policy)
 
     const sweepMs = options.sweepIntervalMs ?? SWEEP_INTERVAL_MS
@@ -241,6 +256,15 @@ export class GovernanceService {
   // -------------------------------------------------------------------------
 
   evaluate(req: EvaluateInput): ServiceResult {
+    // Reserved-key invariant: agent_id has its own first-class column, so a
+    // metadata.agent_id would create a conflicting stored value vs the virtual
+    // match-time key. Enforced HERE (service layer) so direct embedders are
+    // covered, not just the HTTP route schema. (issue #13)
+    const reserved = reservedMetadataKey(req.metadata)
+    if (reserved) {
+      return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
+    }
+
     // D15 budgets: tool_input size, origin cardinality, pending pressure.
     const inputBytes = byteLength(req.arguments ?? {})
     if (inputBytes > MAX_TOOL_INPUT_BYTES) {
@@ -283,6 +307,8 @@ export class GovernanceService {
       baselineAnnotations: cache.get(toolName),
       currentAnnotations: cache.getCurrent(toolName),
       driftEvent: cache.getDrift(toolName),
+      metadata: req.metadata ?? undefined,
+      agentId: req.agent_id ?? undefined,
     })
 
     const { decision } = pipeline
@@ -294,6 +320,9 @@ export class GovernanceService {
     let limitPlan: LimitPlan | undefined
     let limitsBlock: Record<string, unknown> | undefined
 
+    // sender_id is sourced from adapter metadata (host-enforced path only).
+    const senderId = senderIdOf(req.metadata)
+
     if (pipeline.isDryRun) {
       wire = 'dry_run'
     } else if (decision.action === 'deny') {
@@ -301,12 +330,18 @@ export class GovernanceService {
     } else if (decision.action === 'require_approval') {
       wire = 'require_approval'
     } else if (decision.action === 'rate_limit') {
-      const planned = this.planRate(decision, toolName, req.session_id)
+      const planned = this.planRate(decision, toolName, req.session_id, senderId)
+      if (planned?.plan && !this.reserveSenderKey(planned.plan.key)) {
+        return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+      }
       limitPlan = planned?.plan
       limitsBlock = planned?.block ? { rate: planned.block } : undefined
       wire = planned?.allowed ? 'allow' : 'rate_limited'
     } else if (decision.action === 'spend_limit') {
-      const planned = this.planSpend(decision, toolName, req.session_id, req.arguments)
+      const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
+      if (planned?.plan && !this.reserveSenderKey(planned.plan.key)) {
+        return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+      }
       limitPlan = planned?.plan
       limitsBlock = planned?.block ? { spend: planned.block } : undefined
       wire = planned?.allowed ? 'allow' : 'spend_limited'
@@ -550,8 +585,16 @@ export class GovernanceService {
   // -------------------------------------------------------------------------
 
   installScan(req: InstallScanInput): ServiceResult {
+    const reserved = reservedMetadataKey(req.metadata)
+    if (reserved) {
+      return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
+    }
     const evaluationId = randomUUID()
     const toolName = `install:${req.package.source ?? 'pkg'}:${req.package.name}`
+
+    const verdict = this.evaluateInstall(req)
+    const denied = verdict.decision === 'deny'
+
     const auditId = this.writeAudit({
       timestampIso: new Date(this.now()).toISOString(),
       origin: req.origin,
@@ -560,10 +603,13 @@ export class GovernanceService {
       toolName,
       toolInput: { ...req.package },
       metadata: req.metadata,
-      action: 'allow',
-      wire: 'allow',
-      matchedRuleName: null,
-      matchedRuleIndex: null,
+      // policy_decision is 'deny' (NOT 'deny_install') so the dashboard renders a
+      // blocked install as a block, not an allow. The install context lives in
+      // record_kind + block_reason.
+      action: denied ? 'deny' : 'allow',
+      wire: denied ? 'deny' : 'allow',
+      matchedRuleName: verdict.matchedRule?.name ?? null,
+      matchedRuleIndex: verdict.matchedRule?.index ?? null,
       flaggedDestructive: false,
       dryRun: false,
       recordKind: 'install_scan',
@@ -574,15 +620,48 @@ export class GovernanceService {
       finalizedBy: 'evaluate',
       expiresAtMs: this.now() + this.ttlMs,
     })
+
+    const body: Record<string, unknown> = {
+      evaluation_id: evaluationId,
+      decision: verdict.decision,
+      reason: verdict.reason,
+      matched_rule: verdict.matchedRule?.name ?? null,
+      matched_rule_index: verdict.matchedRule?.index ?? null,
+    }
+    if (denied) {
+      body['feedback'] = buildFeedback(verdict.matchedRule, verdict.reason)
+    }
+    return { status: 200, body }
+  }
+
+  /** First-match-wins evaluation of the compiled install policy (issue #13). */
+  private evaluateInstall(req: InstallScanInput): {
+    decision: 'allow' | 'deny'
+    matchedRule?: CompiledInstallRule
+    reason: string
+  } {
+    const install = this.policy.install
+    if (!install) {
+      return { decision: 'allow', reason: 'no install-time rules defined' }
+    }
+    const metadataView =
+      req.agent_id != null
+        ? { ...(req.metadata ?? {}), agent_id: req.agent_id }
+        : (req.metadata ?? undefined)
+
+    for (const rule of install.rules) {
+      if (matchInstallRule(rule, req.package, metadataView)) {
+        const label = rule.name ? `"${rule.name}"` : `install_rule[${String(rule.index)}]`
+        return {
+          decision: rule.action === 'deny_install' ? 'deny' : 'allow',
+          matchedRule: rule,
+          reason: `Matched ${label} → ${rule.action}`,
+        }
+      }
+    }
     return {
-      status: 200,
-      body: {
-        evaluation_id: evaluationId,
-        decision: 'allow',
-        reason: 'no install-time rules defined',
-        matched_rule: null,
-        matched_rule_index: null,
-      },
+      decision: install.defaultAction,
+      reason: `No matching install rule; default ${install.defaultAction}`,
     }
   }
 
@@ -639,6 +718,59 @@ export class GovernanceService {
     for (const [id, tomb] of this.tombstones) {
       if (tomb.expiresAtMs <= now) this.tombstones.delete(id)
     }
+    this.pruneSenderKeys()
+  }
+
+  /**
+   * Reserve a cardinality slot for a sender-keyed limit (issue #13).
+   *
+   * Only `sender:*` keys are gated — tool/session families are bounded by upstream
+   * cardinality, and the MCP path never reaches here, so structural traffic cannot
+   * be starved. A key already backed by live state (registry or a live limiter
+   * bucket) costs no new slot. At capacity we lazily prune dead keys before failing
+   * closed, so an emptied bucket frees its slot without waiting for the sweep.
+   */
+  private reserveSenderKey(key: string): boolean {
+    if (!key.startsWith('sender:')) return true
+    if (this.senderKeys.has(key)) return true
+    if (this.hasLiveBucket(key)) {
+      this.senderKeys.add(key)
+      return true
+    }
+    if (this.senderKeys.size >= this.maxSenderKeys) {
+      this.pruneSenderKeys()
+      if (this.senderKeys.size >= this.maxSenderKeys) return false
+    }
+    this.senderKeys.add(key)
+    return true
+  }
+
+  /** Drop registry keys with no pending evaluation AND no live limiter bucket. */
+  private pruneSenderKeys(): void {
+    if (this.senderKeys.size === 0) return
+    const inUse = new Set<string>()
+    for (const entry of this.pending.values()) {
+      if (entry.limitPlan && entry.limitPlan.key.startsWith('sender:')) {
+        inUse.add(entry.limitPlan.key)
+      }
+    }
+    for (const key of this.senderKeys) {
+      if (inUse.has(key)) continue
+      if (this.hasLiveBucket(key)) continue
+      this.senderKeys.delete(key)
+    }
+  }
+
+  /**
+   * Whether either limiter still holds a live bucket for `key`. Uses the public
+   * `getKeyState()` — never the limiters' private maps — and its lazy eviction of
+   * an emptied bucket IS the prune-on-touch mechanism.
+   */
+  private hasLiveBucket(key: string): boolean {
+    return (
+      this.rateLimiter?.getKeyState(key) !== undefined ||
+      this.spendLimiter?.getKeyState(key) !== undefined
+    )
   }
 
   close(): void {
@@ -651,6 +783,7 @@ export class GovernanceService {
     this.pending.clear()
     this.tombstones.clear()
     this.caches.clear()
+    this.senderKeys.clear()
     this.pendingBytes = 0
   }
 
@@ -734,12 +867,13 @@ export class GovernanceService {
     decision: ReturnType<typeof decide>['decision'],
     toolName: string,
     sessionId: string | null,
+    senderId: string | null,
   ): { plan?: LimitPlan; block?: Record<string, unknown>; allowed: boolean } | undefined {
     const limits = decision.matchedRule?.limits
     if (!this.rateLimiter || !limits?.maxCalls || !limits.windowMs) {
       return { allowed: true }
     }
-    const key = buildLimitKey(limits.key, toolName, sessionId)
+    const key = buildLimitKey(limits.key, toolName, sessionId, senderId)
     const peek = this.rateLimiter.peek({
       key,
       maxCalls: limits.maxCalls,
@@ -762,11 +896,12 @@ export class GovernanceService {
     toolName: string,
     sessionId: string | null,
     args: Record<string, unknown> | undefined,
+    senderId: string | null,
   ): { plan?: LimitPlan; block?: Record<string, unknown>; allowed: boolean } | undefined {
     const maxSpend = decision.matchedRule?.limits?.maxSpend
     if (!this.spendLimiter || !maxSpend) return { allowed: true }
 
-    const key = buildLimitKey(maxSpend.key, toolName, sessionId)
+    const key = buildLimitKey(maxSpend.key, toolName, sessionId, senderId)
     const rawAmount = resolvePath(maxSpend.field, args ?? {})
     if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount) || rawAmount < 0) {
       // Invalid amount — terminal block (mirrors the MCP invalid-amount deny).
@@ -929,6 +1064,9 @@ interface WriteAuditArgs {
 
 function deriveBlockReason(args: WriteAuditArgs): string | null {
   if (args.recordKind === 'evaluation_expired') return null // bypass signal, not a block (F4)
+  // Install-time denials get their own block_reason so #16 can discriminate them
+  // and so they count into blocked_total (issue #13).
+  if (args.recordKind === 'install_scan') return args.wire === 'deny' ? 'install_denied' : null
   if (args.dryRun) return null
   if (args.approvalStatus === 'denied') return 'approval_denied'
   if (args.approvalStatus === 'timeout') return 'approval_timeout'
@@ -972,18 +1110,52 @@ function policyCanRequireApproval(policy: CompiledPolicy): boolean {
 }
 
 function buildLimitKey(
-  keyType: 'tool' | 'agent' | 'session' | undefined,
+  keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
   toolName: string,
   sessionId: string | null,
+  senderId: string | null,
 ): string {
   switch (keyType) {
     case 'session':
       return `session:${sessionId ?? 'unknown'}`
+    case 'sender_id':
+      return `sender:${senderId ?? 'unknown'}`
     case 'agent':
     case 'tool':
     default:
       return `tool:${toolName}`
   }
+}
+
+/** Read a string sender_id out of the adapter metadata, else null. */
+function senderIdOf(metadata: Record<string, unknown> | null): string | null {
+  const v = metadata?.['sender_id']
+  return typeof v === 'string' ? v : null
+}
+
+/** Match one compiled install rule against a package + metadata view (issue #13). */
+function matchInstallRule(
+  rule: CompiledInstallRule,
+  pkg: InstallScanInput['package'],
+  metadataView: Readonly<Record<string, unknown>> | undefined,
+): boolean {
+  if (rule.match.name && !rule.match.name.test(pkg.name)) return false
+  if (rule.match.source !== undefined && rule.match.source !== pkg.source) return false
+  if (rule.match.metadata && !matchMetadata(rule.match.metadata, { metadata: metadataView })) {
+    return false
+  }
+  return true
+}
+
+/**
+ * Keys that have a first-class column and therefore must not be smuggled inside the
+ * free-form metadata object (issue #13). Returns the offending key or null.
+ */
+function reservedMetadataKey(metadata: Record<string, unknown> | null): string | null {
+  if (metadata && Object.prototype.hasOwnProperty.call(metadata, 'agent_id')) {
+    return 'agent_id'
+  }
+  return null
 }
 
 function definitionProvided(tool: WireToolDefinition): boolean {

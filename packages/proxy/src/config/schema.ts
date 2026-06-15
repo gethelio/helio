@@ -144,12 +144,32 @@ const annotationsMatchSchema = z
   })
   .strict()
 
+// A metadata condition is either a bare string (eq shorthand) or an operator
+// object restricted to the string-friendly subset (issue #13). Numeric
+// comparators are deliberately excluded — metadata values (channel_id, …) are
+// strings.
+const metadataConditionSchema = z.union([
+  z.string(),
+  z
+    .object({
+      eq: z.string().optional(),
+      neq: z.string().optional(),
+      contains: z.string().optional(),
+      regex: z.string().optional(),
+    })
+    .strict()
+    .refine((obj) => Object.keys(obj).length > 0, {
+      message: 'At least one metadata condition operator is required',
+    }),
+])
+
 const matchSchema = z
   .object({
     tool: z.string().optional(),
     annotations: annotationsMatchSchema.optional(),
     input: z.record(z.string(), inputConditionSchema).optional(),
     environment: z.string().optional(),
+    metadata: z.record(z.string(), metadataConditionSchema).optional(),
   })
   .strict()
 
@@ -187,7 +207,7 @@ const spendLimitSchema = z
     limit: z.number(),
     currency: z.string(),
     window: durationSchema,
-    key: z.enum(['tool', 'agent', 'session']).optional(),
+    key: z.enum(['tool', 'agent', 'session', 'sender_id']).optional(),
   })
   .strict()
 
@@ -195,7 +215,7 @@ const limitsSchema = z
   .object({
     max_calls: z.number().int().positive().optional(),
     window: durationSchema.optional(),
-    key: z.enum(['tool', 'agent', 'session']).optional(),
+    key: z.enum(['tool', 'agent', 'session', 'sender_id']).optional(),
     max_spend: spendLimitSchema.optional(),
   })
   .strict()
@@ -222,6 +242,35 @@ const policyRuleSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Install-time policy (issue #13 — deny_install). A separate rule list because a
+// package has no tool/annotations/input to match on (issue #13).
+// ---------------------------------------------------------------------------
+
+const installMatchSchema = z
+  .object({
+    name: z.string().optional(), // glob, picomatch (same engine as match.tool)
+    source: z.string().optional(), // exact ecosystem match (npm | pip | …)
+    metadata: z.record(z.string(), metadataConditionSchema).optional(),
+  })
+  .strict()
+
+const installRuleSchema = z
+  .object({
+    name: z.string().optional(),
+    match: installMatchSchema,
+    action: z.enum(['deny_install', 'allow']),
+    feedback: feedbackSchema.optional(),
+  })
+  .strict()
+
+const installSchema = z
+  .object({
+    default: z.enum(['allow', 'deny']).default('allow'),
+    rules: z.array(installRuleSchema).default([]),
+  })
+  .strict()
+
+// ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
 
@@ -231,6 +280,8 @@ const policiesSchema = z
     flag_destructive: z.enum(['log', 'require_approval']).optional(),
     dry_run: z.boolean().default(false),
     rules: z.array(policyRuleSchema).default([]),
+    /** Install-time policy (issue #13 — deny_install). Optional; absent ⇒ observational. */
+    install: installSchema.optional(),
     /**
      * How to treat calls to a tool whose definition (annotations, schemas,
      * description) has drifted from the baseline Helio captured on first
@@ -421,6 +472,31 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
           `Rule sets match.environment="${rule.match.environment}" but top-level ` +
           '`environment` is not configured. Set top-level environment to enable env-scoped rules.',
       })
+    }
+
+    // sender_id is an adapter (host-enforced) context field that only exists on
+    // the sideband. Without the sideband a sender-keyed limit is dead config that
+    // would silently collapse to tool scope on the MCP path — reject it up front
+    // (issue #13). Mirrors the match.environment / top-level-environment guard.
+    if (!cfg.sdk.enabled) {
+      if (rule.limits?.key === 'sender_id') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['policies', 'rules', ruleIndex, 'limits', 'key'],
+          message:
+            'limits.key "sender_id" requires the SDK sideband (sdk.enabled: true) — ' +
+            'sender_id is supplied by hook adapters and is absent on the MCP path.',
+        })
+      }
+      if (rule.limits?.max_spend?.key === 'sender_id') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['policies', 'rules', ruleIndex, 'limits', 'max_spend', 'key'],
+          message:
+            'limits.max_spend.key "sender_id" requires the SDK sideband (sdk.enabled: true) — ' +
+            'sender_id is supplied by hook adapters and is absent on the MCP path.',
+        })
+      }
     }
 
     if (rule.action === 'rate_limit') {

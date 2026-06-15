@@ -42,6 +42,16 @@ export interface DecideInput {
   readonly currentAnnotations: ToolAnnotationHints | undefined
   /** Active drift event for this tool, if its definition moved off baseline. */
   readonly driftEvent: ToolDriftEvent | undefined
+  /**
+   * Adapter-supplied context for `match.metadata.*` (issue #13). Present only on
+   * the sideband path; undefined on the MCP path (metadata rules inert there).
+   */
+  readonly metadata?: Readonly<Record<string, unknown>> | undefined
+  /**
+   * The request's `agent_id`, merged into the metadata view as the virtual
+   * `agent_id` match key — it shadows any literal `metadata.agent_id`.
+   */
+  readonly agentId?: string | undefined
 }
 
 /** The decision plus all the metadata the execution/audit steps consume. */
@@ -76,11 +86,17 @@ export function decide(input: DecideInput): PipelineDecision {
   const driftEvent = input.driftEvent
   const driftMode: DriftMode = policy.onToolDrift ?? 'block'
 
+  // Merge the virtual `agent_id` key (from the request column) into the
+  // adapter-supplied metadata for `match.metadata.*`. The virtual key shadows any
+  // literal `metadata.agent_id`; absent on the MCP path → undefined.
+  const metadata = buildMetadataView(input.metadata, input.agentId)
+
   let decision = evaluatePolicy(policy, {
     toolName,
     annotations,
     toolArguments,
     environment,
+    metadata,
   })
 
   // In log mode a drifted tool is evaluated against BOTH the baseline
@@ -93,6 +109,7 @@ export function decide(input: DecideInput): PipelineDecision {
       annotations: input.currentAnnotations,
       toolArguments,
       environment,
+      metadata,
     })
     decision = stricterDecision(decision, currentDecision)
   }
@@ -239,4 +256,21 @@ const ACTION_SEVERITY: Record<PolicyAction, number> = {
 /** Pick the stricter of two policy decisions (ties keep the first). */
 export function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDecision {
   return ACTION_SEVERITY[b.action] > ACTION_SEVERITY[a.action] ? b : a
+}
+
+/**
+ * Build the metadata match view for `match.metadata.*` (issue #13).
+ *
+ * Merges the request's `agent_id` in as a virtual `agent_id` key that shadows any
+ * literal `metadata.agent_id` (the adapter-supplied object is rejected for that key
+ * at the service boundary, but the shadow keeps match semantics deterministic even
+ * if it slips through an embedder). Returns undefined when neither source is present
+ * so a `match.metadata` rule stays inert (MCP path).
+ */
+function buildMetadataView(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+  agentId: string | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (agentId === undefined) return metadata
+  return { ...(metadata ?? {}), agent_id: agentId }
 }
