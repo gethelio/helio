@@ -354,6 +354,54 @@ describe('GET /api/audit', () => {
     expect(body.limit).toBe(50)
     expect(body.data).toHaveLength(1)
   })
+
+  it('filters by origin and record_kind (#16)', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, {
+      tool_name: 'kept',
+      origin: 'openclaw',
+      record_kind: 'install_scan',
+    })
+    insertAuditRecord(auditStore, {
+      tool_name: 'wrong_kind',
+      origin: 'openclaw',
+      record_kind: 'tool_call',
+    })
+    insertAuditRecord(auditStore, {
+      tool_name: 'wrong_origin',
+      origin: 'mcp',
+      record_kind: 'install_scan',
+    })
+
+    const res = await get('/api/audit?origin=openclaw&record_kind=install_scan')
+    const body = (await res.json()) as { total: number; data: AuditRecord[] }
+    expect(res.status).toBe(200)
+    expect(body.total).toBe(1)
+    expect(body.data.map((r) => r.tool_name)).toEqual(['kept'])
+  })
+
+  it('filters by channel_id and sender_id (#16)', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, {
+      tool_name: 'kept',
+      origin: 'openclaw',
+      metadata: { channel_id: 'C123', sender_id: 'U1' },
+    })
+    insertAuditRecord(auditStore, {
+      tool_name: 'other_sender',
+      origin: 'openclaw',
+      metadata: { channel_id: 'C123', sender_id: 'U2' },
+    })
+    insertAuditRecord(auditStore, { tool_name: 'mcp_no_meta', origin: 'mcp', metadata: null })
+
+    const res = await get('/api/audit?channel_id=C123&sender_id=U1')
+    const body = (await res.json()) as { total: number; data: AuditRecord[] }
+    expect(res.status).toBe(200)
+    expect(body.total).toBe(1)
+    expect(body.data.map((r) => r.tool_name)).toEqual(['kept'])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -431,6 +479,20 @@ describe('GET /api/audit/export', () => {
     const body = (await res.json()) as AuditRecord[]
     expect(body).toHaveLength(1)
     expect(at(body, 0).tool_name).toBe('fail')
+  })
+
+  it('export filters by origin (#16)', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { tool_name: 'adapter_call', origin: 'openclaw' })
+    insertAuditRecord(auditStore, { tool_name: 'mcp_call', origin: 'mcp' })
+
+    const res = await get('/api/audit/export?format=json&origin=openclaw')
+    expect(res.status).toBe(200)
+    const rows = (await res.json()) as AuditRecord[]
+    const names = rows.map((r) => r.tool_name)
+    expect(names).toContain('adapter_call')
+    expect(names).not.toContain('mcp_call')
   })
 })
 
@@ -827,6 +889,8 @@ describe('GET /api/events', () => {
       dry_run: false,
       matched_rule: null,
       matched_rule_index: null,
+      record_kind: 'tool_call',
+      origin: 'mcp',
     })
 
     const eventData = await readWithTimeout(1000)

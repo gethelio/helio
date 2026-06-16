@@ -48,6 +48,9 @@ export interface AuditRecord {
   readonly flagged_destructive: boolean
   readonly dry_run: boolean
   readonly created_at: string
+  readonly record_kind: 'tool_call' | 'drift_event' | 'install_scan' | 'evaluation_expired'
+  readonly origin: string
+  readonly metadata: Record<string, unknown> | null
 }
 
 export interface AuditListResponse {
@@ -184,6 +187,10 @@ export interface ActionEvent {
   readonly dry_run: boolean
   readonly matched_rule: string | null
   readonly matched_rule_index: number | null
+  // record_kind + origin let the live Feed render an origin/kind chip. metadata is
+  // intentionally omitted here — the Feed fetches the full AuditRecord on card expand.
+  readonly record_kind: AuditRecord['record_kind']
+  readonly origin: string
 }
 
 export interface ApprovalRequestedEvent {

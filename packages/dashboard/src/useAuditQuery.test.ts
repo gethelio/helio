@@ -246,4 +246,52 @@ describe('useAuditQuery', () => {
       expect(result.current.loading).toBe(false)
     })
   })
+
+  it('passes origin/record_kind/channel/sender to fetchAudit (#16)', async () => {
+    const { result } = renderHook(() => useAuditQuery())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    mockFetchAudit.mockClear()
+
+    act(() => {
+      result.current.setBulkFilters({ origin: 'openclaw', record_kind: 'install_scan' })
+    })
+
+    // origin is debounced; record_kind (select) is not. Flush the 300ms window so origin reaches fetchAudit.
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+
+    await waitFor(() => {
+      expect(mockFetchAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ origin: 'openclaw', record_kind: 'install_scan' }),
+      )
+    })
+  })
+
+  it('debounces channel/sender text filters by 300ms (#16)', async () => {
+    const { result } = renderHook(() => useAuditQuery())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    mockFetchAudit.mockClear()
+
+    // Change channel filter — should not trigger fetch with channel value immediately
+    act(() => {
+      result.current.setFilter('channel', 'C123')
+    })
+    expect(mockFetchAudit).not.toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123' }))
+
+    // Advance 300ms for debounce
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+
+    await waitFor(() => {
+      expect(mockFetchAudit).toHaveBeenLastCalledWith(expect.objectContaining({ channel: 'C123' }))
+    })
+  })
 })

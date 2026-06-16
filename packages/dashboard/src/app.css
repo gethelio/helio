@@ -1,8 +1,11 @@
 @import 'tailwindcss';
 
-/* Tailwind CSS v4 removed cursor:pointer from buttons. Restore it. */
+/* Tailwind CSS v4 removed cursor:pointer from buttons. Restore it.
+   Native <select> dropdowns also default to the arrow cursor — include them
+   so all interactive controls share the pointer affordance. */
 button,
 [role='button'],
+select,
 summary {
   cursor: pointer;
 }

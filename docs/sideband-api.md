@@ -306,24 +306,28 @@ Searchable, filtered, paginated audit log.
 
 **Query parameters:**
 
-| Parameter             | Default | Range          | Description                                   |
-| --------------------- | ------- | -------------- | --------------------------------------------- |
-| `limit`               | `50`    | `[1, 1000]`    | Page size.                                    |
-| `offset`              | `0`     | `[0, ∞)`       | Number of records to skip.                    |
-| `tool`                | —       | —              | Tool name substring filter (`LIKE %tool%`).   |
-| `decision`            | —       | —              | Filter by `policy_decision`.                  |
-| `reason`              | —       | —              | Filter by `block_reason`.                     |
-| `blocked`             | —       | `true`/`false` | Filter by whether `block_reason` is non-null. |
-| `session`             | —       | —              | Filter by session ID.                         |
-| `agent`               | —       | —              | Filter by agent ID.                           |
-| `from`                | —       | ISO 8601       | Lower bound on `created_at` (inclusive).      |
-| `to`                  | —       | ISO 8601       | Upper bound on `created_at` (inclusive).      |
-| `upstream_status_min` | —       | integer        | Minimum upstream HTTP status (inclusive).     |
-| `upstream_status_max` | —       | integer        | Maximum upstream HTTP status (inclusive).     |
-| `destructive`         | —       | `true`/`false` | Filter by the `flagged_destructive` column.   |
-| `dry_run`             | —       | `true`/`false` | Filter by the `dry_run` column.               |
+| Parameter             | Default | Range          | Description                                                                                   |
+| --------------------- | ------- | -------------- | --------------------------------------------------------------------------------------------- |
+| `limit`               | `50`    | `[1, 1000]`    | Page size.                                                                                    |
+| `offset`              | `0`     | `[0, ∞)`       | Number of records to skip.                                                                    |
+| `tool`                | —       | —              | Tool name substring filter (`LIKE %tool%`).                                                   |
+| `decision`            | —       | —              | Filter by `policy_decision`.                                                                  |
+| `reason`              | —       | —              | Filter by `block_reason`.                                                                     |
+| `blocked`             | —       | `true`/`false` | Filter by whether `block_reason` is non-null.                                                 |
+| `session`             | —       | —              | Filter by session ID.                                                                         |
+| `agent`               | —       | —              | Filter by agent ID.                                                                           |
+| `from`                | —       | ISO 8601       | Lower bound on `created_at` (inclusive).                                                      |
+| `to`                  | —       | ISO 8601       | Upper bound on `created_at` (inclusive).                                                      |
+| `upstream_status_min` | —       | integer        | Minimum upstream HTTP status (inclusive).                                                     |
+| `upstream_status_max` | —       | integer        | Maximum upstream HTTP status (inclusive).                                                     |
+| `destructive`         | —       | `true`/`false` | Filter by the `flagged_destructive` column.                                                   |
+| `dry_run`             | —       | `true`/`false` | Filter by the `dry_run` column.                                                               |
+| `origin`              | —       | —              | Filter by enforcement origin (`mcp`, or an adapter slug like `openclaw`).                     |
+| `record_kind`         | —       | —              | Filter by record category (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`). |
+| `channel_id`          | —       | —              | Filter by `metadata.channel_id` (adapter-supplied).                                           |
+| `sender_id`           | —       | —              | Filter by `metadata.sender_id` (adapter-supplied).                                            |
 
-`tool` uses substring matching (`LIKE %value%`). `decision`, `reason`, `session`, and `agent` use exact equality matching.
+`tool`, `origin`, `channel_id`, and `sender_id` use substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, and `record_kind` use exact equality matching.
 
 **Response (200):**
 
@@ -366,21 +370,25 @@ Bulk export of audit records as a downloadable attachment. **Not a JSON envelope
 
 **Query parameters:**
 
-| Parameter             | Default | Description                                   |
-| --------------------- | ------- | --------------------------------------------- |
-| `format`              | `json`  | `json` or `csv`.                              |
-| `limit`               | `10000` | Maximum records. Capped at 10k.               |
-| `tool`                | —       | Filter by tool name substring.                |
-| `decision`            | —       | Filter by policy decision.                    |
-| `reason`              | —       | Filter by block reason.                       |
-| `blocked`             | —       | Filter by whether `block_reason` is non-null. |
-| `dry_run`             | —       | Filter by dry-run records (`true`/`false`).   |
-| `session`             | —       | Filter by session ID.                         |
-| `agent`               | —       | Filter by agent ID.                           |
-| `from`                | —       | Start time (ISO 8601).                        |
-| `to`                  | —       | End time (ISO 8601).                          |
-| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).     |
-| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).     |
+| Parameter             | Default | Description                                                                                   |
+| --------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `format`              | `json`  | `json` or `csv`.                                                                              |
+| `limit`               | `10000` | Maximum records. Capped at 10k.                                                               |
+| `tool`                | —       | Filter by tool name substring.                                                                |
+| `decision`            | —       | Filter by policy decision.                                                                    |
+| `reason`              | —       | Filter by block reason.                                                                       |
+| `blocked`             | —       | Filter by whether `block_reason` is non-null.                                                 |
+| `dry_run`             | —       | Filter by dry-run records (`true`/`false`).                                                   |
+| `session`             | —       | Filter by session ID.                                                                         |
+| `agent`               | —       | Filter by agent ID.                                                                           |
+| `from`                | —       | Start time (ISO 8601).                                                                        |
+| `to`                  | —       | End time (ISO 8601).                                                                          |
+| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).                                                     |
+| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).                                                     |
+| `origin`              | —       | Filter by enforcement origin (`mcp`, or an adapter slug like `openclaw`).                     |
+| `record_kind`         | —       | Filter by record category (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`). |
+| `channel_id`          | —       | Filter by `metadata.channel_id` (adapter-supplied).                                           |
+| `sender_id`           | —       | Filter by `metadata.sender_id` (adapter-supplied).                                            |
 
 See [Audit Trail → Dashboard API Export](./audit.md#dashboard-api-export) for full context and examples.
 
@@ -564,14 +572,14 @@ Server-Sent Events stream of dashboard events. The stream stays open indefinitel
 
 **Event types:**
 
-| Event                          | Payload fields                                                                                                                                                                                                                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `heartbeat`                    | empty `data`. Sent on connect and every `sseHeartbeatMs`.                                                                                                                                                                                                          |
-| `action`                       | `id`, `tool_name`, `policy_decision`, `block_reason`, `approval_status`, `session_id`, `agent_id`, `environment`, `timestamp`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `matched_rule`, `matched_rule_index` |
-| `approval_requested`           | `ticket_id`, `tool_name`, `channel`, `requested_at`                                                                                                                                                                                                                |
-| `approval_resolved`            | `ticket_id`, `status`, `resolved_by` (optional), `resolved_at`                                                                                                                                                                                                     |
-| `approval_notification_failed` | `ticket_id`, `channel`, `phase` (`initial`/`escalation`), `error`                                                                                                                                                                                                  |
-| `limit_warning`                | `key`, `type` (`rate`/`spend`), `current`, `limit`, `utilization`                                                                                                                                                                                                  |
+| Event                          | Payload fields                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `heartbeat`                    | empty `data`. Sent on connect and every `sseHeartbeatMs`.                                                                                                                                                                                                                                                                                                                                                     |
+| `action`                       | `id`, `tool_name`, `policy_decision`, `block_reason`, `approval_status`, `session_id`, `agent_id`, `environment`, `timestamp`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `matched_rule`, `matched_rule_index`, `origin` (enforcement origin: `mcp` or adapter slug), `record_kind` (`tool_call` / `drift_event` / `install_scan` / `evaluation_expired`) |
+| `approval_requested`           | `ticket_id`, `tool_name`, `channel`, `requested_at`                                                                                                                                                                                                                                                                                                                                                           |
+| `approval_resolved`            | `ticket_id`, `status`, `resolved_by` (optional), `resolved_at`                                                                                                                                                                                                                                                                                                                                                |
+| `approval_notification_failed` | `ticket_id`, `channel`, `phase` (`initial`/`escalation`), `error`                                                                                                                                                                                                                                                                                                                                             |
+| `limit_warning`                | `key`, `type` (`rate`/`spend`), `current`, `limit`, `utilization`                                                                                                                                                                                                                                                                                                                                             |
 
 For `approval_resolved`, `status` is one of `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`.
 

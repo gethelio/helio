@@ -30,6 +30,10 @@ function buildExportUrl(
     to: string
     upstream_status_min: string
     upstream_status_max: string
+    origin: string
+    record_kind: string
+    channel: string
+    sender: string
   },
 ): string {
   const outcomeParams = outcomeFilterToAuditParams(filters.decision)
@@ -46,6 +50,10 @@ function buildExportUrl(
   if (filters.to) params.set('to', filters.to)
   if (filters.upstream_status_min) params.set('upstream_status_min', filters.upstream_status_min)
   if (filters.upstream_status_max) params.set('upstream_status_max', filters.upstream_status_max)
+  if (filters.origin) params.set('origin', filters.origin)
+  if (filters.record_kind) params.set('record_kind', filters.record_kind)
+  if (filters.channel) params.set('channel_id', filters.channel)
+  if (filters.sender) params.set('sender_id', filters.sender)
   return `/api/audit/export?${params.toString()}`
 }
 
@@ -59,6 +67,7 @@ const BLOCK_REASON_FILTERS: ReadonlyArray<{ label: string; value: string | null 
   { label: 'Approval Timeout', value: 'approval_timeout' },
   { label: 'Client Disconnected', value: 'client_disconnected' },
   { label: 'Shutdown Cancelled', value: 'shutdown_cancelled' },
+  { label: 'Install Denied', value: 'install_denied' },
   { label: 'Rate Limited', value: 'rate_limited' },
   { label: 'Spend Limited', value: 'spend_limited' },
 ]
@@ -207,6 +216,32 @@ export function AuditFilterBar({ filters, setFilter, setBulkFilters }: AuditFilt
             </option>
           ))}
         </select>
+
+        <input
+          type="text"
+          aria-label="Origin"
+          placeholder="Origin (e.g. openclaw)…"
+          value={filters.origin}
+          onChange={(e) => {
+            setFilter('origin', e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+        />
+
+        <select
+          aria-label="Record Kind"
+          value={filters.record_kind}
+          onChange={(e) => {
+            setFilter('record_kind', e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 focus:border-gray-300 focus:outline-none"
+        >
+          <option value="">All Kinds</option>
+          <option value="tool_call">Tool Call</option>
+          <option value="install_scan">Install Scan</option>
+          <option value="drift_event">Drift</option>
+          <option value="evaluation_expired">Expired</option>
+        </select>
       </div>
 
       {/* Row 2: time range + session + export */}
@@ -272,6 +307,26 @@ export function AuditFilterBar({ filters, setFilter, setBulkFilters }: AuditFilt
           value={filters.session}
           onChange={(e) => {
             setFilter('session', e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+        />
+
+        <input
+          type="text"
+          placeholder="Channel ID…"
+          value={filters.channel}
+          onChange={(e) => {
+            setFilter('channel', e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+        />
+
+        <input
+          type="text"
+          placeholder="Sender ID…"
+          value={filters.sender}
+          onChange={(e) => {
+            setFilter('sender', e.target.value)
           }}
           className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
         />

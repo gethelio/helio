@@ -121,6 +121,10 @@ export interface AuditParams {
   blocked?: boolean
   session?: string
   agent?: string
+  origin?: string
+  record_kind?: string
+  channel?: string
+  sender?: string
   from?: string
   to?: string
   destructive?: boolean
@@ -141,6 +145,10 @@ export function fetchAudit(params?: AuditParams): Promise<AuditListResponse> {
         blocked: params?.blocked,
         session: params?.session,
         agent: params?.agent,
+        origin: params?.origin,
+        record_kind: params?.record_kind,
+        channel_id: params?.channel,
+        sender_id: params?.sender,
         from: params?.from,
         to: params?.to,
         destructive: params?.destructive,

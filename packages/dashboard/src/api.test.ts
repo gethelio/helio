@@ -222,6 +222,21 @@ describe('read endpoints', () => {
     expect('page' in res).toBe(false)
   })
 
+  it('fetchAudit serializes origin/record_kind/channel/sender into the query (#16)', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
+    await fetchAudit({
+      origin: 'openclaw',
+      record_kind: 'install_scan',
+      channel: 'C1',
+      sender: 'U1',
+    })
+    const url = calledUrl()
+    expect(url).toContain('origin=openclaw')
+    expect(url).toContain('record_kind=install_scan')
+    expect(url).toContain('channel_id=C1')
+    expect(url).toContain('sender_id=U1')
+  })
+
   it('fetchAuditRecord encodes ID', async () => {
     mockFetch.mockReturnValue(okJson({ data: { id: 'abc' } }))
     await fetchAuditRecord('abc/def')

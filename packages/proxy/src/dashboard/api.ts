@@ -98,6 +98,10 @@ const auditExportQuerySchema = z.object({
   to: optionalQueryString,
   upstream_status_min: optionalQueryInt,
   upstream_status_max: optionalQueryInt,
+  origin: optionalQueryString,
+  record_kind: optionalQueryString,
+  channel_id: optionalQueryString,
+  sender_id: optionalQueryString,
 })
 
 const auditQuerySchema = z.object({
@@ -115,6 +119,10 @@ const auditQuerySchema = z.object({
   dry_run: queryBoolean,
   upstream_status_min: optionalQueryInt,
   upstream_status_max: optionalQueryInt,
+  origin: optionalQueryString,
+  record_kind: optionalQueryString,
+  channel_id: optionalQueryString,
+  sender_id: optionalQueryString,
 })
 
 const analyticsQuerySchema = z.object({
@@ -409,6 +417,10 @@ export function createDashboardAppWithLifecycle(
       to: query.to,
       upstream_status_min: query.upstream_status_min,
       upstream_status_max: query.upstream_status_max,
+      origin: query.origin,
+      record_kind: query.record_kind,
+      channel_id: query.channel_id,
+      sender_id: query.sender_id,
     }
 
     const result = auditStore.list(filters, { limit, order: 'asc' })
@@ -457,6 +469,10 @@ export function createDashboardAppWithLifecycle(
       dry_run: query.dry_run,
       upstream_status_min: query.upstream_status_min,
       upstream_status_max: query.upstream_status_max,
+      origin: query.origin,
+      record_kind: query.record_kind,
+      channel_id: query.channel_id,
+      sender_id: query.sender_id,
     }
 
     const result = auditStore.list(filters, { limit, offset, order: 'desc' })

@@ -89,8 +89,8 @@ Denied calls always have a null `upstream_response` since no upstream request wa
 
 The dashboard provides two views for audit data:
 
-- **Feed tab** — A real-time stream of tool calls as they happen, powered by Server-Sent Events. Each action card shows the tool name, policy decision, timing, and matched rule.
-- **Audit tab** — A searchable, filterable, paginated log of all recorded actions. Click any record to see full details including tool arguments, upstream response, and evidence chain.
+- **Feed tab** — A real-time stream of tool calls as they happen, powered by Server-Sent Events. Each action card shows the tool name, policy decision, timing, and matched rule. An **Origin** badge (MCP or the adapter slug) identifies where the call originated. For non-`tool_call` records, a **record-kind chip** (Install Scan, Drift, or Expired) appears alongside the badge. Adapter-origin cards also surface context such as `channel_id` and `sender_id` from the record's metadata.
+- **Audit tab** — A searchable, filterable, paginated log of all recorded actions. An **Origin** column shows the enforcement origin (MCP or adapter) with a record-kind chip for non-`tool_call` entries. **Channel ID** and **Sender ID** columns show adapter metadata and are visible at wider viewports. Click any record to see full details including tool arguments, upstream response, and evidence chain.
 
 ![Dashboard Audit](./images/dashboard-audit.png)
 
@@ -105,6 +105,10 @@ The dashboard provides two views for audit data:
 - Upstream HTTP status range (`upstream_status_min` / `upstream_status_max`)
 - Destructive flag
 - Dry-run flag
+- Origin (`mcp`, `openclaw`, or any adapter slug)
+- Record kind (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`)
+- Channel ID (`metadata.channel_id`)
+- Sender ID (`metadata.sender_id`)
 
 ## CLI Export
 

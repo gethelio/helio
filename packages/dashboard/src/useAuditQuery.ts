@@ -16,6 +16,10 @@ export interface AuditFilters {
   to: string
   upstream_status_min: string
   upstream_status_max: string
+  origin: string
+  record_kind: string
+  channel: string
+  sender: string
 }
 
 export interface UseAuditQueryReturn {
@@ -45,6 +49,10 @@ const INITIAL_FILTERS: AuditFilters = {
   to: '',
   upstream_status_min: '',
   upstream_status_max: '',
+  origin: '',
+  record_kind: '',
+  channel: '',
+  sender: '',
 }
 
 function parseOptionalInt(value: string): number | undefined {
@@ -61,6 +69,9 @@ export function useAuditQuery(): UseAuditQueryReturn {
 
   const [debouncedTool, setDebouncedTool] = useState('')
   const [debouncedSession, setDebouncedSession] = useState('')
+  const [debouncedOrigin, setDebouncedOrigin] = useState('')
+  const [debouncedChannel, setDebouncedChannel] = useState('')
+  const [debouncedSender, setDebouncedSender] = useState('')
 
   const [data, setData] = useState<AuditListResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -85,6 +96,33 @@ export function useAuditQuery(): UseAuditQueryReturn {
     }
   }, [filters.session])
 
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedOrigin(filters.origin)
+    }, 300)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [filters.origin])
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedChannel(filters.channel)
+    }, 300)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [filters.channel])
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedSender(filters.sender)
+    }, 300)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [filters.sender])
+
   // -- Fetch on filter/page change ------------------------------------------
   useEffect(() => {
     let canceled = false
@@ -102,6 +140,10 @@ export function useAuditQuery(): UseAuditQueryReturn {
       dry_run: outcomeParams.dry_run,
       upstream_status_min: parseOptionalInt(filters.upstream_status_min),
       upstream_status_max: parseOptionalInt(filters.upstream_status_max),
+      origin: debouncedOrigin || undefined,
+      record_kind: filters.record_kind || undefined,
+      channel: debouncedChannel || undefined,
+      sender: debouncedSender || undefined,
       offset: (page - 1) * limit,
       limit,
     })
@@ -129,6 +171,10 @@ export function useAuditQuery(): UseAuditQueryReturn {
     filters.to,
     filters.upstream_status_min,
     filters.upstream_status_max,
+    debouncedOrigin,
+    filters.record_kind,
+    debouncedChannel,
+    debouncedSender,
     page,
     limit,
     refreshToken,

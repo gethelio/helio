@@ -776,6 +776,102 @@ CREATE TABLE IF NOT EXISTS audit_records (
   })
 
   // -------------------------------------------------------------------------
+  // List – metadata filters
+  // -------------------------------------------------------------------------
+
+  describe('list – metadata filters', () => {
+    it('filters by metadata.channel_id – positive match', () => {
+      const store = createStore()
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C123', sender_id: 'U1' } }),
+      )
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C999', sender_id: 'U2' } }),
+      )
+      store.insert(makeRecord({ origin: 'mcp', metadata: null }))
+
+      const result = store.list({ channel_id: 'C123' })
+      expect(result.total).toBe(1)
+      expect(result.records[0]?.metadata).toEqual({ channel_id: 'C123', sender_id: 'U1' })
+    })
+
+    it('filters by metadata.channel_id – excludes records with null metadata', () => {
+      const store = createStore()
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C123', sender_id: 'U1' } }),
+      )
+      store.insert(makeRecord({ origin: 'mcp', metadata: null }))
+
+      // The mcp record has no channel_id in metadata; filtering by C999 must return nothing
+      const result = store.list({ channel_id: 'C999' })
+      expect(result.total).toBe(0)
+    })
+
+    it('filters by metadata.sender_id', () => {
+      const store = createStore()
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C1', sender_id: 'U_alice' } }),
+      )
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C1', sender_id: 'U_bob' } }),
+      )
+
+      const result = store.list({ sender_id: 'U_alice' })
+      expect(result.total).toBe(1)
+      expect(result.records[0]?.metadata).toMatchObject({ sender_id: 'U_alice' })
+    })
+
+    it('combines channel_id and sender_id filters (AND composition)', () => {
+      const store = createStore()
+      const aliceId = store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C1', sender_id: 'U_alice' } }),
+      )
+      const bobId = store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C1', sender_id: 'U_bob' } }),
+      )
+      // Insert a bob record in a different channel to confirm channel filter is respected
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C2', sender_id: 'U_bob' } }),
+      )
+
+      const result = store.list({ channel_id: 'C1', sender_id: 'U_bob' })
+      expect(result.total).toBe(1)
+      expect(result.records[0]?.id).toBe(bobId)
+      // alice's record must not appear
+      expect(result.records.find((r) => r.id === aliceId)).toBeUndefined()
+    })
+
+    it('matches origin by substring (partial input narrows as you type)', () => {
+      const store = createStore()
+      store.insert(makeRecord({ origin: 'openclaw' }))
+      store.insert(makeRecord({ origin: 'mcp' }))
+
+      // A partial slug ("open") must match "openclaw" — substring, not exact.
+      const result = store.list({ origin: 'open' })
+      expect(result.total).toBe(1)
+      expect(result.records[0]?.origin).toBe('openclaw')
+    })
+
+    it('matches metadata.channel_id/sender_id by substring', () => {
+      const store = createStore()
+      store.insert(
+        makeRecord({
+          origin: 'openclaw',
+          metadata: { channel_id: 'C-eng-releases', sender_id: 'U-alice' },
+        }),
+      )
+      store.insert(
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C-ops', sender_id: 'U-bob' } }),
+      )
+
+      expect(store.list({ channel_id: 'eng' }).total).toBe(1)
+      expect(store.list({ sender_id: 'alice' }).records[0]?.metadata).toMatchObject({
+        sender_id: 'U-alice',
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Close
   // -------------------------------------------------------------------------
 
