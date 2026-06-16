@@ -33,8 +33,12 @@
   "pnpm": {
     "auditConfig": {
       "ignoreGhsas": [
-        "GHSA-gv7w-rqvm-qjhr"
+        "GHSA-gv7w-rqvm-qjhr",
+        "GHSA-fx2h-pf6j-xcff"
       ]
+    },
+    "overrides": {
+      "form-data@>=4.0.0 <4.0.6": ">=4.0.6"
     }
   }
 }
