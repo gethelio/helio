@@ -17,6 +17,42 @@ Maintainer notes:
 - Keep entries user-visible and operator-relevant (new behavior, defaults,
   security posture, and breaking changes).
 
+## [0.5.0] - 2026-06-16
+
+### Added
+
+- **Sideband governance API for hook-based adapters (#12).** A new
+  bearer-protected sideband lets a non-MCP host (e.g. a chat adapter) run the
+  same policy engine as the MCP path: `POST /evaluate` (peek-only decision),
+  `POST /audit` (idempotent record-on-consume), `POST /install-scan`
+  (observational install evaluation), and `POST /approval/:id/resolve`. Governed
+  calls are recorded with new `record_kind` / `origin` / `metadata` audit
+  columns, and a sideband evaluation whose `/audit` never arrives is recorded as
+  `evaluation_expired` (a bypass/tamper signal). **The adapter contract is
+  experimental** — it may change in a breaking way until a second adapter
+  validates its neutrality (the OpenClaw adapter, #11, is the first). Pin
+  adapters to a Helio minor version. See `docs/adapter-api.md`.
+- **Context-aware policy primitives (#13).** Policies can now match on
+  adapter-supplied context: `match.metadata.*` (plus a virtual `agent_id` key,
+  inert on the MCP path), an install-time `deny_install` action under
+  `policies.install`, and per-sender rate/spend scoping via
+  `scope: { by: sender_id }`.
+- **Dashboard renders adapter-origin tool calls (#16).** The Feed and Audit
+  pages show an **Origin** column (MCP / adapter, e.g. OpenClaw) and a
+  record-kind chip (Install Scan / Drift / Expired) shown alongside — and
+  distinct from — the allow/deny decision. The Audit page adds
+  `metadata.channel_id` / `metadata.sender_id` as columns and filters (with
+  Origin and Record Kind controls and an "Install Denied" block-reason filter),
+  and feed cards gain an Adapter Context detail section. Free-text filters
+  (tool, origin, channel, sender) match by substring.
+
+### Security
+
+- **Patched `form-data` to >= 4.0.6 (GHSA-hmw2-7cc7-3qxx).** The vulnerable
+  version (CRLF injection via unescaped multipart field names) reached the
+  runtime transitively through `@slack/web-api`; forced to the patched release
+  via a pnpm override.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added
@@ -196,7 +232,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/gethelio/helio/compare/v0.4.0...v0.5.0
 [0.2.0]: https://github.com/gethelio/helio/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/gethelio/helio/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gethelio/helio/releases/tag/v0.1.0
