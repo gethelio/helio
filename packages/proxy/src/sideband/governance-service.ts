@@ -49,6 +49,11 @@ const MAX_PENDING_BYTES = 64 * 1_024 * 1_024
 // Capped here in the service (NOT in the limiters) so the evaluate/audit split can
 // reserve pre-execution and the MCP door is never gated (issue #13).
 const MAX_SENDER_KEYS = 50_000
+// Optional /audit evidence payload (issue #11). Caps are enforced in
+// populateEvidence (NOT route validation) so an over-cap entry soft-drops
+// without discarding the audit row for a call that already ran.
+const MAX_EVIDENCE_ENTRIES = 16
+const MAX_EVIDENCE_BYTES = 64 * 1_024
 
 const SWEEP_INTERVAL_MS = 30_000
 
@@ -99,6 +104,19 @@ export interface InstallScanInput {
   readonly metadata: Record<string, unknown> | null
 }
 
+export interface AuditEvidenceInput {
+  readonly evidence_key: string
+  readonly evidence_data: unknown
+  readonly ttl_seconds?: number
+}
+
+/** Per-entry outcome reported back for each submitted evidence entry. */
+export interface AuditEvidenceOutcome {
+  readonly evidence_key: string
+  readonly stored: boolean
+  readonly reason?: string
+}
+
 export interface AuditInput {
   readonly evaluation_id: string
   readonly status: 'success' | 'error' | 'not_executed'
@@ -106,6 +124,12 @@ export interface AuditInput {
   readonly duration_ms?: number
   readonly result?: unknown
   readonly actual_amount?: number
+  /**
+   * Optional evidence to populate on a successfully-audited call (issue #11). Adapter-scoped, single-token evidence write: bound to the pending
+   * evaluation's session/tool, success-only, first-finalize-only. Every
+   * per-entry failure is soft (reported, never request-fatal) — see audit().
+   */
+  readonly evidence?: ReadonlyArray<AuditEvidenceInput>
 }
 
 export interface ResolveApprovalInput {
@@ -546,6 +570,13 @@ export class GovernanceService {
       this.evidenceStore.recordToolCall(entry.sessionId, entry.toolName, req.status === 'success')
     }
 
+    // Populate evidence (issue #11). Success-only, and first-finalize
+    // only — we are past every tombstone replay return above, so this never
+    // re-writes on a replay. Every per-entry failure is soft (reported below,
+    // never request-fatal): losing the audit row for a call that already ran
+    // would be worse than a dropped evidence entry.
+    const evidenceOutcomes = this.populateEvidence(req, entry)
+
     const auditId = this.writeAudit({
       timestampIso: entry.timestampIso,
       origin: entry.origin,
@@ -577,7 +608,70 @@ export class GovernanceService {
       expiresAtMs: this.now() + this.ttlMs,
     })
 
-    return { status: 201, body: { ok: true, audit_record_id: auditId } }
+    const body: Record<string, unknown> = { ok: true, audit_record_id: auditId }
+    if (evidenceOutcomes) body['evidence'] = evidenceOutcomes
+    return { status: 201, body }
+  }
+
+  /**
+   * Write the optional `/audit` evidence entries for a successful call
+   * (issue #11), returning a per-entry outcome list — or `undefined`
+   * when there is nothing to report (non-success status, or no evidence
+   * supplied). Caps are enforced here, NOT in route validation, so an over-cap
+   * entry soft-drops without discarding the audit row: entries past
+   * `MAX_EVIDENCE_ENTRIES` → `too_many`; oversized `evidence_data` →
+   * `too_large`; no evidence store on the service → `evidence_unavailable`;
+   * a sessionless evaluation → `no_session`; the store's own rejections
+   * (`key_not_in_policy_allowlist`, `closed`) pass through as the per-entry
+   * reason. None of these fail the audit.
+   */
+  private populateEvidence(
+    req: AuditInput,
+    entry: PendingEvaluation,
+  ): AuditEvidenceOutcome[] | undefined {
+    if (req.status !== 'success' || !req.evidence || req.evidence.length === 0) {
+      return undefined
+    }
+    const outcomes: AuditEvidenceOutcome[] = []
+    for (let i = 0; i < req.evidence.length; i++) {
+      const e = req.evidence[i]
+      if (!e) continue
+      if (i >= MAX_EVIDENCE_ENTRIES) {
+        outcomes.push({ evidence_key: e.evidence_key, stored: false, reason: 'too_many' })
+        continue
+      }
+      const bytes = Buffer.byteLength(canonicalize(e.evidence_data ?? null), 'utf8')
+      if (bytes > MAX_EVIDENCE_BYTES) {
+        outcomes.push({ evidence_key: e.evidence_key, stored: false, reason: 'too_large' })
+        continue
+      }
+      if (!this.evidenceStore) {
+        // Governance enabled without an evidence store (evidence-only-disabled
+        // deployment) — distinct from a call that simply has no session.
+        outcomes.push({
+          evidence_key: e.evidence_key,
+          stored: false,
+          reason: 'evidence_unavailable',
+        })
+        continue
+      }
+      if (!entry.sessionId) {
+        outcomes.push({ evidence_key: e.evidence_key, stored: false, reason: 'no_session' })
+        continue
+      }
+      const result = this.evidenceStore.putEvidence(entry.sessionId, {
+        evidence_key: e.evidence_key,
+        data: e.evidence_data,
+        tool_name: entry.toolName,
+        ttl_seconds: e.ttl_seconds,
+      })
+      outcomes.push(
+        result.stored
+          ? { evidence_key: e.evidence_key, stored: true }
+          : { evidence_key: e.evidence_key, stored: false, reason: result.reason },
+      )
+    }
+    return outcomes
   }
 
   // -------------------------------------------------------------------------
