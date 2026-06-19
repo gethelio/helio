@@ -927,3 +927,151 @@ describe('GovernanceService.resolveApproval', () => {
     router.close()
   })
 })
+
+// ---------------------------------------------------------------------------
+// /audit evidence population (issue #11)
+// ---------------------------------------------------------------------------
+
+describe('audit evidence', () => {
+  type Outcome = { evidence_key: string; stored: boolean; reason?: string }
+
+  function evalAudit(
+    harness: ServiceHarness,
+    evidence: AuditInput['evidence'],
+    opts?: { status?: AuditInput['status']; sessionId?: string | null; hash?: string },
+  ) {
+    const ev = harness.service.evaluate(
+      evalInput({ session_id: opts?.sessionId === undefined ? 'oc:s1' : opts.sessionId }),
+    )
+    const id = ev.body['evaluation_id'] as string
+    const res = harness.service.audit(
+      auditInput(id, { status: opts?.status ?? 'success', evidence }),
+      opts?.hash ?? 'h',
+    )
+    return { id, res, outcomes: res.body['evidence'] as Outcome[] | undefined }
+  }
+
+  it('writes evidence to the store on a successful audit and reports stored:true', () => {
+    const h = makeService({ withEvidence: true })
+    const { res, outcomes } = evalAudit(h, [
+      { evidence_key: 'recipient', evidence_data: { to: 'a@b.com' } },
+    ])
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([{ evidence_key: 'recipient', stored: true }])
+    expect(h.evidenceStore?.getEvidence('oc:s1', 'recipient')?.data).toEqual({ to: 'a@b.com' })
+    expect(h.evidenceStore?.getEvidence('oc:s1', 'recipient')?.tool_name).toBe('send')
+  })
+
+  it('ignores evidence when the call errored (success-only)', () => {
+    const h = makeService({ withEvidence: true })
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'recipient', evidence_data: 'x' }], {
+      status: 'error',
+    })
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toBeUndefined()
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'recipient')).toBe(false)
+  })
+
+  it('ignores evidence when status is not_executed', () => {
+    const h = makeService({ withEvidence: true })
+    const { outcomes } = evalAudit(h, [{ evidence_key: 'recipient', evidence_data: 'x' }], {
+      status: 'not_executed',
+    })
+
+    expect(outcomes).toBeUndefined()
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'recipient')).toBe(false)
+  })
+
+  it('soft-fails an allowlist-rejected key but still finalizes 201', () => {
+    const h = makeService({ withEvidence: true })
+    h.evidenceStore?.setAllowedEvidenceKeys(['allowed'])
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'blocked', evidence_data: 'x' }])
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([
+      { evidence_key: 'blocked', stored: false, reason: 'key_not_in_policy_allowlist' },
+    ])
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'blocked')).toBe(false)
+  })
+
+  it('soft-drops an oversized entry with reason too_large (no 413)', () => {
+    const h = makeService({ withEvidence: true })
+    const big = 'x'.repeat(70 * 1024)
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'big', evidence_data: big }])
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([{ evidence_key: 'big', stored: false, reason: 'too_large' }])
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'big')).toBe(false)
+  })
+
+  it('soft-drops entries beyond MAX_EVIDENCE_ENTRIES with reason too_many', () => {
+    const h = makeService({ withEvidence: true })
+    const entries = Array.from({ length: 18 }, (_, i) => ({
+      evidence_key: `k${String(i)}`,
+      evidence_data: i,
+    }))
+    const { res, outcomes } = evalAudit(h, entries)
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toHaveLength(18)
+    expect(outcomes?.slice(0, 16).every((o) => o.stored)).toBe(true)
+    expect(outcomes?.slice(16)).toEqual([
+      { evidence_key: 'k16', stored: false, reason: 'too_many' },
+      { evidence_key: 'k17', stored: false, reason: 'too_many' },
+    ])
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'k15')).toBe(true)
+    expect(h.evidenceStore?.hasEvidence('oc:s1', 'k16')).toBe(false)
+  })
+
+  it('soft-fails with reason no_session when the evaluation has no session', () => {
+    const h = makeService({ withEvidence: true })
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'k', evidence_data: 'x' }], {
+      sessionId: null,
+    })
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([{ evidence_key: 'k', stored: false, reason: 'no_session' }])
+  })
+
+  it('soft-fails with reason evidence_unavailable when the service has no evidence store', () => {
+    const h = makeService() // no withEvidence → evidenceStore undefined
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'k', evidence_data: 'x' }])
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([{ evidence_key: 'k', stored: false, reason: 'evidence_unavailable' }])
+  })
+
+  it('soft-fails with reason closed when the store is shutting down — still 201, never 503', () => {
+    const h = makeService({ withEvidence: true })
+    h.evidenceStore?.close()
+    const { res, outcomes } = evalAudit(h, [{ evidence_key: 'k', evidence_data: 'x' }])
+
+    expect(res.status).toBe(201)
+    expect(outcomes).toEqual([{ evidence_key: 'k', stored: false, reason: 'closed' }])
+  })
+
+  it('does not re-write evidence on an idempotent replay', () => {
+    const h = makeService({ withEvidence: true })
+    const { id } = evalAudit(h, [{ evidence_key: 'k', evidence_data: 'v' }])
+    const firstExpiry = h.evidenceStore?.getEvidence('oc:s1', 'k')?.expires_at
+
+    h.advance(10_000)
+    const replay = h.service.audit(
+      auditInput(id, { evidence: [{ evidence_key: 'k', evidence_data: 'v' }] }),
+      'h',
+    )
+
+    expect(replay.status).toBe(200)
+    expect(replay.body['already_finalized']).toBe(true)
+    // No re-write → TTL/expiry unchanged despite the 10s advance.
+    expect(h.evidenceStore?.getEvidence('oc:s1', 'k')?.expires_at).toBe(firstExpiry)
+  })
+
+  it('is a no-op (no outcomes) when no evidence is supplied', () => {
+    const h = makeService({ withEvidence: true })
+    const { outcomes } = evalAudit(h, undefined)
+    expect(outcomes).toBeUndefined()
+  })
+})

@@ -28,7 +28,9 @@ function setup(opts?: {
   const governance =
     opts?.withGovernance === false
       ? undefined
-      : new GovernanceService({ policy, sweepIntervalMs: 0 })
+      : // Wire the same EvidenceStore into the service, mirroring production
+        // (cli.ts) so the /audit evidence path is exercised end-to-end.
+        new GovernanceService({ policy, sweepIntervalMs: 0, evidenceStore: store })
 
   const app = createSidebandApp(store, {
     token: opts?.tokens ? SDK_TOKEN : undefined,
@@ -252,5 +254,130 @@ describe('sideband governance routes', () => {
     })
     expect(res.status).toBe(200)
     expect(((await res.json()) as { decision: string }).decision).toBe('allow')
+  })
+
+  it('accepts an evidence array on /audit and writes it to the store', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+    const audit = await ctx.post('/audit', {
+      evaluation_id,
+      status: 'success',
+      evidence: [{ evidence_key: 'recipient', evidence_data: { to: 'a@b.com' } }],
+    })
+
+    expect(audit.status).toBe(201)
+    const json = (await audit.json()) as { evidence: { evidence_key: string; stored: boolean }[] }
+    expect(json.evidence).toEqual([{ evidence_key: 'recipient', stored: true }])
+    expect(ctx.store.getEvidence('oc:s1', 'recipient')?.data).toEqual({ to: 'a@b.com' })
+  })
+
+  it('does not reject an over-count evidence array at the route (no .max) — soft-drops in service', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+    const evidence = Array.from({ length: 17 }, (_, i) => ({
+      evidence_key: `k${String(i)}`,
+      evidence_data: i,
+    }))
+    const audit = await ctx.post('/audit', { evaluation_id, status: 'success', evidence })
+
+    expect(audit.status).toBe(201) // NOT 400 — the route has no .max() refinement
+    const json = (await audit.json()) as {
+      evidence: { evidence_key: string; stored: boolean; reason?: string }[]
+    }
+    expect(json.evidence).toHaveLength(17)
+    expect(json.evidence[16]).toEqual({ evidence_key: 'k16', stored: false, reason: 'too_many' })
+  })
+
+  it('treats divergent evidence under the same evaluation_id as a 409 conflict', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+
+    const first = await ctx.post('/audit', {
+      evaluation_id,
+      status: 'success',
+      evidence: [{ evidence_key: 'k', evidence_data: 'v1' }],
+    })
+    expect(first.status).toBe(201)
+
+    const divergent = await ctx.post('/audit', {
+      evaluation_id,
+      status: 'success',
+      evidence: [{ evidence_key: 'k', evidence_data: 'v2' }],
+    })
+    expect(divergent.status).toBe(409)
+    expect(((await divergent.json()) as { error: string }).error).toBe('evaluation_conflict')
+  })
+
+  it('treats identical evidence (any entry order) as an idempotent replay', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+    const a = { evidence_key: 'a', evidence_data: 1 }
+    const b = { evidence_key: 'b', evidence_data: 2 }
+
+    const first = await ctx.post('/audit', { evaluation_id, status: 'success', evidence: [a, b] })
+    expect(first.status).toBe(201)
+
+    // Same entries, reversed order → must hash identically (sorted tuple).
+    const replay = await ctx.post('/audit', { evaluation_id, status: 'success', evidence: [b, a] })
+    expect(replay.status).toBe(200)
+    expect(((await replay.json()) as { already_finalized: boolean }).already_finalized).toBe(true)
+  })
+
+  it('soft-fails evidence with reason closed over HTTP — /audit stays 201, never 503', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+    ctx.store.close() // standalone /evidence would 503; /audit must not inherit that
+
+    const audit = await ctx.post('/audit', {
+      evaluation_id,
+      status: 'success',
+      evidence: [{ evidence_key: 'k', evidence_data: 'x' }],
+    })
+    expect(audit.status).toBe(201)
+    const json = (await audit.json()) as { evidence: { evidence_key: string; reason?: string }[] }
+    expect(json.evidence).toEqual([{ evidence_key: 'k', stored: false, reason: 'closed' }])
+  })
+
+  it('rejects an over-1MiB /audit body with 413 (gross body limit, not an evidence cap)', async () => {
+    const ctx = setup()
+    store = ctx.store
+    governance = ctx.governance ?? null
+
+    const ev = await ctx.post('/evaluate', evalBody({ session_id: 'oc:s1' }))
+    const { evaluation_id } = (await ev.json()) as { evaluation_id: string }
+
+    const huge = 'x'.repeat(1_200 * 1024) // ~1.2 MiB > the 1 MiB sideband body limit
+    const body = JSON.stringify({
+      evaluation_id,
+      status: 'success',
+      evidence: [{ evidence_key: 'k', evidence_data: huge }],
+    })
+    // Set content-length explicitly — the real Node server sets it, and hono's
+    // bodyLimit checks it to fail fast with 413 before the body is parsed.
+    const res = await ctx.post('/audit', body, {
+      'content-length': String(Buffer.byteLength(body)),
+    })
+    expect(res.status).toBe(413)
+    expect(((await res.json()) as { error: string }).error).toBe('request_body_too_large')
   })
 })

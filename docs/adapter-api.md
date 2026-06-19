@@ -4,12 +4,12 @@
 
 The governance API lives on the **SDK sideband** — the local server on `127.0.0.1:3200` (configurable via `sdk.*`), the same server the Python SDK uses for evidence/context. It is **not** the dashboard sideband (`:3100`, documented in [Sideband API Reference](./sideband-api.md)); the two are different servers with different jobs. Endpoints here:
 
-| Route                        | Purpose                                                                        |
-| ---------------------------- | ------------------------------------------------------------------------------ |
-| `POST /evaluate`             | Decide a tool call. **Side-effect-free** on rate/spend counters.               |
-| `POST /audit`                | Record the outcome of an evaluated call; **consumes** counters. Idempotent.    |
-| `POST /install-scan`         | Evaluate a package/skill install. Observational until install-time rules ship. |
-| `POST /approval/:id/resolve` | Record the resolution of a natively-handled approval.                          |
+| Route                        | Purpose                                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `POST /evaluate`             | Decide a tool call. **Side-effect-free** on rate/spend counters.                               |
+| `POST /audit`                | Record the outcome of an evaluated call; **consumes** counters. Idempotent.                    |
+| `POST /install-scan`         | Evaluate a package/skill install against `policies.install` (observational when none defined). |
+| `POST /approval/:id/resolve` | Record the resolution of a natively-handled approval.                                          |
 
 ## Why this exists, and what it does not promise
 
@@ -36,7 +36,7 @@ An adapter built on this API **MUST**:
 
 ## Authentication
 
-The governance routes require `Authorization: Bearer <HELIO_ADAPTER_TOKEN>`. This is a **separate token** from the SDK's `HELIO_SDK_TOKEN`: an SDK client cannot drive policy decisions, and an adapter cannot write evidence. Both are generated per boot (and printed to stderr) unless set in the environment. Requests carrying an `Origin` header are refused (browser-forgery guard), and bodies over 1 MiB are rejected with 413.
+The governance routes require `Authorization: Bearer <HELIO_ADAPTER_TOKEN>`. This is a **separate token** from the SDK's `HELIO_SDK_TOKEN`: an SDK client cannot drive policy decisions, and an adapter cannot call the SDK's `POST /evidence`/`/context` routes. The adapter's evidence access is deliberately narrow: it may attach evidence to a call it is auditing, via the optional `evidence` field on `POST /audit` (success-only, bound to that evaluation's own session/tool, subject to the policy allowlist — see [Populating evidence](#populating-evidence)); it cannot write arbitrary evidence to arbitrary sessions. Both tokens are generated per boot (and printed to stderr) unless set in the environment. Requests carrying an `Origin` header are refused (browser-forgery guard), and bodies over 1 MiB are rejected with 413.
 
 If you embed `GovernanceService` directly (instead of running `helio start`), wire an `ApprovalRouter` whenever the policy can emit `require_approval` (explicit rules, `flag_destructive: require_approval`, or `on_tool_drift: require_approval`), otherwise construction and hot-reload fail closed by throwing `GovernanceConfigError` (exported from `@gethelio/proxy`).
 
@@ -90,11 +90,20 @@ The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limi
   "error": "…",            // optional, when status == "error"
   "duration_ms": 412,      // optional
   "result": { },           // optional outcome summary
-  "actual_amount": 0.42    // optional, finite ≥0 — true post-execution spend; overrides the arg-derived amount
+  "actual_amount": 0.42,   // optional, finite ≥0 — true post-execution spend; overrides the arg-derived amount
+  "evidence": [            // optional — see "Populating evidence" below
+    { "evidence_key": "recipient", "evidence_data": { "to": "a@b.com" }, "ttl_seconds": 300 }
+  ]
 }
 
 // Response 201 (fresh) — replays return 200
-{ "ok": true, "audit_record_id": "…" }
+{
+  "ok": true,
+  "audit_record_id": "…",
+  "evidence": [            // present only when the request carried evidence
+    { "evidence_key": "recipient", "stored": true }
+  ]
+}
 ```
 
 Counters are consumed here (not at `/evaluate`), and only when the call actually ran (`success`/`error`, not `not_executed`). `/audit` is **idempotent on `evaluation_id`**: an identical replay returns `200 { already_finalized: true }` with no double-consumption, so a network retry after a lost response is safe. A different payload under the same id is an adapter bug → `409 evaluation_conflict`.
@@ -102,6 +111,17 @@ Counters are consumed here (not at `/evaluate`), and only when the call actually
 **Decision finalization.** `deny`, `rate_limited`, `spend_limited`, and `dry_run` are **terminal at `/evaluate`** — their audit record is written immediately, so completeness never depends on the adapter calling `/audit`. A later `/audit` for such an evaluation returns `200 { finalized_by: "evaluate" }` and accepts any payload, so adapters may audit unconditionally.
 
 `actual_amount` must be finite and `>= 0` (`400 invalid_actual_amount` otherwise) and only applies to evaluations whose decision carried a spend rule (`400 no_spend_rule` if sent for any other evaluation).
+
+### Populating evidence
+
+The optional `evidence` array lets an adapter ground a call's outcome — e.g. recording the recipient a `send` tool actually resolved — so a later [evidence-grounded rule](./policies.md) (`evidence.requires`) can enforce on it. This is the **only** way the adapter token writes evidence; the SDK-scoped `POST /evidence` route is not available to it (see [Authentication](#authentication)). Each entry is `{ evidence_key, evidence_data, ttl_seconds? }`. The proxy binds the write to the **pending evaluation's own** `session_id` and `tool_name` — an adapter cannot target another session — and stores it via the same evidence store the SDK path uses.
+
+Rules:
+
+- **Success-only.** Evidence is written only when `status: "success"`. On `error`/`not_executed` it is ignored (a failed tool must not ground later calls).
+- **First-finalize-only.** Evidence is written once, on the first `/audit`; idempotent replays never re-write (no TTL reset).
+- **Every per-entry failure is soft — never request-fatal.** The audit always finalizes `201`; per-entry outcomes are reported in the response `evidence` array as `{ evidence_key, stored, reason? }`. Reasons: `key_not_in_policy_allowlist` (the key is not named by any `evidence.requires` rule), `too_large` (`evidence_data` over 64 KiB), `too_many` (more than 16 entries — the excess is dropped), `no_session` (the evaluation had no `session_id`), `evidence_unavailable` (this deployment runs governance without an evidence store), `closed` (the store is shutting down). **A rejected key is silently not stored**, so a later grounded `/evaluate` will fail closed — make sure every key you populate is named by an `evidence.requires` rule.
+- **Idempotency.** Evidence is part of the `/audit` idempotency hash (order-independent): an identical retry replays cleanly, but the same `evaluation_id` with divergent evidence is `409 evaluation_conflict`.
 
 **Other responses:** `404 evaluation_unknown`, `404 evaluation_expired` (the decision aged out — see below), `409 approval_unresolved` (resolve the approval first; **retryable** with short backoff).
 

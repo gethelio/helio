@@ -54,6 +54,12 @@ const installScanBody = z.object({
   metadata: metadataSchema,
 })
 
+const evidenceEntrySchema = z.object({
+  evidence_key: z.string().min(1),
+  evidence_data: z.unknown().refine((v) => v !== undefined, { message: 'Required' }),
+  ttl_seconds: z.number().int().positive().optional(),
+})
+
 const auditBody = z.object({
   evaluation_id: z.string().min(1),
   status: z.enum(['success', 'error', 'not_executed']),
@@ -61,6 +67,10 @@ const auditBody = z.object({
   duration_ms: z.number().optional(),
   result: z.unknown().optional(),
   actual_amount: z.number().optional(),
+  // No `.max()` / size refinement here on purpose (issue #11): caps are
+  // enforced per-entry in GovernanceService.populateEvidence as soft-drops, so
+  // an over-cap entry never 400s away the audit row for a call that already ran.
+  evidence: z.array(evidenceEntrySchema).optional(),
 })
 
 const resolveBody = z.object({
@@ -207,8 +217,31 @@ function auditPayloadHash(data: z.infer<typeof auditBody>): string {
     duration_ms: data.duration_ms ?? null,
     result: data.result ?? null,
     actual_amount: data.actual_amount ?? null,
+    evidence: canonicalEvidence(data.evidence),
   }
   return createHash('sha256').update(canonicalize(semantic)).digest('hex')
+}
+
+/**
+ * Order-independent canonical form of the submitted evidence array, for the
+ * idempotency hash (issue #11). Entries are normalized (defaults
+ * filled) and sorted by their full canonical tuple — `(evidence_key,
+ * evidence_data, ttl_seconds)` — so a retry that sends the same facts in a
+ * different array order hashes identically, while any divergence in key, data,
+ * or ttl is a `409 evaluation_conflict`. Hashes the *submitted* payload, so the
+ * result is independent of which entries the service later soft-drops.
+ */
+function canonicalEvidence(evidence: z.infer<typeof auditBody>['evidence']): unknown {
+  if (!evidence || evidence.length === 0) return null
+  return evidence
+    .map((e) => ({
+      evidence_key: e.evidence_key,
+      evidence_data: e.evidence_data ?? null,
+      ttl_seconds: e.ttl_seconds ?? null,
+    }))
+    .map((norm) => ({ sortKey: canonicalize(norm), norm }))
+    .sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+    .map((x) => x.norm)
 }
 
 /** Narrow a numeric status to Hono's accepted status type. */
