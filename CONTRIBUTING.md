@@ -163,6 +163,55 @@ The proxy sits in the critical path of every agent tool call. Performance matter
 - Audit writes must be **async and non-blocking**: never add latency to the tool call path.
 - If you're adding a dependency, consider its impact on startup time and memory.
 
+### Dependencies & supply-chain audits
+
+Helio is a security tool, so the dependency tree is part of the threat model — npm
+supply-chain campaigns (e.g. the 2026 TeamPCP wave) compromise **dev, build, and
+transitive** packages, not just production ones, with install-time code execution.
+Our audit posture reflects that:
+
+- **Coverage is always the full tree** (dev + build + transitive). We never scope
+  the audit to production-only — build tooling produces the shipped bundle and runs
+  in CI with credentials, so it is in scope.
+- **`pnpm audit --audit-level=high` is enforced unconditionally on `main`, on every
+  release (`release.yml`), and daily (`security-audit.yml`).** These are the
+  guarantees: a flagged dependency can never be merged to `main` unnoticed or
+  shipped in a release.
+- **On a pull request, the audit runs only when the PR changes a dependency
+  manifest or install input** — `package.json`, `pnpm-lock.yaml`,
+  `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.*` (install hooks), or anything under
+  `patches/`. With `--frozen-lockfile`, leaving all of these unchanged means an
+  unchanged installed tree, so an unrelated feature PR is not blocked by a
+  newly-published advisory on a dependency it never touched. The check still reports
+  green with a notice explaining the skip. The guard **fails closed** — any
+  uncertainty (unknown event, missing base SHA, diff/grep error) runs the audit. If
+  you add a new install-affecting input (e.g. a new pnpm hook mechanism), add it to
+  the trigger set in `ci.yml`.
+- **Dependabot security updates** is enabled so advisories on the standing tree are
+  auto-PR'd within hours rather than discovered by a CI failure.
+- **This gate's integrity depends on branch protection.** `main` must require the
+  `ci` status check and code-owner review (workflow files are owned via CODEOWNERS),
+  with admin bypass disabled — otherwise a PR could weaken the workflow itself. Treat
+  those settings as part of the control, not optional.
+
+**Handling an advisory — triage by _type_, not just dev-vs-prod:**
+
+- A **malicious package, install-time RCE, or credential-exfiltration** advisory is
+  an **incident** regardless of whether the package is dev-only or shipped — remediate
+  immediately (upgrade, or remove), do not ignore.
+- A **benign vulnerability with no exploit path in our usage** (e.g. a dev-server
+  SSRF or ReDoS in a build tool we only invoke on trusted input) may be **time-boxed
+  ignored** via `pnpm.auditConfig.ignoreGhsas`, but **only** with a tracking issue to
+  remove it. Prefer a real upgrade over an ignore.
+
+Current dev-only ignores (each tracked for removal):
+
+| GHSA                  | Package (path)                      | Why ignored                                                                                                           | Tracking |
+| --------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------- |
+| `GHSA-gv7w-rqvm-qjhr` | esbuild (via vite, dashboard build) | dev-server request vuln; not in the shipped bundle                                                                    | #64      |
+| `GHSA-fx2h-pf6j-xcff` | vite (dashboard build)              | dev-server only; vite is not run in production                                                                        | #64      |
+| `GHSA-vmh5-mc38-953g` | undici (via `jsdom`, test env)      | SOCKS5 ProxyAgent TLS path, not exercised in tests; no patched undici is compatible with `jsdom@29`'s internal layout | #64      |
+
 ## Issue Labels
 
 | Label              | Meaning                                      |

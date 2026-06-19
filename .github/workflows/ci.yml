@@ -62,8 +62,53 @@ jobs:
       - name: Docs drift check
         run: pnpm docs:check:ci
 
+      # Supply-chain audit. Full-tree (dev + build + transitive) on every push to
+      # main and on release (release.yml). On a pull_request it runs ONLY when the
+      # PR changes a dependency manifest — so an unrelated feature PR is not blocked
+      # by a newly-published advisory on a dep it never touched. Safe because, with
+      # `--frozen-lockfile`, an unchanged manifest means an unchanged installed tree
+      # (nothing new to audit), and that standing tree is still covered by the
+      # main-push audit, the release audit, the daily Security Audit workflow, and
+      # Dependabot security updates. Fails CLOSED: any uncertainty runs the audit.
       - name: Audit dependencies
-        run: pnpm audit --audit-level=high
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          run_audit() {
+            echo "Running full-tree dependency audit (pnpm audit --audit-level=high)"
+            pnpm audit --audit-level=high
+          }
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            run_audit; exit $?
+          fi
+          if [ -z "${BASE_SHA:-}" ]; then
+            echo "::notice::No PR base SHA available — running full audit (fail-closed)."
+            run_audit; exit $?
+          fi
+          if ! changed="$(git diff --name-only "$BASE_SHA" HEAD 2>/dev/null)"; then
+            echo "::notice::Could not compute changed files — running full audit (fail-closed)."
+            run_audit; exit $?
+          fi
+          # Any file that can affect what `pnpm install` produces or executes:
+          # declared/resolved deps (package.json, pnpm-lock.yaml, pnpm-workspace.yaml),
+          # registry/install config (.npmrc), install hooks (.pnpmfile.cjs/.js/.mjs),
+          # and applied patches (patches/**). Missing any of these would be a
+          # fail-open (a PR could change the installed tree while the audit skips).
+          # Branch on grep's exit code explicitly: 0 = matched (run), 1 = no match
+          # (skip), anything else = grep error → run (fail-closed).
+          printf '%s\n' "$changed" | grep -Eq '(^|/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.(c|m)?js)$|(^|/)patches/'
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Dependency manifest / install input changed in this PR — running full audit."
+            run_audit; exit $?
+          elif [ "$rc" -ne 1 ]; then
+            echo "::notice::Manifest-change detection errored (grep rc=$rc) — running full audit (fail-closed)."
+            run_audit; exit $?
+          fi
+          echo "::notice title=Dependency audit skipped::No dependency manifest or install input changed in this PR (package.json / pnpm-lock.yaml / pnpm-workspace.yaml / .npmrc / .pnpmfile.* / patches/). The full-tree audit is enforced on main, on release, and by the daily Security Audit workflow."
 
       - name: Build
         run: pnpm build

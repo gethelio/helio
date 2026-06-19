@@ -1,0 +1,63 @@
+name: Security Audit
+
+# Standing-tree supply-chain backstop. The per-PR audit (ci.yml) only runs when a
+# PR changes a dependency manifest, so this daily full-tree audit catches a
+# newly-published advisory on an already-installed dependency during quiet periods
+# (no pushes to main). Dependabot security updates is the proactive remediator;
+# this is the visible fail-loud signal. Full tree (dev + build + transitive).
+
+on:
+  schedule:
+    - cron: '17 7 * * *' # daily at 07:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-audit
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write # open/append a tracking issue when the audit fails (see below)
+
+jobs:
+  audit:
+    name: Full-tree dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies (full tree)
+        run: pnpm audit --audit-level=high
+
+      # Make a failure actionable rather than a quiet red run: open a tracking
+      # issue (or comment on the existing open one, to avoid daily duplicates).
+      - name: Report audit failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          title='Scheduled security audit failing'
+          body="The daily full-tree \`pnpm audit --audit-level=high\` failed. Triage per CONTRIBUTING.md (Dependencies & supply-chain audits). Run: ${RUN_URL}"
+          existing="$(gh issue list --state open --search "in:title \"${title}\"" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -n "${existing:-}" ]; then
+            gh issue comment "$existing" --body "$body" || true
+          else
+            gh issue create --title "$title" --body "$body" || true
+          fi
