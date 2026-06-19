@@ -76,7 +76,12 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          # GitHub runs `shell: bash` with `-e` (errexit); disable it so the
+          # no-match `grep` (rc=1, the skip case) doesn't abort before we read
+          # `rc`. Exit codes are handled explicitly below (rc checks + exit $?),
+          # and the audit's own failure still propagates via `run_audit; exit $?`.
           set -uo pipefail
+          set +e
           run_audit() {
             echo "Running full-tree dependency audit (pnpm audit --audit-level=high)"
             pnpm audit --audit-level=high
