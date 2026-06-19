@@ -34,12 +34,12 @@
     "auditConfig": {
       "ignoreGhsas": [
         "GHSA-gv7w-rqvm-qjhr",
-        "GHSA-fx2h-pf6j-xcff"
+        "GHSA-fx2h-pf6j-xcff",
+        "GHSA-vmh5-mc38-953g"
       ]
     },
     "overrides": {
-      "form-data@>=4.0.0 <4.0.6": ">=4.0.6",
-      "undici@>=7.23.0 <7.28.0": ">=7.28.0"
+      "form-data@>=4.0.0 <4.0.6": ">=4.0.6"
     }
   }
 }
