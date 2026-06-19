@@ -17,6 +17,33 @@ Maintainer notes:
 - Keep entries user-visible and operator-relevant (new behavior, defaults,
   security posture, and breaking changes).
 
+## [0.6.0] - 2026-06-19
+
+### Added
+
+- **Optional `evidence` payload on `POST /audit` (#11).** Hook-based adapters can
+  now populate evidence-grounding facts on their single adapter-scoped token by
+  attaching an optional `evidence` array to `/audit`, instead of the SDK-scoped
+  `POST /evidence`. Writes are **success-only** and **first-finalize-only**, bound
+  to the pending evaluation's own `session_id` / `tool_name` (an adapter cannot
+  target another session), and still gated by the `evidence.requires` policy
+  allowlist. Every per-entry failure is **soft** — over-cap (`too_many` past 16,
+  `too_large` over 64 KiB), a disallowed key, or a shutting-down store are
+  reported per entry and never fail the audit, so the record for a call that
+  already ran is preserved. Part of the experimental adapter contract (#11); see
+  `docs/adapter-api.md`.
+
+### Security
+
+- **hono `4.12.14` → `4.12.26`** (GHSA-88fw-hqm2-52qc — CORS middleware reflects
+  any `Origin` with credentials on the wildcard default). Helio's sideband rejects
+  `Origin` headers and does not use the permissive default, so it was not
+  exploitable in practice, but the dependency is upgraded regardless.
+- **undici** dev-only advisory (GHSA-vmh5-mc38-953g) acknowledged as a test-only
+  transitive (`dashboard > jsdom`), not present in the published artifacts; no
+  patched version is compatible with `jsdom@29`'s internal layout, so it is scoped
+  to the dev-only audit ignore list.
+
 ## [0.5.0] - 2026-06-16
 
 ### Added
