@@ -81,6 +81,7 @@ listen:
 policies:
   default: allow
 
+  # These rules match on tool-name globs (deny / rate-limit / spend-limit):
   rules:
     # Block destructive operations
     - match:
@@ -119,6 +120,8 @@ dashboard:
   port: 3100
   api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
+
+Omitted fields like `listen.host`, `dashboard.host`, and `audit.path` fall back to safe defaults (`127.0.0.1` for both hosts — loopback only — and `./helio-audit.db`). The [Configuration Reference](./docs/configuration.md) is the authoritative list of every field, its default, and the canonical section order.
 
 If your upstream requires a static credential (for example `Authorization: Bearer …` on a hosted MCP server), set [`upstream.headers`](docs/configuration.md#static-request-headers) — values support `${VAR}` interpolation so secrets stay out of the file.
 

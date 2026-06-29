@@ -51,15 +51,10 @@ upstream:
 
 listen:
   port: 3000
-  host: '127.0.0.1'
-
-dashboard:
-  enabled: true
-  port: 3100
-  api_secret: '${HELIO_DASHBOARD_SECRET}'
 
 policies:
   default: allow
+  # These rules match on MCP tool annotations (readOnlyHint / destructiveHint):
   rules:
     - name: block-destructive
       match:
@@ -78,10 +73,16 @@ policies:
 
 audit:
   storage: sqlite
-  path: ./helio-audit.db
   retention: 90d
   include_responses: true
+
+dashboard:
+  enabled: true
+  port: 3100
+  api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
+
+Omitted fields like `listen.host`, `dashboard.host`, and `audit.path` fall back to safe defaults (`127.0.0.1` for both hosts — loopback only — and `./helio-audit.db`). The section order here (`upstream → listen → policies → audit → dashboard`) matches what `helio init` scaffolds and the [Configuration Reference](./configuration.md).
 
 This example configuration blocks any tool marked as destructive, explicitly allows read-only tools, and falls through to `default: allow` for everything else. Every tool call is recorded to a local SQLite database. (Until you uncomment a `policies` block like this one, the scaffolded config blocks nothing.)
 
