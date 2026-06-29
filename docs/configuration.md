@@ -36,14 +36,6 @@ listen:
   port: 3000 # Proxy listening port
   host: '127.0.0.1' # Bind address
 
-dashboard:
-  enabled: true # Serve the dashboard UI
-  port: 3100 # Dashboard API port
-  host: '127.0.0.1' # Dashboard bind address
-  api_secret: 'your-secret' # Manual dashboard login secret + optional Bearer auth for API clients
-  allow_open_mode: false # Explicit local-only opt-in for running without api_secret
-  sse_heartbeat_interval: '30s' # SSE keepalive interval
-
 environment: 'production' # Label for policy matching
 
 policies:
@@ -79,6 +71,14 @@ audit:
   path: ./helio-audit.db # SQLite database file
   retention: '90d' # Auto-delete records older than this
   include_responses: true # Store full upstream responses
+
+dashboard:
+  enabled: true # Serve the dashboard UI
+  port: 3100 # Dashboard API port
+  host: '127.0.0.1' # Dashboard bind address
+  api_secret: 'your-secret' # Manual dashboard login secret + optional Bearer auth for API clients
+  allow_open_mode: false # Explicit local-only opt-in for running without api_secret
+  sse_heartbeat_interval: '30s' # SSE keepalive interval
 
 sdk:
   enabled: false # Enable the Python SDK sideband API
@@ -175,25 +175,6 @@ Where the proxy listens for incoming MCP requests.
 | ------ | ------- | -------- | ----------- | ----------------------- |
 | `port` | integer | No       | `3000`      | Port number (1–65535).  |
 | `host` | string  | No       | `127.0.0.1` | Hostname or IP to bind. |
-
-### dashboard
-
-Configuration for the built-in web dashboard.
-
-When `dashboard.enabled: true`, Helio requires bundled dashboard assets to be present in the proxy package. If assets are missing, `helio start` and `helio validate` fail fast with an explicit error.
-
-> **Security — open dashboard mode:** with `dashboard.enabled: true`, you must either set a non-empty `dashboard.api_secret` or explicitly opt in to local open mode with `dashboard.allow_open_mode: true`. Open mode is allowed only on loopback hosts (`127.0.0.1`, `localhost`, `::1`) and should never be exposed via shared or non-local deployments. If you use `api_secret: '${VAR}'`, a missing `${VAR}` fails config loading; only an explicitly empty value (or omitted secret with open-mode opt-in) runs unauthenticated.
->
-> `helio init` generates a secure `dashboard.api_secret` by default. Do not remove it unless you intentionally want local open mode.
-
-| Field                    | Type     | Required    | Default     | Description                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------ | -------- | ----------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                | boolean  | No          | `true`      | Enable the dashboard UI and sideband API server.                                                                                                                                                                                                                                                                                                                                       |
-| `port`                   | integer  | No          | `3100`      | Dashboard sideband API port (1–65535).                                                                                                                                                                                                                                                                                                                                                 |
-| `host`                   | string   | No          | `127.0.0.1` | Dashboard sideband bind address.                                                                                                                                                                                                                                                                                                                                                       |
-| `api_secret`             | string   | Conditional | —           | Shared dashboard secret. Required when `dashboard.enabled: true` unless `dashboard.allow_open_mode: true`. Also required whenever any rule uses `action: require_approval` or `policies.flag_destructive: require_approval`. Browser operators enter it once on the dashboard login card to mint an HttpOnly session cookie; machine clients may send `Authorization: Bearer <token>`. |
-| `allow_open_mode`        | boolean  | No          | `false`     | Explicit opt-in to run the dashboard sideband without `api_secret`. Only valid on loopback hosts and intended for trusted local development only.                                                                                                                                                                                                                                      |
-| `sse_heartbeat_interval` | duration | No          | `30s`       | Interval between SSE keepalive messages.                                                                                                                                                                                                                                                                                                                                               |
 
 ### environment
 
@@ -295,6 +276,25 @@ Audit rows also include:
 
 - `environment` — runtime environment label captured at decision time (nullable if unset)
 - `matched_rule_index` — zero-based rule index when a rule matched; `null` when default policy applied
+
+### dashboard
+
+Configuration for the built-in web dashboard.
+
+When `dashboard.enabled: true`, Helio requires bundled dashboard assets to be present in the proxy package. If assets are missing, `helio start` and `helio validate` fail fast with an explicit error.
+
+> **Security — open dashboard mode:** with `dashboard.enabled: true`, you must either set a non-empty `dashboard.api_secret` or explicitly opt in to local open mode with `dashboard.allow_open_mode: true`. Open mode is allowed only on loopback hosts (`127.0.0.1`, `localhost`, `::1`) and should never be exposed via shared or non-local deployments. If you use `api_secret: '${VAR}'`, a missing `${VAR}` fails config loading; only an explicitly empty value (or omitted secret with open-mode opt-in) runs unauthenticated.
+>
+> `helio init` generates a secure `dashboard.api_secret` by default. Do not remove it unless you intentionally want local open mode.
+
+| Field                    | Type     | Required    | Default     | Description                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | -------- | ----------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                | boolean  | No          | `true`      | Enable the dashboard UI and sideband API server.                                                                                                                                                                                                                                                                                                                                       |
+| `port`                   | integer  | No          | `3100`      | Dashboard sideband API port (1–65535).                                                                                                                                                                                                                                                                                                                                                 |
+| `host`                   | string   | No          | `127.0.0.1` | Dashboard sideband bind address.                                                                                                                                                                                                                                                                                                                                                       |
+| `api_secret`             | string   | Conditional | —           | Shared dashboard secret. Required when `dashboard.enabled: true` unless `dashboard.allow_open_mode: true`. Also required whenever any rule uses `action: require_approval` or `policies.flag_destructive: require_approval`. Browser operators enter it once on the dashboard login card to mint an HttpOnly session cookie; machine clients may send `Authorization: Bearer <token>`. |
+| `allow_open_mode`        | boolean  | No          | `false`     | Explicit opt-in to run the dashboard sideband without `api_secret`. Only valid on loopback hosts and intended for trusted local development only.                                                                                                                                                                                                                                      |
+| `sse_heartbeat_interval` | duration | No          | `30s`       | Interval between SSE keepalive messages.                                                                                                                                                                                                                                                                                                                                               |
 
 ### sdk
 

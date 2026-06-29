@@ -113,18 +113,6 @@ upstream:
 #   headers:
 #     Authorization: "Bearer \${UPSTREAM_TOKEN}"
 
-# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
-# not change to 0.0.0.0 without putting an authenticating reverse proxy in
-# front. dashboard.api_secret is the manual dashboard login secret and also
-# supports machine Bearer auth for sideband API clients. Store it safely; it
-# stays valid until you rotate it. Rotate by editing this file and restarting
-# (or hot-reloading) the proxy. Rotation invalidates active dashboard sessions.
-dashboard:
-  enabled: true
-  port: 3100
-  host: 127.0.0.1
-  api_secret: "${apiSecret}"
-
 # listen:
 #   port: 3000
 #   host: 127.0.0.1
@@ -144,6 +132,18 @@ dashboard:
 #   path: ./helio-audit.db
 #   retention: 90d
 #   include_responses: true
+
+# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
+# not change to 0.0.0.0 without putting an authenticating reverse proxy in
+# front. dashboard.api_secret is the manual dashboard login secret and also
+# supports machine Bearer auth for sideband API clients. Store it safely; it
+# stays valid until you rotate it. Rotate by editing this file and restarting
+# (or hot-reloading) the proxy. Rotation invalidates active dashboard sessions.
+dashboard:
+  enabled: true
+  port: 3100
+  host: 127.0.0.1
+  api_secret: "${apiSecret}"
 
 # sdk:
 #   enabled: false
