@@ -27,7 +27,9 @@ helio init
 
 ## Step 2: Configure
 
-Open `helio.yaml` and set `upstream.url` to point at your MCP server:
+Open `helio.yaml` and set `upstream.url` to point at your MCP server.
+
+> **Helio starts in audit-only mode.** `helio init` scaffolds the `policies` section **commented out**, so out of the box Helio runs with `default: allow` and **zero rules** — it records every tool call but **blocks nothing** until you add rules. The example below is an **illustrative target** (not the file `init` writes); uncomment and adapt `policies` to start enforcing. See the [Policy Guide](./policies.md) for rule syntax.
 
 ```yaml
 version: '1'
@@ -70,7 +72,7 @@ audit:
   include_responses: true
 ```
 
-This configuration blocks any tool marked as destructive, explicitly allows read-only tools, and falls through to `default: allow` for everything else. Every tool call is recorded to a local SQLite database.
+This example configuration blocks any tool marked as destructive, explicitly allows read-only tools, and falls through to `default: allow` for everything else. Every tool call is recorded to a local SQLite database. (Until you uncomment a `policies` block like this one, the scaffolded config blocks nothing.)
 
 If you use the `${HELIO_DASHBOARD_SECRET}` placeholder above, export it before starting:
 

@@ -32,6 +32,7 @@ import {
   warnIfWebhookChannelUnreachable,
   warnIfSdkSidebandExposed,
   warnIfDashboardOpenMode,
+  warnIfNoEnforcement,
 } from './startup-warnings.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
 
@@ -526,6 +527,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   console.error(
     `Policies: ${String(ruleCount)} rule${ruleCount !== 1 ? 's' : ''} loaded (default: ${policy.defaultAction})`,
   )
+  warnIfNoEnforcement(policy)
   if (config.upstream.transport === 'stdio') {
     console.error(`Upstream: ${config.upstream.command ?? ''} (stdio)`)
   } else {

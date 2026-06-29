@@ -80,3 +80,28 @@ export function warnIfDashboardOpenMode(
   )
   return true
 }
+
+/**
+ * Emit a startup warning when the loaded policy enforces nothing — zero rules
+ * with `default: allow`. In that state Helio records a full audit trail but
+ * blocks no tool calls, which is easy to miss in the "Policies: 0 rules loaded
+ * (default: allow)" line. Dry-run is excluded: it forwards nothing upstream, so
+ * "not blocking" would be misleading.
+ */
+export function warnIfNoEnforcement(
+  policy: {
+    rules: ReadonlyArray<unknown>
+    defaultAction: 'allow' | 'deny'
+    dryRun?: boolean
+  },
+  log: (message: string) => void = console.error,
+): boolean {
+  if (policy.rules.length > 0 || policy.defaultAction !== 'allow' || policy.dryRun) return false
+
+  log(
+    '[helio] No policy rules are loaded and the default action is "allow" - ' +
+      'Helio is recording an audit trail but NOT blocking anything. Add rules ' +
+      'under `policies:` in helio.yaml to start enforcing (see docs/policies.md).',
+  )
+  return true
+}
