@@ -17,6 +17,18 @@ Maintainer notes:
 - Keep entries user-visible and operator-relevant (new behavior, defaults,
   security posture, and breaking changes).
 
+## [Unreleased]
+
+### Added
+
+- **Audit-only default surfaced at startup and in the docs (#80, #81).** When
+  Helio starts with zero policy rules and `default: allow`, it now prints a
+  startup line noting that it is recording a full audit trail but not blocking
+  anything, so the audit-only posture is not missed. The line is suppressed when
+  at least one rule is loaded, when `default: deny`, or in dry-run. The README
+  and getting-started guides now also state that `helio init` scaffolds the
+  `policies` section commented out (audit-only) until you add rules.
+
 ## [0.6.0] - 2026-06-19
 
 ### Added
@@ -259,8 +271,11 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/gethelio/helio/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gethelio/helio/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/gethelio/helio/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/gethelio/helio/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gethelio/helio/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/gethelio/helio/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gethelio/helio/releases/tag/v0.1.0
