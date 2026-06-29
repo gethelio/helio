@@ -122,6 +122,8 @@ dashboard:
 
 If your upstream requires a static credential (for example `Authorization: Bearer …` on a hosted MCP server), set [`upstream.headers`](docs/configuration.md#static-request-headers) — values support `${VAR}` interpolation so secrets stay out of the file.
 
+No MCP server to test against? Helio ships a zero-dependency echo server you can run in one command — see the [Getting Started guide](./docs/getting-started.md#no-mcp-server-to-test-with).
+
 About `dashboard.api_secret`:
 
 - **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains a generated `api_secret` (a literal 32-byte hex value, also printed when you ran `init`). It's set — skip this step.
@@ -148,6 +150,16 @@ npx @gethelio/proxy start
   }
 }
 ```
+
+**No agent handy?** You don't need one to see Helio work. Point the official [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) at `http://localhost:3000/mcp` (run `npx @modelcontextprotocol/inspector`, transport: Streamable HTTP), or send a call straight through the proxy from the terminal:
+
+```bash
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"London"}}}'
+```
+
+Either way the call appears in the dashboard with its policy decision. (`get_weather` is one of the demo tools in Helio's [echo server](./docs/getting-started.md#no-mcp-server-to-test-with).)
 
 ### 5. Open the dashboard
 

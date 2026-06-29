@@ -6,7 +6,18 @@ Get Helio running in under 5 minutes. By the end, you'll have an MCP governance 
 
 - **Node.js 22+** — check with `node --version`
 - **`jq` (optional)** — used in examples below for pretty-printing JSON. If unavailable, remove `| jq` and read raw JSON output.
-- **An MCP server to govern** — any server that speaks Streamable HTTP, SSE, or stdio. Helio works with any spec-compliant MCP server (e.g. FastMCP, the official MCP SDKs) with zero changes to the server. If you don't have one, use the echo server included in the [examples](../examples/basic/).
+- **An MCP server to govern** — any server that speaks Streamable HTTP, SSE, or stdio. Helio works with any spec-compliant MCP server (e.g. FastMCP, the official MCP SDKs) with zero changes to the server. **No server to test against?** Use the zero-dependency echo server below — no clone or install needed. (If you've cloned the repo as a contributor, you can instead run the bundled examples with `pnpm start`; see [`examples/basic/`](../examples/basic/).)
+
+### No MCP server to test with?
+
+Helio ships a tiny echo server that speaks MCP over plain `node:http` — no dependencies, no install. Save it and run it on the default upstream port:
+
+```bash
+curl -O https://raw.githubusercontent.com/gethelio/helio/main/examples/_shared/mcp-echo-server.mjs
+node mcp-echo-server.mjs
+```
+
+It prints `MCP echo server listening on http://127.0.0.1:8080/mcp` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
 
 ## Step 1: Install
 
@@ -129,6 +140,11 @@ Instead of connecting your MCP client directly to the upstream server, point it 
 ```
 
 **Any HTTP MCP client** — change the server URL from `http://localhost:8080/mcp` to `http://localhost:3000/mcp`. The proxy is fully transparent: it forwards all MCP methods unchanged and only intercepts `tools/call` for policy evaluation.
+
+**No client or agent handy?** You don't need one to try Helio:
+
+- **MCP Inspector** — run `npx @modelcontextprotocol/inspector`, choose the Streamable HTTP transport, and point it at `http://localhost:3000/mcp`. Every tool call you make appears in the dashboard with its policy decision.
+- **curl** — send a request straight through the proxy (see [Step 6](#step-6-send-a-test-tool-call) below). This works against any upstream, including the echo server.
 
 ### Error normalization behavior
 
