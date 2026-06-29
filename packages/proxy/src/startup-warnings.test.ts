@@ -3,6 +3,7 @@ import {
   warnIfWebhookChannelUnreachable,
   warnIfSdkSidebandExposed,
   warnIfDashboardOpenMode,
+  warnIfNoEnforcement,
 } from './startup-warnings.js'
 
 describe('warnIfWebhookChannelUnreachable', () => {
@@ -180,6 +181,63 @@ describe('warnIfDashboardOpenMode', () => {
     const messages: string[] = []
     const warned = warnIfDashboardOpenMode(makeConfig({ allowOpenMode: false }), (m) =>
       messages.push(m),
+    )
+
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+})
+
+describe('warnIfNoEnforcement', () => {
+  function makePolicy(args: {
+    readonly ruleCount?: number
+    readonly defaultAction?: 'allow' | 'deny'
+    readonly dryRun?: boolean
+  }) {
+    return {
+      rules: Array.from({ length: args.ruleCount ?? 0 }, (_, i) => ({ name: `rule-${String(i)}` })),
+      defaultAction: args.defaultAction ?? 'allow',
+      dryRun: args.dryRun,
+    }
+  }
+
+  it('warns when zero rules are loaded and the default action is allow', () => {
+    const messages: string[] = []
+    const warned = warnIfNoEnforcement(makePolicy({ ruleCount: 0, defaultAction: 'allow' }), (m) =>
+      messages.push(m),
+    )
+
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('NOT blocking anything')
+    expect(messages[0]).toContain('audit trail')
+  })
+
+  it('does not warn when at least one rule is loaded', () => {
+    const messages: string[] = []
+    const warned = warnIfNoEnforcement(makePolicy({ ruleCount: 1, defaultAction: 'allow' }), (m) =>
+      messages.push(m),
+    )
+
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn when the default action is deny', () => {
+    const messages: string[] = []
+    const warned = warnIfNoEnforcement(makePolicy({ ruleCount: 0, defaultAction: 'deny' }), (m) =>
+      messages.push(m),
+    )
+
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn in dry-run mode even with zero rules and default allow', () => {
+    const messages: string[] = []
+    const warned = warnIfNoEnforcement(
+      makePolicy({ ruleCount: 0, defaultAction: 'allow', dryRun: true }),
+      (m) => messages.push(m),
     )
 
     expect(warned).toBe(false)
