@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-30
+
 ### Added
 
 - **Audit-only default surfaced at startup and in the docs (#80, #81).** When
@@ -28,6 +30,16 @@ Maintainer notes:
   at least one rule is loaded, when `default: deny`, or in dry-run. The README
   and getting-started guides now also state that `helio init` scaffolds the
   `policies` section commented out (audit-only) until you add rules.
+
+### Changed
+
+- **Quick-start onboarding hardened (#82, #83, #84, #85).** Reconciled the config
+  sample order across the README, getting-started, the `init` scaffold, and the
+  Configuration Reference into one request-lifecycle order; added a
+  zero-dependency echo server and an agent-free Step 4 (MCP Inspector plus a
+  copy-paste curl) so npm-only users can complete the quick start without a repo
+  clone or an existing agent; and clarified the dashboard login and SDK-token
+  notes.
 
 ## [0.6.0] - 2026-06-19
 
@@ -271,7 +283,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/gethelio/helio/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gethelio/helio/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gethelio/helio/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gethelio/helio/compare/v0.3.0...v0.4.0
