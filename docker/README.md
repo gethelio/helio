@@ -1,35 +1,60 @@
 # Helio Docker Quickstart
 
-Runs the Helio proxy, a mock MCP echo server, and the dashboard via
-Docker Compose. Designed for a 5-minute demo on your local machine.
+A self-contained, 5-minute demo that shows Helio governing MCP tool
+calls inside Docker. `docker compose up` starts three things together:
+the Helio proxy, a throwaway echo server that stands in for an upstream
+MCP server, and the dashboard. You send a couple of tool calls, watch
+one get allowed and one get blocked, and see both land in the dashboard
+audit feed. No MCP server or agent of your own is required.
 
-> Looking to run Helio in its own container **next to a coding agent or dev
-> container**, with network isolation so the agent can't bypass governance? See
+> **This is a demo, not a deployment.** To run Helio in its own
+> container next to a coding agent or dev container, with network
+> isolation so the agent can't bypass governance, and pointed at your
+> own MCP server, see
 > [Running Helio as a Sidecar](../docs/deployment-sidecar.md).
 
 ## Setup (one-time)
 
-1. Copy the example env file:
+Prerequisites: a local clone of this repo, and Docker running (Docker
+Desktop, or a Docker Engine daemon). Every command below is run from
+the `docker/` directory.
+
+1. Clone the repo and change into the `docker/` directory:
+
+   ```bash
+   git clone https://github.com/gethelio/helio.git
+   cd helio/docker
+   ```
+
+2. Copy the example env file:
 
    ```bash
    cp .env.example .env
    ```
 
-2. Generate a 32-byte hex secret and paste it into `.env` as
-   `HELIO_DASHBOARD_SECRET=...`:
+3. Generate a 32-byte hex secret and set it as `HELIO_DASHBOARD_SECRET`
+   in `.env`. The file ships with an empty `HELIO_DASHBOARD_SECRET=`
+   line; open `.env` in your editor and paste the value after the `=`:
 
    ```bash
    openssl rand -hex 32           # macOS / Linux
    # or: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    ```
 
-3. Start the stack:
+   Prefer a one-liner? This appends the secret. Compose uses the last
+   value for a repeated key, so it overrides the empty placeholder:
+
+   ```bash
+   echo "HELIO_DASHBOARD_SECRET=$(openssl rand -hex 32)" >> .env
+   ```
+
+4. Start the stack:
 
    ```bash
    docker compose up
    ```
 
-   If you skip step 2, compose aborts before any container starts with
+   If you skip step 3, compose aborts before any container starts with
    an error that mentions
    `required variable HELIO_DASHBOARD_SECRET is missing` followed by
    the remediation hint baked into `docker-compose.yml`
@@ -37,10 +62,55 @@ Docker Compose. Designed for a 5-minute demo on your local machine.
    The `${HELIO_DASHBOARD_SECRET:?...}` guard in `docker-compose.yml`
    makes a silent-unauth start impossible.
 
-Open <http://localhost:3100> for the dashboard. Send tool calls to
-<http://localhost:3000/mcp>. The secret from step 2 is used as a
-dashboard login secret and can also be used by machine clients as an
-`Authorization: Bearer <secret>` credential on dashboard API calls.
+Open <http://localhost:3100> for the dashboard and log in with the
+secret you set in step 3 (the value of `HELIO_DASHBOARD_SECRET` in
+`docker/.env`). That same secret also works as an
+`Authorization: Bearer <secret>` credential for machine clients on
+dashboard API calls.
+
+## Exercise it
+
+The demo runs Helio's policy engine in front of the echo server, so you
+can watch governance act. The config (`helio.docker.yaml`) allows
+read-only tools and blocks destructive ones. Send a couple of calls
+through the proxy on port 3000:
+
+```bash
+# Allowed: get_weather is read-only
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"London"}}}'
+
+# Blocked: delete_record is destructive, so the policy denies it
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_record","arguments":{"id":"rec_42"}}}'
+```
+
+The first returns a result; the second returns a policy denial that
+names the `block-destructive` rule. Both appear in the dashboard
+activity feed with their decision.
+
+No agent handy? You can also point the official
+[MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector)
+at <http://localhost:3000/mcp> (run `npx @modelcontextprotocol/inspector`,
+transport: Streamable HTTP) and call the tools from its UI.
+
+That is as far as the demo goes. To govern your own MCP server, with
+Helio in its own container next to an agent, see
+[Running Helio as a Sidecar](../docs/deployment-sidecar.md).
+
+## Reset the demo
+
+Audit records persist in the `helio-data` Docker volume across restarts.
+`docker compose down` stops the containers but keeps that volume, so a
+later `docker compose up` still shows earlier tool calls in the feed. To
+wipe the audit history and start from a clean slate, remove the volume
+too:
+
+```bash
+docker compose down -v
+```
 
 ## Security model
 
@@ -100,10 +170,10 @@ OAuth, etc.).
 
 ## What's in this directory
 
-| File                  | Purpose                                                                            |
-| --------------------- | ---------------------------------------------------------------------------------- |
-| `Dockerfile`          | 4-stage build: deps, build, runtime, with `tini`, non-root user, and a healthcheck |
-| `docker-compose.yml`  | Orchestrates `helio` + `mcp-server` (the demo upstream)                            |
-| `helio.docker.yaml`   | Helio config loaded by the proxy container                                         |
-| `mcp-echo-server.mjs` | Zero-dependency MCP echo server for the demo                                       |
-| `.env.example`        | Template for local env vars (copy to `.env`, fill in the secret)                   |
+| File                  | Purpose                                                                                         |
+| --------------------- | ----------------------------------------------------------------------------------------------- |
+| `Dockerfile`          | 4-stage build (deps, build, prod-deps, runtime) with `tini`, a non-root user, and a healthcheck |
+| `docker-compose.yml`  | Orchestrates `helio` + `mcp-server` (the demo upstream)                                         |
+| `helio.docker.yaml`   | Helio config loaded by the proxy container                                                      |
+| `mcp-echo-server.mjs` | Zero-dependency MCP echo server for the demo                                                    |
+| `.env.example`        | Template for local env vars (copy to `.env`, fill in the secret)                                |
