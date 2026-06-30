@@ -11,9 +11,12 @@ import type { AuditRecord } from './audit/types.js'
 const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
 
 /** Run the CLI and capture output. */
-function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function runCli(
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('node', [CLI_PATH, ...args], (error, stdout, stderr) => {
+    execFile('node', [CLI_PATH, ...args], env ? { env } : {}, (error, stdout, stderr) => {
       resolve({
         code: typeof error?.code === 'number' ? error.code : error ? 1 : 0,
         stdout,
@@ -418,6 +421,36 @@ dashboard:
       ])
       expect(code).toBe(1)
       expect(stderr.length).toBeGreaterThan(0)
+    })
+
+    it('fails fast when a ${VAR} secret reference is unset', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      // A hand-authored config using the documented ${HELIO_DASHBOARD_SECRET}
+      // placeholder without exporting it must fail loudly, not run unauthenticated.
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: true
+  api_secret: "\${HELIO_DASHBOARD_SECRET}"
+`,
+      )
+
+      const env = { ...process.env }
+      delete env['HELIO_DASHBOARD_SECRET']
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath], env)
+        expect(code).toBe(1)
+        expect(stderr).toContain('Environment variable "HELIO_DASHBOARD_SECRET" is not set')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 
@@ -855,6 +888,152 @@ audit:
         rmSync(dir, { recursive: true, force: true })
       }
     }, 15_000)
+
+    it('resolves a require_approval call through the dashboard approve endpoint', async () => {
+      const upstream = await startMockMcpServer((payload) => {
+        const id = payload['id'] ?? null
+        if (payload['method'] === 'tools/list') {
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              tools: [{ name: 'create_payment', annotations: { destructiveHint: false } }],
+            },
+          }
+        }
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: { content: [{ type: 'text', text: 'payment-sent' }] },
+        }
+      })
+
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-approval-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const dashboardPort = listenPort + 1
+      const auditPath = join(dir, 'audit.db')
+      const secret = `test-secret-${String(listenPort)}`
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "${upstream.url}"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: true
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "${secret}"
+approval:
+  channels:
+    - type: dashboard
+policies:
+  default: allow
+  rules:
+    - name: approve-payments
+      match:
+        tool: "create_payment"
+      action: require_approval
+audit:
+  path: "${auditPath}"
+`,
+      )
+
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+
+      let stderr = ''
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error(`Timed out waiting for startup. stderr:\n${stderr}`))
+          }, 8_000)
+          timer.unref()
+          child.stderr.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf-8')
+            if (stderr.includes('Helio proxy listening')) {
+              clearTimeout(timer)
+              resolve()
+            }
+          })
+          child.once('exit', (code) => {
+            clearTimeout(timer)
+            reject(
+              new Error(
+                `helio start exited before ready marker with code ${String(code)}. stderr:\n${stderr}`,
+              ),
+            )
+          })
+        })
+
+        const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+        const dashUrl = `http://127.0.0.1:${String(dashboardPort)}`
+        await waitForProxyHealth(baseUrl, 2_000)
+
+        // The require_approval rule holds the call open, so do NOT await yet.
+        const callPromise = fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'create_payment', arguments: { amount: 10 } },
+          }),
+          signal: AbortSignal.timeout(12_000),
+        })
+
+        // Poll the dashboard approvals queue until the pending ticket appears.
+        const authHeader = { authorization: `Bearer ${secret}` }
+        let ticketId: string | undefined
+        for (let i = 0; i < 40 && ticketId === undefined; i++) {
+          const listRes = await fetch(`${dashUrl}/api/approvals`, { headers: authHeader })
+          if (listRes.ok) {
+            const list = (await listRes.json()) as {
+              data?: Array<{ id: string; tool_name: string }>
+            }
+            ticketId = (list.data ?? []).find((t) => t.tool_name === 'create_payment')?.id
+          }
+          if (ticketId === undefined) await new Promise((r) => setTimeout(r, 100))
+        }
+        expect(ticketId).toBeDefined()
+
+        // Resolve it via the dashboard REST API (the same router the proxy is
+        // waiting on), which should unblock the pending /mcp call.
+        const approveRes = await fetch(`${dashUrl}/api/approvals/${String(ticketId)}/approve`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...authHeader },
+          body: JSON.stringify({ approved_by: 'e2e-test' }),
+        })
+        expect(approveRes.status).toBe(200)
+
+        const callRes = await callPromise
+        const body = (await callRes.json()) as Record<string, unknown>
+        expect(callRes.status).toBe(200)
+        expect(body['error']).toBeUndefined()
+        expect(JSON.stringify(body)).toContain('payment-sent')
+        expect(
+          upstream.calls.some((c) => c.method === 'tools/call' && c.name === 'create_payment'),
+        ).toBe(true)
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGTERM')
+          await new Promise<void>((resolve) => {
+            child.once('exit', () => {
+              resolve()
+            })
+          })
+        }
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
 
     it('generates a fresh SDK sideband bearer token when sdk.enabled is true', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
