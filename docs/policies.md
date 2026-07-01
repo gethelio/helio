@@ -128,6 +128,8 @@ match:
 | `contains` | string | Substring match          | `contains: "@example.com"` |
 | `regex`    | string | Regular expression match | `regex: "^admin_"`         |
 
+A `neq` condition matches only when the field is present; an absent field does not satisfy `neq`.
+
 Multiple conditions on the same or different fields are AND-combined:
 
 ```yaml
@@ -231,6 +233,8 @@ The request is blocked immediately. No upstream request is made. The response is
   }
 }
 ```
+
+The `data` object also carries `ruleIndex` and `policy_reason`; the fields shown above are the ones an agent typically acts on.
 
 ### require_approval
 
@@ -440,12 +444,14 @@ When evidence is missing, the proxy returns self-repair feedback telling the age
       "blocked": true,
       "reason": "evidence_missing",
       "missing_evidence": ["order_lookup"],
-      "suggestion": "Call order_lookup tool first to provide evidence, then retry",
+      "suggestion": "Call the order_lookup tool first to provide the required evidence, then retry this action.",
       "retry_allowed": true
     }
   }
 }
 ```
+
+The `data` object also carries `rule`, `ruleIndex`, `action`, `expired_evidence`, and `missing_dependencies`.
 
 Evidence entries have a configurable TTL (default: 300 seconds). If evidence has expired, the response includes `"reason": "evidence_expired"` with a suggestion to refresh it.
 
