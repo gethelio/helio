@@ -82,6 +82,13 @@ volumes:
   helio-data: {}
 ```
 
+> **Apple Silicon / arm64:** the published image is currently `linux/amd64` only,
+> so `docker compose up` (or `docker pull`) fails on arm64 hosts with a
+> `no matching manifest` error. Until multi-arch images ship
+> ([#101](https://github.com/gethelio/helio/issues/101)), either add
+> `platform: linux/amd64` to the `helio` service above (it runs under emulation)
+> or build from `docker/Dockerfile`.
+
 Note what is and isn't published:
 
 - **`mcp-server` has no `ports:`** — it is never published to the host or the
