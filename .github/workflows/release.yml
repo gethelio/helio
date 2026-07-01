@@ -166,7 +166,7 @@ jobs:
     name: Docker Build & Push
     needs: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -189,6 +189,9 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: scripts/set-release-version.sh "$VERSION"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -217,9 +220,15 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Attestations (explicit for documentation): attach full build
+          # provenance to the image. No image SBOM here — the `sbom` job below
+          # publishes a CycloneDX dependency SBOM as a release asset instead.
+          provenance: mode=max
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -229,7 +238,9 @@ jobs:
       - name: Sign image with cosign
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "ghcr.io/gethelio/helio@${DIGEST}"
+        # --recursive signs the multi-arch index AND each per-platform child
+        # image, so the amd64/arm64 images users actually pull are each signed.
+        run: cosign sign --yes --recursive "ghcr.io/gethelio/helio@${DIGEST}"
 
   sbom:
     name: Generate SBOM
