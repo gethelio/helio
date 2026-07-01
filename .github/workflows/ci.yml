@@ -148,6 +148,48 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: false
-          tags: helio:ci-${{ github.sha }}
+          load: true
+          tags: helio:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Validate the demo config
+        working-directory: docker
+        run: |
+          docker run --rm \
+            -e HELIO_DASHBOARD_SECRET=ci-placeholder \
+            -v "$PWD/helio.docker.yaml:/config/helio.yaml:ro" \
+            helio:ci node packages/proxy/dist/cli.js validate -c /config/helio.yaml
+
+      - name: Assert the missing-secret guard aborts with the documented message
+        working-directory: docker
+        run: |
+          # With the secret unset, `docker compose config` must abort (non-zero)
+          # AND print the documented remediation. Assert both, so neither the
+          # fail-closed behavior nor the message can drift from the README.
+          if out=$(docker compose --env-file /dev/null config 2>&1); then
+            echo "guard did not fire: compose config exited 0 with the secret unset"
+            echo "$out"
+            exit 1
+          fi
+          if ! grep -q 'required variable HELIO_DASHBOARD_SECRET is missing' <<<"$out"; then
+            echo "missing-secret guard message drifted from the README:"
+            echo "$out"
+            exit 1
+          fi
+          echo "ok: missing-secret guard aborts with the documented message"
+
+      - name: Smoke test the compose stack
+        working-directory: docker
+        run: |
+          echo "HELIO_DASHBOARD_SECRET=$(openssl rand -hex 32)" > .env
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            up -d --no-build --wait --wait-timeout 120
+          ../scripts/docker-smoke.sh
+
+      - name: Tear down the compose stack
+        if: always()
+        working-directory: docker
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v || true
+          rm -f .env

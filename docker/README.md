@@ -170,10 +170,11 @@ OAuth, etc.).
 
 ## What's in this directory
 
-| File                  | Purpose                                                                                         |
-| --------------------- | ----------------------------------------------------------------------------------------------- |
-| `Dockerfile`          | 4-stage build (deps, build, prod-deps, runtime) with `tini`, a non-root user, and a healthcheck |
-| `docker-compose.yml`  | Orchestrates `helio` + `mcp-server` (the demo upstream)                                         |
-| `helio.docker.yaml`   | Helio config loaded by the proxy container                                                      |
-| `mcp-echo-server.mjs` | Zero-dependency MCP echo server for the demo                                                    |
-| `.env.example`        | Template for local env vars (copy to `.env`, fill in the secret)                                |
+| File                    | Purpose                                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `Dockerfile`            | 4-stage build (deps, build, prod-deps, runtime) with `tini`, a non-root user, and a healthcheck       |
+| `docker-compose.yml`    | Orchestrates `helio` + `mcp-server` (the demo upstream)                                               |
+| `docker-compose.ci.yml` | CI-only override that runs the smoke test against the prebuilt image (see `.github/workflows/ci.yml`) |
+| `helio.docker.yaml`     | Helio config loaded by the proxy container                                                            |
+| `mcp-echo-server.mjs`   | Zero-dependency MCP echo server for the demo                                                          |
+| `.env.example`          | Template for local env vars (copy to `.env`, fill in the secret)                                      |
