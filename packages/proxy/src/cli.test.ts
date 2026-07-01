@@ -413,6 +413,29 @@ dashboard:
       }
     })
 
+    it('renders the exact path and message for a missing scalar field', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      // upstream present but upstream.url omitted → exactly one error, on the
+      // scalar. Pins the rendered CLI output so a future Zod message change (as
+      // happened on the v3→v4 upgrade) fails here instead of silently drifting
+      // from docs/configuration.md.
+      writeFileSync(
+        configPath,
+        'version: "1"\nupstream:\n  transport: streamable-http\ndashboard:\n  enabled: false\n',
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(stderr).toContain('upstream.url: Invalid input: expected string, received undefined')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('rejects non-existent file', async () => {
       const { code, stderr } = await runCli([
         'validate',
