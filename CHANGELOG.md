@@ -38,6 +38,14 @@ Maintainer notes:
   with allow and deny tool-call examples and a "Reset the demo" note, and aligned
   `helio.docker.yaml` with the canonical config section order.
 
+### Fixed
+
+- **Docker demo approvals now fire (#104).** The demo config configured an
+  approval channel but nothing ever reached it — `flag_destructive` was dead
+  because the `block-destructive` rule matched first. `send_email` now requires
+  approval, so calling it populates the dashboard Approvals page as the README
+  promised; the "Exercise it" section walks through it.
+
 ## [0.7.0] - 2026-06-30
 
 ### Added
