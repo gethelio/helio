@@ -21,6 +21,11 @@ Maintainer notes:
 
 ### Changed
 
+- **Sidecar deployment guide clarified and corrected (#105).** Reframed
+  `docs/deployment-sidecar.md` around its purpose (a deployment pattern, not a
+  tutorial), aligned the sample config with the canonical section order, and
+  removed a dead `flag_destructive` setting that implied an approval flow the
+  policy never triggered.
 - **Dashboard login prompt is deployment-neutral (#94).** The lock screen no
   longer assumes the dashboard secret is a literal in `helio.yaml`. It now points
   to the `dashboard.api_secret` value in your Helio config and explains the

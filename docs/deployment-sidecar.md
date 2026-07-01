@@ -1,21 +1,28 @@
 # Running Helio as a Sidecar
 
-This guide shows how to run Helio in its **own container, next to your coding
-agent**, so every MCP tool call the agent makes is forced through Helio's
-policy engine and audit trail. This is the deployment most teams actually want:
-the agent can't "just do the thing" — it has to go through governance.
+This is a **deployment pattern, not a tutorial.** It shows the one topology that
+makes Helio's governance impossible for an agent to bypass, with a copy-paste
+Docker Compose setup that implements it.
 
-It is different from the [Docker quickstart](../docker/README.md), which is a
-5-minute demo with a throwaway echo server. Here the goal is a real topology you
-can drop next to an existing development container.
+**Who it's for:** you already know roughly what Helio does — if not, start with
+the [README](../README.md) or [Getting Started](./getting-started.md) — and you
+want to run it for real alongside a coding agent or dev container, not just try
+the [5-minute demo](../docker/README.md).
 
-## The one rule that makes this work
+**What you get:** every MCP (Model Context Protocol) tool call the agent makes is
+forced through Helio's policy engine, approvals, and audit trail. The agent can't "just do the thing";
+it has to go through governance. Everything below exists to guarantee that one
+property.
 
-Governance only holds if the agent **cannot reach the upstream MCP server
-directly**. If the agent can open a socket to the MCP server itself, it will
-bypass Helio entirely and the audit trail becomes fiction.
+## Why a sidecar — the one rule that makes it work
 
-So the topology is:
+A proxy only governs what is **forced through it.** If the agent can open a
+connection to the tool server directly, it just goes around Helio, and the audit
+log records only the calls that happened to pass through — a comforting fiction.
+So the whole design reduces to one requirement: the agent must have **no network
+path to the upstream MCP server except through Helio.**
+
+You get that with two Docker networks and Helio as the only bridge between them:
 
 ```
 ┌─────────────────┐        ┌──────────────┐        ┌────────────────────┐
@@ -28,13 +35,20 @@ So the topology is:
         └─────────────────────────┘   nothing else can ───────┘
 ```
 
-- The agent gets one address: Helio's edge at `:3000`.
-- Helio is the **only** thing on the network that can reach the upstream MCP
-  server.
-- The upstream server is on an **internal** network with no route to the agent.
+Trace who can reach whom:
+
+- **agent → Helio: yes** — they share the `edge` network, so the agent points
+  its MCP client at `helio:3000`.
+- **agent → upstream: no** — the upstream is only on the `internal` network,
+  which the agent is not attached to, so there is simply no route.
+- **Helio → upstream: yes** — Helio sits on both networks; it is the only bridge.
+
+That missing route is the whole point. It is not a rule the agent is trusted to
+follow; it is a wall Docker enforces. The only way for the agent to reach a tool
+is to ask Helio, so every call is governed and logged.
 
 In Docker terms: put the upstream MCP server on an `internal: true` network that
-the agent container is not attached to.
+the agent container is not attached to, and attach Helio to both networks.
 
 ## Docker Compose recipe
 
@@ -53,7 +67,6 @@ services:
 
   helio:
     image: ghcr.io/gethelio/helio:latest # or build from docker/Dockerfile
-    command: ['node', 'packages/proxy/dist/cli.js', 'start', '-c', '/config/helio.yaml']
     networks: [edge, internal]
     environment:
       HELIO_DASHBOARD_SECRET: '${HELIO_DASHBOARD_SECRET:?generate with: openssl rand -hex 32}'
@@ -82,12 +95,11 @@ volumes:
   helio-data: {}
 ```
 
-> **Apple Silicon / arm64:** the published image is currently `linux/amd64` only,
-> so `docker compose up` (or `docker pull`) fails on arm64 hosts with a
-> `no matching manifest` error. Until multi-arch images ship
-> ([#101](https://github.com/gethelio/helio/issues/101)), either add
-> `platform: linux/amd64` to the `helio` service above (it runs under emulation)
-> or build from `docker/Dockerfile`.
+> **Apple Silicon / arm64:** the currently published image (`0.7.0`) is
+> `linux/amd64` only, so `docker compose up` (or `docker pull`) fails on arm64
+> hosts with a `no matching manifest` error. The next release ships multi-arch
+> images; until then, either add `platform: linux/amd64` to the `helio` service
+> above (it runs under emulation) or build from `docker/Dockerfile`.
 
 Note what is and isn't published:
 
@@ -114,16 +126,10 @@ listen:
   port: 3000
   host: '0.0.0.0' # bind inside the container namespace; not published to host
 
-dashboard:
-  enabled: true
-  port: 3100
-  host: '0.0.0.0'
-  api_secret: '${HELIO_DASHBOARD_SECRET}'
-
 policies:
   default: allow
-  flag_destructive: require_approval
   rules:
+    # Deny anything the tool marks as destructive.
     - name: block-destructive
       match:
         annotations:
@@ -132,6 +138,7 @@ policies:
       feedback:
         message: 'Destructive actions are blocked by policy.'
         suggestion: 'Use a non-destructive alternative or request approval.'
+    # Allow read-only tools.
     - name: allow-reads
       match:
         annotations:
@@ -143,7 +150,18 @@ audit:
   path: /data/helio-audit.db
   retention: 90d
   include_responses: true
+
+dashboard:
+  enabled: true
+  port: 3100
+  host: '0.0.0.0'
+  api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
+
+This sample **denies** destructive tools outright. To require human approval
+instead — an operator approves or denies each destructive call from the
+dashboard — change that rule's `action` to `require_approval` and add an
+`approval:` section with a `dashboard` channel. See [Approvals](./approvals.md).
 
 Start it:
 
@@ -169,9 +187,17 @@ keep the upstream server off the network your dev container is attached to.
   "dockerComposeFile": "../compose.yaml",
   "service": "agent", // VS Code attaches to the agent service above
   "workspaceFolder": "/workspace",
-  "forwardPorts": [3100], // dashboard only; do not forward the upstream MCP port
+  "forwardPorts": ["helio:3100"], // the dashboard runs on the helio service; never forward the MCP port
 }
 ```
+
+The dashboard runs on the `helio` service, not `agent` — that is why the forward
+is qualified as `helio:3100`. The compose file already publishes it to
+`127.0.0.1:3100` on the host, so locally you can just open `localhost:3100`; the
+`forwardPorts` entry makes VS Code Dev Containers forward it explicitly. GitHub
+Codespaces does not support the `host:port` form of `forwardPorts`, so there drop
+the entry and use the auto-forwarded published port (it appears in the Ports
+panel).
 
 Inside the dev container, configure your MCP client (Claude Desktop, an SDK, or
 the agent framework you use) with the URL `http://helio:3000/mcp`. Because the
@@ -204,9 +230,10 @@ reachable from the agent and governance can be bypassed.
 
 **`Upstream MCP server at http://mcp-server:8080/mcp is unreachable — is it running?`**
 Helio started before the upstream was ready, or the upstream isn't on the
-`internal` network. Helio retries priming with backoff and stays fail-closed
-(undocumented tools denied) until the upstream answers, so once the MCP server
-is up the proxy recovers on its own. Check that `mcp-server` is attached to the
+`internal` network. Helio retries priming (the startup fetch of the upstream's
+tool list) with backoff and stays fail-closed (calls it can't verify are denied)
+until the upstream answers, so once the MCP server is up the proxy recovers on
+its own. Check that `mcp-server` is attached to the
 `internal` network and that `upstream.url` matches its compose service name and
 port.
 
