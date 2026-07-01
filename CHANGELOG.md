@@ -19,6 +19,20 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard login prompt is deployment-neutral (#94).** The lock screen no
+  longer assumes the dashboard secret is a literal in `helio.yaml`. It now points
+  to the `dashboard.api_secret` value in your Helio config and explains the
+  `${HELIO_DASHBOARD_SECRET}` env-placeholder case used by the Docker quickstart
+  and hand-authored configs.
+- **Docker quickstart hardened (#93).** The `docker/README.md` walkthrough now
+  covers cloning and `cd docker`, writing the dashboard secret into `.env`, and
+  states up front that the stack is a self-contained demo, with a pointer to the
+  sidecar guide for governing your own server. Added an "Exercise it" section
+  with allow and deny tool-call examples and a "Reset the demo" note, and aligned
+  `helio.docker.yaml` with the canonical config section order.
+
 ## [0.7.0] - 2026-06-30
 
 ### Added
