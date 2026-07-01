@@ -72,8 +72,8 @@ dashboard API calls.
 
 The demo runs Helio's policy engine in front of the echo server, so you
 can watch governance act. The config (`helio.docker.yaml`) allows
-read-only tools and blocks destructive ones. Send a couple of calls
-through the proxy on port 3000:
+read-only tools, denies destructive ones, and requires approval before
+sending email. Send a couple of calls through the proxy on port 3000:
 
 ```bash
 # Allowed: get_weather is read-only
@@ -81,15 +81,31 @@ curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"London"}}}'
 
-# Blocked: delete_record is destructive, so the policy denies it
+# Denied: delete_record is destructive, so the policy blocks it
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_record","arguments":{"id":"rec_42"}}}'
 ```
 
-The first returns a result; the second returns a policy denial that
-names the `block-destructive` rule. Both appear in the dashboard
+`get_weather` returns a result; `delete_record` returns a policy denial
+that names the `block-destructive` rule. Both appear in the dashboard
 activity feed with their decision.
+
+Now trigger a human-in-the-loop approval. This call **waits** for a
+decision:
+
+```bash
+# Requires approval: send_email pauses until you approve it
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_email","arguments":{"to":"ceo@example.com","body":"hi"}}}'
+```
+
+The command hangs because the call is pending. Open the dashboard at
+<http://localhost:3100>, go to **Approvals**, and approve the
+`send_email` ticket — the curl then returns `Email sent to
+ceo@example.com`. (Deny it, or wait past the 120s timeout, and the call
+is denied instead.)
 
 No agent handy? You can also point the official
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector)

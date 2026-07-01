@@ -2,10 +2,11 @@
 #
 # This config is used by docker-compose.yml. It demonstrates governance
 # with a mix of policies: read-only tools are allowed, destructive tools
-# are denied, and everything else falls through to the default (allow).
+# are denied, sending email requires approval, and everything else falls
+# through to the default (allow).
 #
-# The dashboard approval channel is enabled so you can see the approvals
-# page working in the UI at http://localhost:3100.
+# The `send_email` rule routes to the dashboard approval channel, so calling
+# that tool makes the approvals page populate at http://localhost:3100.
 #
 # Sections follow the canonical request-lifecycle order from
 # docs/configuration.md: upstream, listen, policies, approval, audit,
@@ -23,8 +24,15 @@ listen:
 
 policies:
   default: allow
-  flag_destructive: require_approval
   rules:
+    # Sending email pauses for human approval in the dashboard.
+    - name: approve-send-email
+      match:
+        tool: 'send_email'
+      action: require_approval
+      approval:
+        channel: dashboard
+
     - name: block-destructive
       match:
         annotations:
