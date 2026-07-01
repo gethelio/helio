@@ -1,0 +1,12 @@
+# CI-only override for the docker job in .github/workflows/ci.yml.
+#
+# The build-push-action step builds and loads the proxy image as `helio:ci`.
+# This override points the `helio` service at that pre-built image so the
+# smoke test runs against the exact image CI just validated, with no rebuild.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait
+services:
+  helio:
+    image: helio:ci
+    pull_policy: never
