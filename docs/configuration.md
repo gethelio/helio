@@ -115,11 +115,11 @@ Connection to the MCP server that Helio proxies.
 
 **Transport options:**
 
-- **`streamable-http`** (default) — MCP Streamable HTTP. The MCP server exposes an HTTP endpoint. Helio acts as a full session-aware MCP client: it forwards each downstream client's `initialize` handshake and session id transparently, sends `MCP-Protocol-Version` on upstream requests, and accepts both `application/json` and `text/event-stream` (SSE) responses (including SSE field lines with or without a space after `:`). For Helio-managed internal session traffic, protocol version is taken from the upstream-negotiated `initialize` result; in direct forwarder/library usage, Helio preserves an already-present `mcp-protocol-version` request header. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work without any server-side configuration changes.
+- **`streamable-http`** (default) — MCP Streamable HTTP: the server exposes an HTTP endpoint, and Helio acts as a full session-aware MCP client. It forwards each downstream client's `initialize` handshake and session id transparently, and sends `MCP-Protocol-Version` on upstream requests. Responses may be `application/json` or `text/event-stream` (SSE); Helio accepts both, tolerating SSE field lines with or without a space after `:`. For internal session traffic the protocol version comes from the upstream-negotiated `initialize` result; in direct forwarder or library usage, Helio preserves an already-present `mcp-protocol-version` request header. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work with no server-side configuration changes.
 - **`sse`** — Server-Sent Events transport for older MCP clients. Uses GET for the event stream and POST for messages.
 - **`stdio`** — Spawns the MCP server as a child process and communicates over stdin/stdout. Useful for local servers that don't expose an HTTP endpoint.
 
-> **Note on `202 Accepted` empty-body responses (v0.1).** Both `streamable-http` (for JSON-RPC `notifications/*` requests, per JSON-RPC 2.0 §4.1) and `sse` (for every POSTed message — actual responses arrive on the separate event stream) reply with `HTTP 202 Accepted` and an empty body. The response carries Hono's default headers — `Transfer-Encoding: chunked` and `content-type: text/plain; charset=UTF-8` — but the body is genuinely empty, so the headers are informational only. Permissive HTTP/JSON-RPC clients (which is the common case) ignore both. Strict-purist clients that expect `Content-Length: 0` should treat the chunked-but-empty response as semantically equivalent. If a specific MCP client refuses this shape, please file an issue.
+> **Note on `202 Accepted` empty-body responses.** Both HTTP transports reply with `HTTP 202 Accepted` and an empty body for fire-and-forget messages: `streamable-http` for JSON-RPC `notifications/*` requests (per JSON-RPC 2.0 §4.1), and `sse` for every POSTed message (the actual response arrives on the separate event stream). Permissive HTTP/JSON-RPC clients, the common case, ignore it. If a specific MCP client refuses the empty-body shape, please file an issue.
 
 ```yaml
 # Stdio example — Helio spawns the server process
@@ -186,7 +186,7 @@ If a rule sets `match.environment` but top-level `environment` is missing, confi
 
 ### policies
 
-Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation.
+Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation, including install-time rules (`policies.install` with `deny_install`) and the [adapter governance API](./adapter-api.md).
 
 | Field              | Type    | Required | Default | Description                                                                                                                                                                                                     |
 | ------------------ | ------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -199,16 +199,17 @@ Governance rules for tool calls. See [Policy Guide](./policies.md) for full docu
 
 Each rule in the `rules` array has the following structure:
 
-| Field      | Type     | Required | Description                                                                                                                                                                                      |
-| ---------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `name`     | string   | No       | Human-readable label for audit and error messages.                                                                                                                                               |
-| `match`    | object   | Yes      | Conditions that must all be true for this rule to match. See [Match Conditions](./policies.md#match-conditions).                                                                                 |
-| `action`   | string   | Yes      | What to do: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`.                                                                                                      |
-| `approval` | object   | No       | Per-rule approval override (`channel`, optional `timeout` / escalation fields). When omitted on `require_approval`, runtime falls back to channel `dashboard` and the global `approval.timeout`. |
-| `evidence` | object   | No       | Evidence keys that must be present before allowing the action.                                                                                                                                   |
-| `requires` | string[] | No       | Tool names that must have been called first in this session.                                                                                                                                     |
-| `limits`   | object   | No       | Rate or spend limit configuration.                                                                                                                                                               |
-| `feedback` | object   | No       | Custom message and suggestion returned when the action is blocked.                                                                                                                               |
+| Field              | Type     | Required | Description                                                                                                                                                                                      |
+| ------------------ | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`             | string   | No       | Human-readable label for audit and error messages.                                                                                                                                               |
+| `match`            | object   | Yes      | Conditions that must all be true for this rule to match. See [Match Conditions](./policies.md#match-conditions).                                                                                 |
+| `action`           | string   | Yes      | What to do: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`.                                                                                                      |
+| `approval`         | object   | No       | Per-rule approval override (`channel`, optional `timeout` / escalation fields). When omitted on `require_approval`, runtime falls back to channel `dashboard` and the global `approval.timeout`. |
+| `evidence`         | object   | No       | Evidence keys that must be present before allowing the action.                                                                                                                                   |
+| `requires`         | string[] | No       | Tool names that must have been called first in this session.                                                                                                                                     |
+| `requires_success` | boolean  | No       | Whether prerequisite tools in `requires` must have succeeded, not just been called. Defaults to `true`; set `false` to accept any prior call.                                                    |
+| `limits`           | object   | No       | Rate or spend limit configuration.                                                                                                                                                               |
+| `feedback`         | object   | No       | Custom message and suggestion returned when the action is blocked.                                                                                                                               |
 
 `action: require_approval` without a rule-level `approval:` block is valid. Helio emits a config warning and uses runtime defaults (`channel: dashboard`, timeout from top-level `approval.timeout`).
 
@@ -287,25 +288,25 @@ When `dashboard.enabled: true`, Helio requires bundled dashboard assets to be pr
 >
 > `helio init` generates a secure `dashboard.api_secret` by default. Do not remove it unless you intentionally want local open mode.
 
-| Field                    | Type     | Required    | Default     | Description                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------ | -------- | ----------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                | boolean  | No          | `true`      | Enable the dashboard UI and sideband API server.                                                                                                                                                                                                                                                                                                                                       |
-| `port`                   | integer  | No          | `3100`      | Dashboard sideband API port (1–65535).                                                                                                                                                                                                                                                                                                                                                 |
-| `host`                   | string   | No          | `127.0.0.1` | Dashboard sideband bind address.                                                                                                                                                                                                                                                                                                                                                       |
-| `api_secret`             | string   | Conditional | —           | Shared dashboard secret. Required when `dashboard.enabled: true` unless `dashboard.allow_open_mode: true`. Also required whenever any rule uses `action: require_approval` or `policies.flag_destructive: require_approval`. Browser operators enter it once on the dashboard login card to mint an HttpOnly session cookie; machine clients may send `Authorization: Bearer <token>`. |
-| `allow_open_mode`        | boolean  | No          | `false`     | Explicit opt-in to run the dashboard sideband without `api_secret`. Only valid on loopback hosts and intended for trusted local development only.                                                                                                                                                                                                                                      |
-| `sse_heartbeat_interval` | duration | No          | `30s`       | Interval between SSE keepalive messages.                                                                                                                                                                                                                                                                                                                                               |
+| Field                    | Type     | Required    | Default     | Description                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------ | -------- | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `enabled`                | boolean  | No          | `true`      | Enable the dashboard UI and sideband API server.                                                                                                                                                                                                                                                                                                                                                                               |
+| `port`                   | integer  | No          | `3100`      | Dashboard sideband API port (1–65535).                                                                                                                                                                                                                                                                                                                                                                                         |
+| `host`                   | string   | No          | `127.0.0.1` | Dashboard sideband bind address.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `api_secret`             | string   | Conditional | —           | Shared dashboard secret. Required when `dashboard.enabled: true` unless `dashboard.allow_open_mode: true`. Also required whenever any rule uses `action: require_approval`, or `policies.flag_destructive` or `policies.on_tool_drift` is set to `require_approval`. Browser operators enter it once on the dashboard login card to mint an HttpOnly session cookie; machine clients may send `Authorization: Bearer <token>`. |
+| `allow_open_mode`        | boolean  | No          | `false`     | Explicit opt-in to run the dashboard sideband without `api_secret`. Only valid on loopback hosts and intended for trusted local development only.                                                                                                                                                                                                                                                                              |
+| `sse_heartbeat_interval` | duration | No          | `30s`       | Interval between SSE keepalive messages.                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ### sdk
 
 Configuration for the SDK sideband API, used for evidence grounding (Python SDK) and the [adapter governance API](./adapter-api.md) (hook-based adapters such as OpenClaw).
 
-| Field            | Type    | Required | Default     | Description                                                                                                       |
-| ---------------- | ------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
-| `enabled`        | boolean | No       | `false`     | Enable the SDK sideband HTTP server.                                                                              |
-| `port`           | integer | No       | `3200`      | Sideband server port (1–65535).                                                                                   |
-| `host`           | string  | No       | `127.0.0.1` | Sideband server bind address.                                                                                     |
-| `evaluation_ttl` | string  | No       | `10m`       | How long a governance `/evaluate` decision waits for its `/audit` before being finalized as `evaluation_expired`. |
+| Field            | Type     | Required | Default     | Description                                                                                                       |
+| ---------------- | -------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| `enabled`        | boolean  | No       | `false`     | Enable the SDK sideband HTTP server.                                                                              |
+| `port`           | integer  | No       | `3200`      | Sideband server port (1–65535).                                                                                   |
+| `host`           | string   | No       | `127.0.0.1` | Sideband server bind address.                                                                                     |
+| `evaluation_ttl` | duration | No       | `10m`       | How long a governance `/evaluate` decision waits for its `/audit` before being finalized as `evaluation_expired`. |
 
 #### Sideband authentication
 
@@ -334,7 +335,7 @@ Several fields accept duration strings in the format `<number><unit>`:
 | `h`  | Hours   | `1h` = 1 hour      |
 | `d`  | Days    | `90d` = 90 days    |
 
-Duration strings are used for `approval.timeout`, `audit.retention`, `dashboard.sse_heartbeat_interval`, `upstream.connect_timeout`, `upstream.request_timeout`, rate limit `window`, spend limit `window`, and `escalation_after`.
+Duration strings are used for `approval.timeout`, `audit.retention`, `dashboard.sse_heartbeat_interval`, `upstream.connect_timeout`, `upstream.request_timeout`, rate limit `window`, spend limit `window`, `sdk.evaluation_ttl`, and `escalation_after`.
 
 ## Environment Variable Interpolation
 
@@ -384,7 +385,7 @@ On failure, Helio reports the exact path and error:
 
 ```
 Invalid config: Invalid configuration (1 error)
-  upstream.url: Required
+  upstream.url: Invalid input: expected string, received undefined
 ```
 
 ## Hot Reload
@@ -405,7 +406,7 @@ If the new configuration is invalid, Helio keeps the current policy and logs the
 
 ### Limit reconciliation
 
-Rate and spend limit buckets survive a hot-reload as long as their underlying rule config is unchanged. A benign rewrite of `helio.yaml` (for example, `vim :w` with no real edits, or adding a comment) preserves live counters and elapsed-window progress — operators don't zero their budget mid-window. When a rule's `max_calls` / `window`, or a `max_spend` rule's `limit` / `currency` / `window`, changes, only that specific bucket is evicted and re-created on the next request. Rules that are removed entirely have their buckets cleaned up on the next reload.
+Rate and spend limit buckets survive a hot-reload as long as their underlying rule config is unchanged. A benign rewrite of `helio.yaml` (for example, `vim :w` with no real edits, or adding a comment) preserves live counters and elapsed-window progress — operators don't zero their budget mid-window. Reconciliation compares each bucket's config tuple (rate uses `max_calls` plus `window`; spend uses `limit`, `currency`, and `window`), not rule identity. A bucket survives as long as its tuple still appears in some rule after the reload, and is evicted (then lazily re-created on the next request) only when no remaining rule carries that tuple. So a rule whose limit config changes, or a rule removed entirely, drops its old bucket unless another rule still uses the same tuple.
 
 > **Note:** Limit state is reconciled, not persisted. Restarting the proxy still clears all buckets. Persistence across restarts is planned for a later release.
 
@@ -439,6 +440,7 @@ Only compiled policy behavior is hot-reloadable. Startup-bound sections still re
 | `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                        |
 | `policies.default`          | Yes              | Takes effect immediately on the next request.                                             |
 | `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                             |
+| `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                             |
 | `policies.dry_run`          | Yes              | Takes effect immediately on the next request.                                             |
 | `policies.hot_reload`       | No               | Controls watcher startup behavior; changing it on a running process requires restart.     |
 | `environment`               | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart. |
