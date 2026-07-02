@@ -62,6 +62,20 @@ export interface ApprovalTicket {
   notification_failures?: ApprovalNotificationFailure[]
 }
 
+/**
+ * Approval context snapshotted at resolution time for the audit record.
+ * Emitted as `evidence_chain.approval` only when it has content (a denial
+ * reason or an escalation) — plain approvals do not produce the block.
+ * Shared by the MCP path (governed forwarder) and the sideband path
+ * (governance service) so both emit the same wire shape.
+ */
+export interface ApprovalAuditContext {
+  readonly ticket_id: string
+  readonly denial_reason?: string
+  readonly escalated_at?: string
+  readonly escalated_to?: string[]
+}
+
 /** What the approval router returns to the governed forwarder. */
 export type ApprovalOutcome =
   | { readonly status: 'approved'; readonly resolvedBy: string; readonly ticketId: string }

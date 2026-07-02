@@ -19,6 +19,18 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Audit records keep denial reasons and escalation history (#110).** Approval
+  resolutions with context worth keeping now write an `evidence_chain.approval`
+  block onto the call's audit record: `ticket_id`, `denial_reason` when the
+  denier supplied one, and `escalated_at` / `escalated_to` when the approval
+  escalated before resolution. Previously this context lived only on the
+  in-memory ticket and was lost an hour after resolution. Applies to both the
+  MCP path and sideband-governed calls; the dashboard's audit detail panel
+  renders the new block. Plain approvals are unchanged (`evidence_chain` stays
+  null).
+
 ### Changed
 
 - **Sidecar deployment guide clarified and corrected (#105).** Reframed

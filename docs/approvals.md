@@ -13,7 +13,7 @@ Rule-level `approval` config is optional. If a `require_approval` rule omits it,
 5. A human approves, denies, the timeout fires, the client disconnects, or the proxy shuts down.
 6. The proxy either forwards the request upstream (approved, break-glass, or timed out with `default_on_timeout: allow`) or returns a structured error (`denied`, `timeout` with `default_on_timeout: deny`, `client_disconnected`, or `shutdown_cancelled`).
 
-The resolution is recorded in the [audit trail](./audit.md) on the tool call's audit record (`approval_status`, `approved_by`, `approval_wait_ms`). The ticket itself is held in memory only — it stays queryable through the approvals REST API and dashboard for an hour after resolution, then it is cleaned up.
+The resolution is recorded in the [audit trail](./audit.md) on the tool call's audit record (`approval_status`, `approved_by`, `approval_wait_ms`, and — when there is a denial reason or an escalation — an `evidence_chain.approval` block with those details). The ticket itself is held in memory only — it stays queryable through the approvals REST API and dashboard for an hour after resolution, then it is cleaned up.
 
 ## Channels
 
@@ -80,7 +80,7 @@ approval:
 
 The Slack channel sends a Block Kit message with interactive Approve and Deny buttons to a Slack channel. When a user clicks a button, Helio resolves the ticket and updates the message with the result.
 
-> **Slack deny does not capture a denial reason.** The router supports optional denial reasons (`denial_reason` in the JSON-RPC error response, and on the ticket when a reason is supplied), but Slack button clicks have no free-text input, so Slack-resolved denials always return `denial_reason: null` to the caller. The dashboard's deny modal does capture a reason. A future Slack modal flow could capture reasons too — tracked as a follow-up.
+> **Slack deny does not capture a denial reason.** The router supports optional denial reasons (`denial_reason` in the JSON-RPC error response; a supplied reason is also stored on the ticket and in the audit record's `evidence_chain.approval`), but Slack button clicks have no free-text input, so Slack-resolved denials always return `denial_reason: null` to the caller. The dashboard's deny modal does capture a reason. A future Slack modal flow could capture reasons too — tracked as a follow-up.
 
 ```yaml
 approval:
@@ -264,7 +264,7 @@ If an approval hasn't been resolved within a specified time, Helio can escalate 
 - `escalation_after` must be shorter than `timeout` to fire before the ticket times out.
 - `delegates` is an array of channel names to notify on escalation. If omitted, the primary channel is re-notified.
 - Delegate values must reference configured approval channel `name`s (or channel `type`s such as `webhook` / `slack` / `dashboard`). Unknown delegate references are startup-fatal validation errors.
-- Escalation updates the ticket with `escalated_at` and `escalated_to` fields, visible in the dashboard and on `GET /api/approvals/:id` while the ticket is retained. Escalation is not written to the audit trail.
+- Escalation updates the ticket with `escalated_at` and `escalated_to` fields, visible in the dashboard and on `GET /api/approvals/:id` while the ticket is retained. Both fields are also recorded durably on the call's audit record under `evidence_chain.approval`.
 
 Timeouts also emit the same `approval_resolved` dashboard SSE event path used by manual approve/deny/break-glass resolution, so operator dashboards stay state-consistent across all resolution outcomes.
 

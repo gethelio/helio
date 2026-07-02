@@ -31,7 +31,7 @@ import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { ApprovalRouter, NativeResolution } from '../approval/router.js'
-import type { ApprovalTicket } from '../approval/types.js'
+import type { ApprovalAuditContext, ApprovalTicket } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
 import { GovernanceConfigError } from './errors.js'
@@ -535,6 +535,7 @@ export class GovernanceService {
     // require_approval must be resolved before auditing. Retryable.
     let approvalStatus: string | null = null
     let approvedBy: string | null = null
+    let approvalContext: ApprovalAuditContext | undefined
     if (entry.approvalTicketId) {
       const ticket = this.getTicketStatus(entry.approvalTicketId)
       const status = ticket?.status
@@ -543,6 +544,20 @@ export class GovernanceService {
       }
       approvalStatus = status
       approvedBy = ticket.resolved_by ?? null
+      // Same durable approval context the MCP path emits. Only denial reasons
+      // apply here in practice — native tickets never start escalation timers.
+      if (ticket.denial_reason || ticket.escalated_at) {
+        approvalContext = {
+          ticket_id: entry.approvalTicketId,
+          ...(ticket.denial_reason ? { denial_reason: ticket.denial_reason } : {}),
+          ...(ticket.escalated_at
+            ? {
+                escalated_at: ticket.escalated_at,
+                escalated_to: [...(ticket.escalated_to ?? [])],
+              }
+            : {}),
+        }
+      }
     }
 
     // Validate the optional post-hoc spend override.
@@ -595,6 +610,7 @@ export class GovernanceService {
       limitsChain,
       approvalStatus,
       approvedBy,
+      approvalContext,
       upstreamError: req.status === 'error' ? (req.error ?? 'tool call failed') : null,
       upstreamResponse: req.result ?? null,
       upstreamLatencyMs: req.duration_ms ?? null,
@@ -1078,6 +1094,9 @@ export class GovernanceService {
     if (args.sidebandUnreported) {
       evidenceChain = { ...(evidenceChain ?? {}), sideband: { unreported: true } }
     }
+    if (args.approvalContext) {
+      evidenceChain = { ...(evidenceChain ?? {}), approval: { ...args.approvalContext } }
+    }
 
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
       timestamp: args.timestampIso,
@@ -1150,6 +1169,7 @@ interface WriteAuditArgs {
   limitsChain?: Record<string, unknown>
   approvalStatus?: string | null
   approvedBy?: string | null
+  approvalContext?: ApprovalAuditContext
   upstreamError?: string | null
   upstreamResponse?: unknown
   upstreamLatencyMs?: number | null
