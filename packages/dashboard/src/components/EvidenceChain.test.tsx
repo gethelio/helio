@@ -73,6 +73,34 @@ describe('EvidenceChain', () => {
     expect(screen.getByText('admin')).toBeTruthy()
   })
 
+  it('renders approval context with denial reason and ticket id', () => {
+    const chain = { approval: { ticket_id: 'abc-123', denial_reason: 'Too risky' } }
+    render(<EvidenceChain chain={chain} />)
+    expect(screen.getByText('Approval')).toBeTruthy()
+    expect(screen.getByText('Too risky')).toBeTruthy()
+    expect(screen.getByText(/abc-123/)).toBeTruthy()
+  })
+
+  it('renders approval escalation timestamp and targets', () => {
+    const chain = {
+      approval: {
+        ticket_id: 'abc-123',
+        escalated_at: '2026-07-02T15:03:34.869Z',
+        escalated_to: ['hooks', 'dashboard'],
+      },
+    }
+    render(<EvidenceChain chain={chain} />)
+    expect(screen.getByText('Approval')).toBeTruthy()
+    expect(screen.getByText(/2026-07-02T15:03:34\.869Z/)).toBeTruthy()
+    expect(screen.getByText(/hooks, dashboard/)).toBeTruthy()
+  })
+
+  it('ignores a malformed approval block', () => {
+    const chain = { approval: { ticket_id: 42, escalated_to: 'oops' } }
+    const { container } = render(<EvidenceChain chain={chain} />)
+    expect(container.innerHTML).toBe('')
+  })
+
   it('applies correct progress bar color based on usage', () => {
     // High usage (100%) should get red
     const chain = { rate_limit: { allowed: false, current: 100, limit: 100 } }

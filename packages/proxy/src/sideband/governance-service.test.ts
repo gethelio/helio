@@ -677,6 +677,81 @@ describe('GovernanceService approvals and deadlines', () => {
     expect(records.at(-1)?.record.approved_by).toBe('telegram:@oli')
   })
 
+  it('records evidence_chain.approval with denial_reason for a native denial', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, records } = makeService({ policy, withApprovals: true })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    const approval = ev.body['approval'] as { id: string }
+
+    const resolve = service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'telegram:@oli',
+      reason: 'Too risky',
+    })
+    expect(resolve.status).toBe(200)
+
+    const audited = service.audit(auditInput(id), 'h')
+    expect(audited.status).toBe(201)
+    const record = records.at(-1)?.record
+    expect(record?.approval_status).toBe('denied')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect(chain).not.toBeNull()
+    const approvalBlock = chain['approval'] as Record<string, unknown>
+    expect(approvalBlock['ticket_id']).toBe(approval.id)
+    expect(approvalBlock['denial_reason']).toBe('Too risky')
+    expect(approvalBlock).not.toHaveProperty('escalated_at')
+  })
+
+  it('records no approval block for a native approval without denial reason', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, records } = makeService({ policy, withApprovals: true })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    const approval = ev.body['approval'] as { id: string }
+
+    service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'x' })
+
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
+    expect(records.at(-1)?.record.evidence_chain).toBeNull()
+  })
+
+  it('replays /audit idempotently with the approval block intact', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, records } = makeService({ policy, withApprovals: true })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    const approval = ev.body['approval'] as { id: string }
+
+    service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'x',
+      reason: 'nope',
+    })
+
+    const first = service.audit(auditInput(id), 'h')
+    expect(first.status).toBe(201)
+    const recordCount = records.length
+
+    const replay = service.audit(auditInput(id), 'h')
+    expect(replay.status).toBe(200)
+    expect(replay.body['already_finalized']).toBe(true)
+    expect(replay.body['audit_record_id']).toBe(first.body['audit_record_id'])
+    expect(records.length).toBe(recordCount)
+
+    const chain = records.at(-1)?.record.evidence_chain as Record<string, unknown>
+    expect((chain['approval'] as Record<string, unknown>)['denial_reason']).toBe('nope')
+  })
+
   it('enforces evaluation TTL on access (404 evaluation_expired before the sweep)', () => {
     const { service, advance, records } = makeService({ ttlMs: 1000 })
     const ev = service.evaluate(evalInput())

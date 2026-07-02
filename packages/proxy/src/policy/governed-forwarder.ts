@@ -29,7 +29,7 @@ import {
   buildToolDriftFeedback,
 } from '../feedback/self-repair.js'
 import type { ApprovalRouter } from '../approval/router.js'
-import type { ApprovalOutcome } from '../approval/types.js'
+import type { ApprovalAuditContext, ApprovalOutcome } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
 import { resolvePath } from './matchers.js'
@@ -326,6 +326,7 @@ export class GovernedForwarder implements McpForwarder {
     let result: ForwardResult
     let approvalOutcome: ApprovalOutcome | undefined
     let approvalWaitMs = 0
+    let approvalContext: ApprovalAuditContext | undefined
     let rateLimitResult: RateLimitResult | undefined
     let spendLimitResult: SpendLimitResult | undefined
     let forwardingError: Error | undefined
@@ -355,6 +356,7 @@ export class GovernedForwarder implements McpForwarder {
           result = approvalResult.result
           approvalOutcome = approvalResult.outcome
           approvalWaitMs = approvalResult.approvalWaitMs
+          approvalContext = approvalResult.approvalContext
         }
       } else if (decision.action === 'rate_limit') {
         if (!this.rateLimiter) {
@@ -411,6 +413,7 @@ export class GovernedForwarder implements McpForwarder {
       dependencyResult,
       evidenceBlocked,
       approvalOutcome,
+      approvalContext,
       rateLimitResult,
       spendLimitResult,
       isDryRun,
@@ -426,7 +429,12 @@ export class GovernedForwarder implements McpForwarder {
     decision: PolicyDecision,
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
-  ): Promise<{ result: ForwardResult; outcome: ApprovalOutcome; approvalWaitMs: number }> {
+  ): Promise<{
+    result: ForwardResult
+    outcome: ApprovalOutcome
+    approvalWaitMs: number
+    approvalContext?: ApprovalAuditContext
+  }> {
     // Caller guarantees this.approvalRouter is defined
     const router = this.approvalRouter as ApprovalRouter
 
@@ -441,6 +449,28 @@ export class GovernedForwarder implements McpForwarder {
       request.signal,
     )
     const approvalWaitMs = performance.now() - approvalStart
+
+    // Snapshot approval context now, before any upstream await: a forwarded
+    // call can outlive the queue's resolved-ticket retention, so a later
+    // ticket read-back could come up empty.
+    const ticket = outcome.ticketId ? router.getTicket(outcome.ticketId) : undefined
+    const denialReason = outcome.status === 'denied' && outcome.reason ? outcome.reason : undefined
+    // The ticketId guard skips the synthetic ticketless denial emitted when
+    // submit() races router close — its "Router is closed" reason is not an
+    // approver decision and there is no ticket for the block to point at.
+    const approvalContext: ApprovalAuditContext | undefined =
+      outcome.ticketId && (denialReason || ticket?.escalated_at)
+        ? {
+            ticket_id: outcome.ticketId,
+            ...(denialReason ? { denial_reason: denialReason } : {}),
+            ...(ticket?.escalated_at
+              ? {
+                  escalated_at: ticket.escalated_at,
+                  escalated_to: [...(ticket.escalated_to ?? [])],
+                }
+              : {}),
+          }
+        : undefined
 
     let result: ForwardResult
 
@@ -475,7 +505,7 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    return { result, outcome, approvalWaitMs }
+    return { result, outcome, approvalWaitMs, approvalContext }
   }
 
   private async handleRateLimit(
@@ -748,6 +778,7 @@ export class GovernedForwarder implements McpForwarder {
     dependencyResult?: DependencyCheckResult,
     evidenceBlocked?: boolean,
     approvalOutcome?: ApprovalOutcome,
+    approvalContext?: ApprovalAuditContext,
     rateLimitResult?: RateLimitResult,
     spendLimitResult?: SpendLimitResult,
     isDryRun?: boolean,
@@ -795,6 +826,12 @@ export class GovernedForwarder implements McpForwarder {
           reason: approvalOutcome.reason,
           invoked_by: approvalOutcome.resolvedBy,
         },
+      }
+    }
+    if (approvalContext) {
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        approval: { ...approvalContext },
       }
     }
     if (rateLimitResult) {

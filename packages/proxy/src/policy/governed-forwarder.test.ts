@@ -2062,6 +2062,389 @@ describe('GovernedForwarder', () => {
   })
 
   // -----------------------------------------------------------------------
+  // approval context on audit records (evidence_chain.approval)
+  // -----------------------------------------------------------------------
+
+  describe('approval context on audit records', () => {
+    function createAudit() {
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      return { auditStore, auditWriter }
+    }
+
+    function createApproval(options?: {
+      defaultOnTimeout?: 'allow' | 'deny'
+      resolvedRetentionMs?: number
+    }) {
+      const queue = new ApprovalQueue({
+        cleanupIntervalMs: 0,
+        resolvedRetentionMs: options?.resolvedRetentionMs,
+      })
+      const channels = new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]])
+      const approvalRouter = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: options?.defaultOnTimeout ?? 'deny',
+        channels,
+        queue,
+      })
+      return { queue, approvalRouter }
+    }
+
+    const approvalPolicy = () =>
+      compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'deploy_production' },
+            action: 'require_approval',
+            approval: { channel: 'dashboard' },
+          },
+        ],
+      })
+
+    it('denied with a reason records evidence_chain.approval with ticket_id and denial_reason', async () => {
+      const inner = mockForwarder()
+      const { auditStore, auditWriter } = createAudit()
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, approvalPolicy(), {
+        approvalRouter,
+        auditWriter,
+      })
+
+      const resultPromise = governed.forward(toolsCallRequest('deploy_production', { env: 'prod' }))
+      const ticketId = queue.listPending()[0]?.id as string
+      approvalRouter.deny(ticketId, 'bob', 'Too risky')
+      await resultPromise
+      auditWriter.flush()
+
+      const { records } = auditStore.list()
+      expect(records).toHaveLength(1)
+      const chain = records[0]?.evidence_chain as Record<string, unknown>
+      expect(chain).not.toBeNull()
+      const approval = chain['approval'] as Record<string, unknown>
+      expect(approval['ticket_id']).toBe(ticketId)
+      expect(approval['denial_reason']).toBe('Too risky')
+      expect(approval).not.toHaveProperty('escalated_at')
+      expect(approval).not.toHaveProperty('escalated_to')
+
+      auditWriter.close()
+      approvalRouter.close()
+    })
+
+    it('escalated then approved records escalated_at and escalated_to without denial_reason', async () => {
+      vi.useFakeTimers()
+      try {
+        const inner = mockForwarder()
+        const { auditStore, auditWriter } = createAudit()
+        const { queue, approvalRouter } = createApproval()
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              match: { tool: 'deploy_production' },
+              action: 'require_approval',
+              approval: { channel: 'dashboard', timeout: '10s', escalation_after: '3s' },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { approvalRouter, auditWriter })
+
+        const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+        const ticketId = queue.listPending()[0]?.id as string
+
+        // Fire the escalation timer, then approve before the timeout
+        vi.advanceTimersByTime(3_001)
+        expect(queue.get(ticketId)?.escalated_at).toBeDefined()
+        approvalRouter.approve(ticketId, 'alice')
+
+        await resultPromise
+        auditWriter.flush()
+
+        const { records } = auditStore.list()
+        expect(records).toHaveLength(1)
+        expect(records[0]?.approval_status).toBe('approved')
+        const chain = records[0]?.evidence_chain as Record<string, unknown>
+        expect(chain).not.toBeNull()
+        const approval = chain['approval'] as Record<string, unknown>
+        expect(approval['ticket_id']).toBe(ticketId)
+        expect(approval['escalated_at']).toBe(queue.get(ticketId)?.escalated_at)
+        expect(approval['escalated_to']).toEqual(['dashboard'])
+        expect(approval).not.toHaveProperty('denial_reason')
+
+        auditWriter.close()
+        approvalRouter.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('emits no approval block for the synthetic ticketless denial after router close', async () => {
+      const inner = mockForwarder()
+      const { auditStore, auditWriter } = createAudit()
+      const { approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, approvalPolicy(), {
+        approvalRouter,
+        auditWriter,
+      })
+
+      // A require_approval call racing proxy shutdown: submit() after close()
+      // resolves as a system denial with an empty ticketId and no ticket.
+      approvalRouter.close()
+      const result = await governed.forward(toolsCallRequest('deploy_production'))
+      auditWriter.flush()
+
+      expect(errorFromResult(result).data['reason']).toBe('approval_denied')
+      const { records } = auditStore.list()
+      expect(records).toHaveLength(1)
+      expect(records[0]?.evidence_chain).toBeNull()
+
+      auditWriter.close()
+    })
+
+    it('denied without a reason and without escalation emits no approval block', async () => {
+      const inner = mockForwarder()
+      const { auditStore, auditWriter } = createAudit()
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, approvalPolicy(), {
+        approvalRouter,
+        auditWriter,
+      })
+
+      const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+      const ticketId = queue.listPending()[0]?.id as string
+      approvalRouter.deny(ticketId, 'bob')
+      await resultPromise
+      auditWriter.flush()
+
+      const { records } = auditStore.list()
+      expect(records[0]?.approval_status).toBe('denied')
+      expect(records[0]?.evidence_chain).toBeNull()
+
+      auditWriter.close()
+      approvalRouter.close()
+    })
+
+    it('plain approved without escalation keeps evidence_chain null', async () => {
+      const inner = mockForwarder()
+      const { auditStore, auditWriter } = createAudit()
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, approvalPolicy(), {
+        approvalRouter,
+        auditWriter,
+      })
+
+      const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+      const ticketId = queue.listPending()[0]?.id as string
+      approvalRouter.approve(ticketId, 'alice')
+      await resultPromise
+      auditWriter.flush()
+
+      const { records } = auditStore.list()
+      expect(records[0]?.approval_status).toBe('approved')
+      expect(records[0]?.evidence_chain).toBeNull()
+
+      auditWriter.close()
+      approvalRouter.close()
+    })
+
+    it('escalated then timed out (deny mode) records the escalation', async () => {
+      vi.useFakeTimers()
+      try {
+        const inner = mockForwarder()
+        const { auditStore, auditWriter } = createAudit()
+        const { queue, approvalRouter } = createApproval()
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              match: { tool: 'deploy_production' },
+              action: 'require_approval',
+              approval: { channel: 'dashboard', timeout: '10s', escalation_after: '3s' },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { approvalRouter, auditWriter })
+
+        const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+        const ticketId = queue.listPending()[0]?.id as string
+
+        vi.advanceTimersByTime(3_001)
+        const escalatedAt = queue.get(ticketId)?.escalated_at
+        vi.advanceTimersByTime(7_000)
+
+        const result = await resultPromise
+        auditWriter.flush()
+
+        expect(inner.forward).not.toHaveBeenCalled()
+        expect(errorFromResult(result).data['reason']).toBe('approval_timeout')
+
+        const { records } = auditStore.list()
+        expect(records[0]?.approval_status).toBe('timeout')
+        const chain = records[0]?.evidence_chain as Record<string, unknown>
+        const approval = chain['approval'] as Record<string, unknown>
+        expect(approval['ticket_id']).toBe(ticketId)
+        expect(approval['escalated_at']).toBe(escalatedAt)
+        expect(approval).not.toHaveProperty('denial_reason')
+
+        auditWriter.close()
+        approvalRouter.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('escalated then timed out with default_on_timeout allow forwards and records the escalation', async () => {
+      vi.useFakeTimers()
+      try {
+        const inner = mockForwarder()
+        const { auditStore, auditWriter } = createAudit()
+        const { queue, approvalRouter } = createApproval({ defaultOnTimeout: 'allow' })
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              match: { tool: 'deploy_production' },
+              action: 'require_approval',
+              approval: { channel: 'dashboard', timeout: '10s', escalation_after: '3s' },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { approvalRouter, auditWriter })
+
+        const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+        const ticketId = queue.listPending()[0]?.id as string
+
+        vi.advanceTimersByTime(3_001)
+        const escalatedAt = queue.get(ticketId)?.escalated_at
+        vi.advanceTimersByTime(7_000)
+
+        await resultPromise
+        auditWriter.flush()
+
+        expect(inner.forward).toHaveBeenCalled()
+
+        const { records } = auditStore.list()
+        expect(records[0]?.approval_status).toBe('timeout')
+        const chain = records[0]?.evidence_chain as Record<string, unknown>
+        const approval = chain['approval'] as Record<string, unknown>
+        expect(approval['escalated_at']).toBe(escalatedAt)
+
+        auditWriter.close()
+        approvalRouter.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('break-glass after escalation records both break_glass and approval blocks', async () => {
+      vi.useFakeTimers()
+      try {
+        const inner = mockForwarder()
+        const { auditStore, auditWriter } = createAudit()
+        const { queue, approvalRouter } = createApproval()
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              match: { tool: 'deploy_production' },
+              action: 'require_approval',
+              approval: { channel: 'dashboard', timeout: '10s', escalation_after: '3s' },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { approvalRouter, auditWriter })
+
+        const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+        const ticketId = queue.listPending()[0]?.id as string
+
+        vi.advanceTimersByTime(3_001)
+        approvalRouter.breakGlass(ticketId, 'admin', 'Emergency hotfix')
+
+        await resultPromise
+        auditWriter.flush()
+
+        const { records } = auditStore.list()
+        expect(records[0]?.approval_status).toBe('break_glass')
+        const chain = records[0]?.evidence_chain as Record<string, unknown>
+        const breakGlass = chain['break_glass'] as Record<string, unknown>
+        expect(breakGlass['reason']).toBe('Emergency hotfix')
+        const approval = chain['approval'] as Record<string, unknown>
+        expect(approval['ticket_id']).toBe(ticketId)
+        expect(approval['escalated_at']).toBeDefined()
+
+        auditWriter.close()
+        approvalRouter.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('records the escalation even when the ticket is evicted while the upstream forward is in flight', async () => {
+      vi.useFakeTimers()
+      try {
+        // Upstream forward completes on a 5s timer, well after the ticket is gone
+        const inner: McpForwarder & { forward: ReturnType<typeof vi.fn> } = {
+          forward: vi.fn(
+            () =>
+              new Promise<ForwardResult>((resolve) => {
+                setTimeout(() => {
+                  resolve(successResult({ jsonrpc: '2.0', id: 1, result: { content: [] } }))
+                }, 5_000)
+              }),
+          ),
+        }
+        const { auditStore, auditWriter } = createAudit()
+        const { queue, approvalRouter } = createApproval({ resolvedRetentionMs: 1 })
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              match: { tool: 'deploy_production' },
+              action: 'require_approval',
+              approval: { channel: 'dashboard', timeout: '30s', escalation_after: '3s' },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { approvalRouter, auditWriter })
+
+        const resultPromise = governed.forward(toolsCallRequest('deploy_production'))
+        const ticketId = queue.listPending()[0]?.id as string
+
+        vi.advanceTimersByTime(3_001)
+        const escalatedAt = queue.get(ticketId)?.escalated_at
+        approvalRouter.approve(ticketId, 'alice')
+
+        // Let the snapshot run, then evict the resolved ticket mid-forward
+        await vi.advanceTimersByTimeAsync(10)
+        queue.cleanup()
+        expect(queue.get(ticketId)).toBeUndefined()
+
+        await vi.advanceTimersByTimeAsync(5_000)
+        await resultPromise
+        auditWriter.flush()
+
+        const { records } = auditStore.list()
+        expect(records[0]?.approval_status).toBe('approved')
+        const chain = records[0]?.evidence_chain as Record<string, unknown>
+        expect(chain).not.toBeNull()
+        const approval = chain['approval'] as Record<string, unknown>
+        expect(approval['ticket_id']).toBe(ticketId)
+        expect(approval['escalated_at']).toBe(escalatedAt)
+
+        auditWriter.close()
+        approvalRouter.close()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  // -----------------------------------------------------------------------
   // client_disconnected approval outcome
   // -----------------------------------------------------------------------
 

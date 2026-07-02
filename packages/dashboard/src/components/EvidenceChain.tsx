@@ -38,6 +38,13 @@ interface BreakGlassData {
   invoked_by: string
 }
 
+interface ApprovalContextData {
+  ticket_id: string
+  denial_reason?: string
+  escalated_at?: string
+  escalated_to?: string[]
+}
+
 // ---------------------------------------------------------------------------
 // Type guards
 // ---------------------------------------------------------------------------
@@ -70,6 +77,21 @@ function isBreakGlassData(v: unknown): v is BreakGlassData {
   if (!v || typeof v !== 'object') return false
   const o = v as Record<string, unknown>
   return typeof o.reason === 'string' && typeof o.invoked_by === 'string'
+}
+
+function isApprovalContextData(v: unknown): v is ApprovalContextData {
+  if (!v || typeof v !== 'object') return false
+  const o = v as Record<string, unknown>
+  if (typeof o.ticket_id !== 'string') return false
+  if (o.denial_reason !== undefined && typeof o.denial_reason !== 'string') return false
+  if (o.escalated_at !== undefined && typeof o.escalated_at !== 'string') return false
+  if (
+    o.escalated_to !== undefined &&
+    !(Array.isArray(o.escalated_to) && o.escalated_to.every((t) => typeof t === 'string'))
+  ) {
+    return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +146,9 @@ export function EvidenceChain({ chain }: EvidenceChainProps) {
   const rateLimit = isRateLimitData(chain.rate_limit) ? chain.rate_limit : null
   const spendLimit = isSpendLimitData(chain.spend_limit) ? chain.spend_limit : null
   const breakGlass = isBreakGlassData(chain.break_glass) ? chain.break_glass : null
+  const approval = isApprovalContextData(chain.approval) ? chain.approval : null
 
-  const hasContent = evidence || dependencies || rateLimit || spendLimit || breakGlass
+  const hasContent = evidence || dependencies || rateLimit || spendLimit || breakGlass || approval
   if (!hasContent) return null
 
   return (
@@ -230,6 +253,27 @@ export function EvidenceChain({ chain }: EvidenceChainProps) {
           <p className="text-xs text-amber-700">
             <span className="font-medium">Invoked by:</span> {breakGlass.invoked_by}
           </p>
+        </div>
+      )}
+
+      {/* Approval context (denial reason / escalation) */}
+      {approval && (
+        <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+          <p className="text-xs font-medium text-gray-700">Approval</p>
+          {approval.denial_reason && (
+            <p className="mt-1 text-xs text-gray-600">
+              <span className="font-medium">Denial reason:</span> {approval.denial_reason}
+            </p>
+          )}
+          {approval.escalated_at && (
+            <p className="mt-1 text-xs text-gray-600">
+              <span className="font-medium">Escalated:</span> {approval.escalated_at}
+              {approval.escalated_to && approval.escalated_to.length > 0
+                ? ` to ${approval.escalated_to.join(', ')}`
+                : ''}
+            </p>
+          )}
+          <p className="mt-1 text-xs text-gray-400">Ticket {approval.ticket_id}</p>
         </div>
       )}
     </div>

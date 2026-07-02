@@ -19,7 +19,7 @@ Each audit record contains the following fields:
 | `block_reason`         | string \| null | Structured deny/block reason (`evidence_missing`, `approval_timeout`, `client_disconnected`, `shutdown_cancelled`, `install_denied` for a `deny_install` install scan, etc.). Null when not blocked. |
 | `matched_rule`         | string \| null | Name of the policy rule that matched, or null if the default action applied.                                                                                                                         |
 | `matched_rule_index`   | number \| null | Rule index in config order that matched, or null when no rule matched.                                                                                                                               |
-| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system.                                                                                                                                    |
+| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system, plus decision-context sub-objects when present (`approval`, `break_glass`, `rate_limit`, `spend_limit`, `tool_drift`, `sideband`). |
 | `approval_status`      | string \| null | Approval outcome: `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`. Null if no approval was required.                                                  |
 | `approved_by`          | string \| null | Identity of the human who resolved approval (`approved`, `denied`, or `break_glass`), when applicable.                                                                                               |
 | `upstream_response`    | any \| null    | The upstream MCP server's response. Null for denied calls (no upstream request was made).                                                                                                            |
@@ -35,6 +35,16 @@ Each audit record contains the following fields:
 | `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.                                                         |
 | `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                                                                   |
 | `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                                                                 |
+
+### Approval Context
+
+When a `require_approval` decision resolves with context worth keeping — a denial reason or an escalation — the record's `evidence_chain.approval` carries it:
+
+- `ticket_id` — the approval ticket this record corresponds to.
+- `denial_reason` — present when the denier supplied a reason (Slack denials never carry one).
+- `escalated_at` / `escalated_to` — present when the escalation timer fired before resolution.
+
+The block is omitted when neither applies, so a plain approved call keeps `evidence_chain: null`. Break-glass reasons are recorded separately under `evidence_chain.break_glass` (`reason`, `invoked_by`).
 
 ## Tool Definition Drift Records
 
