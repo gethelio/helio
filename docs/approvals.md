@@ -13,11 +13,11 @@ Rule-level `approval` config is optional. If a `require_approval` rule omits it,
 5. A human approves, denies, the timeout fires, the client disconnects, or the proxy shuts down.
 6. The proxy either forwards the request upstream (approved, break-glass, or timed out with `default_on_timeout: allow`) or returns a structured error (`denied`, `timeout` with `default_on_timeout: deny`, `client_disconnected`, or `shutdown_cancelled`).
 
-The approval ticket and its resolution are recorded in the [audit trail](./audit.md).
+The resolution is recorded in the [audit trail](./audit.md) on the tool call's audit record (`approval_status`, `approved_by`, `approval_wait_ms`). The ticket itself is held in memory only — it stays queryable through the approvals REST API and dashboard for an hour after resolution, then it is cleaned up.
 
 ## Channels
 
-Helio supports three approval channel types. You can configure multiple channels — each rule specifies which channel to use via the `approval.channel` field.
+Helio supports three approval channel types. You can configure multiple channels — each rule specifies which channel to use via the `approval.channel` field. A channel can also set an optional `name`; `approval.channel` (and escalation `delegates`) reference a channel by its `name`, falling back to its `type`, which is what lets two channels of the same type coexist.
 
 ### Dashboard
 
@@ -53,12 +53,14 @@ approval:
     "tool_name": "delete_record",
     "tool_input": { "id": "123" },
     "matched_rule": "approve-deletes",
+    "rule_index": 0,
+    "channel_name": "webhook",
     "session_id": "session-abc",
     "requested_at": "2026-04-09T12:00:00.000Z",
     "timeout_at": "2026-04-09T12:05:00.000Z",
     "timeout_ms": 300000,
     "status": "pending",
-    "channel_name": "webhook"
+    "notification_failures": []
   }
 }
 ```
@@ -72,11 +74,13 @@ approval:
 
 > **Note:** Webhook notification errors are logged but never block the approval flow. The ticket remains resolvable via the REST API regardless of whether the webhook delivery succeeds.
 
+> **Note:** The sideband binds to `127.0.0.1` by default, which an external system cannot reach. If the callback comes from another host, set `dashboard.host` to a reachable interface — Helio warns at startup when a webhook channel is configured against a loopback-bound sideband. The dashboard must also stay enabled while a webhook channel is configured (`dashboard.enabled: false` plus a webhook channel is a startup error).
+
 ### Slack
 
 The Slack channel sends a Block Kit message with interactive Approve and Deny buttons to a Slack channel. When a user clicks a button, Helio resolves the ticket and updates the message with the result.
 
-> **Slack deny does not capture a denial reason.** The router supports optional denial reasons (`denial_reason` in the audit trail and JSON-RPC error response), but Slack button clicks have no free-text input, so Slack-resolved denials always record `denial_reason: null`. The dashboard's deny modal does capture a reason. A future Slack modal flow could capture reasons too — tracked as a follow-up.
+> **Slack deny does not capture a denial reason.** The router supports optional denial reasons (`denial_reason` in the JSON-RPC error response, and on the ticket when a reason is supplied), but Slack button clicks have no free-text input, so Slack-resolved denials always return `denial_reason: null` to the caller. The dashboard's deny modal does capture a reason. A future Slack modal flow could capture reasons too — tracked as a follow-up.
 
 ```yaml
 approval:
@@ -209,12 +213,14 @@ When `default_on_timeout: deny`, the agent receives self-repair feedback:
     "data": {
       "reason": "approval_timeout",
       "timeout_seconds": 300,
-      "suggestion": "Approval request timed out after 300s. Try again or contact approver.",
+      "suggestion": "Approval request timed out after 300s. Try again or contact an approver directly.",
       "retry_allowed": true
     }
   }
 }
 ```
+
+The `data` object also carries `blocked`, `rule`, `ruleIndex`, and `action`; the fields above are the ones agents typically act on.
 
 If the downstream client disconnects while a request is pending approval, Helio resolves the ticket as `client_disconnected` and does not forward the request upstream.
 
@@ -231,6 +237,8 @@ If the proxy receives SIGTERM while requests are still waiting for approval, Hel
   }
 }
 ```
+
+As with the timeout example, the `data` object also carries `blocked`, `rule`, `ruleIndex`, and `action`.
 
 This shutdown path is intentionally fail-closed and does not use `default_on_timeout`.
 
@@ -256,7 +264,7 @@ If an approval hasn't been resolved within a specified time, Helio can escalate 
 - `escalation_after` must be shorter than `timeout` to fire before the ticket times out.
 - `delegates` is an array of channel names to notify on escalation. If omitted, the primary channel is re-notified.
 - Delegate values must reference configured approval channel `name`s (or channel `type`s such as `webhook` / `slack` / `dashboard`). Unknown delegate references are startup-fatal validation errors.
-- Escalation updates the ticket with `escalated_at` and `escalated_to` fields, recorded in the audit trail.
+- Escalation updates the ticket with `escalated_at` and `escalated_to` fields, visible in the dashboard and on `GET /api/approvals/:id` while the ticket is retained. Escalation is not written to the audit trail.
 
 Timeouts also emit the same `approval_resolved` dashboard SSE event path used by manual approve/deny/break-glass resolution, so operator dashboards stay state-consistent across all resolution outcomes.
 
@@ -306,7 +314,7 @@ self-approving its own pending tickets.
 
 Query parameters (all optional):
 
-- `status` — filter by `pending` / `approved` / `denied` / `timeout` / `break_glass` / `client_disconnected` / `shutdown_cancelled`.
+- `status` — filter by `pending` / `approved` / `denied` / `timeout` / `break_glass` / `client_disconnected` / `shutdown_cancelled` / `cancelled`.
 - `limit` — page size. Defaults to `50`. Clamped to `[1, 1000]`.
 - `offset` — number of tickets to skip. Defaults to `0`.
 
@@ -351,15 +359,20 @@ Both `approved_by` and `reason` are required.
 
 **Error responses:**
 
+- `400` — Invalid JSON body or failed validation (for example a missing `approved_by`).
 - `404` — Ticket not found.
 - `409` — Ticket already resolved (returns current status).
+- `409` — Adapter-owned ticket: `{ "error": "native_ticket", "resolve_in": "<origin>" }`.
+
+Tickets created by a host adapter through the [sideband](./sideband-api.md) governance flow appear in the same listings with a `native:<origin>` channel name. The `/api/approvals/*` endpoints cannot resolve them — the decision belongs to the adapter's own approval UI, which reports it back through the sideband — so `approve` / `deny` / `break-glass` return the `native_ticket` error above, and a dismissed adapter dialog resolves the ticket as `cancelled`.
 
 Unknown paths under `/api/*` (e.g. a typo in the endpoint name) return a JSON `404` with an `error` field — never HTML. A typo on the sideband always surfaces as a parseable error payload rather than an HTML blob that could trick a client into thinking the endpoint silently succeeded.
 
 ### Authentication
 
-Helio requires an `api_secret` whenever any rule uses `require_approval` or
-`policies.flag_destructive: require_approval`. The proxy refuses to start
+Helio requires an `api_secret` whenever any rule uses `require_approval`, or
+`policies.flag_destructive: require_approval` or
+`policies.on_tool_drift: require_approval` is set. The proxy refuses to start
 (or hot-reload) if the secret is missing.
 
 Generate a secret with:
