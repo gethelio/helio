@@ -1631,3 +1631,114 @@ describe('unhandled errors', () => {
     expect(errSpy).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// CORS origin validation
+// ---------------------------------------------------------------------------
+
+describe('CORS origin validation', () => {
+  // Origins that MUST be admitted: loopback plus genuine private-network IPv4
+  // literals (Docker bridge, LAN).
+  const allowed = [
+    'http://localhost:5173',
+    'http://127.0.0.1:3100',
+    'http://192.168.1.20',
+    'http://10.0.0.5',
+    'http://172.16.0.1',
+    'http://172.31.255.254',
+  ]
+
+  // Origins that MUST be rejected. The first four are the attack: public DNS
+  // names whose hostname merely starts with a private-range prefix. The rest
+  // are out-of-range or malformed addresses.
+  const rejected = [
+    'http://192.168.attacker.com',
+    'http://10.evil.io',
+    'http://172.16.pwn.example',
+    'http://192.168.1.1.nip.io',
+    'http://172.15.0.1',
+    'http://172.32.0.1',
+    'http://999.1.1.1',
+    'https://evil.example.com',
+  ]
+
+  for (const origin of allowed) {
+    it(`admits ${origin}`, async () => {
+      const { get } = setup()
+      const res = await get('/api/health', { origin })
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin)
+    })
+  }
+
+  for (const origin of rejected) {
+    it(`rejects ${origin}`, async () => {
+      const { get } = setup()
+      const res = await get('/api/health', { origin })
+      expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    })
+  }
+})
+
+describe('CORS origin validation — secure mode', () => {
+  const SECRET = 'secure-mode-cors-secret'
+
+  it('admits a private origin via CORS but still 401s without a credential', async () => {
+    const { get } = setup({ apiSecret: SECRET })
+    const res = await get('/api/feed', { origin: 'http://192.168.1.20' })
+    expect(res.status).toBe(401)
+    // CORS admits the origin, but the auth layer is the real gate.
+    expect(res.headers.get('access-control-allow-origin')).toBe('http://192.168.1.20')
+    // No credentials header, so a browser fetch cannot attach cookies.
+    expect(res.headers.get('access-control-allow-credentials')).toBeNull()
+  })
+
+  it('rejects a spoofed origin and still 401s without a credential', async () => {
+    const { get } = setup({ apiSecret: SECRET })
+    const res = await get('/api/feed', { origin: 'http://192.168.attacker.com' })
+    expect(res.status).toBe(401)
+    expect(res.headers.get('access-control-allow-origin')).toBeNull()
+  })
+
+  it('issues the session cookie with SameSite=Lax', async () => {
+    const { post } = setup({ apiSecret: SECRET })
+    const res = await post('/api/auth/session', { secret: SECRET })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('set-cookie') ?? '').toMatch(/SameSite=Lax/i)
+  })
+})
+
+describe('CORS origin validation — hostname normalization', () => {
+  // The URL parser normalizes these numeric/octal forms to private IPv4
+  // literals, so they are admitted. A browser only emits such an origin if the
+  // page was actually served from that address (not an attacker-controlled DNS
+  // name), so this is not a bypass — pinned here to keep the behavior stable.
+  const admittedByNormalization = [
+    'http://0x7f000001', // -> 127.0.0.1
+    'http://3232235521', // -> 192.168.0.1
+    'http://0300.0250.0.1', // -> 192.168.0.1
+    'http://192.168.1.1.', // trailing dot -> 192.168.1.1
+  ]
+
+  const rejectedForms = [
+    'http://192.168.1.1%2f@evil.com', // real host is evil.com
+    'http://xn--bcher-kva.example', // punycode hostname, not an IP
+    'http://[::1]', // IPv6 loopback is not in the allowlist
+    'http://010.0.0.1', // octal -> 8.0.0.1, a public address
+  ]
+
+  for (const origin of admittedByNormalization) {
+    it(`admits normalized private literal ${origin}`, async () => {
+      const { get } = setup()
+      const res = await get('/api/health', { origin })
+      expect(res.headers.get('access-control-allow-origin')).toBe(origin)
+    })
+  }
+
+  for (const origin of rejectedForms) {
+    it(`rejects ${origin}`, async () => {
+      const { get } = setup()
+      const res = await get('/api/health', { origin })
+      expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    })
+  }
+})
