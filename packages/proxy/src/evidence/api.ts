@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
 import type { EvidenceStore } from './store.js'
 import { verifyBearer } from '../auth/bearer.js'
@@ -81,6 +82,18 @@ export function createSidebandApp(store: EvidenceStore, options: SidebandAppOpti
   const sdkToken = options.token && options.token.length > 0 ? options.token : undefined
   const adapterToken =
     options.adapterToken && options.adapterToken.length > 0 ? options.adapterToken : undefined
+
+  // Unhandled Error exceptions are normalized to JSON 500 with an `error`
+  // field (without this they fall through to Hono's default text/plain 500);
+  // the error details are logged server-side only and never reach the client.
+  // HTTPExceptions keep their intended response. Covers the mounted
+  // governance routes too.
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse()
+    // eslint-disable-next-line no-console -- Intentional operational error log
+    console.error('[helio] Unhandled sideband API error:', err)
+    return c.json({ error: 'Internal server error' }, 500)
+  })
 
   // CORS guard — applied globally, fires before auth. The SDK never sends
   // an Origin header; any request that does is browser-originated traffic
