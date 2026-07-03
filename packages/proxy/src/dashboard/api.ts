@@ -190,6 +190,26 @@ function shouldSetSecureCookie(url: string, xForwardedProto: string | undefined)
   return new URL(url).protocol === 'https:'
 }
 
+/**
+ * Whether `host` is a private-network IPv4 literal (RFC 1918).
+ *
+ * Validates a real dotted-quad with in-range octets, NOT a string prefix. A
+ * prefix check would admit attacker-controlled DNS names such as
+ * `192.168.attacker.com` or `10.evil.io`, which resolve anywhere but are
+ * treated as private for CORS. Hostnames (any non-numeric label) fail the
+ * dotted-quad match and are rejected.
+ */
+function isPrivateIpv4(host: string): boolean {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (!match) return false
+  const a = Number(match[1])
+  const b = Number(match[2])
+  const c = Number(match[3])
+  const d = Number(match[4])
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard API factory
 // ---------------------------------------------------------------------------
@@ -234,9 +254,9 @@ export function createDashboardAppWithLifecycle(
 
   // CORS — needed during development when React dev server (e.g. port 5173)
   // calls the dashboard API (port 3100). In production/Docker the SPA is served
-  // same-origin so CORS isn't triggered. Admits localhost plus hostnames with
-  // private-network prefixes (Docker bridge, LAN) — a prefix check, not IP
-  // validation; other origins get no CORS headers, which only browsers enforce.
+  // same-origin so CORS isn't triggered. Admits localhost plus validated
+  // private-network IPv4 literals (Docker bridge, LAN); every other origin,
+  // including hostnames, gets no CORS headers.
   app.use(
     '*',
     cors({
@@ -246,8 +266,7 @@ export function createDashboardAppWithLifecycle(
           const url = new URL(origin)
           const h = url.hostname
           if (h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0') return origin
-          // Allow private network IPs (Docker bridge, LAN access)
-          if (/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(h)) return origin
+          if (isPrivateIpv4(h)) return origin
         } catch {
           // Invalid origin URL — reject
         }

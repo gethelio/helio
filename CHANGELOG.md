@@ -64,6 +64,19 @@ Maintainer notes:
   approval, so calling it populates the dashboard Approvals page as the README
   promised; the "Exercise it" section walks through it.
 
+### Security
+
+- **Harden dashboard CORS origin validation (GHSA-2c3r-q7gv-hp2m).** The dashboard
+  sideband's private-network origin allowlist matched request origins by
+  hostname prefix, so a public DNS name beginning with a private-range label
+  (for example `192.168.attacker.com`) was admitted. When the dashboard ran in
+  open mode (`dashboard.allow_open_mode: true`, no `dashboard.api_secret`), a
+  browser page on such an origin could read the sideband cross-origin. Origins
+  are now validated as real private IPv4 literals, so hostnames no longer match.
+  Secure mode (`dashboard.api_secret` set) was not affected: cross-origin reads
+  still require a credential the attacker page cannot supply. Affects versions
+  through 0.7.0.
+
 ## [0.7.0] - 2026-06-30
 
 ### Added

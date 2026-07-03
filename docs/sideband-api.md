@@ -10,8 +10,8 @@ The dashboard sideband is a read/write REST + SSE surface served on a separate p
 
 - **Default port:** `127.0.0.1:3100` (configurable via `dashboard.port`).
 - **Bind address:** localhost-only by default. Bind publicly only behind a TLS-terminating reverse proxy you control.
-- **Auth:** By default, `dashboard.enabled: true` requires `dashboard.api_secret`. Browser clients unlock with `POST /api/auth/session` + HttpOnly cookie; non-browser clients can use `Authorization: Bearer <api_secret>`. Running without `api_secret` is only allowed with explicit `dashboard.allow_open_mode: true` on loopback hosts. See [Authentication](#authentication) below.
-- **CORS:** Allows same-origin, `localhost` / `127.0.0.1` / `0.0.0.0`, and private network ranges (`10.x`, `172.16-31.x`, `192.168.x`) for Docker bridge and LAN access. All other origins are rejected.
+- **Auth:** By default, `dashboard.enabled: true` requires `dashboard.api_secret`. Browser clients unlock with `POST /api/auth/session` + HttpOnly cookie; non-browser clients can use `Authorization: Bearer <api_secret>`. Running without `api_secret` is only allowed with explicit `dashboard.allow_open_mode: true` on loopback hosts. Open mode disables all sideband authentication and is a local/demo posture only: the CORS allowlist above does not make it safe, since an unauthenticated loopback service is still reachable by a determined local attacker (for example via DNS rebinding). See [Authentication](#authentication) below.
+- **CORS:** Allows same-origin, `localhost` / `127.0.0.1` / `0.0.0.0`, and validated private-network IPv4 literals (`10.x`, `172.16-31.x`, `192.168.x`) for Docker bridge and LAN access. Origins are matched as real IP addresses, not by hostname prefix; every other origin, including hostnames, receives no CORS headers. (CORS is a browser-enforced control, not a server-side auth boundary.)
 - **Content type:** JSON for everything except `/api/audit/export` (JSON or CSV attachment) and `/api/events` (SSE stream).
 - **Non-200 errors:** Always JSON in the shape `{ "error": "<message>" }`. Unknown `/api/*` paths return `404` with this shape (never HTML).
 
