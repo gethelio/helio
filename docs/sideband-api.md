@@ -48,7 +48,9 @@ Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/l
 
 Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics` and `GET /api/limits` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
 
-`GET /api/health` in particular is preserved in this form so that container orchestrators (Kubernetes, Docker Compose, Nomad) can point healthcheck probes at it without a custom JSON parser — the keys `status`, `version`, and `uptime` sit at the top level exactly where `kubelet --liveness-probe` and friends expect them.
+`GET /api/health` in particular is preserved in this form so that container orchestrators (Kubernetes, Docker Compose, Nomad) can point healthcheck probes at it without a custom JSON parser: probes only evaluate the HTTP status code, and the flat `status`, `version`, and `uptime` keys stay easy to read for the humans and scripts that hit the same URL.
+
+The auth endpoints (`/api/auth/*`) and the approval action POSTs sit outside these three categories: they return small purpose-built objects (`{ "ok": true }`, the session state) documented inline in their endpoint sections.
 
 ### Non-JSON responses
 
@@ -71,7 +73,7 @@ Some validation errors on POST endpoints additionally include a `details` array;
 
 Every type that crosses a JSON boundary — REST response bodies, webhook payloads, SSE event payloads, audit records — uses **snake_case** field names throughout, including inside its TypeScript `interface` definition. There is no camelCase/snake_case mapping layer: `JSON.stringify(obj)` on an internal DTO produces the wire exactly. POST request bodies follow the same convention (`approved_by`, `denied_by`, `reason`).
 
-Strictly-internal TypeScript types (e.g. `ApprovalOutcome`, `RateLimitResult`, constructor option interfaces) remain idiomatic camelCase; they are not serialized. When an internal value needs to flow into a DTO field — for example, copying `outcome.resolvedBy` into an `AuditRecord.resolved_by` column — that is a single-line value copy at the boundary, not a shape conversion.
+Strictly-internal TypeScript types (e.g. `ApprovalOutcome`, `RateLimitResult`, constructor option interfaces) remain idiomatic camelCase; they are not serialized. When an internal value needs to flow into a DTO field — for example, copying `outcome.resolvedBy` into an `AuditRecord.approved_by` column — that is a single-line value copy at the boundary, not a shape conversion.
 
 ---
 
@@ -81,7 +83,7 @@ When `dashboard.api_secret` is set in `helio.yaml` (default secure mode), authen
 
 1. **Browser dashboard flow (recommended for operators)**
    - `POST /api/auth/session` with `{ "secret": "<api_secret>" }`
-   - Server returns an HttpOnly `helio_session` cookie and a CSRF token in JSON
+   - Server returns an HttpOnly `helio_session` cookie and a CSRF token in JSON (sessions last 8 hours)
    - Browser then calls `/api/*` with cookie credentials (no secret exposed in JS runtime)
 2. **Machine client flow (backward compatible)**
    - Send `Authorization: Bearer <api_secret>` on protected `/api/*` calls
@@ -94,14 +96,14 @@ Machine-client auth header:
 Authorization: Bearer <api_secret>
 ```
 
-Protected routes reject unauthenticated requests with `401`. Cookie-authenticated mutating routes additionally require `x-helio-csrf`.
+Protected routes reject unauthenticated requests with `401`. Cookie-authenticated mutating routes additionally require `x-helio-csrf`; a missing or mismatched token gets `403` — `{ "error": "Invalid CSRF token" }`.
 
-When `dashboard.api_secret` is unset, the sideband only starts if `dashboard.allow_open_mode: true` is explicitly set and `dashboard.host` is loopback (`127.0.0.1`, `localhost`, or `::1`). In that open-mode posture, middleware is a no-op and endpoints are unauthenticated. Do not run this mode behind any shared or non-local endpoint.
+When `dashboard.api_secret` is unset and the dashboard is enabled, config validation requires `dashboard.allow_open_mode: true` and a loopback `dashboard.host` (`127.0.0.1`, `localhost`, or `::1`) — otherwise the proxy refuses to start. Open mode is also unavailable whenever the secret is mandatory: any rule using `require_approval`, or `policies.flag_destructive: require_approval` or `policies.on_tool_drift: require_approval`, requires `dashboard.api_secret` regardless of `allow_open_mode` (see [Approval Workflows](./approvals.md#authentication)). In the open-mode posture, middleware is a no-op and endpoints are unauthenticated. Do not run this mode behind any shared or non-local endpoint.
 
 `helio init` generates a fresh 32-byte hex secret on first run and writes it into the scaffolded `helio.yaml`.
 Keep that generated secret unless you are intentionally opting into local open mode.
 
-If an operator loses the secret, recover by generating a new one (for example `openssl rand -hex 32`), updating `dashboard.api_secret` in `helio.yaml`, and restarting/reloading the proxy. Existing sessions are invalidated and all browser clients must sign in again.
+If an operator loses the secret, recover by generating a new one (for example `openssl rand -hex 32`), updating `dashboard.api_secret` in `helio.yaml`, and restarting the proxy — `dashboard.*` changes are not applied by a hot reload. Existing sessions are invalidated and all browser clients must sign in again.
 
 ---
 
@@ -111,7 +113,7 @@ If an operator loses the secret, recover by generating a new one (for example `o
 
 #### GET /api/health
 
-Liveness and version probe. **Does not require authentication** — this is the one endpoint that stays open so that container healthchecks can hit it without bearer plumbing.
+Liveness and version probe. **Does not require authentication** — it stays open (alongside the `/api/auth/*` login endpoints) so that container healthchecks can hit it without bearer plumbing.
 
 **Response (200):**
 
@@ -161,8 +163,9 @@ Creates a browser session from the shared dashboard secret.
 
 **Behavior:**
 
-- On success: sets `Set-Cookie: helio_session=...; HttpOnly; SameSite=Lax; Path=/; ...` and returns `{ authenticated: true, expires_at, csrf_token }`.
+- On success: sets `Set-Cookie: helio_session=...; HttpOnly; SameSite=Lax; Path=/; ...` and returns `{ auth_required: true, authenticated: true, expires_at, csrf_token }`.
 - On invalid secret: returns `401 { "error": "Unauthorized" }`.
+- On a malformed or invalid body: returns `400` — `{ "error": "Invalid JSON" }` or `{ "error": "Validation error", "details": [...] }`.
 
 #### POST /api/auth/logout
 
@@ -217,14 +220,14 @@ Aggregated statistics for the dashboard charts. Computed from the audit store fo
 ```
 
 - `total` — total number of audit records in the window.
-- `allowed_total` — records that resolved without a block (`block_reason IS NULL`).
+- `allowed_total` — records that resolved without a block (`block_reason IS NULL`), excluding drift events (`tool_drift` / `tool_drift_reverted` decisions). When drift events fall inside the window, `allowed_total + blocked_total` adds up to less than `total`.
 - `blocked_total` — records that resolved with a block (`block_reason IS NOT NULL`).
 - `dry_run_total` — records produced in dry-run mode (`dry_run = true`).
 - `applied_total` — records produced in applied mode (`dry_run = false`).
 - `by_decision` — counts grouped by `policy_decision`, sorted descending.
 - `by_block_reason` — blocked counts grouped by `block_reason`, sorted descending.
 - `client_disconnected` and `shutdown_cancelled` are counted in `blocked_total` and `by_block_reason`, and remain distinct from human denials (`approval_denied`) and natural timeouts (`approval_timeout`).
-- `top_tools` — top 10 tools by call count, sorted descending.
+- `top_tools` — top 10 tools by call count, sorted descending. Drift events are excluded.
 - `approval_rate` — `approved / total_require_approval` in the window, or `null` when no approvals were requested.
 - `per_hour` — hourly buckets of record counts over the window.
 
@@ -261,7 +264,7 @@ Current state of every active rate-limit and spend-limit bucket. Returns empty a
 ```
 
 - `rate_limits[].current` — calls consumed in the current window.
-- `rate_limits[].reset_at_ms` — epoch ms at which the sliding window rolls over.
+- `rate_limits[].reset_at_ms` — epoch ms at which the oldest recorded call ages out of the sliding window and `current` drops. The bucket does not reset wholesale.
 - `spend_limits[].current_spend` — total spend in the current window in `currency`.
 
 **Raw-shape endpoint:** this is an RPC-style view.
@@ -368,6 +371,8 @@ Look up a single audit record by ID.
 
 Bulk export of audit records as a downloadable attachment. **Not a JSON envelope** — the body is a bare `AuditRecord[]` array (or a CSV document). Returned with `Content-Disposition: attachment; filename="helio-audit-export.<ext>"` so browsers trigger a download.
 
+Records are exported oldest-first (ascending `created_at`) — the opposite of the newest-first list endpoints. Combined with the `limit` cap, an export whose filters match more than 10k records returns the oldest 10k.
+
 **Query parameters:**
 
 | Parameter             | Default | Description                                                                                   |
@@ -406,11 +411,11 @@ List approval tickets. Tickets are sorted newest-first by `requested_at` before 
 
 **Query parameters:**
 
-| Parameter | Default | Range       | Description                                                                                                             |
-| --------- | ------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `status`  | —       | see below   | Filter by `pending` / `approved` / `denied` / `timeout` / `break_glass` / `client_disconnected` / `shutdown_cancelled`. |
-| `limit`   | `50`    | `[1, 1000]` | Page size.                                                                                                              |
-| `offset`  | `0`     | `[0, ∞)`    | Number of tickets to skip.                                                                                              |
+| Parameter | Default | Range       | Description                                                                                                                           |
+| --------- | ------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`  | —       | see below   | Filter by `pending` / `approved` / `denied` / `timeout` / `break_glass` / `client_disconnected` / `shutdown_cancelled` / `cancelled`. |
+| `limit`   | `50`    | `[1, 1000]` | Page size.                                                                                                                            |
+| `offset`  | `0`     | `[0, ∞)`    | Number of tickets to skip.                                                                                                            |
 
 **Response (200):**
 
@@ -448,12 +453,13 @@ Look up a single approval ticket by ID.
     "requested_at": "2026-04-15T10:00:00.000Z",
     "timeout_at": "2026-04-15T10:05:00.000Z",
     "timeout_ms": 300000,
-    "status": "pending"
+    "status": "pending",
+    "notification_failures": []
   }
 }
 ```
 
-Resolved tickets additionally include `resolved_at`, `resolved_by`, and — depending on resolution — `denial_reason` or `break_glass_reason`. Resolution statuses include `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, and `shutdown_cancelled`. Escalated tickets include `escalated_at` and `escalated_to`.
+Resolved tickets additionally include `resolved_at`, plus — depending on resolution — `resolved_by`, `denial_reason`, or `break_glass_reason` (`resolved_by` appears only when a resolver identity was supplied; the proxy's own `timeout`, `client_disconnected`, and `shutdown_cancelled` resolutions never include one). Resolution statuses include `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, `shutdown_cancelled`, and — for adapter-owned tickets — `cancelled`. Escalated tickets include `escalated_at` and `escalated_to`; `notification_failures` records failed notification deliveries. Tickets live in memory, and resolved tickets are dropped about an hour after resolution — see [Approval Workflows](./approvals.md) for the retention model.
 
 **Error responses:**
 
@@ -482,6 +488,7 @@ Approve a pending ticket.
 - `400` — `{ "error": "Invalid JSON" }` or `{ "error": "Validation error", "details": [...] }`
 - `404` — `{ "error": "Ticket not found" }`
 - `409` — `{ "error": "Ticket already resolved", "status": "<current-status>" }`
+- `409` — `{ "error": "native_ticket", "resolve_in": "<origin>" }` for adapter-owned tickets (`channel_name` of `native:<origin>`): their approval UI lives in the adapter, so the `/api/approvals/*` endpoints refuse to resolve them. See the [adapter governance API](./adapter-api.md).
 
 #### POST /api/approvals/:id/deny
 
@@ -566,7 +573,7 @@ Expired evidence entries are omitted from the `evidence` map in this response. H
 
 #### GET /api/events
 
-Server-Sent Events stream of dashboard events. The stream stays open indefinitely; the server sends a heartbeat every 30 seconds (configurable via `sseHeartbeatMs`) so network-level idle timers do not close the connection. A background sweeper evicts connections that have not received a successful write in three heartbeat intervals. On proxy shutdown, active `/api/events` connections are drained and closed before process exit.
+Server-Sent Events stream of dashboard events. The stream stays open indefinitely; the server sends a heartbeat every 30 seconds (configurable via `dashboard.sse_heartbeat_interval`) so network-level idle timers do not close the connection. A background sweeper evicts connections that have not received a successful write in three heartbeat intervals. On proxy shutdown, active `/api/events` connections are drained and closed before process exit.
 
 **Authentication:** requires either a valid session cookie or `Authorization: Bearer <api_secret>`. Query-string token auth is intentionally not supported.
 
@@ -574,16 +581,16 @@ Server-Sent Events stream of dashboard events. The stream stays open indefinitel
 
 | Event                          | Payload fields                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `heartbeat`                    | empty `data`. Sent on connect and every `sseHeartbeatMs`.                                                                                                                                                                                                                                                                                                                                                     |
+| `heartbeat`                    | empty `data`. Sent on connect and every `dashboard.sse_heartbeat_interval`.                                                                                                                                                                                                                                                                                                                                   |
 | `action`                       | `id`, `tool_name`, `policy_decision`, `block_reason`, `approval_status`, `session_id`, `agent_id`, `environment`, `timestamp`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `matched_rule`, `matched_rule_index`, `origin` (enforcement origin: `mcp` or adapter slug), `record_kind` (`tool_call` / `drift_event` / `install_scan` / `evaluation_expired`) |
 | `approval_requested`           | `ticket_id`, `tool_name`, `channel`, `requested_at`                                                                                                                                                                                                                                                                                                                                                           |
 | `approval_resolved`            | `ticket_id`, `status`, `resolved_by` (optional), `resolved_at`                                                                                                                                                                                                                                                                                                                                                |
 | `approval_notification_failed` | `ticket_id`, `channel`, `phase` (`initial`/`escalation`), `error`                                                                                                                                                                                                                                                                                                                                             |
 | `limit_warning`                | `key`, `type` (`rate`/`spend`), `current`, `limit`, `utilization`                                                                                                                                                                                                                                                                                                                                             |
 
-For `approval_resolved`, `status` is one of `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`.
+For `approval_resolved`, `status` is one of `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, `shutdown_cancelled`, or — for adapter-owned tickets — `cancelled`.
 
-Every non-heartbeat event carries a unique `id:` line for client-side de-duplication and debugging. In v0.1 the SSE stream is **live-only** (no replay endpoint): reconnecting clients should backfill from REST endpoints (`/api/feed`, `/api/approvals`, `/api/limits`) before resuming live consumption.
+Every non-heartbeat event carries a unique `id:` line for client-side de-duplication and debugging. The SSE stream is **live-only** (no replay endpoint): reconnecting clients should backfill from REST endpoints (`/api/feed`, `/api/approvals`, `/api/limits`) before resuming live consumption.
 
 **Non-JSON endpoint** — SSE stream, not a single response.
 
@@ -597,7 +604,7 @@ Every `4xx` and `5xx` JSON response follows this shape:
 { "error": "Human-readable error message" }
 ```
 
-Some POST validation errors include a `details` array of `{ path, message }` entries from Zod; some 409 responses include a `status` field with the current ticket status. The `error` field is always present.
+Some POST validation errors include a `details` array of `{ path, message }` entries from Zod; some 409 responses include a `status` field with the current ticket status (the native-ticket 409 carries `resolve_in` instead). The `error` field is always present.
 
 **Unknown `/api/*` paths** are caught by a dedicated 404 guard and return `{ "error": "Not found" }` with `404`. Unknown paths never fall through to the SPA catch-all (which would otherwise return HTML), so an API client probing the sideband always gets a parseable JSON error.
 

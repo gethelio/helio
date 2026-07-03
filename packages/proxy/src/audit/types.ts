@@ -154,7 +154,7 @@ export interface AuditTimeBucket {
 export interface AuditAggregateStats {
   /** Total number of records in the time range. */
   readonly total: number
-  /** Total records that resolved without a block (`block_reason IS NULL`). */
+  /** Total records that resolved without a block (`block_reason IS NULL`), excluding drift events. */
   readonly allowed_total: number
   /** Total records that resolved with a block (`block_reason IS NOT NULL`). */
   readonly blocked_total: number
