@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { HTTPException } from 'hono/http-exception'
 import { createSidebandApp } from './api.js'
 import { EvidenceStore } from './store.js'
 
@@ -618,5 +619,43 @@ describe('Sideband API', () => {
       expect(res.status).toBe(403)
       expect(store.hasEvidence('s1', 'k')).toBe(false)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unhandled errors
+// ---------------------------------------------------------------------------
+
+describe('unhandled errors', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('returns the JSON error shape when a handler throws', async () => {
+    const { store, get } = setup()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(store, 'getSessionState').mockImplementation(() => {
+      throw new Error('store exploded')
+    })
+
+    const res = await get('/session/s1/state')
+
+    expect(res.status).toBe(500)
+    expect(res.headers.get('content-type') ?? '').toContain('application/json')
+    expect(await res.json()).toEqual({ error: 'Internal server error' })
+    expect(errSpy).toHaveBeenCalledWith('[helio] Unhandled sideband API error:', expect.any(Error))
+  })
+
+  it('lets an HTTPException keep its intended response', async () => {
+    const { store, get } = setup()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(store, 'getSessionState').mockImplementation(() => {
+      throw new HTTPException(418, { message: 'teapot' })
+    })
+
+    const res = await get('/session/s1/state')
+
+    expect(res.status).toBe(418)
+    expect(errSpy).not.toHaveBeenCalled()
   })
 })

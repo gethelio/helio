@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { HTTPException } from 'hono/http-exception'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -1590,5 +1591,43 @@ describe('unknown /api/* routes', () => {
 
     expect(res.status).toBe(404)
     expect(res.headers.get('content-type') ?? '').toContain('application/json')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unhandled errors
+// ---------------------------------------------------------------------------
+
+describe('unhandled errors', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('returns the JSON error shape when a handler throws', async () => {
+    const { auditStore, get } = setup()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(auditStore, 'list').mockImplementation(() => {
+      throw new Error('sqlite exploded')
+    })
+
+    const res = await get('/api/feed')
+
+    expect(res.status).toBe(500)
+    expect(res.headers.get('content-type') ?? '').toContain('application/json')
+    expect(await res.json()).toEqual({ error: 'Internal server error' })
+    expect(errSpy).toHaveBeenCalledWith('[helio] Unhandled dashboard API error:', expect.any(Error))
+  })
+
+  it('lets an HTTPException keep its intended response', async () => {
+    const { auditStore, get } = setup()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(auditStore, 'list').mockImplementation(() => {
+      throw new HTTPException(418, { message: 'teapot' })
+    })
+
+    const res = await get('/api/feed')
+
+    expect(res.status).toBe(418)
+    expect(errSpy).not.toHaveBeenCalled()
   })
 })

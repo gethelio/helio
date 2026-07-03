@@ -52,6 +52,12 @@ Maintainer notes:
 
 ### Fixed
 
+- **Sideband servers return JSON for unhandled errors (#115).** Dashboard
+  sideband and SDK sideband routes used to fall through to a `text/plain` 500
+  for unhandled server exceptions. Both servers now normalize unhandled
+  `Error` exceptions to `500 {"error": "Internal server error"}` and log the
+  underlying error to stderr; the error message itself is never sent to the
+  client.
 - **Docker demo approvals now fire (#104).** The demo config configured an
   approval channel but nothing ever reached it — `flag_destructive` was dead
   because the `block-destructive` rule matched first. `send_email` now requires

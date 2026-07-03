@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
+import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
 import { verifyBearer } from '../auth/bearer.js'
 import { cors } from 'hono/cors'
@@ -220,10 +221,22 @@ export function createDashboardAppWithLifecycle(
 
   const app = new Hono<{ Variables: { auth?: DashboardAuthState } }>()
 
+  // Unhandled Error exceptions are normalized to JSON 500 with an `error`
+  // field (without this they fall through to Hono's default text/plain 500);
+  // the error details are logged server-side only and never reach the client.
+  // HTTPExceptions keep their intended response.
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse()
+    // eslint-disable-next-line no-console -- Intentional operational error log
+    console.error('[helio] Unhandled dashboard API error:', err)
+    return c.json({ error: 'Internal server error' }, 500)
+  })
+
   // CORS — needed during development when React dev server (e.g. port 5173)
   // calls the dashboard API (port 3100). In production/Docker the SPA is served
-  // same-origin so CORS isn't triggered. Allow localhost, private IPs, and any
-  // origin matching the configured dashboard host for container networking.
+  // same-origin so CORS isn't triggered. Admits localhost plus hostnames with
+  // private-network prefixes (Docker bridge, LAN) — a prefix check, not IP
+  // validation; other origins get no CORS headers, which only browsers enforce.
   app.use(
     '*',
     cors({
