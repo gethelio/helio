@@ -218,11 +218,11 @@ The SDK talks to the proxy over the sideband API (default `127.0.0.1:3200`; bind
 
 ```
 SDK sideband listening on http://127.0.0.1:3200
-SDK token (pass as HELIO_SDK_TOKEN env var to your SDK clients):
+SDK token (generated per-boot HELIO_SDK_TOKEN; pass as HELIO_SDK_TOKEN env var to your SDK clients):
   3f9c2b...d8a1
 ```
 
-Pass the same value to the SDK process via `HELIO_SDK_TOKEN` and the SDK automatically attaches `Authorization: Bearer <token>` to every sideband call. The sideband also rejects any request carrying a non-null `Origin` header, so a malicious local HTML file cannot talk to it through a browser. Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of regenerating one.
+Pass the same value to the SDK process via `HELIO_SDK_TOKEN` and the SDK automatically attaches `Authorization: Bearer <token>` to every sideband call. The sideband also rejects any request carrying a non-null `Origin` header, so a malicious local HTML file cannot talk to it through a browser. Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of regenerating one, and does not echo it to stderr.
 
 ### Self-Repair Feedback
 
