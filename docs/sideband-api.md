@@ -44,9 +44,9 @@ Clients that need a page number compute it as `Math.floor(offset / limit) + 1`.
 
 Endpoints that return a computed view of in-memory state are not "resources" in the REST sense, and wrapping them in `{ data }` adds ceremony without signal. They return their computed view directly, with shapes specific to each endpoint.
 
-Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/limits`.
+Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`.
 
-Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics` and `GET /api/limits` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
+Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/limits`, and `GET /api/adapters` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
 
 `GET /api/health` in particular is preserved in this form so that container orchestrators (Kubernetes, Docker Compose, Nomad) can point healthcheck probes at it without a custom JSON parser: probes only evaluate the HTTP status code, and the flat `status`, `version`, and `uptime` keys stay easy to read for the humans and scripts that hit the same URL.
 
@@ -266,6 +266,31 @@ Current state of every active rate-limit and spend-limit bucket. Returns empty a
 - `rate_limits[].current` — calls consumed in the current window.
 - `rate_limits[].reset_at_ms` — epoch ms at which the oldest recorded call ages out of the sliding window and `current` drops. The bucket does not reset wholesale.
 - `spend_limits[].current_spend` — total spend in the current window in `currency`.
+
+**Raw-shape endpoint:** this is an RPC-style view.
+
+#### GET /api/adapters
+
+Per-origin liveness of the adapters driving the [SDK sideband's governance API](./adapter-api.md): when each origin was first and last seen, and the `adapter_version` it most recently reported on `POST /evaluate`. State is in-memory (reset on restart) and bounded by the sideband's 32-origin budget. Returns an empty list when the SDK sideband is disabled, so dashboards need no capability probe.
+
+**Response (200):**
+
+```json
+{
+  "adapters": [
+    {
+      "origin": "openclaw",
+      "adapter_version": "0.1.0",
+      "first_seen": "2026-07-04T12:00:00.000Z",
+      "last_seen": "2026-07-04T12:34:56.789Z"
+    }
+  ]
+}
+```
+
+- An entry is **created by the origin's first `POST /evaluate`** (the path that enforces the origin budget). `/install-scan` and `/audit` only refresh existing entries, so an origin whose sole traffic is install scans does not appear here.
+- `adapter_version` — the last value the origin supplied on `/evaluate`; `null` until one is supplied.
+- `last_seen` — the most recent `/evaluate`, `/install-scan`, or successfully finalized `/audit` from the origin. Entries are sorted most recently seen first.
 
 **Raw-shape endpoint:** this is an RPC-style view.
 

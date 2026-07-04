@@ -21,6 +21,7 @@ import { clampInt } from '../util/clamp.js'
 import { formatZodErrors } from '../util/format-zod-errors.js'
 import type { DashboardEventBus } from './event-bus.js'
 import { DashboardSessionStore } from './session.js'
+import type { AdapterLivenessEntry } from '../sideband/governance-service.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,12 @@ export interface DashboardAppDeps {
   readonly spendLimiter: SpendLimiter
   readonly evidenceStore: EvidenceStore
   readonly eventBus: DashboardEventBus
+  /**
+   * Adapter liveness source for `GET /api/adapters` (issue #126) — a narrow
+   * view of the SDK sideband's GovernanceService. Absent when the SDK
+   * sideband is disabled; the endpoint then serves an empty list.
+   */
+  readonly adapterLiveness?: { listAdapters(): AdapterLivenessEntry[] }
 }
 
 /** Options for the dashboard API. */
@@ -233,6 +240,7 @@ export function createDashboardAppWithLifecycle(
     spendLimiter,
     evidenceStore,
     eventBus,
+    adapterLiveness,
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
@@ -541,6 +549,12 @@ export function createDashboardAppWithLifecycle(
       rate_limits: rateLimiter.listKeyStates(),
       spend_limits: spendLimiter.listKeyStates(),
     })
+  })
+
+  // Adapter liveness (issue #126) — same raw envelope as /api/limits. Empty
+  // (not 404/503) without the SDK sideband, so dashboards need no probe.
+  app.get('/api/adapters', (c) => {
+    return c.json({ adapters: adapterLiveness?.listAdapters() ?? [] })
   })
 
   // -------------------------------------------------------------------------

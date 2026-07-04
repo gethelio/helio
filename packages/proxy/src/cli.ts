@@ -505,6 +505,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         spendLimiter,
         evidenceStore,
         eventBus,
+        // Adapter liveness for GET /api/adapters (issue #126); undefined
+        // unless the SDK sideband is enabled → endpoint serves an empty list.
+        adapterLiveness: governanceService,
       },
       {
         apiSecret: config.dashboard.api_secret,

@@ -46,7 +46,7 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
 // Request
 {
   "origin": "openclaw",                  // optional; default "sideband"; ^[a-z0-9_-]{1,64}$
-  "adapter_version": "0.1.0",            // optional, ≤64 chars; accepted but not yet recorded
+  "adapter_version": "0.1.0",            // optional, ≤64 chars; per-origin liveness (dashboard GET /api/adapters)
   "agent_id": "main",                    // optional
   "session_id": "oc-session-1",          // optional; required for evidence/dependency rules
   "tool": {
