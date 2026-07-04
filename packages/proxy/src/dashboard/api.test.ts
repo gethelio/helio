@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
+import type { DashboardAppDeps } from './api.js'
 import { DashboardEventBus } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
 import type { AuditRecord } from '../audit/types.js'
@@ -29,7 +30,10 @@ function at<T>(arr: readonly T[], index: number): T {
 // Setup helper
 // ---------------------------------------------------------------------------
 
-function setup(options?: { apiSecret?: string }) {
+function setup(options?: {
+  apiSecret?: string
+  adapterLiveness?: DashboardAppDeps['adapterLiveness']
+}) {
   const auditStore = new AuditStore({
     path: ':memory:',
     retention: '90d',
@@ -58,6 +62,7 @@ function setup(options?: { apiSecret?: string }) {
       spendLimiter,
       evidenceStore,
       eventBus,
+      adapterLiveness: options?.adapterLiveness,
     },
     { apiSecret: options?.apiSecret },
   )
@@ -746,6 +751,46 @@ describe('GET /api/limits', () => {
     }
     expect(body.spend_limits).toHaveLength(1)
     expect(at(body.spend_limits, 0).current_spend).toBe(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Adapters (issue #126)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/adapters', () => {
+  it('returns an empty adapters list when the SDK sideband is not wired', async () => {
+    const { get } = setup()
+    const res = await get('/api/adapters')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ adapters: [] })
+  })
+
+  it('returns liveness entries from the registry in a raw envelope', async () => {
+    const entries = [
+      {
+        origin: 'openclaw',
+        adapter_version: '0.1.0',
+        first_seen: '2026-07-04T12:00:00.000Z',
+        last_seen: '2026-07-04T12:34:56.789Z',
+      },
+      {
+        origin: 'sideband',
+        adapter_version: null,
+        first_seen: '2026-07-04T11:00:00.000Z',
+        last_seen: '2026-07-04T11:00:00.000Z',
+      },
+    ]
+    const { get } = setup({ adapterLiveness: { listAdapters: () => entries } })
+    const res = await get('/api/adapters')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ adapters: entries })
+  })
+
+  it('requires auth like the other read endpoints when a secret is set', async () => {
+    const { get } = setup({ apiSecret: 'test-secret' })
+    const res = await get('/api/adapters')
+    expect(res.status).toBe(401)
   })
 })
 

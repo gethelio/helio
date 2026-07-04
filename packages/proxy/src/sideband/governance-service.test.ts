@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { GovernanceService } from './governance-service.js'
 import type { EvaluateInput, AuditInput } from './governance-service.js'
 import { GovernanceConfigError } from './errors.js'
@@ -1148,5 +1148,269 @@ describe('audit evidence', () => {
     const h = makeService({ withEvidence: true })
     const { outcomes } = evalAudit(h, undefined)
     expect(outcomes).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// adapter liveness registry (issue #126)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService adapter liveness registry', () => {
+  const BASE = 1_000_000
+  const iso = (ms: number) => new Date(ms).toISOString()
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const installInput = (origin: string) => ({
+    origin,
+    agent_id: null,
+    session_id: null,
+    package: { name: 'left-pad' },
+    metadata: null,
+  })
+
+  it('evaluate records first_seen/last_seen with a null version when none is supplied', () => {
+    const { service } = makeService()
+    service.evaluate(evalInput())
+    expect(service.listAdapters()).toEqual([
+      {
+        origin: 'openclaw',
+        adapter_version: null,
+        first_seen: iso(BASE),
+        last_seen: iso(BASE),
+      },
+    ])
+  })
+
+  it('records the supplied version, updates last-write-wins, and keeps first_seen', () => {
+    const { service, advance } = makeService()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    service.evaluate(evalInput({ adapter_version: '0.1.0' }))
+    advance(5_000)
+    service.evaluate(evalInput({ adapter_version: '0.2.0' }))
+    expect(service.listAdapters()).toEqual([
+      {
+        origin: 'openclaw',
+        adapter_version: '0.2.0',
+        first_seen: iso(BASE),
+        last_seen: iso(BASE + 5_000),
+      },
+    ])
+  })
+
+  it('retains the last supplied version when a later evaluate omits it', () => {
+    const { service, advance } = makeService()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    service.evaluate(evalInput({ adapter_version: '0.1.0' }))
+    advance(1_000)
+    service.evaluate(evalInput())
+    expect(service.listAdapters()[0]).toMatchObject({
+      adapter_version: '0.1.0',
+      last_seen: iso(BASE + 1_000),
+    })
+  })
+
+  it('ignores an empty or over-64-char adapter_version (embedder path)', () => {
+    const { service } = makeService()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    service.evaluate(evalInput({ adapter_version: '' }))
+    expect(service.listAdapters()[0]?.adapter_version).toBeNull()
+    service.evaluate(evalInput({ adapter_version: 'v'.repeat(65) }))
+    expect(service.listAdapters()[0]?.adapter_version).toBeNull()
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('escapes a caller-controlled origin in version log lines (embedder path)', () => {
+    const { service } = makeService()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const evil = 'x\n[helio] forged line'
+    service.evaluate(evalInput({ origin: evil, adapter_version: '1.0' }))
+    const line = String(spy.mock.calls[0]?.[0])
+    expect(line).not.toMatch(/\n/)
+    expect(line).toContain(JSON.stringify(evil))
+  })
+
+  it('does not refresh last_seen when the audit write throws (audit not finalized)', () => {
+    let time = BASE
+    const throwingWriter = {
+      push: () => {
+        throw new Error('disk full')
+      },
+      pushImmediate: () => {
+        throw new Error('disk full')
+      },
+    } as unknown as AuditWriter
+    const service = new GovernanceService({
+      policy: compile({ default: 'allow', rules: [] }),
+      auditWriter: throwingWriter,
+      ttlMs: 600_000,
+      now: () => time,
+      sweepIntervalMs: 0,
+    })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    time += 5_000
+    expect(() => service.audit(auditInput(id), 'h')).toThrow()
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE))
+  })
+
+  it('logs first sighting and version changes with the version JSON-escaped', () => {
+    const { service } = makeService()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    service.evaluate(evalInput({ adapter_version: '0.1.0' }))
+    service.evaluate(evalInput({ adapter_version: '0.2\n"evil' }))
+
+    const lines = spy.mock.calls.map((c) => String(c[0]))
+    expect(lines[0]).toBe('[helio] adapter origin "openclaw" reports version "0.1.0"')
+    expect(lines[1]).toBe(
+      `[helio] adapter origin "openclaw" version changed "0.1.0" -> ${JSON.stringify('0.2\n"evil')}`,
+    )
+    // The raw newline must not survive into the log line.
+    expect(lines[1]).not.toMatch(/\n/)
+  })
+
+  it('caps version log lines at 5 per origin per boot, then one suppression summary', () => {
+    const { service } = makeService()
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    for (let i = 1; i <= 7; i++) {
+      service.evaluate(evalInput({ adapter_version: `0.${String(i)}.0` }))
+    }
+    const lines = spy.mock.calls.map((c) => String(c[0]))
+    const versionLines = lines.filter((l) => l.includes('version'))
+    const summaryLines = lines.filter((l) => l.includes('suppressing'))
+    expect(versionLines.filter((l) => !l.includes('suppressing'))).toHaveLength(5)
+    expect(summaryLines).toHaveLength(1)
+    // The 7th change added nothing beyond the summary already emitted at the 6th.
+    expect(lines).toHaveLength(6)
+  })
+
+  it('install-scan refreshes last_seen for a known origin but never creates one', () => {
+    const { service, advance } = makeService()
+    service.evaluate(evalInput())
+    advance(2_000)
+    service.installScan(installInput('openclaw'))
+    expect(service.listAdapters()[0]).toMatchObject({ last_seen: iso(BASE + 2_000) })
+
+    service.installScan(installInput('unseen-origin'))
+    expect(service.listAdapters().map((a) => a.origin)).toEqual(['openclaw'])
+  })
+
+  it('audit refreshes last_seen on the successful first finalize', () => {
+    const { service, advance } = makeService()
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    advance(3_000)
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
+    expect(service.listAdapters()[0]).toMatchObject({ last_seen: iso(BASE + 3_000) })
+  })
+
+  it('audit does not refresh on approval_unresolved, invalid_actual_amount, or no_spend_rule', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'gated' }, action: 'require_approval' }],
+    })
+    const { service, advance } = makeService({ policy, withApprovals: true })
+
+    // approval_unresolved 409
+    const gated = service.evaluate(evalInput({ tool: { name: 'gated' } }))
+    const gatedId = gated.body['evaluation_id'] as string
+    advance(1_000)
+    expect(service.audit(auditInput(gatedId), 'h').status).toBe(409)
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE))
+
+    // invalid_actual_amount / no_spend_rule 400s on a plain allow evaluation
+    const plain = service.evaluate(evalInput())
+    const plainId = plain.body['evaluation_id'] as string
+    advance(1_000)
+    expect(service.audit(auditInput(plainId, { actual_amount: -1 }), 'h').status).toBe(400)
+    expect(service.audit(auditInput(plainId, { actual_amount: 1 }), 'h').status).toBe(400)
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE + 1_000))
+  })
+
+  it('audit does not refresh on evaluation_expired or on a tombstone replay', () => {
+    const { service, advance } = makeService({ ttlMs: 10_000 })
+
+    // Expired: never audited in time.
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    advance(10_000)
+    expect(service.audit(auditInput(id), 'h').status).toBe(404)
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE))
+
+    // Replay: refresh happens at first finalize only.
+    const ev2 = service.evaluate(evalInput())
+    const id2 = ev2.body['evaluation_id'] as string
+    advance(1_000)
+    expect(service.audit(auditInput(id2), 'h').status).toBe(201)
+    advance(1_000)
+    expect(service.audit(auditInput(id2), 'h').status).toBe(200)
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE + 11_000))
+  })
+
+  it('keeps last_seen monotonic when the clock moves backward', () => {
+    const { service, advance } = makeService()
+    service.evaluate(evalInput())
+    advance(-500_000)
+    service.evaluate(evalInput())
+    expect(service.listAdapters()[0]?.last_seen).toBe(iso(BASE))
+  })
+
+  it('a 33rd origin is refused by evaluate and leaves no registry entry', () => {
+    const { service } = makeService()
+    for (let i = 0; i < 32; i++) {
+      expect(service.evaluate(evalInput({ origin: `origin-${String(i)}` })).status).toBe(200)
+    }
+    const res = service.evaluate(evalInput({ origin: 'origin-32' }))
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'origin_limit_exceeded' })
+    expect(service.listAdapters()).toHaveLength(32)
+    expect(service.listAdapters().some((a) => a.origin === 'origin-32')).toBe(false)
+  })
+
+  it('listAdapters sorts by last_seen descending', () => {
+    const { service, advance } = makeService()
+    service.evaluate(evalInput({ origin: 'older' }))
+    advance(1_000)
+    service.evaluate(evalInput({ origin: 'newer' }))
+    expect(service.listAdapters().map((a) => a.origin)).toEqual(['newer', 'older'])
+  })
+
+  it('close() clears the registry', () => {
+    const { service } = makeService()
+    service.evaluate(evalInput())
+    service.close()
+    expect(service.listAdapters()).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// memory budget caps — per-origin tool baselines
+// (The 32-origin cap is pinned by the registry describe's 33rd-origin test.)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService tool baseline cap', () => {
+  it('refuses the 1,025th first-seen definition but keeps updating baselined tools', () => {
+    const { service } = makeService()
+    for (let i = 0; i < 1_024; i++) {
+      const res = service.evaluate(
+        evalInput({ tool: { name: `tool-${String(i)}`, description: 'd' } }),
+      )
+      expect(res.status).toBe(200)
+    }
+
+    // First-seen definition past the cap is refused fail-closed…
+    const over = service.evaluate(evalInput({ tool: { name: 'tool-1024', description: 'd' } }))
+    expect(over.status).toBe(400)
+    expect(over.body).toEqual({ error: 'tool_baseline_limit' })
+
+    // …while a definition UPDATE for an already-baselined tool still proceeds
+    // at cap: the evaluation runs (200, no error) and the changed definition
+    // is ingested — visible as a drift block under the default drift mode.
+    const update = service.evaluate(evalInput({ tool: { name: 'tool-0', description: 'changed' } }))
+    expect(update.status).toBe(200)
+    expect(update.body['error']).toBeUndefined()
+    expect(update.body['tool_drift']).toBeDefined()
   })
 })

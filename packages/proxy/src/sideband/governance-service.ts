@@ -54,6 +54,10 @@ const MAX_SENDER_KEYS = 50_000
 // without discarding the audit row for a call that already ran.
 const MAX_EVIDENCE_ENTRIES = 16
 const MAX_EVIDENCE_BYTES = 64 * 1_024
+// Version-sighting/change log lines per origin per boot (issue #126).
+// adapter_version is caller-controlled, so unbounded change-logging would be
+// a log-spam vector; after the cap one suppression summary is emitted.
+const MAX_VERSION_LOG_LINES_PER_ORIGIN = 5
 
 const SWEEP_INTERVAL_MS = 30_000
 
@@ -145,6 +149,18 @@ export interface ServiceResult {
   readonly body: Record<string, unknown>
 }
 
+/**
+ * Per-origin adapter liveness, wire-ready for the dashboard's
+ * `GET /api/adapters` (issue #126). ISO-8601 timestamps; `adapter_version`
+ * stays null until an /evaluate supplies one.
+ */
+export interface AdapterLivenessEntry {
+  readonly origin: string
+  readonly adapter_version: string | null
+  readonly first_seen: string
+  readonly last_seen: string
+}
+
 // ---------------------------------------------------------------------------
 // Internal registry types
 // ---------------------------------------------------------------------------
@@ -177,6 +193,15 @@ interface PendingEvaluation {
   readonly evaluationExpiresAtMs: number
   readonly ticketTimeoutAtMs: number | undefined
   readonly bytes: number
+}
+
+// adapterVersion/lastSeenMs/versionLogCount are mutated in place on every
+// sighting (recordAdapterSeen/touchAdapter); firstSeenMs is set once.
+interface AdapterLivenessState {
+  adapterVersion: string | null
+  readonly firstSeenMs: number
+  lastSeenMs: number
+  versionLogCount: number
 }
 
 type FinalizedBy = 'evaluate' | 'audit' | 'expired'
@@ -234,6 +259,13 @@ export class GovernanceService {
 
   /** Distinct sender_id limit keys with live state (reservation registry, issue #13). */
   private readonly senderKeys = new Set<string>()
+  /**
+   * Per-origin adapter liveness (issue #126). New origins are inserted ONLY on
+   * the /evaluate path, which sits behind the MAX_ORIGINS cache gate — every
+   * other path updates existing entries and skips unknown origins, so the
+   * registry shares the origin cap instead of adding a second growth vector.
+   */
+  private readonly adapters = new Map<string, AdapterLivenessState>()
   private readonly pending = new Map<string, PendingEvaluation>()
   private readonly tombstones = new Map<string, Tombstone>()
   private readonly caches = new Map<string, ToolAnnotationCache>()
@@ -308,6 +340,9 @@ export class GovernanceService {
     }
 
     const cache = this.cacheFor(req.origin)
+    // Liveness must not depend on the decision outcome, so record as soon as
+    // the origin has passed its budget gate (issue #126).
+    this.recordAdapterSeen(req.origin, req.adapter_version)
     const toolName = req.tool.name
 
     // Drift guard: merge the supplied definition into the per-origin
@@ -624,6 +659,12 @@ export class GovernanceService {
       expiresAtMs: this.now() + this.ttlMs,
     })
 
+    // Only a SUCCESSFULLY finalized audit counts as adapter liveness: the
+    // 409/400 exits above must not bump it, and neither may a write path that
+    // throws (500, evaluation still pending) — hence after the tombstone
+    // (issue #126).
+    this.touchAdapter(entry.origin)
+
     const body: Record<string, unknown> = { ok: true, audit_record_id: auditId }
     if (evidenceOutcomes) body['evidence'] = evidenceOutcomes
     return { status: 201, body }
@@ -699,6 +740,9 @@ export class GovernanceService {
     if (reserved) {
       return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
     }
+    // Update-only: /install-scan has no origin budget gate, so it must never
+    // insert a registry entry (issue #126, see the adapters field note).
+    this.touchAdapter(req.origin)
     const evaluationId = randomUUID()
     const toolName = `install:${req.package.source ?? 'pkg'}:${req.package.name}`
 
@@ -773,6 +817,85 @@ export class GovernanceService {
       decision: install.defaultAction,
       reason: `No matching install rule; default ${install.defaultAction}`,
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Adapter liveness registry (issue #126)
+  // -------------------------------------------------------------------------
+
+  /** Wire-ready liveness entries, most recently seen first. */
+  listAdapters(): AdapterLivenessEntry[] {
+    return [...this.adapters.entries()]
+      .sort(([oa, a], [ob, b]) => b.lastSeenMs - a.lastSeenMs || oa.localeCompare(ob))
+      .map(([origin, state]) => ({
+        origin,
+        adapter_version: state.adapterVersion,
+        first_seen: new Date(state.firstSeenMs).toISOString(),
+        last_seen: new Date(state.lastSeenMs).toISOString(),
+      }))
+  }
+
+  /** Insert-or-refresh on the /evaluate path (the only insert site). */
+  private recordAdapterSeen(origin: string, version: string | undefined): void {
+    // Re-enforce the route schema's version bounds here so direct embedders
+    // are covered too (same rationale as reservedMetadataKey): an empty or
+    // over-64-char version is treated as absent, never stored or logged.
+    const normalized = version && version.length <= 64 ? version : undefined
+    const now = this.now()
+    const existing = this.adapters.get(origin)
+    if (!existing) {
+      const state: AdapterLivenessState = {
+        adapterVersion: normalized ?? null,
+        firstSeenMs: now,
+        lastSeenMs: now,
+        versionLogCount: 0,
+      }
+      this.adapters.set(origin, state)
+      if (normalized !== undefined) this.logVersionEvent(origin, state, null, normalized)
+      return
+    }
+    // The injectable clock is not guaranteed monotonic; last_seen must be.
+    existing.lastSeenMs = Math.max(existing.lastSeenMs, now)
+    if (normalized !== undefined && normalized !== existing.adapterVersion) {
+      this.logVersionEvent(origin, existing, existing.adapterVersion, normalized)
+      existing.adapterVersion = normalized
+    }
+  }
+
+  /** Refresh-only for paths without an origin budget gate (install-scan, audit). */
+  private touchAdapter(origin: string): void {
+    const existing = this.adapters.get(origin)
+    if (!existing) return
+    existing.lastSeenMs = Math.max(existing.lastSeenMs, this.now())
+  }
+
+  /**
+   * Log a version sighting/change, capped per origin per boot. Both origin and
+   * version are caller-controlled free text, so both are JSON-escaped — a
+   * newline or control character must not be able to forge extra log lines
+   * (the route's origin regex does not protect direct embedders).
+   */
+  private logVersionEvent(
+    origin: string,
+    state: AdapterLivenessState,
+    from: string | null,
+    to: string,
+  ): void {
+    if (state.versionLogCount > MAX_VERSION_LOG_LINES_PER_ORIGIN) return
+    state.versionLogCount += 1
+    if (state.versionLogCount > MAX_VERSION_LOG_LINES_PER_ORIGIN) {
+      // eslint-disable-next-line no-console -- Intentional operational warning
+      console.error(
+        `[helio] adapter origin ${JSON.stringify(origin)}: suppressing further version logs after ${String(MAX_VERSION_LOG_LINES_PER_ORIGIN)}`,
+      )
+      return
+    }
+    // eslint-disable-next-line no-console -- Intentional operational log
+    console.error(
+      from === null
+        ? `[helio] adapter origin ${JSON.stringify(origin)} reports version ${JSON.stringify(to)}`
+        : `[helio] adapter origin ${JSON.stringify(origin)} version changed ${JSON.stringify(from)} -> ${JSON.stringify(to)}`,
+    )
   }
 
   // -------------------------------------------------------------------------
@@ -894,6 +1017,7 @@ export class GovernanceService {
     this.tombstones.clear()
     this.caches.clear()
     this.senderKeys.clear()
+    this.adapters.clear()
     this.pendingBytes = 0
   }
 

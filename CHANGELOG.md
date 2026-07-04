@@ -19,6 +19,16 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Adapter liveness on the dashboard: `GET /api/adapters` (#126).** The SDK
+  sideband now records, per adapter origin, when it was first and last seen
+  and the `adapter_version` it most recently reported on `POST /evaluate` —
+  the per-origin liveness the field was designed for. The dashboard sideband
+  serves it at `GET /api/adapters` (empty list when the SDK sideband is
+  disabled). State is in-memory, bounded by the existing 32-origin budget,
+  and version changes are logged to stderr escaped and capped per origin.
+
 ## [0.8.0] - 2026-07-03
 
 ### Added

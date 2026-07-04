@@ -44,6 +44,7 @@ export type {
   AuditInput,
   InstallScanInput,
   ResolveApprovalInput,
+  AdapterLivenessEntry,
 } from './sideband/governance-service.js'
 export { AuditStore, AuditWriter } from './audit/index.js'
 export type {
