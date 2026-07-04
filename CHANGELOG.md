@@ -19,6 +19,14 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Security
+
+- **Operator-provided sideband tokens are no longer echoed to stderr (#128).**
+  When `HELIO_SDK_TOKEN` or `HELIO_ADAPTER_TOKEN` is pre-set in the
+  environment, `helio start` now acknowledges the source without printing the
+  value, so long-lived secrets stay out of process logs. Generated per-boot
+  tokens are still printed; stderr is their only handoff.
+
 ### Added
 
 - **Adapter liveness on the dashboard: `GET /api/adapters` (#126).** The SDK

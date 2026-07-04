@@ -1090,13 +1090,16 @@ audit:
       )
       try {
         const stderr = await startAndCaptureStderr(['-c', configPath], {
-          readyMarker: /SDK token \(.*pass as HELIO_SDK_TOKEN/,
+          // The adapter line prints after the SDK line, so anchoring readiness
+          // on it guarantees both banners are captured (no flush-window race).
+          readyMarker: /Adapter token \(generated per-boot HELIO_ADAPTER_TOKEN/,
           timeoutMs: 8_000,
         })
         expect(stderr).toContain(`SDK sideband listening on http://127.0.0.1:${String(sdkPort)}`)
         expect(stderr).toContain('generated per-boot HELIO_SDK_TOKEN')
-        // 32 bytes hex = 64 chars
-        expect(stderr).toMatch(/[a-f0-9]{64}/)
+        expect(stderr).toContain('Adapter token (generated per-boot HELIO_ADAPTER_TOKEN')
+        // 32 bytes hex = 64 chars; one value per token, so both handoffs print.
+        expect(stderr.match(/[a-f0-9]{64}/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -1132,15 +1135,29 @@ audit:
   path: "${auditPath}"
 `,
       )
-      const presetToken = 'preset-token-value-that-should-appear-verbatim-in-stderr'
+      const presetToken = 'preset-token-value-that-must-not-appear-in-stderr'
+      const presetAdapterToken = 'preset-adapter-token-that-must-not-appear-in-stderr'
       try {
         const stderr = await startAndCaptureStderr(['-c', configPath], {
-          readyMarker: /SDK token \(.*pass as HELIO_SDK_TOKEN/,
+          // Anchor on the adapter ack (printed second) so the SDK ack is
+          // already captured — no reliance on the 50ms flush window.
+          readyMarker: /Adapter token: reusing HELIO_ADAPTER_TOKEN from environment/,
           timeoutMs: 8_000,
-          env: { ...process.env, HELIO_SDK_TOKEN: presetToken },
+          env: {
+            ...process.env,
+            HELIO_SDK_TOKEN: presetToken,
+            HELIO_ADAPTER_TOKEN: presetAdapterToken,
+          },
         })
-        expect(stderr).toContain(presetToken)
-        expect(stderr).toContain('reusing HELIO_SDK_TOKEN from environment')
+        // Operator-provided secrets must not be echoed into process logs.
+        expect(stderr).not.toContain(presetToken)
+        expect(stderr).not.toContain(presetAdapterToken)
+        expect(stderr).toContain(
+          'SDK token: reusing HELIO_SDK_TOKEN from environment (value not shown)',
+        )
+        expect(stderr).toContain(
+          'Adapter token: reusing HELIO_ADAPTER_TOKEN from environment (value not shown)',
+        )
         expect(stderr).not.toContain('generated per-boot HELIO_SDK_TOKEN')
       } finally {
         rmSync(dir, { recursive: true, force: true })

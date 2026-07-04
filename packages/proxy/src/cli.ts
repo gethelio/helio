@@ -448,6 +448,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   let sidebandToken: string | undefined
   let sidebandTokenSource: 'generated' | 'env' | undefined
   let adapterToken: string | undefined
+  let adapterTokenSource: 'generated' | 'env' | undefined
   let governanceService: GovernanceService | undefined
   if (config.sdk.enabled) {
     sidebandToken = process.env['HELIO_SDK_TOKEN']
@@ -467,6 +468,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     if (!adapterToken || adapterToken.length === 0) {
       adapterToken = randomBytes(32).toString('hex')
       process.env['HELIO_ADAPTER_TOKEN'] = adapterToken
+      adapterTokenSource = 'generated'
+    } else {
+      adapterTokenSource = 'env'
     }
 
     // The service reuses the SAME limiter/queue/router/writer instances as the
@@ -539,18 +543,21 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   console.error(`Audit: ${config.audit.path} (retention: ${config.audit.retention})`)
   if (sidebandHandle) {
     console.error(`SDK sideband listening on http://${config.sdk.host}:${String(config.sdk.port)}`)
+    // A generated token must be printed — stderr is its only handoff. An
+    // operator-provided one must NOT be: echoing it would copy a long-lived
+    // secret into process logs the operator's secret management never sees.
     if (sidebandToken) {
-      const source =
-        sidebandTokenSource === 'env'
-          ? 'reusing HELIO_SDK_TOKEN from environment'
-          : 'generated per-boot HELIO_SDK_TOKEN'
       console.error(
-        `SDK token (${source}; pass as HELIO_SDK_TOKEN env var to your SDK clients):\n  ${sidebandToken}`,
+        sidebandTokenSource === 'env'
+          ? 'SDK token: reusing HELIO_SDK_TOKEN from environment (value not shown)'
+          : `SDK token (generated per-boot HELIO_SDK_TOKEN; pass as HELIO_SDK_TOKEN env var to your SDK clients):\n  ${sidebandToken}`,
       )
     }
     if (adapterToken) {
       console.error(
-        `Adapter token (governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):\n  ${adapterToken}`,
+        adapterTokenSource === 'env'
+          ? 'Adapter token: reusing HELIO_ADAPTER_TOKEN from environment (value not shown)'
+          : `Adapter token (generated per-boot HELIO_ADAPTER_TOKEN; governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):\n  ${adapterToken}`,
       )
     }
   }

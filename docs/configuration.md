@@ -310,19 +310,21 @@ Configuration for the SDK sideband API, used for evidence grounding (Python SDK)
 
 #### Sideband authentication
 
-When `sdk.enabled` is `true`, Helio generates two fresh 32-byte hex Bearer tokens on every `helio start` (unless set in the environment) and prints them to stderr:
+When `sdk.enabled` is `true`, Helio generates two fresh 32-byte hex Bearer tokens on every `helio start` (unless set in the environment). Generated tokens are printed to stderr — that is their only handoff:
 
 ```
 SDK sideband listening on http://127.0.0.1:3200
-SDK token (pass as HELIO_SDK_TOKEN env var to your SDK clients):
+SDK token (generated per-boot HELIO_SDK_TOKEN; pass as HELIO_SDK_TOKEN env var to your SDK clients):
   <hex>
-Adapter token (governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):
+Adapter token (generated per-boot HELIO_ADAPTER_TOKEN; governance routes; pass as HELIO_ADAPTER_TOKEN to your adapter):
   <hex>
 ```
 
+An environment-provided token is acknowledged without its value (`SDK token: reusing HELIO_SDK_TOKEN from environment (value not shown)`), so pre-set secrets never land in process logs.
+
 The tokens are scoped: `HELIO_SDK_TOKEN` authorizes the evidence/context routes, and `HELIO_ADAPTER_TOKEN` authorizes the governance routes (`/evaluate`, `/audit`, `/install-scan`, `/approval/:id/resolve`). An SDK client cannot drive policy decisions, and an adapter cannot write evidence. Both are written into `process.env` so child processes inherit them. Every sideband request except `GET /healthz` must carry the matching `Authorization: Bearer <token>`; mismatches return `401`. The sideband rejects any request carrying an `Origin` header (including `Origin: null`), blocks `OPTIONS` preflights with `403`, and rejects request bodies over 1 MiB with `413`.
 
-Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of generating one. Rotation, revocation, and key management are not part of the v0.1.0 trust model; a restart with a new token is the rotation primitive.
+Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of generating one, and does not echo it to stderr. Rotation, revocation, and key management are not part of the v0.1.0 trust model; a restart with a new token is the rotation primitive.
 
 ## Duration Strings
 
