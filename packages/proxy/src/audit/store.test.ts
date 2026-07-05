@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
-import { AuditStore } from './store.js'
+import { AuditStore, EXPORT_MAX_RECORDS } from './store.js'
 import type { AuditRecord } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -565,6 +565,100 @@ CREATE TABLE IF NOT EXISTS audit_records (
       const result = store.list({}, { limit: 3 })
       expect(result.records).toHaveLength(3)
       expect(result.total).toBe(10)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // List for export
+  // -------------------------------------------------------------------------
+
+  describe('listForExport', () => {
+    it('returns more than 1000 records in one call', () => {
+      const records = Array.from({ length: 1500 }, () => makeRecord())
+      store.insertBatch(records)
+      const result = store.listForExport({}, 1500)
+      expect(result.records).toHaveLength(1500)
+      expect(result.total).toBe(1500)
+    })
+
+    it('defaults to the export maximum', () => {
+      store.insert(makeRecord())
+      const result = store.listForExport()
+      expect(result.limit).toBe(EXPORT_MAX_RECORDS)
+    })
+
+    it('clamps limit to the export maximum', () => {
+      store.insert(makeRecord())
+      const result = store.listForExport({}, 20_000)
+      expect(result.limit).toBe(EXPORT_MAX_RECORDS)
+    })
+
+    it('clamps limit to a minimum of 1', () => {
+      store.insert(makeRecord())
+      store.insert(makeRecord())
+      const result = store.listForExport({}, 0)
+      expect(result.records).toHaveLength(1)
+      expect(result.limit).toBe(1)
+    })
+
+    it('returns records oldest-first', () => {
+      store.insert(makeRecord(), '2024-12-01T00:00:00.000Z')
+      store.insert(makeRecord(), '2024-01-01T00:00:00.000Z')
+      const result = store.listForExport()
+      expect(result.records[0]?.created_at).toBe('2024-01-01T00:00:00.000Z')
+      expect(result.records[1]?.created_at).toBe('2024-12-01T00:00:00.000Z')
+    })
+
+    // SQLite happens to return equal-created_at rows in rowid order on the
+    // query plans in use today; the explicit `rowid` tiebreaker in query()
+    // turns that planner accident into a contract. These tests pin the
+    // contract — insertion order within ties, in both sort directions, and
+    // under a filtered plan that goes through a secondary index — so a future
+    // query-plan or schema change cannot silently reorder ties or move the
+    // cut point of a capped export.
+    it('breaks created_at ties deterministically in insertion order', () => {
+      const ts = '2024-06-01T00:00:00.000Z'
+      store.insert(makeRecord({ tool_name: 'before' }), '2024-01-01T00:00:00.000Z')
+      for (const name of ['tie_a', 'tie_b', 'tie_c']) {
+        store.insert(makeRecord({ tool_name: name }), ts)
+      }
+      store.insert(makeRecord({ tool_name: 'after' }), '2024-12-01T00:00:00.000Z')
+
+      const expected = ['before', 'tie_a', 'tie_b', 'tie_c', 'after']
+      const first = store.listForExport()
+      const second = store.listForExport()
+      expect(first.records.map((r) => r.tool_name)).toEqual(expected)
+      expect(second.records.map((r) => r.tool_name)).toEqual(expected)
+    })
+
+    it('keeps tie order deterministic under a secondary-index filter plan', () => {
+      const ts = '2024-06-01T00:00:00.000Z'
+      for (const name of ['tie_a', 'tie_b', 'tie_c']) {
+        store.insert(makeRecord({ tool_name: name, policy_decision: 'deny' }), ts)
+        store.insert(makeRecord({ tool_name: `skip_${name}`, policy_decision: 'allow' }), ts)
+      }
+
+      const result = store.listForExport({ policy_decision: 'deny' })
+      expect(result.records.map((r) => r.tool_name)).toEqual(['tie_a', 'tie_b', 'tie_c'])
+    })
+
+    it('reverses tie order for descending list() reads', () => {
+      const ts = '2024-06-01T00:00:00.000Z'
+      for (const name of ['tie_a', 'tie_b', 'tie_c']) {
+        store.insert(makeRecord({ tool_name: name }), ts)
+      }
+
+      const result = store.list({}, { order: 'desc' })
+      expect(result.records.map((r) => r.tool_name)).toEqual(['tie_c', 'tie_b', 'tie_a'])
+    })
+
+    it('applies filters', () => {
+      store.insert(makeRecord({ policy_decision: 'deny', block_reason: 'policy_denied' }))
+      store.insert(makeRecord())
+      const result = store.listForExport({ policy_decision: 'deny' })
+      expect(result.records).toHaveLength(1)
+      expect(result.records[0]?.policy_decision).toBe('deny')
+      expect(result.total).toBe(1)
     })
   })
 

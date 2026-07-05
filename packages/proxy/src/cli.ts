@@ -12,7 +12,7 @@ import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
 import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
-import { AuditStore, AuditWriter } from './audit/index.js'
+import { AuditStore, AuditWriter, EXPORT_MAX_RECORDS } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
 import {
@@ -721,6 +721,17 @@ interface ExportOptions {
 }
 
 async function exportCommand(opts: ExportOptions): Promise<void> {
+  // Strict validation: an audit-export tool must never silently truncate.
+  // parseInt-style leniency would turn "--limit 1e3" into 1 record.
+  const parsedLimit = Number(opts.limit)
+  if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+    console.error(
+      `Error: --limit must be an integer between 1 and ${String(EXPORT_MAX_RECORDS)} (got "${opts.limit}")`,
+    )
+    process.exit(1)
+  }
+  const limit = Math.min(parsedLimit, EXPORT_MAX_RECORDS)
+
   let config
   try {
     config = await loadConfig(opts.config)
@@ -740,7 +751,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
   })
 
   try {
-    const result = store.list(
+    const result = store.listForExport(
       {
         tool_name: opts.tool,
         policy_decision: opts.decision,
@@ -749,7 +760,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
         from: opts.from,
         to: opts.to,
       },
-      { limit: Number(opts.limit), order: 'asc' },
+      limit,
     )
 
     if (opts.format === 'csv') {
@@ -887,7 +898,7 @@ program
   .option('--session <id>', 'Filter by session ID')
   .option('--from <iso>', 'Start time (ISO 8601)')
   .option('--to <iso>', 'End time (ISO 8601)')
-  .option('--limit <n>', 'Max records to export', '1000')
+  .option('--limit <n>', 'Max records to export (up to 10000)', '1000')
   .action((opts: ExportOptions) => exportCommand(opts))
 
 program.parse()

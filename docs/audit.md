@@ -155,17 +155,17 @@ helio export
 
 **Options:**
 
-| Flag                    | Type   | Default      | Description                                                                                                                                   |
-| ----------------------- | ------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database).                                                                                        |
-| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                                                                                                               |
-| `--tool <name>`         | string | —            | Filter by tool name.                                                                                                                          |
-| `--decision <decision>` | string | —            | Filter by policy decision.                                                                                                                    |
-| `--reason <reason>`     | string | —            | Filter by block reason.                                                                                                                       |
-| `--session <id>`        | string | —            | Filter by session ID.                                                                                                                         |
-| `--from <iso>`          | string | —            | Start time (ISO 8601).                                                                                                                        |
-| `--to <iso>`            | string | —            | End time (ISO 8601).                                                                                                                          |
-| `--limit <n>`           | number | `1000`       | Maximum number of records to export. Values above 1,000 are currently capped at 1,000 ([#131](https://github.com/gethelio/helio/issues/131)). |
+| Flag                    | Type   | Default      | Description                                            |
+| ----------------------- | ------ | ------------ | ------------------------------------------------------ |
+| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database). |
+| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                        |
+| `--tool <name>`         | string | —            | Filter by tool name.                                   |
+| `--decision <decision>` | string | —            | Filter by policy decision.                             |
+| `--reason <reason>`     | string | —            | Filter by block reason.                                |
+| `--session <id>`        | string | —            | Filter by session ID.                                  |
+| `--from <iso>`          | string | —            | Start time (ISO 8601).                                 |
+| `--to <iso>`            | string | —            | End time (ISO 8601).                                   |
+| `--limit <n>`           | number | `1000`       | Maximum number of records to export (up to 10,000).    |
 
 **Examples:**
 
@@ -195,27 +195,25 @@ GET /api/audit/export
 
 **Query parameters:**
 
-| Parameter             | Default | Description                                             |
-| --------------------- | ------- | ------------------------------------------------------- |
-| `format`              | `json`  | Output format: `json` or `csv`.                         |
-| `limit`               | `10000` | Maximum records (up to 10,000, but see the note below). |
-| `tool`                | —       | Filter by tool name.                                    |
-| `decision`            | —       | Filter by policy decision.                              |
-| `reason`              | —       | Filter by block reason.                                 |
-| `session`             | —       | Filter by session ID.                                   |
-| `agent`               | —       | Filter by agent ID.                                     |
-| `from`                | —       | Start time (ISO 8601).                                  |
-| `to`                  | —       | End time (ISO 8601).                                    |
-| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).               |
-| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).               |
-| `blocked`             | —       | Filter by blocked vs. allowed (`true`/`false`).         |
-| `dry_run`             | —       | Filter by dry-run mode (`true`/`false`).                |
-| `origin`              | —       | Filter by enforcement origin (substring match).         |
-| `record_kind`         | —       | Filter by record kind (exact match).                    |
-| `channel_id`          | —       | Filter by `metadata.channel_id` (substring match).      |
-| `sender_id`           | —       | Filter by `metadata.sender_id` (substring match).       |
-
-> **Known issue:** exports are currently capped at 1,000 records regardless of `limit` ([#131](https://github.com/gethelio/helio/issues/131)). Until that is fixed, use narrow time-range filters (`from`/`to`) and iterate in slices; each export request is still capped at 1,000 rows.
+| Parameter             | Default | Description                                        |
+| --------------------- | ------- | -------------------------------------------------- |
+| `format`              | `json`  | Output format: `json` or `csv`.                    |
+| `limit`               | `10000` | Maximum records (up to 10,000).                    |
+| `tool`                | —       | Filter by tool name.                               |
+| `decision`            | —       | Filter by policy decision.                         |
+| `reason`              | —       | Filter by block reason.                            |
+| `session`             | —       | Filter by session ID.                              |
+| `agent`               | —       | Filter by agent ID.                                |
+| `from`                | —       | Start time (ISO 8601).                             |
+| `to`                  | —       | End time (ISO 8601).                               |
+| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).          |
+| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).          |
+| `blocked`             | —       | Filter by blocked vs. allowed (`true`/`false`).    |
+| `dry_run`             | —       | Filter by dry-run mode (`true`/`false`).           |
+| `origin`              | —       | Filter by enforcement origin (substring match).    |
+| `record_kind`         | —       | Filter by record kind (exact match).               |
+| `channel_id`          | —       | Filter by `metadata.channel_id` (substring match). |
+| `sender_id`           | —       | Filter by `metadata.sender_id` (substring match).  |
 
 **Examples:**
 

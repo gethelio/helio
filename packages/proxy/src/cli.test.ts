@@ -1321,8 +1321,9 @@ audit:
         cleanupIntervalMs: 0,
       })
 
-      for (const r of records) {
-        store.insert(r)
+      const inserted = store.insertBatch(records)
+      if (inserted !== records.length) {
+        throw new Error(`setupExport seeded ${String(inserted)}/${String(records.length)} records`)
       }
       store.close()
 
@@ -1359,6 +1360,48 @@ audit:
         const records = JSON.parse(stdout) as AuditRecord[]
         expect(records).toHaveLength(3)
         expect(records.map((r) => r.tool_name).sort()).toEqual(['tool_a', 'tool_b', 'tool_c'])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('exports more than 1000 records when --limit allows it (#131)', async () => {
+      const { dir, configPath } = setupExport(Array.from({ length: 1100 }, () => makeRecord()))
+
+      try {
+        const { code, stdout, stderr } = await runCli([
+          'export',
+          '-c',
+          configPath,
+          '-f',
+          'json',
+          '--limit',
+          '2000',
+        ])
+        expect(code).toBe(0)
+        expect(stderr).toContain('Exported 1100 of 1100 records')
+
+        const records = JSON.parse(stdout) as AuditRecord[]
+        expect(records).toHaveLength(1100)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('rejects a malformed --limit instead of silently truncating', async () => {
+      const { dir, configPath } = setupExport([makeRecord()])
+
+      try {
+        for (const bad of ['5,000', 'abc', '50.7', '0']) {
+          const { code, stderr } = await runCli(['export', '-c', configPath, '--limit', bad])
+          expect(code).toBe(1)
+          expect(stderr).toContain('--limit must be an integer between 1 and 10000')
+        }
+
+        // '1e3' is a valid integer (1000) and must not be rejected or truncated.
+        const ok = await runCli(['export', '-c', configPath, '--limit', '1e3'])
+        expect(ok.code).toBe(0)
+        expect(ok.stderr).toContain('Exported 1 of 1 records')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
