@@ -463,6 +463,10 @@ describe('GET /api/audit/export', () => {
     const text = await res.text()
     expect(text).toContain('id,timestamp,session_id')
     expect(text).toContain('csv_tool')
+    const header = text.split('\n')[0] ?? ''
+    expect(header).toContain('record_kind')
+    expect(header).toContain('origin')
+    expect(header).toContain('metadata')
   })
 
   it('respects filters in export', async () => {

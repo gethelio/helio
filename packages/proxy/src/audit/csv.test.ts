@@ -176,18 +176,58 @@ describe('recordsToCsv', () => {
     expect(row).toContain('"tool,with,commas"')
   })
 
-  it('includes all 24 AuditRecord fields in headers', () => {
-    expect(CSV_HEADERS).toHaveLength(24)
-    expect(CSV_HEADERS).toContain('tool_input')
-    expect(CSV_HEADERS).toContain('block_reason')
-    expect(CSV_HEADERS).toContain('evidence_chain')
-    expect(CSV_HEADERS).toContain('upstream_response')
-    expect(CSV_HEADERS).toContain('upstream_http_status')
-    expect(CSV_HEADERS).toContain('total_duration_ms')
-    expect(CSV_HEADERS).toContain('approval_wait_ms')
-    expect(CSV_HEADERS).toContain('proxy_compute_ms')
-    expect(CSV_HEADERS).toContain('environment')
-    expect(CSV_HEADERS).toContain('matched_rule_index')
+  it('includes all 27 AuditRecord fields in headers, in a stable order', () => {
+    // Downstream consumers parse by column index, so new columns must only
+    // ever be appended, never inserted or reordered.
+    expect(CSV_HEADERS).toEqual([
+      'id',
+      'timestamp',
+      'session_id',
+      'agent_id',
+      'tool_name',
+      'tool_input',
+      'policy_decision',
+      'block_reason',
+      'matched_rule',
+      'evidence_chain',
+      'approval_status',
+      'approved_by',
+      'upstream_response',
+      'upstream_error',
+      'upstream_http_status',
+      'upstream_latency_ms',
+      'total_duration_ms',
+      'approval_wait_ms',
+      'proxy_compute_ms',
+      'flagged_destructive',
+      'dry_run',
+      'created_at',
+      'environment',
+      'matched_rule_index',
+      'record_kind',
+      'origin',
+      'metadata',
+    ])
+  })
+
+  it('serializes record_kind and origin as plain strings', () => {
+    const csv = recordsToCsv([makeRecord({ record_kind: 'install_scan', origin: 'openclaw' })])
+    const lines = csv.split('\n')
+    const headers = (lines[0] ?? '').split(',')
+    const cells = (lines[1] ?? '').split(',')
+    expect(cells[headers.indexOf('record_kind')]).toBe('install_scan')
+    expect(cells[headers.indexOf('origin')]).toBe('openclaw')
+  })
+
+  it('serializes metadata as a JSON string that round-trips', () => {
+    const csv = recordsToCsv([makeRecord({ metadata: { channel_id: 'C042' } })])
+    const lines = csv.split('\n')
+    const headers = (lines[0] ?? '').split(',')
+    const cells = (lines[1] ?? '').split(',')
+    const cell = cells[headers.indexOf('metadata')]
+    expect(cell).toBe('"{""channel_id"":""C042""}"')
+    const unescaped = (cell ?? '').slice(1, -1).replace(/""/g, '"')
+    expect(JSON.parse(unescaped)).toEqual({ channel_id: 'C042' })
   })
 
   it('serializes object fields as JSON strings', () => {
