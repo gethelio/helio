@@ -1557,5 +1557,30 @@ audit:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it('CSV includes record_kind and origin but leaves metadata empty', async () => {
+      const { dir, configPath } = setupExport([
+        makeRecord({ origin: 'openclaw', metadata: { channel_id: 'C042' } }),
+      ])
+
+      try {
+        const { code, stdout } = await runCli(['export', '-c', configPath, '-f', 'csv'])
+        expect(code).toBe(0)
+
+        const lines = stdout.trim().split('\n')
+        const headers = (lines[0] ?? '').split(',')
+        const cells = (lines[1] ?? '').split(',')
+        expect(cells[headers.indexOf('record_kind')]).toBe('tool_call')
+        expect(cells[headers.indexOf('origin')]).toBe('openclaw')
+
+        // The CLI serializer leaves object-valued fields empty; metadata is
+        // only populated in dashboard API CSV exports.
+        const metadataIdx = headers.indexOf('metadata')
+        expect(metadataIdx).toBeGreaterThan(-1)
+        expect(cells[metadataIdx]).toBe('')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 })

@@ -48,6 +48,12 @@ Maintainer notes:
   timestamp; the paginated `/api/audit` keeps its 1,000-row page cap.
   `helio export --limit` accepts integers up to 10,000 and rejects
   malformed values with an error instead of exporting a truncated result.
+- **CSV audit exports include every record field, matching JSON (#66).** CSV
+  exports gain `record_kind`, `origin`, and `metadata` columns, appended
+  after the existing columns so positions stay stable for consumers that
+  parse by index. Dashboard API exports serialize `metadata` as a JSON
+  string, like the other object-valued fields; `helio export -f csv` keeps
+  its lightweight serializer and leaves object-valued fields empty.
 
 ## [0.8.0] - 2026-07-03
 

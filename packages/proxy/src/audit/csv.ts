@@ -30,6 +30,9 @@ export const CSV_HEADERS = [
   'created_at',
   'environment',
   'matched_rule_index',
+  'record_kind',
+  'origin',
+  'metadata',
 ] as const
 
 /**

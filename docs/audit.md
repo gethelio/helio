@@ -235,15 +235,13 @@ The export response includes a `Content-Disposition` header for browser download
 
 ## CSV Format
 
-CSV exports include 24 of the record's 27 fields:
+CSV exports include all 27 of the record's fields:
 
-`id`, `timestamp`, `session_id`, `agent_id`, `tool_name`, `tool_input`, `policy_decision`, `block_reason`, `matched_rule`, `evidence_chain`, `approval_status`, `approved_by`, `upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `created_at`, `environment`, `matched_rule_index`
+`id`, `timestamp`, `session_id`, `agent_id`, `tool_name`, `tool_input`, `policy_decision`, `block_reason`, `matched_rule`, `evidence_chain`, `approval_status`, `approved_by`, `upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `created_at`, `environment`, `matched_rule_index`, `record_kind`, `origin`, `metadata`
 
-The `record_kind`, `origin`, and `metadata` fields are not yet included in CSV exports ([#66](https://github.com/gethelio/helio/issues/66)); use the JSON format if you need them.
+Dashboard API CSV exports (`GET /api/audit/export?format=csv`) serialize object fields (`tool_input`, `evidence_chain`, `upstream_response`, `metadata`) as JSON strings. Fields containing commas, newlines, or quotes are properly escaped per RFC 4180. Boolean values are exported as `true` or `false`. Null values are exported as empty strings.
 
-Dashboard API CSV exports (`GET /api/audit/export?format=csv`) serialize object fields (`tool_input`, `evidence_chain`, `upstream_response`) as JSON strings. Fields containing commas, newlines, or quotes are properly escaped per RFC 4180. Boolean values are exported as `true` or `false`. Null values are exported as empty strings.
-
-`helio export -f csv` currently uses a lightweight serializer: it prints the same CSV headers and scalar fields, but leaves object-valued fields empty.
+`helio export -f csv` currently uses a lightweight serializer: it prints the same CSV headers and scalar fields, including `record_kind` and `origin`, but leaves the object-valued fields (`tool_input`, `evidence_chain`, `upstream_response`, `metadata`) empty. Use the dashboard API export if you need `metadata` in CSV.
 
 **Formula injection defense.** Any cell that would otherwise begin with `=`, `+`, `-`, `@`, a tab, or a carriage return is prefixed with a single quote (`'`) before being quoted. This prevents CSV-opened spreadsheet applications from interpreting audit data as a formula (CWE-1236).
 
