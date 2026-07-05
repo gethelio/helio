@@ -500,6 +500,23 @@ describe('GET /api/audit/export', () => {
     expect(names).toContain('adapter_call')
     expect(names).not.toContain('mcp_call')
   })
+
+  it('exports more than 1000 records in one request (#131)', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    for (let i = 0; i < 1200; i++) {
+      insertAuditRecord(auditStore)
+    }
+
+    const full = await get('/api/audit/export?limit=10000')
+    expect(full.status).toBe(200)
+    const fullBody = (await full.json()) as AuditRecord[]
+    expect(fullBody).toHaveLength(1200)
+
+    const partial = await get('/api/audit/export?limit=1100')
+    const partialBody = (await partial.json()) as AuditRecord[]
+    expect(partialBody).toHaveLength(1100)
+  })
 })
 
 // ---------------------------------------------------------------------------

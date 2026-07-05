@@ -37,6 +37,18 @@ Maintainer notes:
   disabled). State is in-memory, bounded by the existing 32-origin budget,
   and version changes are logged to stderr escaped and capped per origin.
 
+### Fixed
+
+- **Bulk audit exports honor the documented 10,000-record cap (#131).** The
+  dashboard export endpoint (`GET /api/audit/export`) and `helio export`
+  previously returned at most 1,000 records regardless of the requested
+  limit, because the bulk path shared the dashboard's page-query cap.
+  Exports now use a dedicated read path capped at 10,000 records,
+  oldest-first with a deterministic tiebreak for records sharing a
+  timestamp; the paginated `/api/audit` keeps its 1,000-row page cap.
+  `helio export --limit` accepts integers up to 10,000 and rejects
+  malformed values with an error instead of exporting a truncated result.
+
 ## [0.8.0] - 2026-07-03
 
 ### Added

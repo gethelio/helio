@@ -21,6 +21,19 @@ import type {
 /** policy_decision values that describe upstream definition changes, not tool calls. */
 const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
 
+/**
+ * Maximum records a single bulk export may return. Shared by the dashboard
+ * export route schema and the CLI export command so the advertised cap and
+ * the store's actual cap cannot diverge.
+ */
+export const EXPORT_MAX_RECORDS = 10_000
+
+/**
+ * Maximum page size for paginated `list()` reads. Shared with the dashboard
+ * audit route schema for the same reason as {@link EXPORT_MAX_RECORDS}.
+ */
+export const LIST_MAX_PAGE_SIZE = 1_000
+
 // ---------------------------------------------------------------------------
 // Schema DDL
 // ---------------------------------------------------------------------------
@@ -447,20 +460,43 @@ export class AuditStore {
     return row ? deserializeRow(row) : undefined
   }
 
-  /** Query records with filters and pagination. */
+  /** Query records with filters and pagination. Capped at 1,000 per page. */
   list(filters: AuditQueryFilters = {}, pagination: AuditPaginationOptions = {}): AuditListResult {
-    const { clause, params } = buildWhereClause(filters)
-    const limit = clamp(pagination.limit ?? 50, 1, 1000)
+    const limit = clamp(pagination.limit ?? 50, 1, LIST_MAX_PAGE_SIZE)
     const offset = Math.max(pagination.offset ?? 0, 0)
     const order = pagination.order === 'asc' ? 'ASC' : 'DESC'
+    return this.query(filters, limit, offset, order)
+  }
+
+  /**
+   * Query records for bulk export. Unlike `list()`, which enforces the
+   * dashboard's 1,000-row page cap, this path allows up to
+   * {@link EXPORT_MAX_RECORDS} in a single call. Always oldest-first
+   * (ascending `created_at`), so a capped export keeps the earliest records.
+   */
+  listForExport(filters: AuditQueryFilters = {}, limit?: number): AuditListResult {
+    const clamped = clamp(limit ?? EXPORT_MAX_RECORDS, 1, EXPORT_MAX_RECORDS)
+    return this.query(filters, clamped, 0, 'ASC')
+  }
+
+  private query(
+    filters: AuditQueryFilters,
+    limit: number,
+    offset: number,
+    order: 'ASC' | 'DESC',
+  ): AuditListResult {
+    const { clause, params } = buildWhereClause(filters)
 
     const { total } = this.db
       .prepare(`SELECT COUNT(*) as total FROM audit_records ${clause}`)
       .get(...params) as { total: number }
 
+    // rowid tiebreaker: created_at has millisecond resolution and a batched
+    // flush stamps many rows identically, so without it the cut point of a
+    // capped export (and tie order across queries) would be nondeterministic.
     const rows = this.db
       .prepare(
-        `SELECT * FROM audit_records ${clause} ORDER BY created_at ${order} LIMIT ? OFFSET ?`,
+        `SELECT * FROM audit_records ${clause} ORDER BY created_at ${order}, rowid ${order} LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as RawAuditRow[]
 

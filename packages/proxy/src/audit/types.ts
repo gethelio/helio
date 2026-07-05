@@ -122,7 +122,7 @@ export interface AuditQueryFilters {
 
 /** Pagination options for list queries. */
 export interface AuditPaginationOptions {
-  /** Maximum number of records to return (default: 50, max: 1000). */
+  /** Maximum number of records to return (default: 50, max: 1,000 — `LIST_MAX_PAGE_SIZE`). */
   readonly limit?: number
   /** Number of records to skip (default: 0). */
   readonly offset?: number

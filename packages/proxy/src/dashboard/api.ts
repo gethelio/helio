@@ -10,6 +10,7 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { streamSSE } from 'hono/streaming'
 import { VERSION } from '../version.js'
 import type { AuditStore } from '../audit/store.js'
+import { EXPORT_MAX_RECORDS, LIST_MAX_PAGE_SIZE } from '../audit/store.js'
 import { recordsToCsv } from '../audit/csv.js'
 import type { ApprovalRouter } from '../approval/router.js'
 import type { ApprovalQueue } from '../approval/queue.js'
@@ -94,7 +95,7 @@ const feedQuerySchema = z.object({
 
 const auditExportQuerySchema = z.object({
   format: z.preprocess((value) => (value === 'csv' ? 'csv' : 'json'), z.enum(['json', 'csv'])),
-  limit: clampedQueryInt(10_000, 1, 10_000),
+  limit: clampedQueryInt(EXPORT_MAX_RECORDS, 1, EXPORT_MAX_RECORDS),
   tool: optionalQueryString,
   decision: optionalQueryString,
   reason: optionalQueryString,
@@ -113,7 +114,7 @@ const auditExportQuerySchema = z.object({
 })
 
 const auditQuerySchema = z.object({
-  limit: clampedQueryInt(50, 1, 1000),
+  limit: clampedQueryInt(50, 1, LIST_MAX_PAGE_SIZE),
   offset: clampedQueryInt(0, 0, Number.MAX_SAFE_INTEGER),
   tool: optionalQueryString,
   decision: optionalQueryString,
@@ -463,7 +464,7 @@ export function createDashboardAppWithLifecycle(
       sender_id: query.sender_id,
     }
 
-    const result = auditStore.list(filters, { limit, order: 'asc' })
+    const result = auditStore.listForExport(filters, limit)
 
     if (format === 'csv') {
       const csv = recordsToCsv(result.records)
