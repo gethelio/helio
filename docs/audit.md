@@ -1,40 +1,62 @@
 # Audit Trail
 
-Every `tools/call` request that passes through Helio is recorded in an audit trail — including the tool name, arguments, policy decision, approval outcome, upstream response, and timing. Audit records are written asynchronously so they never slow down the request path.
+Every `tools/call` request that names a tool is recorded in an audit trail as it passes through Helio — including the tool name, arguments, policy decision, approval outcome, upstream response, and timing. (A malformed `tools/call` without a tool name is passed through to the upstream and is not recorded.) Audit records are written asynchronously so they never slow down the request path.
 
 ## What's Recorded
 
 Each audit record contains the following fields:
 
-| Field                  | Type           | Description                                                                                                                                                                                          |
-| ---------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                   | string         | Unique record identifier (UUID v4).                                                                                                                                                                  |
-| `timestamp`            | string         | ISO 8601 timestamp of when the proxy received the tool call.                                                                                                                                         |
-| `session_id`           | string \| null | MCP session ID from the `Mcp-Session-Id` header.                                                                                                                                                     |
-| `agent_id`             | string \| null | Agent identifier, if available.                                                                                                                                                                      |
-| `environment`          | string \| null | Runtime environment label configured at proxy startup.                                                                                                                                               |
-| `tool_name`            | string         | The name of the tool that was called.                                                                                                                                                                |
-| `tool_input`           | object         | The full arguments passed to the tool call.                                                                                                                                                          |
-| `policy_decision`      | string         | The policy engine's decision: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`.                                                                                        |
-| `block_reason`         | string \| null | Structured deny/block reason (`evidence_missing`, `approval_timeout`, `client_disconnected`, `shutdown_cancelled`, `install_denied` for a `deny_install` install scan, etc.). Null when not blocked. |
-| `matched_rule`         | string \| null | Name of the policy rule that matched, or null if the default action applied.                                                                                                                         |
-| `matched_rule_index`   | number \| null | Rule index in config order that matched, or null when no rule matched.                                                                                                                               |
-| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system, plus decision-context sub-objects when present (`approval`, `break_glass`, `rate_limit`, `spend_limit`, `tool_drift`, `sideband`). |
-| `approval_status`      | string \| null | Approval outcome: `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`. Null if no approval was required.                                                  |
-| `approved_by`          | string \| null | Identity of the human who resolved approval (`approved`, `denied`, or `break_glass`), when applicable.                                                                                               |
-| `upstream_response`    | any \| null    | The upstream MCP server's response. Null for denied calls (no upstream request was made).                                                                                                            |
-| `upstream_error`       | string \| null | Error message from the upstream server, if the call failed.                                                                                                                                          |
-| `upstream_http_status` | number \| null | Upstream HTTP status code when an upstream response was received. Null on denied or connection-level forwarding failures.                                                                            |
-| `upstream_latency_ms`  | number \| null | Time in milliseconds the upstream request took. Null for denied calls.                                                                                                                               |
-| `total_duration_ms`    | number         | End-to-end duration from request receipt to final response.                                                                                                                                          |
-| `approval_wait_ms`     | number         | Time spent waiting in the approval queue/timer. Zero when no approval hold occurred.                                                                                                                 |
-| `proxy_compute_ms`     | number         | Proxy compute time excluding approval wait and upstream processing.                                                                                                                                  |
-| `flagged_destructive`  | boolean        | Whether the tool was flagged as potentially destructive (`destructiveHint: true`).                                                                                                                   |
-| `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                                                                    |
-| `record_kind`          | string         | Record category: `tool_call` (default), `drift_event`, `install_scan`, or `evaluation_expired` (a sideband decision that was never audited).                                                         |
-| `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.                                                         |
-| `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                                                                   |
-| `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                                                                 |
+| Field                  | Type           | Description                                                                                                                                                                                                                                                 |
+| ---------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                   | string         | Unique record identifier (UUID v4).                                                                                                                                                                                                                         |
+| `timestamp`            | string         | ISO 8601 timestamp of when the proxy received the tool call.                                                                                                                                                                                                |
+| `session_id`           | string \| null | MCP session ID from the `Mcp-Session-Id` header, or the adapter-supplied session identifier on sideband records.                                                                                                                                            |
+| `agent_id`             | string \| null | Agent identifier, if available.                                                                                                                                                                                                                             |
+| `environment`          | string \| null | Runtime environment label configured at proxy startup.                                                                                                                                                                                                      |
+| `tool_name`            | string         | The name of the tool that was called.                                                                                                                                                                                                                       |
+| `tool_input`           | object         | The full arguments passed to the tool call.                                                                                                                                                                                                                 |
+| `policy_decision`      | string         | The policy engine's decision: `allow`, `deny`, `require_approval`, `rate_limit`, `spend_limit`, or `dry_run`. Drift records store `tool_drift` or `tool_drift_reverted` here instead (see [Tool Definition Drift Records](#tool-definition-drift-records)). |
+| `block_reason`         | string \| null | Structured deny/block reason — see [Block Reasons](#block-reasons) for the full vocabulary. Null when not blocked.                                                                                                                                          |
+| `matched_rule`         | string \| null | Name of the policy rule that matched, or null if the default action applied.                                                                                                                                                                                |
+| `matched_rule_index`   | number \| null | Rule index in config order that matched, or null when no rule matched.                                                                                                                                                                                      |
+| `evidence_chain`       | object \| null | Evidence and dependency state from the evidence grounding system, plus decision-context sub-objects when present (`approval`, `break_glass`, `rate_limit`, `spend_limit`, `tool_drift`, `sideband`).                                                        |
+| `approval_status`      | string \| null | Approval outcome: `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, or `shutdown_cancelled`; tickets resolved through the sideband can also record `cancelled`. Null if no approval was required.                                      |
+| `approved_by`          | string \| null | Identity of the human who resolved approval (`approved`, `denied`, or `break_glass`), when applicable.                                                                                                                                                      |
+| `upstream_response`    | any \| null    | The upstream MCP server's response. Null for denied calls (no upstream request was made).                                                                                                                                                                   |
+| `upstream_error`       | string \| null | Error message from the upstream server, if the call failed.                                                                                                                                                                                                 |
+| `upstream_http_status` | number \| null | Upstream HTTP status code when an upstream response was received. Null on denied or connection-level forwarding failures.                                                                                                                                   |
+| `upstream_latency_ms`  | number \| null | Time in milliseconds the upstream request took. Null for denied calls.                                                                                                                                                                                      |
+| `total_duration_ms`    | number         | End-to-end duration from request receipt to final response.                                                                                                                                                                                                 |
+| `approval_wait_ms`     | number         | Time spent waiting in the approval queue/timer. Zero when no approval hold occurred.                                                                                                                                                                        |
+| `proxy_compute_ms`     | number         | Proxy compute time excluding approval wait and upstream processing.                                                                                                                                                                                         |
+| `flagged_destructive`  | boolean        | Whether the tool was flagged as potentially destructive (`destructiveHint: true`).                                                                                                                                                                          |
+| `dry_run`              | boolean        | Whether this record was produced in dry-run mode.                                                                                                                                                                                                           |
+| `record_kind`          | string         | Record category: `tool_call` (default), `drift_event`, `install_scan`, or `evaluation_expired` (see [Expired Sideband Evaluations](#expired-sideband-evaluations)).                                                                                         |
+| `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.                                                                                                                |
+| `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                                                                                                                          |
+| `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                                                                                                                        |
+
+### Block Reasons
+
+`block_reason` is the column to alert on: it is non-null exactly when Helio blocked the call. The vocabulary:
+
+| Reason                  | Set when                                                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `policy_denied`         | A `deny` rule (or the default deny) matched, or a session-required evidence gate had no session.                                   |
+| `evidence_missing`      | A required evidence key was never stored for the session.                                                                          |
+| `evidence_expired`      | A required evidence key was stored but its TTL lapsed.                                                                             |
+| `dependency_missing`    | A `requires` / `requires_success` dependency was not satisfied.                                                                    |
+| `approval_denied`       | An approver denied the call.                                                                                                       |
+| `approval_timeout`      | The approval window elapsed (with `default_on_timeout: deny`).                                                                     |
+| `client_disconnected`   | The MCP client disconnected before request completion (while awaiting approval, or after approval resolved but before completion). |
+| `shutdown_cancelled`    | Proxy shutdown cancelled a pending approval.                                                                                       |
+| `cancelled`             | A sideband-resolved ticket was cancelled by the adapter.                                                                           |
+| `rate_limited`          | A `rate_limit` rule's window was exhausted.                                                                                        |
+| `spend_limited`         | A `spend_limit` rule's window budget was exhausted (or the amount was invalid).                                                    |
+| `tool_definition_drift` | The call hit a drifted tool under `on_tool_drift: block`.                                                                          |
+| `install_denied`        | An install scan matched a `deny_install` rule.                                                                                     |
+
+`evaluation_expired` records keep `block_reason` null: an expired evaluation is a reporting failure, not an enforcement block. One caveat for library embedders: when Helio's forwarder is embedded without an approval router or rate/spend limiter, a rule requiring the missing handler blocks with the free-text policy reason instead of a fixed value. This cannot happen under `helio start`, which always wires all three.
 
 ### Approval Context
 
@@ -44,7 +66,11 @@ When a `require_approval` decision resolves with context worth keeping — a den
 - `denial_reason` — present when the denier supplied a reason (Slack denials never carry one).
 - `escalated_at` / `escalated_to` — present when the escalation timer fired before resolution.
 
-The block is omitted when neither applies, so a plain approved call keeps `evidence_chain: null`. Break-glass reasons are recorded separately under `evidence_chain.break_glass` (`reason`, `invoked_by`).
+The `approval` block is omitted when neither applies, so a plain approved call records no approval context at all — its `evidence_chain` stays null unless other context (evidence grounding, rate or spend limit state) populates it. Break-glass reasons are recorded separately under `evidence_chain.break_glass` (`reason`, `invoked_by`).
+
+### Expired Sideband Evaluations
+
+When a [sideband-governed](./adapter-api.md) call is decided via `/evaluate` but the adapter's `/audit` report never arrives within `sdk.evaluation_ttl` (default 10 minutes), Helio finalizes the evaluation as a `record_kind: evaluation_expired` record. This is a bypass/tamper signal — the adapter was told the decision but never reported the outcome — not an enforcement block, so `block_reason` stays null and the record does not count toward blocked totals. The record carries `evidence_chain.sideband.unreported: true` and is placed on the priority flush queue. Treat a nonzero count of these as an adapter reliability problem or something worse; the Expired chip in the dashboard surfaces them.
 
 ## Tool Definition Drift Records
 
@@ -74,7 +100,7 @@ audit:
   include_responses: true # Store full upstream responses
 ```
 
-**Indexes** are created on `created_at`, `tool_name`, `policy_decision`, `block_reason`, and `session_id` for fast queries, plus a composite `(upstream_http_status, created_at)` index for upstream status rollups and status-over-time alert queries.
+**Indexes** are created on `created_at`, `tool_name`, `policy_decision`, `block_reason`, `session_id`, `record_kind`, and `origin` for fast queries, plus a composite `(upstream_http_status, created_at)` index for upstream status rollups and status-over-time alert queries.
 
 ### Local Schema Resets (Pre-1.0)
 
@@ -107,18 +133,17 @@ The dashboard provides two views for audit data:
 **Available filters in the Audit tab:**
 
 - Tool name (substring match)
-- Policy decision (allow, deny, require_approval, etc.)
-- Block reason (`evidence_missing`, `evidence_expired`, etc.)
-- Session ID
-- Agent ID
-- Time range (from/to)
-- Upstream HTTP status range (`upstream_status_min` / `upstream_status_max`)
-- Destructive flag
-- Dry-run flag
+- Outcome (Allow, Deny, Approval Denied, Approval Timeout, Client Disconnected, Shutdown Cancelled, Rate Limited, Spend Limited, Dry Run)
+- Block reason (`policy_denied`, `evidence_missing`, etc. — see [Block Reasons](#block-reasons))
 - Origin (`mcp`, `openclaw`, or any adapter slug)
-- Record kind (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`)
+- Record kind (`tool_call`, `install_scan`, `drift_event`, `evaluation_expired`)
+- Time range (presets or a custom from/to)
+- Session ID
 - Channel ID (`metadata.channel_id`)
 - Sender ID (`metadata.sender_id`)
+- Upstream HTTP status range (min/max)
+
+The outcome pills filter by what actually happened to the call, not the raw `policy_decision` value — an approved `require_approval` call shows under Allow. Filtering by agent ID or the destructive flag is not exposed in the UI; both are available as `/api/audit` query parameters (`agent`, `destructive`).
 
 ## CLI Export
 
@@ -130,17 +155,17 @@ helio export
 
 **Options:**
 
-| Flag                    | Type   | Default      | Description                                            |
-| ----------------------- | ------ | ------------ | ------------------------------------------------------ |
-| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database). |
-| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                        |
-| `--tool <name>`         | string | —            | Filter by tool name.                                   |
-| `--decision <decision>` | string | —            | Filter by policy decision.                             |
-| `--reason <reason>`     | string | —            | Filter by block reason.                                |
-| `--session <id>`        | string | —            | Filter by session ID.                                  |
-| `--from <iso>`          | string | —            | Start time (ISO 8601).                                 |
-| `--to <iso>`            | string | —            | End time (ISO 8601).                                   |
-| `--limit <n>`           | number | `1000`       | Maximum number of records to export.                   |
+| Flag                    | Type   | Default      | Description                                                                                                                                   |
+| ----------------------- | ------ | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database).                                                                                        |
+| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                                                                                                               |
+| `--tool <name>`         | string | —            | Filter by tool name.                                                                                                                          |
+| `--decision <decision>` | string | —            | Filter by policy decision.                                                                                                                    |
+| `--reason <reason>`     | string | —            | Filter by block reason.                                                                                                                       |
+| `--session <id>`        | string | —            | Filter by session ID.                                                                                                                         |
+| `--from <iso>`          | string | —            | Start time (ISO 8601).                                                                                                                        |
+| `--to <iso>`            | string | —            | End time (ISO 8601).                                                                                                                          |
+| `--limit <n>`           | number | `1000`       | Maximum number of records to export. Values above 1,000 are currently capped at 1,000 ([#131](https://github.com/gethelio/helio/issues/131)). |
 
 **Examples:**
 
@@ -170,21 +195,27 @@ GET /api/audit/export
 
 **Query parameters:**
 
-| Parameter             | Default | Description                                     |
-| --------------------- | ------- | ----------------------------------------------- |
-| `format`              | `json`  | Output format: `json` or `csv`.                 |
-| `limit`               | `10000` | Maximum records (up to 10,000).                 |
-| `tool`                | —       | Filter by tool name.                            |
-| `decision`            | —       | Filter by policy decision.                      |
-| `reason`              | —       | Filter by block reason.                         |
-| `session`             | —       | Filter by session ID.                           |
-| `agent`               | —       | Filter by agent ID.                             |
-| `from`                | —       | Start time (ISO 8601).                          |
-| `to`                  | —       | End time (ISO 8601).                            |
-| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).       |
-| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).       |
-| `blocked`             | —       | Filter by blocked vs. allowed (`true`/`false`). |
-| `dry_run`             | —       | Filter by dry-run mode (`true`/`false`).        |
+| Parameter             | Default | Description                                             |
+| --------------------- | ------- | ------------------------------------------------------- |
+| `format`              | `json`  | Output format: `json` or `csv`.                         |
+| `limit`               | `10000` | Maximum records (up to 10,000, but see the note below). |
+| `tool`                | —       | Filter by tool name.                                    |
+| `decision`            | —       | Filter by policy decision.                              |
+| `reason`              | —       | Filter by block reason.                                 |
+| `session`             | —       | Filter by session ID.                                   |
+| `agent`               | —       | Filter by agent ID.                                     |
+| `from`                | —       | Start time (ISO 8601).                                  |
+| `to`                  | —       | End time (ISO 8601).                                    |
+| `upstream_status_min` | —       | Minimum upstream HTTP status (inclusive).               |
+| `upstream_status_max` | —       | Maximum upstream HTTP status (inclusive).               |
+| `blocked`             | —       | Filter by blocked vs. allowed (`true`/`false`).         |
+| `dry_run`             | —       | Filter by dry-run mode (`true`/`false`).                |
+| `origin`              | —       | Filter by enforcement origin (substring match).         |
+| `record_kind`         | —       | Filter by record kind (exact match).                    |
+| `channel_id`          | —       | Filter by `metadata.channel_id` (substring match).      |
+| `sender_id`           | —       | Filter by `metadata.sender_id` (substring match).       |
+
+> **Known issue:** exports are currently capped at 1,000 records regardless of `limit` ([#131](https://github.com/gethelio/helio/issues/131)). Until that is fixed, use narrow time-range filters (`from`/`to`) and iterate in slices; each export request is still capped at 1,000 rows.
 
 **Examples:**
 
@@ -206,9 +237,11 @@ The export response includes a `Content-Disposition` header for browser download
 
 ## CSV Format
 
-CSV exports include all 24 audit record fields:
+CSV exports include 24 of the record's 27 fields:
 
 `id`, `timestamp`, `session_id`, `agent_id`, `tool_name`, `tool_input`, `policy_decision`, `block_reason`, `matched_rule`, `evidence_chain`, `approval_status`, `approved_by`, `upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `created_at`, `environment`, `matched_rule_index`
+
+The `record_kind`, `origin`, and `metadata` fields are not yet included in CSV exports ([#66](https://github.com/gethelio/helio/issues/66)); use the JSON format if you need them.
 
 Dashboard API CSV exports (`GET /api/audit/export?format=csv`) serialize object fields (`tool_input`, `evidence_chain`, `upstream_response`) as JSON strings. Fields containing commas, newlines, or quotes are properly escaped per RFC 4180. Boolean values are exported as `true` or `false`. Null values are exported as empty strings.
 
@@ -236,7 +269,7 @@ audit:
 The audit system is designed to add zero latency to the request path:
 
 - **Async buffered writes** — Records are pushed to an in-memory buffer immediately (non-blocking). The buffer is flushed to SQLite in batches. Enforcement records (deny/approval/rate/spend blocks) are scheduled for a prioritized next-tick flush, while process crash handlers still synchronously drain buffered records before exit. Dashboard `action` SSE events are emitted on successful persistence, so live views do not race ahead of durable storage.
-- **Batch size** — 50 records per flush, or every 100ms, whichever comes first.
+- **Flush triggers** — a flush is scheduled once 50 records are buffered, or every 100ms, whichever comes first; each flush writes everything buffered in one batch.
 - **Single-transaction batches** — Each flush uses a single SQLite transaction, so WAL mode syncs once per batch rather than once per record.
 - **Throughput and overhead** — Validate on your hardware with the benchmark script: `pnpm --filter @gethelio/proxy benchmark`. The script generates a local report at `docs/benchmark-results.md` with environment-specific numbers.
 - **Read-after-write window** — Because writes are batched, a query against `/api/audit?limit=1` fired immediately after a request can briefly see the previous "latest" row instead of the just-completed one. Allow records take up to 100ms to materialize; enforcement records (denies, approvals, rate/spend blocks) take roughly one event-loop tick. Live debugging tools should pause ~200ms between a request and an audit query that expects to see it, or use the SSE `action` feed (which is emitted on persistence, not on push).
