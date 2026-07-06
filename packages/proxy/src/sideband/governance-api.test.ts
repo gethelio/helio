@@ -3,6 +3,8 @@ import { createSidebandApp } from '../evidence/api.js'
 import { EvidenceStore } from '../evidence/store.js'
 import { GovernanceService } from './governance-service.js'
 import { compilePolicies } from '../policy/parser.js'
+import { ApprovalRouter } from '../approval/router.js'
+import { ApprovalQueue } from '../approval/queue.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -13,6 +15,7 @@ const ADAPTER_TOKEN = 'adapter-token-bbbbbbbbbbbb'
 
 function setup(opts?: {
   withGovernance?: boolean
+  withApprovals?: boolean
   tokens?: boolean
   policy?: Parameters<typeof compilePolicies>[0]
 }) {
@@ -25,12 +28,21 @@ function setup(opts?: {
     },
   ).policy
 
+  const approvalRouter = opts?.withApprovals
+    ? new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels: new Map(),
+        queue: new ApprovalQueue({ cleanupIntervalMs: 0 }),
+      })
+    : undefined
+
   const governance =
     opts?.withGovernance === false
       ? undefined
       : // Wire the same EvidenceStore into the service, mirroring production
         // (cli.ts) so the /audit evidence path is exercised end-to-end.
-        new GovernanceService({ policy, sweepIntervalMs: 0, evidenceStore: store })
+        new GovernanceService({ policy, sweepIntervalMs: 0, evidenceStore: store, approvalRouter })
 
   const app = createSidebandApp(store, {
     token: opts?.tokens ? SDK_TOKEN : undefined,
@@ -104,6 +116,63 @@ describe('sideband governance routes', () => {
 
     const allowed = await ctx.post('/evaluate', evalBody({ metadata: { channel_id: 'C2' } }))
     expect(((await allowed.json()) as { decision: string }).decision).toBe('allow')
+  })
+
+  it('carries configured rule feedback on a dry_run decision end-to-end', async () => {
+    const ctx = setup({
+      policy: {
+        default: 'allow',
+        dry_run: false,
+        rules: [
+          {
+            name: 'shadow-send',
+            match: { tool: 'send' },
+            action: 'dry_run',
+            feedback: { message: 'Shadow mode: send would be governed' },
+          },
+        ],
+      },
+    })
+    store = ctx.store
+    governance = ctx.governance ?? null
+    const res = await ctx.post('/evaluate', evalBody())
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { decision: string; feedback?: { message: string } }
+    expect(json.decision).toBe('dry_run')
+    expect(json.feedback).toStrictEqual({ message: 'Shadow mode: send would be governed' })
+  })
+
+  it('carries configured rule feedback on a require_approval decision end-to-end', async () => {
+    const ctx = setup({
+      withApprovals: true,
+      policy: {
+        default: 'allow',
+        dry_run: false,
+        rules: [
+          {
+            name: 'approve-send',
+            match: { tool: 'send' },
+            action: 'require_approval',
+            feedback: { message: 'Manager sign-off required', suggestion: 'Ask in #ops' },
+          },
+        ],
+      },
+    })
+    store = ctx.store
+    governance = ctx.governance ?? null
+    const res = await ctx.post('/evaluate', evalBody())
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      decision: string
+      feedback?: { message: string; suggestion?: string }
+      approval?: { id: string }
+    }
+    expect(json.decision).toBe('require_approval')
+    expect(json.feedback).toStrictEqual({
+      message: 'Manager sign-off required',
+      suggestion: 'Ask in #ops',
+    })
+    expect(json.approval?.id).toBeTruthy()
   })
 
   it('denies a matching install through /install-scan end-to-end (deny_install)', async () => {

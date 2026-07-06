@@ -418,7 +418,7 @@ export class GovernanceService {
       matched_rule: matchedRuleName,
       matched_rule_index: matchedRuleIndex,
     }
-    if (isBlocking(wire)) {
+    if (shouldAttachFeedback(wire, decision)) {
       responseBody['feedback'] = buildFeedback(decision.matchedRule, decision.reason)
     }
     if (limitsBlock) responseBody['limits'] = limitsBlock
@@ -1332,6 +1332,21 @@ function buildFeedback(
 
 function isBlocking(wire: WireDecision): boolean {
   return wire === 'deny' || wire === 'rate_limited' || wire === 'spend_limited'
+}
+
+/**
+ * Blocking decisions always carry feedback (message falls back to the internal
+ * reason). The gating decisions — require_approval and dry_run — carry it only
+ * when the matched rule configures one and the underlying action gates: global
+ * dry-run can shadow a plain allow rule, whose feedback is never surfaced.
+ */
+function shouldAttachFeedback(
+  wire: WireDecision,
+  decision: { action: string; matchedRule?: { feedback?: unknown } },
+): boolean {
+  if (isBlocking(wire)) return true
+  const gating = wire === 'require_approval' || wire === 'dry_run'
+  return gating && decision.action !== 'allow' && decision.matchedRule?.feedback != null
 }
 
 function isTerminalAtEvaluate(wire: WireDecision): boolean {

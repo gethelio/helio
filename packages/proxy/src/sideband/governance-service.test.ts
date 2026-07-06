@@ -307,6 +307,132 @@ describe('GovernanceService.evaluate', () => {
 })
 
 // ---------------------------------------------------------------------------
+// rule feedback on gating decisions (issue #78)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService.evaluate — rule feedback', () => {
+  it('returns configured feedback on require_approval', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'ap',
+          match: { tool: 'send' },
+          action: 'require_approval',
+          feedback: { message: 'Needs a human sign-off', suggestion: 'Ask in #ops' },
+        },
+      ],
+    })
+    const { service } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('require_approval')
+    expect(res.body['feedback']).toStrictEqual({
+      message: 'Needs a human sign-off',
+      suggestion: 'Ask in #ops',
+    })
+    expect(res.body['approval']).toBeTruthy()
+  })
+
+  it('omits feedback on require_approval when the rule configures none', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('require_approval')
+    expect(res.body).not.toHaveProperty('feedback')
+  })
+
+  it('returns configured feedback on a per-rule dry_run', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'shadow',
+          match: { tool: 'send' },
+          action: 'dry_run',
+          feedback: { message: 'Would be blocked in enforce mode' },
+        },
+      ],
+    })
+    const { service } = makeService({ policy })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body['feedback']).toStrictEqual({ message: 'Would be blocked in enforce mode' })
+  })
+
+  it('returns the underlying matched rule feedback under global dry_run', () => {
+    const policy = compile({
+      default: 'allow',
+      dry_run: true,
+      rules: [
+        {
+          name: 'no-send',
+          match: { tool: 'send' },
+          action: 'deny',
+          feedback: { message: 'Sending is disabled' },
+        },
+      ],
+    })
+    const { service } = makeService({ policy })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body['feedback']).toStrictEqual({ message: 'Sending is disabled' })
+  })
+
+  it('omits feedback under global dry_run when no rule matched', () => {
+    const policy = compile({ default: 'allow', dry_run: true, rules: [] })
+    const { service } = makeService({ policy })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body).not.toHaveProperty('feedback')
+  })
+
+  it('omits feedback under global dry_run when the matched rule is a plain allow', () => {
+    const policy = compile({
+      default: 'deny',
+      dry_run: true,
+      rules: [
+        {
+          name: 'ok-send',
+          match: { tool: 'send' },
+          action: 'allow',
+          feedback: { message: 'Sending is fine' },
+        },
+      ],
+    })
+    const { service } = makeService({ policy })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('dry_run')
+    expect((res.body['dry_run'] as { would_forward: boolean }).would_forward).toBe(true)
+    expect(res.body).not.toHaveProperty('feedback')
+  })
+
+  it('omits feedback on require_approval escalated by flag_destructive (no matched rule)', () => {
+    const policy = compile({ default: 'allow', flag_destructive: 'require_approval', rules: [] })
+    const { service } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'send', annotations: { destructiveHint: true } } }),
+    )
+    expect(res.body['decision']).toBe('require_approval')
+    expect(res.body['matched_rule']).toBeNull()
+    expect(res.body).not.toHaveProperty('feedback')
+  })
+
+  it('keeps the reason fallback on deny when the rule configures no feedback', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'no-send', match: { tool: 'send' }, action: 'deny' }],
+    })
+    const { service } = makeService({ policy })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('deny')
+    expect(res.body['feedback']).toStrictEqual({ message: 'Matched "no-send" → deny' })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // audit
 // ---------------------------------------------------------------------------
 

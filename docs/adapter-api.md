@@ -66,7 +66,7 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
   "reason": "Matched \"allow-chat\" → allow",
   "matched_rule": "allow-chat",          // null when the default policy applied
   "matched_rule_index": 2,
-  "feedback": { "message": "…" },        // present on blocking decisions
+  "feedback": { "message": "…" },        // always on blocking decisions; on require_approval / dry_run when the gating rule configures feedback
   "approval": { "id": "…", "timeout_ms": 300000, "resolve_path": "/approval/…/resolve" }, // require_approval only
   "limits": { "rate": { } },             // present when a limit rule matched
   "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only

@@ -209,7 +209,7 @@ Each rule in the `rules` array has the following structure:
 | `requires`         | string[] | No       | Tool names that must have been called first in this session.                                                                                                                                     |
 | `requires_success` | boolean  | No       | Whether prerequisite tools in `requires` must have succeeded, not just been called. Defaults to `true`; set `false` to accept any prior call.                                                    |
 | `limits`           | object   | No       | Rate or spend limit configuration.                                                                                                                                                               |
-| `feedback`         | object   | No       | Custom message and suggestion returned when the action is blocked.                                                                                                                               |
+| `feedback`         | object   | No       | Custom message and suggestion returned when the action is blocked, and on sideband `require_approval`/`dry_run` decisions. See [Feedback Messages](./policies.md#feedback-messages).             |
 
 `action: require_approval` without a rule-level `approval:` block is valid. Helio emits a config warning and uses runtime defaults (`channel: dashboard`, timeout from top-level `approval.timeout`).
 
