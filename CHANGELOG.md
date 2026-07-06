@@ -19,6 +19,18 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sideband `/evaluate` returns configured rule feedback on gating decisions
+  (#78).** A `require_approval` or `dry_run` decision now carries the matched
+  rule's `feedback` block (`message`, optional `suggestion`) when the rule
+  configures one, so adapter-built approval prompts and shadow-mode reports
+  can show the operator's rationale instead of the internal rule-match
+  reason. Blocking decisions are unchanged and still always include
+  `feedback`; gating decisions without configured feedback omit it, and a
+  plain `allow` rule's feedback is never surfaced (a global dry-run that
+  shadows an allowed call stays feedback-free).
+
 ## [0.9.0] - 2026-07-05
 
 ### Security

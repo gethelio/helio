@@ -37,7 +37,7 @@ rules:
     limits: # Rate or spend limit config
       max_calls: 100
       window: '1h'
-    feedback: # Custom message for blocked actions
+    feedback: # Custom message for blocked and gated actions
       message: 'This action is blocked.'
       suggestion: 'Try a different approach.'
 ```
@@ -502,6 +502,8 @@ When a tool call is blocked, the proxy returns structured feedback as a JSON-RPC
 ```
 
 The `feedback.message` appears as the error message. The `feedback.suggestion` is included in the error `data` for agents to use for self-correction. If no feedback is configured, the proxy generates a default message based on the block reason.
+
+On the [sideband adapter API](./adapter-api.md), `feedback` also accompanies `require_approval` and `dry_run` decisions when the gating rule configures it, so adapter-built approval prompts and shadow-mode reports can show the operator's rationale. Feedback on a plain `allow` rule is never surfaced.
 
 ## Flag Destructive
 
