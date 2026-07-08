@@ -21,6 +21,17 @@ Maintainer notes:
 
 ### Fixed
 
+- **Nameless `tools/call` requests are rejected and audited instead of
+  forwarded unrecorded (#132).** A `tools/call` that carries no usable tool
+  name (missing, non-string, or empty `params.name`) previously bypassed both
+  policy evaluation and the audit trail — it was forwarded to the upstream
+  untouched. Helio now rejects it at the proxy with a JSON-RPC invalid-params
+  error (`-32602`) and writes a `policy_decision: rejected` audit record under
+  the `<nameless>` sentinel, with `block_reason: missing_tool_name` and the raw
+  `params` preserved in `tool_input`. The record is distinguishable from a
+  rule-matched deny and renders as its own Rejected outcome in the dashboard.
+  This restores the audit trail's completeness guarantee for every
+  `tools/call`.
 - **Sideband `/evaluate` returns configured rule feedback on gating decisions
   (#78).** A `require_approval` or `dry_run` decision now carries the matched
   rule's `feedback` block (`message`, optional `suggestion`) when the rule

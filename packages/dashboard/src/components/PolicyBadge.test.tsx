@@ -33,6 +33,7 @@ describe('PolicyBadge', () => {
       'bg-purple-50',
     ],
     [{ policyDecision: 'allow', dryRun: true }, 'Dry Run', 'bg-blue-50'],
+    [{ policyDecision: 'rejected', blockReason: 'missing_tool_name' }, 'Rejected', 'bg-rose-50'],
   ])('renders outcome badge with correct color class', (props, label, expectedClass) => {
     render(<PolicyBadge {...props} />)
     const badge = screen.getByText(label)

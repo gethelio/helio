@@ -227,7 +227,7 @@ Aggregated statistics for the dashboard charts. Computed from the audit store fo
 - `by_decision` — counts grouped by `policy_decision`, sorted descending.
 - `by_block_reason` — blocked counts grouped by `block_reason`, sorted descending.
 - `client_disconnected` and `shutdown_cancelled` are counted in `blocked_total` and `by_block_reason`, and remain distinct from human denials (`approval_denied`) and natural timeouts (`approval_timeout`).
-- `top_tools` — top 10 tools by call count, sorted descending. Drift events are excluded.
+- `top_tools` — top 10 tools by call count, sorted descending. Drift events and nameless-call rejections (`policy_decision: rejected`) are excluded — neither names a real tool.
 - `approval_rate` — `approved / total_require_approval` in the window, or `null` when no approvals were requested.
 - `per_hour` — hourly buckets of record counts over the window.
 

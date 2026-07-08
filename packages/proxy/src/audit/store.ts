@@ -22,6 +22,14 @@ import type {
 const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
 
 /**
+ * policy_decision values excluded from top-tools rankings: they do not name a
+ * real tool call. Drift events describe definition changes; `rejected` records
+ * a nameless tools/call under the `<nameless>` sentinel (issue #132). Both
+ * would otherwise pollute tool-usage rankings.
+ */
+const NON_TOOL_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'rejected')"
+
+/**
  * Maximum records a single bulk export may return. Shared by the dashboard
  * export route schema and the CLI export command so the advertised cap and
  * the store's actual cap cannot diverge.
@@ -562,11 +570,12 @@ export class AuditStore {
       )
       .all(...params) as Array<{ reason: string; count: number }>
 
-    // Top tools (limit 10) — drift events are excluded: they describe definition
-    // changes, not tool calls, and would inflate tool-usage rankings.
+    // Top tools (limit 10) — non-tool decisions (drift events and nameless-call
+    // rejections) are excluded: they do not name a real tool call and would
+    // inflate tool-usage rankings.
     const toolsClause = clause
-      ? `${clause} AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL}`
-      : `WHERE policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL}`
+      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
+      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
     const top_tools = this.db
       .prepare(
         `SELECT tool_name, COUNT(*) as count

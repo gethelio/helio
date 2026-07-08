@@ -5,7 +5,7 @@ import type {
   ForwardResult,
   McpResponse,
 } from '../mcp/types.js'
-import { INTERNAL_ERROR } from '../mcp/types.js'
+import { INTERNAL_ERROR, INVALID_PARAMS } from '../mcp/types.js'
 import type { CompiledPolicy } from './types.js'
 import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
@@ -290,9 +290,13 @@ export class GovernedForwarder implements McpForwarder {
     const params = request.params as Record<string, unknown> | undefined
     const toolName = typeof params?.['name'] === 'string' ? params['name'] : undefined
 
-    // If we can't extract a tool name, let upstream handle the malformed request
+    // Fail closed on a nameless tools/call (missing, non-string, or empty
+    // params.name). Forwarding it unrecorded would let a lenient upstream act
+    // on it outside both policy evaluation and the audit trail — the one-field
+    // governance bypass that #132 closes. Reject with invalid-params and write
+    // a distinct audit record so the trail stays complete.
     if (!toolName) {
-      return this.inner.forward(request)
+      return this.rejectNamelessToolsCall(request, params, timestamp, startTime)
     }
 
     const toolArguments =
@@ -420,6 +424,71 @@ export class GovernedForwarder implements McpForwarder {
       forwardingError,
       driftEvent ? { event: driftEvent, mode: driftMode } : undefined,
     )
+
+    return result
+  }
+
+  /**
+   * Reject a `tools/call` that carries no usable tool name and record it.
+   *
+   * The rejection is its own audit shape, not a governed decision: no rule was
+   * evaluated, so it is written directly (like {@link writeDriftAuditRecord})
+   * rather than threaded through {@link writeAuditRecord}, whose
+   * `PolicyDecision.action` union has no `rejected` member and whose
+   * forwarded-upstream logic does not apply. The raw `params` are preserved in
+   * `tool_input` so an investigator can see exactly what a lenient upstream
+   * could have keyed off.
+   */
+  private rejectNamelessToolsCall(
+    request: McpRequest,
+    params: unknown,
+    timestamp: string,
+    startTime: number,
+  ): ForwardResult {
+    const result = makeErrorResult(
+      request,
+      INVALID_PARAMS,
+      'tools/call requires a string params.name',
+      { blocked: true, reason: 'missing_tool_name' },
+    )
+
+    if (this.auditWriter) {
+      // Preserve the raw params losslessly and unambiguously: always nest the
+      // wire value (object, array, scalar, null, or absent) under a single
+      // `raw_params` key. Storing a plain object verbatim would collide — a
+      // caller sending `{ raw_params: 42 }` would be indistinguishable from a
+      // caller sending the scalar `42` once wrapped — so wrap uniformly.
+      // `tool_input` stays a Record<string, unknown> as its type requires.
+      const toolInput: Record<string, unknown> = { raw_params: params ?? null }
+
+      this.auditWriter.pushImmediate({
+        timestamp,
+        session_id: request.sessionId ?? null,
+        agent_id: null,
+        environment: this.environment ?? null,
+        tool_name: '<nameless>',
+        tool_input: toolInput,
+        policy_decision: 'rejected',
+        block_reason: 'missing_tool_name',
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: performance.now() - startTime,
+        approval_wait_ms: 0,
+        proxy_compute_ms: performance.now() - startTime,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      })
+    }
 
     return result
   }
