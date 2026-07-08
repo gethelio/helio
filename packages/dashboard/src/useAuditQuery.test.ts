@@ -136,6 +136,23 @@ describe('useAuditQuery', () => {
     })
   })
 
+  it('rejected outcome filter maps to decision=rejected', async () => {
+    const { result } = renderHook(() => useAuditQuery())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    mockFetchAudit.mockClear()
+
+    act(() => {
+      result.current.setFilter('decision', 'rejected')
+    })
+
+    await waitFor(() => {
+      expect(mockFetchAudit).toHaveBeenCalledWith(expect.objectContaining({ decision: 'rejected' }))
+    })
+  })
+
   it('maps upstream status range filters to numeric audit params', async () => {
     const { result } = renderHook(() => useAuditQuery())
 

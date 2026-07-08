@@ -41,6 +41,12 @@ describe('outcome helpers', () => {
     expect(deriveDisplayOutcome({ block_reason: 'install_denied' })).toBe('deny')
   })
 
+  it('renders a nameless-call rejection as its own outcome, distinct from allow and deny', () => {
+    expect(
+      deriveDisplayOutcome({ policy_decision: 'rejected', block_reason: 'missing_tool_name' }),
+    ).toBe('rejected')
+  })
+
   it('derives dry_run with highest priority', () => {
     expect(
       deriveDisplayOutcome({
@@ -56,6 +62,7 @@ describe('outcome helpers', () => {
     expect(formatDisplayOutcome('client_disconnected')).toBe('Client Disconnected')
     expect(formatDisplayOutcome('shutdown_cancelled')).toBe('Shutdown Cancelled')
     expect(formatDisplayOutcome('rate_limited')).toBe('Rate Limited')
+    expect(formatDisplayOutcome('rejected')).toBe('Rejected')
   })
 
   it('derives context chips for allow-path governance actions', () => {
@@ -77,5 +84,6 @@ describe('outcome helpers', () => {
       reason: 'shutdown_cancelled',
     })
     expect(outcomeFilterToAuditParams('dry_run')).toEqual({ dry_run: true })
+    expect(outcomeFilterToAuditParams('rejected')).toEqual({ decision: 'rejected' })
   })
 })

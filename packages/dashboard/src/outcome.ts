@@ -5,6 +5,7 @@
 export type DisplayOutcome =
   | 'allow'
   | 'deny'
+  | 'rejected'
   | 'approval_denied'
   | 'approval_timeout'
   | 'client_disconnected'
@@ -51,6 +52,12 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       // dedicated chip. Pinned here so a blocked install never falls through to
       // "allow" regardless of policy_decision.
       return 'deny'
+    case 'missing_tool_name':
+      // Nameless tools/call rejection (issue #132). Its own outcome, distinct
+      // from a governed deny so an operator can tell a fail-closed structural
+      // rejection apart from a rule-matched deny. Pinned before the
+      // policy_decision fallthrough.
+      return 'rejected'
     default:
       break
   }
@@ -66,6 +73,8 @@ export function formatDisplayOutcome(outcome: DisplayOutcome): string {
       return 'Allow'
     case 'deny':
       return 'Deny'
+    case 'rejected':
+      return 'Rejected'
     case 'approval_denied':
       return 'Approval Denied'
     case 'approval_timeout':
@@ -115,6 +124,8 @@ export function outcomeFilterToAuditParams(filter: OutcomeFilterValue | null): A
       return { blocked: false, dry_run: false }
     case 'deny':
       return { decision: 'deny' }
+    case 'rejected':
+      return { decision: 'rejected' }
     case 'approval_denied':
       return { reason: 'approval_denied' }
     case 'approval_timeout':

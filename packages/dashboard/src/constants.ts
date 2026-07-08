@@ -9,6 +9,7 @@ export const DECISION_FILTERS: ReadonlyArray<{ label: string; value: OutcomeFilt
     { label: 'All', value: null },
     { label: 'Allow', value: 'allow' },
     { label: 'Deny', value: 'deny' },
+    { label: 'Rejected', value: 'rejected' },
     { label: 'Approval Denied', value: 'approval_denied' },
     { label: 'Approval Timeout', value: 'approval_timeout' },
     { label: 'Client Disconnected', value: 'client_disconnected' },
@@ -23,12 +24,14 @@ export const DECISION_FILTERS: ReadonlyArray<{ label: string; value: OutcomeFilt
  *
  * These must stay in sync with the Tailwind classes in PolicyBadge.tsx:
  *   allow → emerald (#059669), deny → red (#dc2626),
- *   require_approval → amber (#d97706), rate_limit → orange (#ea580c),
- *   spend_limit → purple (#9333ea), dry_run → blue (#2563eb)
+ *   rejected → rose (#e11d48), require_approval → amber (#d97706),
+ *   rate_limit → orange (#ea580c), spend_limit → purple (#9333ea),
+ *   dry_run → blue (#2563eb)
  */
 export const DECISION_COLOR_HEX: Record<string, string> = {
   allow: '#059669',
   deny: '#dc2626',
+  rejected: '#e11d48',
   require_approval: '#d97706',
   rate_limit: '#ea580c',
   spend_limit: '#9333ea',

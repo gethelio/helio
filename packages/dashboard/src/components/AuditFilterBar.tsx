@@ -68,6 +68,7 @@ const BLOCK_REASON_FILTERS: ReadonlyArray<{ label: string; value: string | null 
   { label: 'Client Disconnected', value: 'client_disconnected' },
   { label: 'Shutdown Cancelled', value: 'shutdown_cancelled' },
   { label: 'Install Denied', value: 'install_denied' },
+  { label: 'Missing Tool Name', value: 'missing_tool_name' },
   { label: 'Rate Limited', value: 'rate_limited' },
   { label: 'Spend Limited', value: 'spend_limited' },
 ]

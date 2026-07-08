@@ -8,6 +8,9 @@ export const PARSE_ERROR = -32700
 /** JSON-RPC invalid request — not a valid JSON-RPC request object. */
 export const INVALID_REQUEST = -32600
 
+/** JSON-RPC invalid params — the request's params are structurally invalid. */
+export const INVALID_PARAMS = -32602
+
 /** JSON-RPC internal error — unexpected server-side failure. */
 export const INTERNAL_ERROR = -32603
 

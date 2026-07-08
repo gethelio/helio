@@ -1258,36 +1258,148 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  describe('nameless tools/call rejection', () => {
+    it('rejects tools/call with missing params.name without forwarding upstream', async () => {
+      const inner = mockForwarder()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { arguments: { foo: 'bar' } },
+      }
+      const result = await governed.forward(request)
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.code).toBe(-32602)
+      expect(error.data['reason']).toBe('missing_tool_name')
+    })
+
+    it('rejects tools/call with a non-string params.name', async () => {
+      const inner = mockForwarder()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 42, arguments: {} },
+      }
+      const result = await governed.forward(request)
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).code).toBe(-32602)
+    })
+
+    it('rejects tools/call with an empty-string params.name (fail-closed boundary)', async () => {
+      const inner = mockForwarder()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: '', arguments: {} },
+      }
+      const result = await governed.forward(request)
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).code).toBe(-32602)
+    })
+
+    it('audits a nameless tools/call as a distinct rejected record with raw params preserved', async () => {
+      const inner = mockForwarder()
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+      })
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { arguments: { to: 'ops@example.com' }, custom: 'field' },
+      }
+      await governed.forward(request)
+
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+      expect(auditWriter.push).not.toHaveBeenCalled()
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['policy_decision']).toBe('rejected')
+      expect(record['block_reason']).toBe('missing_tool_name')
+      expect(record['tool_name']).toBe('<nameless>')
+      // Raw params are nested under raw_params, losslessly and uniformly.
+      expect(record['tool_input']).toEqual({
+        raw_params: { arguments: { to: 'ops@example.com' }, custom: 'field' },
+      })
+      expect(record['matched_rule']).toBeNull()
+      expect(record['matched_rule_index']).toBeNull()
+      expect(record['upstream_response']).toBeNull()
+      expect(record['upstream_error']).toBeNull()
+      expect(record['upstream_http_status']).toBeNull()
+      expect(record['record_kind']).toBe('tool_call')
+      expect(record['origin']).toBe('mcp')
+    })
+
+    it('wraps every params shape under raw_params without collision', async () => {
+      const cases: Array<{ params: unknown; expected: unknown }> = [
+        { params: undefined, expected: null }, // params field omitted
+        { params: null, expected: null }, // explicit null (typeof null === 'object')
+        { params: [], expected: [] }, // array
+        { params: 42, expected: 42 }, // numeric scalar
+        { params: 'str', expected: 'str' }, // string scalar
+        // Collision guard: an object literally shaped { raw_params: 42 } must
+        // remain distinguishable from the scalar 42 above.
+        { params: { raw_params: 42 }, expected: { raw_params: 42 } },
+      ]
+
+      for (const { params, expected } of cases) {
+        const inner = mockForwarder()
+        const auditWriter = fakeAuditWriter()
+        const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+          auditWriter,
+        })
+
+        const request = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          ...(params === undefined ? {} : { params }),
+        } as unknown as McpRequest
+        const result = await governed.forward(request)
+
+        expect(inner.forward).not.toHaveBeenCalled()
+        expect(errorFromResult(result).code).toBe(-32602)
+        const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+        expect(record['tool_input']).toEqual({ raw_params: expected })
+      }
+    })
+
+    it('rejects and audits a nameless tools/call notification (no id)', async () => {
+      const inner = mockForwarder()
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+      })
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { arguments: {} },
+      }
+      const result = await governed.forward(request)
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).code).toBe(-32602)
+      const body = result.response.body as Record<string, unknown>
+      expect(body['id']).toBeNull()
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('edge cases', () => {
-    it('passes through tools/call with missing params.name to upstream', async () => {
-      const inner = mockForwarder()
-      const policy = compile({ default: 'deny', rules: [] })
-      const governed = new GovernedForwarder(inner, policy)
-
-      const request: McpRequest = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: {},
-      }
-      await governed.forward(request)
-      expect(inner.forward).toHaveBeenCalled()
-    })
-
-    it('handles tools/call with no params at all by forwarding to upstream', async () => {
-      const inner = mockForwarder()
-      const policy = compile({ default: 'deny', rules: [] })
-      const governed = new GovernedForwarder(inner, policy)
-
-      const request: McpRequest = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-      }
-      await governed.forward(request)
-      expect(inner.forward).toHaveBeenCalled()
-    })
-
     it('handles notification (no id) for denied tools/call', async () => {
       const inner = mockForwarder()
       const policy = compile({

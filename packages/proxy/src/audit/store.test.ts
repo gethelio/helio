@@ -836,6 +836,36 @@ CREATE TABLE IF NOT EXISTS audit_records (
 
       s.close()
     })
+
+    it('excludes rejected records from top_tools but keeps them in totals and by_decision', () => {
+      const s = createStore()
+      s.insert(
+        makeRecord({ tool_name: 'get_weather', policy_decision: 'allow', block_reason: null }),
+      ) // a normal allowed call
+      s.insert(
+        makeRecord({
+          tool_name: '<nameless>',
+          policy_decision: 'rejected',
+          block_reason: 'missing_tool_name',
+        }),
+      )
+
+      const stats = s.aggregate()
+      expect(stats.total).toBe(2) // rejected records remain visible in totals
+      expect(stats.allowed_total).toBe(1) // rejected is not an allowed call
+      expect(stats.blocked_total).toBe(1) // rejected has a non-null block_reason
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', count: 1 }])
+      expect(stats.by_decision).toEqual(
+        expect.arrayContaining([expect.objectContaining({ decision: 'rejected', count: 1 })]),
+      )
+      expect(stats.by_block_reason).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ reason: 'missing_tool_name', count: 1 }),
+        ]),
+      )
+
+      s.close()
+    })
   })
 
   // -------------------------------------------------------------------------
