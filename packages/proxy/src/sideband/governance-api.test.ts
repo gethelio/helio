@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { createSidebandApp } from '../evidence/api.js'
 import { EvidenceStore } from '../evidence/store.js'
 import { GovernanceService } from './governance-service.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 import { compilePolicies } from '../policy/parser.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
@@ -448,5 +450,51 @@ describe('sideband governance routes', () => {
     })
     expect(res.status).toBe(413)
     expect(((await res.json()) as { error: string }).error).toBe('request_body_too_large')
+  })
+})
+
+describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
+  it('returns the budget decision, limits block, and feedback through the route layer', async () => {
+    const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
+    const budgetEngine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'cap',
+          limit: 10,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'send', field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+    const governance = new GovernanceService({ policy, budgetEngine, sweepIntervalMs: 0 })
+    const store = new EvidenceStore()
+    const app = createSidebandApp(store, { governance })
+
+    const res = await app.request('/evaluate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        origin: 'openclaw',
+        tool: { name: 'send' },
+        arguments: { amount: 50 },
+      }),
+    })
+
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body['decision']).toBe('budget_exceeded')
+    const limits = body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['name']).toBe('cap')
+    expect(limits.budgets[0]?.['reset_at_ms']).toBeDefined()
+    const feedback = body['feedback'] as { message: string }
+    expect(feedback.message).toContain('"cap"')
+
+    budgetEngine.close()
+    governance.close()
+    store.close()
   })
 })

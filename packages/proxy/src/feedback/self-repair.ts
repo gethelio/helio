@@ -4,6 +4,7 @@ import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/gro
 import type { RateLimitResult } from '../policy/rate-limiter.js'
 import type { SpendLimitResult } from '../policy/spend-limiter.js'
 import type { ToolDriftEvent } from '../policy/annotation-cache.js'
+import type { BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
 
 // ---------------------------------------------------------------------------
 // Block reasons — the discriminant for self-repair feedback.
@@ -22,6 +23,7 @@ export type BlockReason =
   | 'client_disconnected'
   | 'shutdown_cancelled'
   | 'tool_definition_drift'
+  | 'budget_exceeded'
 
 // ---------------------------------------------------------------------------
 // Feedback types — discriminated union keyed on `reason`.
@@ -134,6 +136,29 @@ export interface ToolDriftFeedback extends SelfRepairFeedbackBase {
   readonly drifted_aspects: readonly string[]
 }
 
+/** One breached (or invalid-amount) budget inside a budget_exceeded denial. */
+export interface BudgetBreachBlock {
+  readonly name: string
+  readonly limit: number
+  readonly spent: number
+  readonly remaining: number
+  readonly attempted_amount: number | null
+  readonly currency: string
+  readonly window: string
+  readonly on_exceed: 'deny' | 'require_approval'
+  /** ISO-8601 for duration windows; null for session pots (never replenish). */
+  readonly reset_at: string | null
+  /** Set when the contributor amount was missing or invalid (fail closed). */
+  readonly reason?: 'invalid_amount'
+}
+
+/** One or more named budgets denied the call (issue #14). */
+export interface BudgetExceededFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'budget_exceeded'
+  readonly action: 'budget'
+  readonly budgets: readonly BudgetBreachBlock[]
+}
+
 /** Discriminated union of all self-repair feedback types. */
 export type SelfRepairFeedback =
   | PolicyDeniedFeedback
@@ -147,6 +172,7 @@ export type SelfRepairFeedback =
   | RateLimitedFeedback
   | SpendLimitedFeedback
   | ToolDriftFeedback
+  | BudgetExceededFeedback
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -479,5 +505,69 @@ export function buildSpendLimitedFeedback(
     reset_at: resetAt,
     suggestion,
     retry_allowed: true,
+  }
+}
+
+/**
+ * Build self-repair feedback when named budgets deny a call (issue #14).
+ *
+ * Lists every breached budget (all-or-nothing gate: one breach denies the
+ * call and nothing is recorded anywhere) and every fail-closed invalid-amount
+ * contributor. Born snake_case with `rule_index` only where the alias story
+ * applies via ruleInfo.
+ */
+export function buildBudgetExceededFeedback(
+  decision: PolicyDecision,
+  breaches: readonly BudgetPeekEntry[],
+  failures: readonly BudgetChargeFailure[],
+): BudgetExceededFeedback {
+  const info = ruleInfo(decision.matchedRule)
+
+  const budgets: BudgetBreachBlock[] = [
+    ...breaches.map((entry) => ({
+      name: entry.budget.name,
+      limit: entry.budget.limit,
+      spent: entry.spent,
+      remaining: entry.remaining,
+      attempted_amount: entry.amount,
+      currency: entry.budget.currency,
+      window: entry.budget.windowRaw,
+      on_exceed: entry.budget.onExceed,
+      reset_at: entry.resetAtMs === null ? null : new Date(entry.resetAtMs).toISOString(),
+    })),
+    ...failures.map((failure) => ({
+      name: failure.budget.name,
+      limit: failure.budget.limit,
+      spent: failure.spent,
+      remaining: failure.remaining,
+      attempted_amount: null,
+      currency: failure.budget.currency,
+      window: failure.budget.windowRaw,
+      on_exceed: failure.budget.onExceed,
+      reset_at: failure.resetAtMs === null ? null : new Date(failure.resetAtMs).toISOString(),
+      reason: 'invalid_amount' as const,
+    })),
+  ]
+
+  // Budget-specific by design: a matched rule's feedback describes the RULE
+  // (which may have said allow), not the budget that denied the call.
+  const suggestion =
+    failures.length > 0
+      ? `Budget ${failures.map((f) => `"${f.budget.name}"`).join(', ')} could not read a valid spend amount from this call. Retry with a non-negative finite amount in the expected field.`
+      : `Budget ${breaches.map((b) => `"${b.budget.name}"`).join(', ')} would be exceeded by this call. Wait for the window to reset or reduce the amount.`
+
+  // Retryability hinges on the actual breaches: duration windows replenish,
+  // session pots never do. Invalid amounts are fixable, but only when no
+  // session breach would deny the retry anyway.
+  const retryAllowed = breaches.every((entry) => entry.budget.window.kind === 'duration')
+
+  return {
+    blocked: true,
+    reason: 'budget_exceeded',
+    ...info,
+    action: 'budget',
+    budgets,
+    suggestion,
+    retry_allowed: retryAllowed,
   }
 }

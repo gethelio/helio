@@ -14,8 +14,9 @@ export interface ReloadBoundaryDiff {
 /**
  * Compare two validated configs and report changed paths that do not hot-reload.
  *
- * Hot-reload only applies `policies.default`, `policies.flag_destructive`,
- * `policies.dry_run`, and `policies.rules` by swapping the compiled policy.
+ * Hot-reload applies `policies.default`, `policies.flag_destructive`,
+ * `policies.dry_run`, and `policies.rules` by swapping the compiled policy,
+ * and `budgets` by reconciling the budget engine on name identity.
  * Everything else is startup-bound (listeners, upstream, dashboard, etc.) and
  * requires process restart.
  */
@@ -43,6 +44,10 @@ export function diffReloadBoundary(previous: HelioConfig, next: HelioConfig): Re
   if (!isDeepStrictEqual(previous.sdk, next.sdk)) {
     restartRequiredPaths.push('sdk')
   }
+
+  // `budgets` is deliberately NOT in this list: budgets hot-reload (the
+  // watcher recompiles them and the engine reconciles by name, issue #14).
+  // Do not cargo-cult it in when adding the next top-level field.
 
   // `policies.hot_reload` only affects whether the watcher exists at startup.
   const previousHotReload = previous.policies.hot_reload ?? true

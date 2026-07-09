@@ -5,6 +5,7 @@ import {
   outcomeFilterToAuditParams,
   formatDisplayOutcome,
 } from './outcome'
+import { DECISION_FILTERS } from './constants'
 
 describe('outcome helpers', () => {
   it('derives allow for non-blocked rate/spend/approval actions', () => {
@@ -85,5 +86,32 @@ describe('outcome helpers', () => {
     })
     expect(outcomeFilterToAuditParams('dry_run')).toEqual({ dry_run: true })
     expect(outcomeFilterToAuditParams('rejected')).toEqual({ decision: 'rejected' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// budget_exceeded (issue #14)
+// ---------------------------------------------------------------------------
+
+describe('budget_exceeded outcome', () => {
+  it('renders a budget denial as Budget Exceeded, never Allow', () => {
+    // A budget denial rides policy_decision "allow" (the rule allowed; the
+    // budget gate blocked) — the block_reason must win over the fallthrough.
+    const outcome = deriveDisplayOutcome({
+      policy_decision: 'allow',
+      block_reason: 'budget_exceeded',
+    })
+    expect(outcome).toBe('budget_exceeded')
+    expect(formatDisplayOutcome(outcome)).toBe('Budget Exceeded')
+  })
+
+  it('maps the budget_exceeded filter to the block-reason query param', () => {
+    expect(outcomeFilterToAuditParams('budget_exceeded')).toEqual({
+      reason: 'budget_exceeded',
+    })
+  })
+
+  it('offers Budget Exceeded in the decision filter list', () => {
+    expect(DECISION_FILTERS.some((f) => f.value === 'budget_exceeded')).toBe(true)
   })
 })

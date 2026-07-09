@@ -12,6 +12,7 @@ export type DisplayOutcome =
   | 'shutdown_cancelled'
   | 'rate_limited'
   | 'spend_limited'
+  | 'budget_exceeded'
   | 'dry_run'
 
 export type OutcomeFilterValue = Exclude<DisplayOutcome, never>
@@ -39,6 +40,12 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       return 'rate_limited'
     case 'spend_limited':
       return 'spend_limited'
+    case 'budget_exceeded':
+      // A named-budget denial (issue #14). It usually rides
+      // policy_decision "allow" — the rule allowed, the budget gate blocked —
+      // so it must be pinned before the policy_decision fallthrough or the
+      // dashboard would render a blocked call as Allow.
+      return 'budget_exceeded'
     case 'approval_denied':
       return 'approval_denied'
     case 'approval_timeout':
@@ -87,6 +94,8 @@ export function formatDisplayOutcome(outcome: DisplayOutcome): string {
       return 'Rate Limited'
     case 'spend_limited':
       return 'Spend Limited'
+    case 'budget_exceeded':
+      return 'Budget Exceeded'
     case 'dry_run':
       return 'Dry Run'
   }
@@ -138,6 +147,8 @@ export function outcomeFilterToAuditParams(filter: OutcomeFilterValue | null): A
       return { reason: 'rate_limited' }
     case 'spend_limited':
       return { reason: 'spend_limited' }
+    case 'budget_exceeded':
+      return { reason: 'budget_exceeded' }
     case 'dry_run':
       return { dry_run: true }
     default:

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type {
   McpForwarder,
   McpForwarderWithInternal,
@@ -27,6 +28,7 @@ import {
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
+  buildBudgetExceededFeedback,
   ruleInfo,
 } from '../feedback/self-repair.js'
 import type { ApprovalRouter } from '../approval/router.js'
@@ -35,6 +37,7 @@ import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
 import { spendBucketKey } from './spend-limiter.js'
 import { resolvePath } from './matchers.js'
+import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 
 /** Custom JSON-RPC error code for policy denials. */
 const POLICY_DENIED = -32001
@@ -53,6 +56,67 @@ export interface GovernedForwarderOptions {
   rateLimiter?: RateLimiter
   /** Spend limiter for handling spend_limit decisions. */
   spendLimiter?: SpendLimiter
+  /** Budget engine for named cross-tool budgets (issue #14). */
+  budgetEngine?: BudgetEngine
+}
+
+/**
+ * Phase-1 outcome: what an action branch decided, minus the forward itself.
+ * `commitRuleLimit` records a peeked rate/spend rule counter and runs at the
+ * forward site, in the same tick as the peek.
+ */
+interface ActionGateBase {
+  approvalOutcome?: ApprovalOutcome
+  approvalWaitMs: number
+  approvalContext?: ApprovalAuditContext
+  rateLimitResult?: RateLimitResult
+  spendLimitResult?: SpendLimitResult
+  commitRuleLimit?: () => void
+}
+
+type ActionGateResult =
+  | (ActionGateBase & { proceed: true; result?: undefined })
+  | (ActionGateBase & { proceed: false; result: ForwardResult })
+
+/** Build a blocked phase-1 outcome carrying only the block result. */
+function blocked(result: ForwardResult): ActionGateResult {
+  return { proceed: false, result, approvalWaitMs: 0 }
+}
+
+/** Phase-2 outcome: the budget gate's verdict plus its audit chain blocks. */
+type BudgetGateResult =
+  | {
+      proceed: true
+      result?: undefined
+      /** Wire-ready per-budget blocks for the audit record's evidence_chain. */
+      chain?: Array<Record<string, unknown>>
+      /** Records all charges; returns post-commit chain blocks. */
+      commit?: (auditRecordId: string) => Array<Record<string, unknown>>
+    }
+  | {
+      proceed: false
+      result: ForwardResult
+      chain: Array<Record<string, unknown>>
+      commit?: undefined
+    }
+
+/** Wire-ready evidence_chain block for one budget's view of a call. */
+function budgetChainBlock(
+  entry: BudgetPeekEntry,
+  kind?: 'spend' | 'approved_overage',
+): Record<string, unknown> {
+  return {
+    name: entry.budget.name,
+    bucket_key: entry.bucketKey,
+    allowed: entry.allowed,
+    amount: entry.amount,
+    spent: entry.spent,
+    limit: entry.budget.limit,
+    remaining: entry.remaining,
+    currency: entry.budget.currency,
+    ...(kind ? { kind } : {}),
+    ...(entry.stale ? { stale: true } : {}),
+  }
 }
 
 /** Result of attempting to prime the tool annotation cache. */
@@ -82,6 +146,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly approvalRouter: ApprovalRouter | undefined
   private readonly rateLimiter: RateLimiter | undefined
   private readonly spendLimiter: SpendLimiter | undefined
+  private readonly budgetEngine: BudgetEngine | undefined
   private readonly annotationCache = new ToolAnnotationCache()
   private agentKeyWarned = false
   private senderKeyWarned = false
@@ -95,6 +160,7 @@ export class GovernedForwarder implements McpForwarder {
     this.approvalRouter = options?.approvalRouter
     this.rateLimiter = options?.rateLimiter
     this.spendLimiter = options?.spendLimiter
+    this.budgetEngine = options?.budgetEngine
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
     }
@@ -337,6 +403,10 @@ export class GovernedForwarder implements McpForwarder {
       driftEvent: this.annotationCache.getDrift(toolName),
     })
 
+    // Pre-generated so budget ledger rows can reference the audit record
+    // before it is written (the async writer accepts caller-supplied ids).
+    const auditRecordId = randomUUID()
+
     let result: ForwardResult
     let approvalOutcome: ApprovalOutcome | undefined
     let approvalWaitMs = 0
@@ -344,53 +414,81 @@ export class GovernedForwarder implements McpForwarder {
     let rateLimitResult: RateLimitResult | undefined
     let spendLimitResult: SpendLimitResult | undefined
     let forwardingError: Error | undefined
+    /** Whether the request actually reached the upstream — a fact recorded at
+     * the single forward site, not derived after the fact. */
+    let forwarded = false
+    let budgetsChain: Array<Record<string, unknown>> | undefined
     try {
       if (isDryRun) {
         result = this.handleDryRun(request, decision, toolName, toolArguments, evidenceBlocked)
-      } else if (sessionBlocked) {
-        result = this.makeSessionRequiredBlockResult(request, decision)
-      } else if (evidenceBlocked) {
-        result = this.makeEvidenceBlockResult(request, decision, evidenceResult, dependencyResult)
-      } else if (driftBlocked && driftEvent) {
-        result = this.makeDriftBlockResult(request, driftEvent)
-      } else if (decision.action === 'allow') {
-        result = await this.inner.forward(request)
-      } else if (decision.action === 'deny') {
-        result = this.makeDenyResult(request, decision)
-      } else if (decision.action === 'require_approval') {
-        if (!this.approvalRouter) {
-          result = this.makeUnsupportedResult(request, decision, toolName)
-        } else {
-          const approvalResult = await this.handleApproval(
-            request,
-            decision,
-            toolName,
-            toolArguments,
-          )
-          result = approvalResult.result
-          approvalOutcome = approvalResult.outcome
-          approvalWaitMs = approvalResult.approvalWaitMs
-          approvalContext = approvalResult.approvalContext
-        }
-      } else if (decision.action === 'rate_limit') {
-        if (!this.rateLimiter) {
-          result = this.makeUnsupportedResult(request, decision, toolName)
-        } else {
-          const rlResult = await this.handleRateLimit(request, decision, toolName)
-          result = rlResult.result
-          rateLimitResult = rlResult.rateLimitResult
-        }
-      } else if (decision.action === 'spend_limit') {
-        if (!this.spendLimiter) {
-          result = this.makeUnsupportedResult(request, decision, toolName)
-        } else {
-          const slResult = await this.handleSpendLimit(request, decision, toolName, toolArguments)
-          result = slResult.result
-          spendLimitResult = slResult.spendLimitResult
-        }
       } else {
-        // Unknown action (shouldn't happen) — deny defensively
-        result = this.makeDenyResult(request, decision)
+        // Phase 1 — action gate: everything the per-action branches decide,
+        // without forwarding. Rule rate/spend limits PEEK here and record at
+        // the forward site. Only the approval branch may await: an `await` on
+        // a fully-synchronous async function still yields to the microtask
+        // queue, and that gap would let a concurrent call peek the same last
+        // limiter slot before this one records it. Every other branch stays
+        // synchronous so peek → record has no interleaving point.
+        const gate =
+          decision.action === 'require_approval' && this.approvalRouter
+            ? await this.handleApproval(request, decision, toolName, toolArguments)
+            : this.resolveActionGate(request, decision, toolName, toolArguments, {
+                sessionBlocked,
+                evidenceBlocked,
+                driftBlocked,
+                driftEvent,
+                evidenceResult,
+                dependencyResult,
+              })
+        approvalOutcome = gate.approvalOutcome
+        approvalWaitMs = gate.approvalWaitMs
+        approvalContext = gate.approvalContext
+        rateLimitResult = gate.rateLimitResult
+        spendLimitResult = gate.spendLimitResult
+
+        if (!gate.proceed) {
+          result = gate.result
+        } else {
+          // Phase 2 — budget gate: peek every matching budget, all-or-nothing.
+          const budgetGate = this.gateBudgets(request, decision, toolName, toolArguments)
+          budgetsChain = budgetGate.chain
+          if (!budgetGate.proceed) {
+            result = budgetGate.result
+          } else {
+            // Phase 3 — commit, then the single forward site. No await sits
+            // between the gates' peeks and these commits, so two concurrent
+            // calls cannot double-spend the last slot. The fallible budget
+            // ledger commits FIRST: a durable-write failure must block the
+            // call WITHOUT having consumed the rule counters, and it reports
+            // its own failure class instead of masquerading as an upstream
+            // error.
+            let ledgerBlock: ForwardResult | undefined
+            try {
+              budgetsChain = budgetGate.commit?.(auditRecordId) ?? budgetsChain
+            } catch (ledgerError) {
+              const reason =
+                ledgerError instanceof Error ? ledgerError.message : String(ledgerError)
+              // eslint-disable-next-line no-console -- Intentional operational warning
+              console.error(
+                `[helio] Budget ledger write failed for tool "${toolName}"; blocking the call: ${reason}`,
+              )
+              ledgerBlock = makeErrorResult(request, INTERNAL_ERROR, 'budget ledger write failed', {
+                blocked: true,
+                reason: 'budget_ledger_write_failed',
+                failure_class: 'budget_ledger_write_failed',
+                failure_reason: reason,
+              })
+              budgetsChain = [{ ledger_write_failed: true, reason }]
+            }
+            if (ledgerBlock) {
+              result = ledgerBlock
+            } else {
+              gate.commitRuleLimit?.()
+              forwarded = true
+              result = await this.inner.forward(request)
+            }
+          }
+        }
       }
     } catch (error) {
       forwardingError = error instanceof Error ? error : new Error(String(error))
@@ -400,21 +498,25 @@ export class GovernedForwarder implements McpForwarder {
       })
     }
 
-    // Record tool call for dependency tracking (never in dry-run — nothing was forwarded)
-    const wasForwarded = this.wasForwardedUpstream(
-      decision,
-      approvalOutcome,
-      rateLimitResult,
-      spendLimitResult,
-    )
-    if (wasForwarded && !isDryRun && this.evidenceStore && request.sessionId && toolName) {
-      const succeeded = !hasJsonRpcError(result)
-      this.evidenceStore.recordToolCall(request.sessionId, toolName, succeeded)
+    // Post-forward bookkeeping is isolated: counters and the upstream call
+    // already happened, so a throwing evidence store or audit writer must
+    // degrade to a logged error, not reject the response (which would look
+    // retryable to the caller while the money state is already committed).
+    try {
+      // Record tool call for dependency tracking (never in dry-run — nothing was forwarded)
+      if (forwarded && !isDryRun && this.evidenceStore && request.sessionId && toolName) {
+        const succeeded = !hasJsonRpcError(result)
+        this.evidenceStore.recordToolCall(request.sessionId, toolName, succeeded)
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console -- Bookkeeping bugs must not affect the response
+      console.error('[helio] dependency tracking failed after forward:', err)
     }
 
     const totalDurationMs = performance.now() - startTime
-    this.writeAuditRecord(
+    this.writeAuditRecordSafely(
       request,
+      auditRecordId,
       timestamp,
       toolName,
       toolArguments,
@@ -423,6 +525,7 @@ export class GovernedForwarder implements McpForwarder {
       totalDurationMs,
       approvalWaitMs,
       flaggedDestructive,
+      forwarded,
       evidenceResult,
       dependencyResult,
       evidenceBlocked,
@@ -430,12 +533,168 @@ export class GovernedForwarder implements McpForwarder {
       approvalContext,
       rateLimitResult,
       spendLimitResult,
+      budgetsChain,
       isDryRun,
       forwardingError,
       driftEvent ? { event: driftEvent, mode: driftMode } : undefined,
     )
 
     return result
+  }
+
+  /** writeAuditRecord, isolated: an audit-writer bug must not reject the response. */
+  private writeAuditRecordSafely(...args: Parameters<GovernedForwarder['writeAuditRecord']>): void {
+    try {
+      this.writeAuditRecord(...args)
+    } catch (err) {
+      // eslint-disable-next-line no-console -- Bookkeeping bugs must not affect the response
+      console.error('[helio] audit record write failed:', err)
+    }
+  }
+
+  /**
+   * Everything the non-approval action branches decide, minus the forward
+   * itself. Deliberately SYNCHRONOUS: the caller must reach the phase-3
+   * commits without yielding to the microtask queue, or concurrent calls
+   * could double-spend a peeked limiter slot. The approval branch (the only
+   * one that genuinely waits) is dispatched by the caller directly.
+   */
+  private resolveActionGate(
+    request: McpRequest,
+    decision: PolicyDecision,
+    toolName: string,
+    toolArguments: Record<string, unknown> | undefined,
+    pipeline: {
+      sessionBlocked: boolean
+      evidenceBlocked: boolean
+      driftBlocked: boolean
+      driftEvent: ToolDriftEvent | undefined
+      evidenceResult: EvidenceCheckResult | undefined
+      dependencyResult: DependencyCheckResult | undefined
+    },
+  ): ActionGateResult {
+    if (pipeline.sessionBlocked) {
+      return blocked(this.makeSessionRequiredBlockResult(request, decision))
+    }
+    if (pipeline.evidenceBlocked) {
+      return blocked(
+        this.makeEvidenceBlockResult(
+          request,
+          decision,
+          pipeline.evidenceResult,
+          pipeline.dependencyResult,
+        ),
+      )
+    }
+    if (pipeline.driftBlocked && pipeline.driftEvent) {
+      return blocked(this.makeDriftBlockResult(request, pipeline.driftEvent))
+    }
+
+    switch (decision.action) {
+      case 'allow':
+        return { proceed: true, approvalWaitMs: 0 }
+      case 'deny':
+        return blocked(this.makeDenyResult(request, decision))
+      case 'require_approval':
+        // Reached only when no router is configured — the caller dispatches
+        // the awaiting approval path itself to keep this function synchronous.
+        return blocked(this.makeUnsupportedResult(request, decision, toolName))
+      case 'rate_limit':
+        if (!this.rateLimiter) {
+          return blocked(this.makeUnsupportedResult(request, decision, toolName))
+        }
+        return this.handleRateLimit(request, decision, toolName)
+      case 'spend_limit':
+        if (!this.spendLimiter) {
+          return blocked(this.makeUnsupportedResult(request, decision, toolName))
+        }
+        return this.handleSpendLimit(request, decision, toolName, toolArguments)
+      default:
+        // Unknown action (shouldn't happen) — deny defensively
+        return blocked(this.makeDenyResult(request, decision))
+    }
+  }
+
+  /**
+   * Phase 2: check every budget the call feeds, all-or-nothing (issue #14).
+   *
+   * Any breach denies (this release only ships `on_exceed: deny`) and records
+   * NOTHING on any budget — rejected calls never consume budget anywhere. On
+   * proceed, the returned `commit` records every charge together (ledger rows
+   * first, atomically, referencing the pre-generated audit id).
+   */
+  private gateBudgets(
+    request: McpRequest,
+    decision: PolicyDecision,
+    toolName: string,
+    toolArguments: Record<string, unknown> | undefined,
+  ): BudgetGateResult {
+    const engine = this.budgetEngine
+    if (!engine) return { proceed: true }
+
+    const { charges, failures } = engine.resolveCharges({
+      toolName,
+      toolArguments,
+      sessionId: request.sessionId ?? null,
+      senderId: null, // adapter context; absent on the MCP path
+    })
+
+    if (charges.length === 0 && failures.length === 0) return { proceed: true }
+
+    // Peek the valid charges even when failures deny the call — the feedback
+    // must show every failure AND every simultaneous breach, with real
+    // bucket snapshots throughout.
+    const peek = charges.length > 0 ? engine.peekAll(charges) : { allowed: true, entries: [] }
+    const breaches = peek.entries.filter((entry) => !entry.allowed)
+
+    if (failures.length > 0 || !peek.allowed) {
+      if (failures.length > 0) {
+        // eslint-disable-next-line no-console -- Intentional operational warning
+        console.error(
+          `[helio] Warning: budget ${failures.map((f) => `"${f.budget.name}"`).join(', ')} could not resolve a valid amount for tool "${toolName}", denying request`,
+        )
+      }
+      const feedback = buildBudgetExceededFeedback(decision, breaches, failures)
+      // The message is budget-specific by design: a matched rule's feedback
+      // describes the RULE (which may well have said allow), not the budget
+      // that denied the call.
+      const message =
+        failures.length > 0
+          ? `Budget denied: invalid amount for ${failures.map((f) => `"${f.budget.name}"`).join(', ')}`
+          : `Budget exceeded: ${breaches.map((entry) => `"${entry.budget.name}"`).join(', ')}`
+      return {
+        proceed: false,
+        result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+        chain: [
+          ...peek.entries.map((entry) => budgetChainBlock(entry)),
+          ...failures.map((failure) => ({
+            name: failure.budget.name,
+            bucket_key: failure.bucketKey,
+            allowed: false,
+            reason: failure.reason,
+            spent: failure.spent,
+            limit: failure.budget.limit,
+            remaining: failure.remaining,
+            currency: failure.budget.currency,
+          })),
+        ],
+      }
+    }
+
+    return {
+      proceed: true,
+      chain: peek.entries.map((entry) => budgetChainBlock(entry)),
+      commit: (auditRecordId) =>
+        engine
+          .recordAll(charges, {
+            kind: 'spend',
+            auditRecordId,
+            origin: 'mcp',
+            toolName,
+            timestampIso: new Date().toISOString(),
+          })
+          .map((entry) => budgetChainBlock(entry, 'spend')),
+    }
   }
 
   /**
@@ -508,12 +767,7 @@ export class GovernedForwarder implements McpForwarder {
     decision: PolicyDecision,
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
-  ): Promise<{
-    result: ForwardResult
-    outcome: ApprovalOutcome
-    approvalWaitMs: number
-    approvalContext?: ApprovalAuditContext
-  }> {
+  ): Promise<ActionGateResult> {
     // Caller guarantees this.approvalRouter is defined
     const router = this.approvalRouter as ApprovalRouter
 
@@ -551,47 +805,82 @@ export class GovernedForwarder implements McpForwarder {
           }
         : undefined
 
-    let result: ForwardResult
-
+    // The approval gate decides but never forwards — the single forward site
+    // in handleToolsCall runs only after the budget gate also passes.
     if (outcome.status === 'approved' || outcome.status === 'break_glass') {
       if (request.signal?.aborted) {
-        result = this.makeClientDisconnectedBlockResult(request, decision)
-      } else {
-        result = await this.inner.forward(request)
+        return {
+          proceed: false,
+          result: this.makeClientDisconnectedBlockResult(request, decision),
+          approvalOutcome: outcome,
+          approvalWaitMs,
+          approvalContext,
+        }
       }
-    } else if (outcome.status === 'denied') {
+      return { proceed: true, approvalOutcome: outcome, approvalWaitMs, approvalContext }
+    }
+    if (outcome.status === 'denied') {
       const feedback = buildApprovalDeniedFeedback(decision, outcome.resolvedBy, outcome.reason)
       const message =
         decision.matchedRule?.feedback?.message ?? `Approval denied by ${outcome.resolvedBy}`
-      result = makeErrorResult(request, POLICY_DENIED, message, { ...feedback })
-    } else if (outcome.status === 'client_disconnected') {
-      result = this.makeClientDisconnectedBlockResult(request, decision)
-    } else if (outcome.status === 'shutdown_cancelled') {
+      return {
+        proceed: false,
+        result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+        approvalOutcome: outcome,
+        approvalWaitMs,
+        approvalContext,
+      }
+    }
+    if (outcome.status === 'client_disconnected') {
+      return {
+        proceed: false,
+        result: this.makeClientDisconnectedBlockResult(request, decision),
+        approvalOutcome: outcome,
+        approvalWaitMs,
+        approvalContext,
+      }
+    }
+    if (outcome.status === 'shutdown_cancelled') {
       const feedback = buildShutdownCancelledFeedback(decision)
       const message =
         decision.matchedRule?.feedback?.message ?? 'Approval cancelled by proxy shutdown'
-      result = makeErrorResult(request, POLICY_DENIED, message, { ...feedback })
-    } else {
-      // timeout
-      if (router.defaultOnTimeout === 'allow' && !request.signal?.aborted) {
-        result = await this.inner.forward(request)
-      } else if (request.signal?.aborted) {
-        result = this.makeClientDisconnectedBlockResult(request, decision)
-      } else {
-        const feedback = buildApprovalTimeoutFeedback(decision, outcome.timeoutMs)
-        const message = decision.matchedRule?.feedback?.message ?? `Approval timed out`
-        result = makeErrorResult(request, POLICY_DENIED, message, { ...feedback })
+      return {
+        proceed: false,
+        result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+        approvalOutcome: outcome,
+        approvalWaitMs,
+        approvalContext,
       }
     }
-
-    return { result, outcome, approvalWaitMs, approvalContext }
+    // timeout
+    if (router.defaultOnTimeout === 'allow' && !request.signal?.aborted) {
+      return { proceed: true, approvalOutcome: outcome, approvalWaitMs, approvalContext }
+    }
+    if (request.signal?.aborted) {
+      return {
+        proceed: false,
+        result: this.makeClientDisconnectedBlockResult(request, decision),
+        approvalOutcome: outcome,
+        approvalWaitMs,
+        approvalContext,
+      }
+    }
+    const feedback = buildApprovalTimeoutFeedback(decision, outcome.timeoutMs)
+    const message = decision.matchedRule?.feedback?.message ?? `Approval timed out`
+    return {
+      proceed: false,
+      result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+      approvalOutcome: outcome,
+      approvalWaitMs,
+      approvalContext,
+    }
   }
 
-  private async handleRateLimit(
+  private handleRateLimit(
     request: McpRequest,
     decision: PolicyDecision,
     toolName: string,
-  ): Promise<{ result: ForwardResult; rateLimitResult: RateLimitResult }> {
+  ): ActionGateResult {
     // Caller guarantees this.rateLimiter is defined
     const limiter = this.rateLimiter as RateLimiter
     const limits = decision.matchedRule?.limits
@@ -603,36 +892,47 @@ export class GovernedForwarder implements McpForwarder {
         `Policy misconfigured: rate_limit rule for "${toolName}" requires limits.max_calls and limits.window`,
       )
       return {
+        proceed: false,
         result,
+        approvalWaitMs: 0,
         rateLimitResult: { allowed: false, current: 0, limit: 0, windowMs: 0, resetAtMs: 0 },
       }
     }
 
     const key = this.buildLimitKey(limits.key, toolName, request)
-    const rateLimitResult = limiter.check({
-      key,
-      maxCalls: limits.maxCalls,
-      windowMs: limits.windowMs,
-    })
+    const params = { key, maxCalls: limits.maxCalls, windowMs: limits.windowMs }
+    // Peek at the gate; record at the forward site (commitRuleLimit) so a call
+    // a later gate blocks never consumes the counter. Peek → record stays in
+    // one event-loop tick on this path, so no concurrent call can interleave.
+    const rateLimitResult = limiter.peek(params)
 
-    let result: ForwardResult
-    if (rateLimitResult.allowed) {
-      result = await this.inner.forward(request)
-    } else {
+    if (!rateLimitResult.allowed) {
       const feedback = buildRateLimitedFeedback(decision, rateLimitResult)
       const message = decision.matchedRule?.feedback?.message ?? `Rate limit exceeded for ${key}`
-      result = makeErrorResult(request, POLICY_DENIED, message, { ...feedback })
+      return {
+        proceed: false,
+        result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+        approvalWaitMs: 0,
+        rateLimitResult,
+      }
     }
 
-    return { result, rateLimitResult }
+    return {
+      proceed: true,
+      approvalWaitMs: 0,
+      rateLimitResult,
+      commitRuleLimit: () => {
+        limiter.record(params)
+      },
+    }
   }
 
-  private async handleSpendLimit(
+  private handleSpendLimit(
     request: McpRequest,
     decision: PolicyDecision,
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
-  ): Promise<{ result: ForwardResult; spendLimitResult: SpendLimitResult }> {
+  ): ActionGateResult {
     // Caller guarantees this.spendLimiter is defined
     const limiter = this.spendLimiter as SpendLimiter
     const maxSpend = decision.matchedRule?.limits?.maxSpend
@@ -644,7 +944,9 @@ export class GovernedForwarder implements McpForwarder {
         `Policy misconfigured: spend_limit rule for "${toolName}" requires limits.max_spend`,
       )
       return {
+        proceed: false,
         result,
+        approvalWaitMs: 0,
         spendLimitResult: { allowed: false, currentSpend: 0, limit: 0, windowMs: 0, resetAtMs: 0 },
       }
     }
@@ -674,7 +976,9 @@ export class GovernedForwarder implements McpForwarder {
         { ...feedback },
       )
       return {
+        proceed: false,
         result,
+        approvalWaitMs: 0,
         spendLimitResult: invalidAmount,
       }
     }
@@ -684,39 +988,44 @@ export class GovernedForwarder implements McpForwarder {
     // carrying the real currentSpend / resetAtMs from any pre-existing
     // legitimate spend on this bucket. That gives the audit row an accurate
     // snapshot of the bucket at the time of the attack, instead of a fake-zero
-    // synthetic result.
-    const spendLimitResult = limiter.check({
-      key,
-      amount: rawAmount,
-      limit: maxSpend.limit,
-      windowMs: maxSpend.windowMs,
-    })
+    // synthetic result. Peek at the gate; record at the forward site
+    // (commitRuleLimit), so a call the budget gate blocks consumes nothing —
+    // peek → record stays in one event-loop tick on this path.
+    const params = { key, amount: rawAmount, limit: maxSpend.limit, windowMs: maxSpend.windowMs }
+    const spendLimitResult = limiter.peek(params)
 
     if (spendLimitResult.reason === 'invalid_amount') {
       // eslint-disable-next-line no-console -- Intentional operational warning
       console.error(
         `[helio] Warning: spend limit field "${maxSpend.field}" resolved to invalid amount (${String(rawAmount)}) for tool "${toolName}" (rule: ${decision.matchedRule.name ?? 'unnamed'}), denying request`,
       )
-    } else {
-      // Bucket was created or updated — label it for dashboard reads. Skip on
-      // the invalid-amount path because the limiter never created a bucket.
-      limiter.setCurrency(key, maxSpend.currency)
     }
 
-    let result: ForwardResult
-    if (spendLimitResult.allowed) {
-      result = await this.inner.forward(request)
-    } else {
+    if (!spendLimitResult.allowed) {
       const feedback = buildSpendLimitedFeedback(decision, spendLimitResult, maxSpend.currency)
       const message =
         spendLimitResult.reason === 'invalid_amount'
           ? `Spend limit denied: invalid amount for field "${maxSpend.field}"`
           : (decision.matchedRule.feedback?.message ??
             `Spend limit exceeded for ${key} (${maxSpend.currency})`)
-      result = makeErrorResult(request, POLICY_DENIED, message, { ...feedback })
+      return {
+        proceed: false,
+        result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
+        approvalWaitMs: 0,
+        spendLimitResult,
+      }
     }
 
-    return { result, spendLimitResult }
+    return {
+      proceed: true,
+      approvalWaitMs: 0,
+      spendLimitResult,
+      commitRuleLimit: () => {
+        limiter.record(params)
+        // Label the bucket for dashboard reads once it exists.
+        limiter.setCurrency(key, maxSpend.currency)
+      },
+    }
   }
 
   /**
@@ -790,7 +1099,46 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    return this.makeDryRunResult(request, decision, wouldForward, evidenceSatisfied, limitsOk)
+    // Budget gate peek (issue #14): a call that would otherwise forward must
+    // also clear every matching budget. Dry-run never records.
+    let budgets: Array<Record<string, unknown>> | undefined
+    if (wouldForward && this.budgetEngine) {
+      const { charges, failures } = this.budgetEngine.resolveCharges({
+        toolName,
+        toolArguments,
+        sessionId: request.sessionId ?? null,
+        senderId: null,
+      })
+      if (failures.length > 0 || charges.length > 0) {
+        const peek =
+          charges.length > 0 ? this.budgetEngine.peekAll(charges) : { allowed: true, entries: [] }
+        const ok = failures.length === 0 && peek.allowed
+        wouldForward &&= ok
+        limitsOk &&= ok
+        budgets = [
+          ...peek.entries.map((entry) => budgetChainBlock(entry)),
+          ...failures.map((failure) => ({
+            name: failure.budget.name,
+            bucket_key: failure.bucketKey,
+            allowed: false,
+            reason: failure.reason,
+            spent: failure.spent,
+            limit: failure.budget.limit,
+            remaining: failure.remaining,
+            currency: failure.budget.currency,
+          })),
+        ]
+      }
+    }
+
+    return this.makeDryRunResult(
+      request,
+      decision,
+      wouldForward,
+      evidenceSatisfied,
+      limitsOk,
+      budgets,
+    )
   }
 
   /** Construct a limit bucket key based on the configured key type. */
@@ -844,26 +1192,9 @@ export class GovernedForwarder implements McpForwarder {
     return spendBucketKey(this.buildLimitKey(keyType, toolName, request), ruleIndex)
   }
 
-  /** Determine if the request was actually forwarded to the upstream MCP server. */
-  private wasForwardedUpstream(
-    decision: PolicyDecision,
-    approvalOutcome?: ApprovalOutcome,
-    rateLimitResult?: RateLimitResult,
-    spendLimitResult?: SpendLimitResult,
-  ): boolean {
-    return (
-      decision.action === 'allow' ||
-      approvalOutcome?.status === 'approved' ||
-      approvalOutcome?.status === 'break_glass' ||
-      (approvalOutcome?.status === 'timeout' &&
-        this.approvalRouter?.defaultOnTimeout === 'allow') ||
-      rateLimitResult?.allowed === true ||
-      spendLimitResult?.allowed === true
-    )
-  }
-
   private writeAuditRecord(
     request: McpRequest,
+    auditRecordId: string,
     timestamp: string,
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
@@ -872,6 +1203,7 @@ export class GovernedForwarder implements McpForwarder {
     totalDurationMs: number,
     approvalWaitMs: number,
     flaggedDestructive: boolean,
+    forwarded: boolean,
     evidenceResult?: EvidenceCheckResult,
     dependencyResult?: DependencyCheckResult,
     evidenceBlocked?: boolean,
@@ -879,22 +1211,16 @@ export class GovernedForwarder implements McpForwarder {
     approvalContext?: ApprovalAuditContext,
     rateLimitResult?: RateLimitResult,
     spendLimitResult?: SpendLimitResult,
+    budgetsChain?: Array<Record<string, unknown>>,
     isDryRun?: boolean,
     forwardingError?: Error,
     drift?: { event: ToolDriftEvent; mode: 'block' | 'require_approval' | 'log' },
   ): void {
     if (!this.auditWriter) return
 
-    const wasForwarded = this.wasForwardedUpstream(
-      decision,
-      approvalOutcome,
-      rateLimitResult,
-      spendLimitResult,
-    )
-
-    // In dry-run mode, nothing was actually forwarded regardless of what
-    // wasForwardedUpstream() returns based on the policy decision alone.
-    const actuallyForwarded = wasForwarded && !isDryRun
+    // `forwarded` is a fact captured at the single forward site — never a
+    // derivation. Dry-run never forwards by construction.
+    const actuallyForwarded = forwarded && !isDryRun
     const hadForwardingError = forwardingError !== undefined
 
     // Extract upstream error from JSON-RPC error response
@@ -958,6 +1284,13 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
+    if (budgetsChain && budgetsChain.length > 0) {
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        budgets: budgetsChain,
+      }
+    }
+
     if (drift) {
       evidenceChain = {
         ...(evidenceChain ?? {}),
@@ -1004,11 +1337,11 @@ export class GovernedForwarder implements McpForwarder {
     // flush queue. Ordinary allows stay buffered to reduce write churn.
     // Crash durability is preserved by the process-level crash-drain hook,
     // which synchronously flushes the writer before exit.
-    const isEnforcementDecision = !isDryRun && (!wasForwarded || approvalOutcome !== undefined)
+    const isEnforcementDecision = !isDryRun && (!forwarded || approvalOutcome !== undefined)
     if (isEnforcementDecision) {
-      this.auditWriter.pushImmediate(record)
+      this.auditWriter.pushImmediate(record, auditRecordId)
     } else {
-      this.auditWriter.push(record)
+      this.auditWriter.push(record, auditRecordId)
     }
   }
 
@@ -1069,6 +1402,7 @@ export class GovernedForwarder implements McpForwarder {
     wouldForward: boolean,
     evidenceSatisfied: boolean,
     limitsOk: boolean,
+    budgets?: Array<Record<string, unknown>>,
   ): ForwardResult {
     const payload = {
       dry_run: true,
@@ -1077,6 +1411,7 @@ export class GovernedForwarder implements McpForwarder {
       matched_rule: decision.matchedRule?.name ?? null,
       evidence_satisfied: evidenceSatisfied,
       limits_ok: limitsOk,
+      ...(budgets ? { budgets } : {}),
     }
     const body = {
       jsonrpc: '2.0' as const,

@@ -1030,4 +1030,162 @@ describe('helioConfigSchema', () => {
       expect(result.success).toBe(true)
     })
   })
+
+  describe('budgets (issue #14)', () => {
+    const validBudget = {
+      name: 'daily-cap',
+      limit: 50,
+      currency: 'USD',
+      window: '24h',
+      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    }
+
+    function withBudgets(budgets: unknown[], extra: Record<string, unknown> = {}) {
+      return minimalConfig({ budgets, ...extra })
+    }
+
+    it('defaults to an empty list when absent', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.budgets).toEqual([])
+    })
+
+    it('parses a duration-window budget and applies defaults', () => {
+      const result = helioConfigSchema.safeParse(withBudgets([validBudget]))
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      const budget = result.data.budgets[0]
+      expect(budget?.key).toBe('global')
+      expect(budget?.on_exceed).toBe('deny')
+    })
+
+    it('accepts window: session with key: session', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'session', key: 'session' }]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts window: session with key: sender_id when the sideband is enabled', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'session', key: 'sender_id' }], {
+          sdk: { enabled: true },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects window: session with key: global (explicit)', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'session', key: 'global' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects window: session with the default key', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'session' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('accepts idle_ttl on session windows', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'session', key: 'session', idle_ttl: '12h' }]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects idle_ttl on duration windows', () => {
+      const result = helioConfigSchema.safeParse(withBudgets([{ ...validBudget, idle_ttl: '12h' }]))
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects key: sender_id when the sideband is disabled', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, key: 'sender_id' }]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const paths = result.error.issues.map((i) => i.path.join('.'))
+      expect(paths).toContain('budgets.0.key')
+    })
+
+    it('rejects duplicate budget names', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([validBudget, { ...validBudget, window: '1h' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects an empty contributors list', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, contributors: [] }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects unknown budget fields (strict)', () => {
+      const result = helioConfigSchema.safeParse(withBudgets([{ ...validBudget, surprise: true }]))
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects unknown contributor fields (strict)', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          { ...validBudget, contributors: [{ tool: 'a_*', field: '$.x', currency: 'USD' }] },
+        ]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects on_exceed: require_approval (ships in a later change)', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, on_exceed: 'require_approval' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('accepts on_exceed: deny explicitly', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, on_exceed: 'deny' }]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects an approval block (only meaningful with require_approval)', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, approval: { channel: 'dashboard' } }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects a non-positive limit', () => {
+      const zero = helioConfigSchema.safeParse(withBudgets([{ ...validBudget, limit: 0 }]))
+      const negative = helioConfigSchema.safeParse(withBudgets([{ ...validBudget, limit: -5 }]))
+      expect(zero.success).toBe(false)
+      expect(negative.success).toBe(false)
+    })
+
+    it('rejects a window that is neither a duration nor "session"', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, window: 'monthly' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects an empty budget name', () => {
+      const result = helioConfigSchema.safeParse(withBudgets([{ ...validBudget, name: '' }]))
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects budget names with delimiter characters', () => {
+      // Names are embedded in bucket keys; a ":" could forge scope segments.
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, name: 'evil:sender:x' }]),
+      )
+      expect(result.success).toBe(false)
+    })
+  })
 })

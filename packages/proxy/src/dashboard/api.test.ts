@@ -752,6 +752,20 @@ describe('GET /api/limits', () => {
     expect(body.spend_limits).toEqual([])
   })
 
+  it('labels spend buckets with the rule-discriminated key', async () => {
+    const { get, spendLimiter } = setup()
+    spendLimiter.check({
+      key: 'session:abc:rule:2',
+      amount: 5,
+      limit: 20,
+      windowMs: 60_000,
+    })
+    const res = await get('/api/limits')
+    const body = (await res.json()) as { spend_limits: Array<{ key: string }> }
+    expect(body.spend_limits).toHaveLength(1)
+    expect(body.spend_limits[0]?.key).toBe('session:abc:rule:2')
+  })
+
   it('returns rate limit state after checks', async () => {
     const { get, rateLimiter } = setup()
     rateLimiter.check({ key: 'tool:send_email', maxCalls: 10, windowMs: 60_000 })

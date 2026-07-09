@@ -5,6 +5,8 @@ import type { HelioConfig } from './schema.js'
 import { diffReloadBoundary } from './reload-boundary.js'
 import { compilePolicies } from '../policy/parser.js'
 import type { CompiledPolicy, PolicyParseWarning } from '../policy/types.js'
+import { compileBudgets } from '../budget/parser.js'
+import type { CompiledBudget } from '../budget/types.js'
 
 // ---------------------------------------------------------------------------
 // ConfigWatcher — hot-reload policy rules on helio.yaml changes.
@@ -14,11 +16,12 @@ import type { CompiledPolicy, PolicyParseWarning } from '../policy/types.js'
 export interface ConfigWatcherOptions {
   /** Absolute or relative path to helio.yaml. */
   readonly configPath: string
-  /** Called with the new compiled policy on successful reload. */
+  /** Called with the new compiled policy and budgets on successful reload. */
   readonly onPolicyReload: (
     policy: CompiledPolicy,
     warnings: readonly PolicyParseWarning[],
     restartRequiredPaths: readonly string[],
+    budgets: readonly CompiledBudget[],
   ) => void
   /** Called when a reload attempt fails (parse, validation, or compile error). */
   readonly onError: (error: Error) => void
@@ -98,11 +101,12 @@ export class ConfigWatcher {
     try {
       const config = await loadConfig(this.configPath, this.env)
       const { policy, warnings } = compilePolicies(config.policies)
+      const budgets = compileBudgets(config.budgets)
       const restartRequiredPaths =
         this.initialConfig !== undefined
           ? diffReloadBoundary(this.initialConfig, config).restartRequiredPaths
           : []
-      this.onPolicyReload(policy, warnings, restartRequiredPaths)
+      this.onPolicyReload(policy, warnings, restartRequiredPaths, budgets)
     } catch (err) {
       if (err instanceof Error) {
         this.onError(err)

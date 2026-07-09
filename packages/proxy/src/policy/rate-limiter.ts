@@ -138,7 +138,7 @@ export class RateLimiter {
 
     // Emit warning when approaching the limit
     if (this.onWarning && current / maxCalls >= this.warningThreshold) {
-      this.onWarning({ key, current, limit: maxCalls, window_ms: windowMs, reset_at_ms: resetAtMs })
+      this.safeWarn({ key, current, limit: maxCalls, window_ms: windowMs, reset_at_ms: resetAtMs })
     }
 
     return {
@@ -186,7 +186,7 @@ export class RateLimiter {
     const resetAtMs = (bucket.timestamps[0] ?? now) + windowMs
 
     if (this.onWarning && current <= maxCalls && current / maxCalls >= this.warningThreshold) {
-      this.onWarning({ key, current, limit: maxCalls, window_ms: windowMs, reset_at_ms: resetAtMs })
+      this.safeWarn({ key, current, limit: maxCalls, window_ms: windowMs, reset_at_ms: resetAtMs })
     }
 
     return {
@@ -333,6 +333,22 @@ export class RateLimiter {
   }
 
   /** Stop the cleanup timer and mark as closed. */
+  /**
+   * Invoke the warning callback without letting a subscriber throw into the
+   * limiter's caller: a warning fires after state has already mutated, and a
+   * governed call must not be blocked (or double-charged on retry) by an
+   * observability bug.
+   */
+  private safeWarn(state: RateLimitKeyState): void {
+    if (!this.onWarning) return
+    try {
+      this.onWarning(state)
+    } catch (err) {
+      // eslint-disable-next-line no-console -- Subscriber bugs must not affect enforcement
+      console.error('[helio] limit warning subscriber threw:', err)
+    }
+  }
+
   close(): void {
     if (this.closed) return
     this.closed = true

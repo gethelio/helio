@@ -309,6 +309,67 @@ const policiesSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Budgets (issue #14) — named cross-tool spend budgets, independent of rules
+// ---------------------------------------------------------------------------
+
+const budgetContributorSchema = z
+  .object({
+    tool: z.string().min(1), // picomatch glob, same engine as match.tool
+    field: z.string().min(1), // dot-path into tool arguments, e.g. "$.amount"
+  })
+  .strict()
+
+const budgetSchema = z
+  .object({
+    // The name is embedded in bucket keys (`budget:<name>:<scope>`) and, later,
+    // ledger rows — constrain it so keys stay parseable and scope classification
+    // (e.g. the sender-key cardinality guard) cannot be confused by delimiters.
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-zA-Z0-9_-]+$/, {
+        message: 'Budget names may only contain letters, digits, "_" and "-"',
+      }),
+    limit: z.number().positive(),
+    currency: z.string().min(1),
+    /** A sliding duration ("1h", "7d") or "session" (a depleting pot per session key). */
+    window: z.union([durationSchema, z.literal('session')]),
+    key: z.enum(['global', 'session', 'sender_id']).default('global'),
+    /**
+     * Break-glass (`require_approval`) ships later in this release train;
+     * until then the schema accepts only the default so the config surface
+     * never promises behavior that does not exist yet.
+     */
+    on_exceed: z.literal('deny').default('deny'),
+    /** Session windows only: idle time before a session pot is collected. Default 24h. */
+    idle_ttl: durationSchema.optional(),
+    contributors: z.array(budgetContributorSchema).min(1),
+  })
+  .strict()
+  .superRefine((budget, ctx) => {
+    if (budget.window === 'session' && budget.key === 'global') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['key'],
+        message:
+          'window: "session" requires key: "session" or "sender_id" — a global bucket with ' +
+          'session lifetime never replenishes and never ends. Pick a per-session or ' +
+          'per-sender scope, or use a duration window.',
+      })
+    }
+    if (budget.window !== 'session' && budget.idle_ttl !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['idle_ttl'],
+        message:
+          'idle_ttl only applies to window: "session" budgets. Duration windows expire ' +
+          'entries on their own; remove idle_ttl.',
+      })
+    }
+  })
+
+// ---------------------------------------------------------------------------
 // Approval channels (discriminated union)
 // ---------------------------------------------------------------------------
 
@@ -387,6 +448,9 @@ const helioConfigBaseSchema = z.object({
   dashboard: dashboardSchema.prefault({}),
   environment: z.string().optional(),
   policies: policiesSchema.prefault({}),
+  // Budgets sit beside policies deliberately: they are the second half of the
+  // governance declaration (policy decision → budget gate), not plumbing.
+  budgets: z.array(budgetSchema).default([]),
   approval: approvalSchema.prefault({}),
   audit: auditSchema.prefault({}),
   sdk: sdkSchema.prefault({}),
@@ -442,6 +506,33 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
         'dashboard.host must be a loopback address (127.0.0.1, localhost, or ::1) ' +
         'when dashboard.allow_open_mode is true and dashboard.api_secret is unset.',
     })
+  }
+
+  // Budgets (issue #14): names are the identity for hot-reload state
+  // preservation and persistence, so they must be unique; sender_id scoping
+  // mirrors the rule-limits sideband guard above.
+  const seenBudgetNames = new Set<string>()
+  for (const [budgetIndex, budget] of cfg.budgets.entries()) {
+    if (seenBudgetNames.has(budget.name)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['budgets', budgetIndex, 'name'],
+        message:
+          `Duplicate budget name "${budget.name}". Budget names are the identity that ` +
+          'preserves accrued spend across config edits — each budget needs its own.',
+      })
+    }
+    seenBudgetNames.add(budget.name)
+
+    if (!cfg.sdk.enabled && budget.key === 'sender_id') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['budgets', budgetIndex, 'key'],
+        message:
+          'budget key "sender_id" requires the SDK sideband (sdk.enabled: true) — ' +
+          'sender_id is supplied by hook adapters and is absent on the MCP path.',
+      })
+    }
   }
 
   const hasWebhookChannel = cfg.approval.channels.some((channel) => channel.type === 'webhook')
@@ -569,3 +660,9 @@ export type PoliciesConfig = z.infer<typeof policiesSchema>
 
 /** The audit section of the config. */
 export type AuditConfig = z.infer<typeof auditSchema>
+
+/** A single named budget from the `budgets` array (issue #14). */
+export type BudgetConfig = z.infer<typeof budgetSchema>
+
+/** The `budgets` section of the config. */
+export type BudgetsConfig = readonly BudgetConfig[]

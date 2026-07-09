@@ -24,6 +24,24 @@ function minimalConfig(overrides: Record<string, unknown> = {}): HelioConfig {
 // ---------------------------------------------------------------------------
 
 describe('diffReloadBoundary', () => {
+  it('does not require restart when budgets change (they hot-reload)', () => {
+    const previous = minimalConfig()
+    const next = minimalConfig({
+      budgets: [
+        {
+          name: 'cap',
+          limit: 50,
+          currency: 'USD',
+          window: '24h',
+          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+        },
+      ],
+    })
+
+    const diff = diffReloadBoundary(previous, next)
+    expect(diff.restartRequiredPaths).toEqual([])
+  })
+
   it('does not require restart when only policy rules change', () => {
     const previous = minimalConfig()
     const next = minimalConfig({

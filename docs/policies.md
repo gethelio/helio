@@ -419,6 +419,29 @@ Spend limits track cumulative monetary amounts extracted from tool call argument
     suggestion: 'Wait for the current window to reset or escalate to a human.'
 ```
 
+## Named Budgets (cross-tool)
+
+`spend_limit` rules cap what one rule's matched tools spend. **Named budgets** are the cross-tool layer: a first-class `budgets:` section, independent of rules, where one depleting pot aggregates spend across every tool its contributors match — Stripe and PayPal into one cap, each exposing the amount under its own field name.
+
+```yaml
+budgets:
+  - name: daily-cap
+    limit: 50
+    currency: USD
+    window: 24h
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
+```
+
+The ordering differs per door because only one of them can sequence gates in time. On the **MCP door** a call flows: policy decision → approval resolution (rule-level, if required) → budget gate → forward — a human can approve a call that the budget gate then checks with fresh numbers. The **sideband door** decides everything in one `/evaluate` round-trip, so budgets are checked at evaluate time: a budget breach is terminal there and preempts any approval ticket (the money gate forbids what the approver would have been asked to allow), while an allowed call's budget charges commit at `/audit` once the call actually executed. On both doors a deny rule denies before budgets are consulted, and dry-run peeks budgets without ever recording. The budget gate is all-or-nothing: every matching budget is peeked first, the call forwards only if all allow, and a denied call records nothing on any budget — including the rule-level rate/spend counters, which are only consumed when the call actually forwards. A denial returns structured feedback with `reason: budget_exceeded` and a `budgets` array listing every breached budget (name, `spent`, `remaining`, `reset_at`).
+
+`window: session` makes the pot deplete for the lifetime of a session key and never replenish on a timer; idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal. See the [configuration reference](./configuration.md#budgets) for the full schema and validation rules.
+
+`action: spend_limit` keeps working as the per-rule quick path; budgets are the cross-tool layer on top.
+
 ## Evidence Requirements
 
 Evidence grounding lets you require that certain information has been gathered before a tool call is allowed. Evidence is submitted by the [Python SDK](../packages/python-sdk/) via the sideband API.

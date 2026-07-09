@@ -13,6 +13,8 @@ import { QueueChannel } from '../approval/channels.js'
 import type { ApprovalChannel } from '../approval/types.js'
 import { RateLimiter } from './rate-limiter.js'
 import { SpendLimiter } from './spend-limiter.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3289,6 +3291,559 @@ describe('GovernedForwarder', () => {
   // -------------------------------------------------------------------------
   // spend_limit action
   // -------------------------------------------------------------------------
+
+  describe('budget gate (issue #14)', () => {
+    function createBudgetEngine(configs: Parameters<typeof compileBudgets>[0]) {
+      let time = 1_000_000
+      const advance = (ms: number) => {
+        time += ms
+      }
+      const engine = new BudgetEngine({
+        budgets: compileBudgets(configs),
+        now: () => time,
+        cleanupIntervalMs: 0,
+      })
+      return { engine, advance }
+    }
+
+    const stripeBudget = {
+      name: 'daily-cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global' as const,
+      on_exceed: 'deny' as const,
+      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    }
+
+    it('forwards and records on every matching budget when all allow', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([
+        stripeBudget,
+        { ...stripeBudget, name: 'weekly-cap', limit: 500, window: '7d' },
+      ])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(result.response.status).toBe(200)
+      const spent = engine.listStates().map((s) => s.buckets[0]?.spent)
+      expect(spent).toEqual([30, 30])
+    })
+
+    it('denies and records NOTHING when one budget breaches while another allows', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([
+        { ...stripeBudget, name: 'big', limit: 1000 },
+        { ...stripeBudget, name: 'small', limit: 10 },
+      ])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.code).toBe(-32001)
+      expect(error.data['blocked']).toBe(true)
+      expect(error.data['reason']).toBe('budget_exceeded')
+      const budgets = error.data['budgets'] as Array<Record<string, unknown>>
+      expect(budgets).toHaveLength(1)
+      expect(budgets[0]?.['name']).toBe('small')
+      expect(budgets[0]?.['remaining']).toBe(10)
+      expect(budgets[0]?.['attempted_amount']).toBe(50)
+      // Atomicity: neither budget recorded anything.
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+    })
+
+    it('does not consume rule rate counters when the budget gate denies', async () => {
+      const inner = mockForwarder()
+      const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const { engine } = createBudgetEngine([{ ...stripeBudget, limit: 10 }])
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'rate',
+            match: { tool: 'stripe_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        rateLimiter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(rateLimiter.getKeyState('tool:stripe_charge')).toBeUndefined()
+    })
+
+    it('does not consume rule spend buckets when the budget gate denies', async () => {
+      const inner = mockForwarder()
+      const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+      const { engine } = createBudgetEngine([{ ...stripeBudget, limit: 10 }])
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'rule-cap',
+            match: { tool: 'stripe_*' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: { field: '$.amount', limit: 1000, currency: 'USD', window: '1h' },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        spendLimiter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(spendLimiter.listKeyStates()).toEqual([])
+    })
+
+    it('records rule limits and budgets together when the call forwards', async () => {
+      const inner = mockForwarder()
+      const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+      const { engine } = createBudgetEngine([stripeBudget])
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'rule-cap',
+            match: { tool: 'stripe_*' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: { field: '$.amount', limit: 1000, currency: 'USD', window: '1h' },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        spendLimiter,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 40 }))
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(spendLimiter.getKeyState('tool:stripe_charge:rule:0')?.current_spend).toBe(40)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(40)
+    })
+
+    it('fails closed when a contributor amount is missing', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { note: 'no amt' }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.data['reason']).toBe('budget_exceeded')
+      const budgets = error.data['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['reason']).toBe('invalid_amount')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+    })
+
+    it('a deny decision never consults budgets', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const resolveSpy = vi.spyOn(engine, 'resolveCharges')
+      const policy = compile({
+        default: 'allow',
+        rules: [{ name: 'block', match: { tool: 'stripe_*' }, action: 'deny' }],
+      })
+      const governed = new GovernedForwarder(inner, policy, { budgetEngine: engine })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }))
+
+      expect(errorFromResult(result).data['reason']).toBe('policy_denied')
+      expect(resolveSpy).not.toHaveBeenCalled()
+    })
+
+    it('nameless tools/call never reaches the budget gate', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const resolveSpy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const request: McpRequest = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { arguments: { amount: 5 } },
+      }
+      await governed.forward(request)
+
+      expect(resolveSpy).not.toHaveBeenCalled()
+      expect(inner.forward).not.toHaveBeenCalled()
+    })
+
+    it('dry-run peeks budgets and records nothing', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([{ ...stripeBudget, limit: 10 }])
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', dry_run: true, rules: [] }),
+        { budgetEngine: engine },
+      )
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const body = result.response.body as { result: { content: Array<{ text: string }> } }
+      const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+      expect(payload['dry_run']).toBe(true)
+      expect(payload['would_forward']).toBe(false)
+      expect(payload['limits_ok']).toBe(false)
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+    })
+
+    it('exactly one of two concurrent calls wins the last rate slot', async () => {
+      const inner = mockForwarder()
+      const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'one-per-min',
+            match: { tool: 'send_email' },
+            action: 'rate_limit',
+            limits: { max_calls: 1, window: '1m' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter })
+
+      // Concurrent macrotask interleaving: an await between peek and record
+      // would let both calls see the free slot and both forward.
+      const [a, b] = await Promise.all([
+        governed.forward(toolsCallRequest('send_email', {}, 1)),
+        governed.forward(toolsCallRequest('send_email', {}, 2)),
+      ])
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      const blockedResults = [a, b].filter(
+        (r) => (r.response.body as { error?: unknown }).error !== undefined,
+      )
+      expect(blockedResults).toHaveLength(1)
+      expect(errorFromResult(blockedResults[0] as ForwardResult).data['reason']).toBe(
+        'rate_limited',
+      )
+    })
+
+    it('exactly one of two concurrent calls wins the last budget slot', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const [a, b] = await Promise.all([
+        governed.forward(toolsCallRequest('stripe_charge', { amount: 60 }, 1)),
+        governed.forward(toolsCallRequest('stripe_charge', { amount: 60 }, 2)),
+      ])
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      const blockedResults = [a, b].filter(
+        (r) => (r.response.body as { error?: unknown }).error !== undefined,
+      )
+      expect(blockedResults).toHaveLength(1)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+    })
+
+    it('blocks without consuming rule counters when the ledger write fails', async () => {
+      const inner = mockForwarder()
+      const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+      const failing = new BudgetEngine({
+        budgets: compileBudgets([stripeBudget]),
+        cleanupIntervalMs: 0,
+        ledger: {
+          commitAll: () => {
+            throw new Error('disk full')
+          },
+        },
+      })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'rule-cap',
+            match: { tool: 'stripe_*' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: { field: '$.amount', limit: 1000, currency: 'USD', window: '1h' },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: failing,
+        spendLimiter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 40 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.data['failure_class']).toBe('budget_ledger_write_failed')
+      // The fallible ledger commits first: neither the rule counter nor any
+      // budget bucket may be consumed by a call that never forwarded.
+      expect(spendLimiter.listKeyStates()).toEqual([])
+      expect(failing.listStates().flatMap((s) => s.buckets)).toEqual([])
+    })
+
+    it('keeps separate session pots per session key on the MCP door', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([
+        { ...stripeBudget, name: 'sc', window: 'session', key: 'session' as const },
+      ])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallWithSession('stripe_charge', 's1', { amount: 90 }))
+      // A different session gets its own full pot.
+      await governed.forward(toolsCallWithSession('stripe_charge', 's2', { amount: 90 }))
+      expect(inner.forward).toHaveBeenCalledTimes(2)
+
+      // s1's pot is nearly depleted; the next s1 call breaches.
+      inner.forward.mockClear()
+      const denied = await governed.forward(
+        toolsCallWithSession('stripe_charge', 's1', { amount: 20 }),
+      )
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(denied).data['reason']).toBe('budget_exceeded')
+      const keys = engine
+        .listStates()
+        .flatMap((s2) => s2.buckets)
+        .map((b) => b.bucket_key)
+        .sort()
+      expect(keys).toEqual(['budget:sc:session:s1', 'budget:sc:session:s2'])
+    })
+
+    it('runs the budget gate after an approved rule ticket', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const channels = new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]])
+      const router = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels,
+        queue,
+      })
+      const policy = compile({
+        default: 'allow',
+        rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        approvalRouter: router,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 40 }))
+      await vi.waitFor(() => {
+        expect(queue.list({ status: 'pending' })).toHaveLength(1)
+      })
+      const ticket = queue.list({ status: 'pending' })[0]
+      router.approve(ticket?.id ?? '', 'alice')
+      const result = await pending
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(result.response.status).toBe(200)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(40)
+      router.close()
+      queue.close()
+    })
+
+    it('denies after an approved rule ticket when the budget gate breaches', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([{ ...stripeBudget, limit: 10 }])
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const channels = new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]])
+      const router = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels,
+        queue,
+      })
+      const policy = compile({
+        default: 'allow',
+        rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        approvalRouter: router,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 40 }))
+      await vi.waitFor(() => {
+        expect(queue.list({ status: 'pending' })).toHaveLength(1)
+      })
+      router.approve(queue.list({ status: 'pending' })[0]?.id ?? '', 'alice')
+      const result = await pending
+
+      // The human approved the RULE gate; the money gate still denies.
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(engine.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+      router.close()
+      queue.close()
+    })
+
+    it('audits a ledger-write failure with its own block reason and evidence', async () => {
+      const inner = mockForwarder()
+      const failing = new BudgetEngine({
+        budgets: compileBudgets([stripeBudget]),
+        cleanupIntervalMs: 0,
+        ledger: {
+          commitAll: () => {
+            throw new Error('disk full')
+          },
+        },
+      })
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: failing,
+        auditWriter,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }))
+      auditWriter.flush()
+
+      const record = auditStore.list().records[0]
+      expect(record?.block_reason).toBe('budget_ledger_write_failed')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgets = chain['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['ledger_write_failed']).toBe(true)
+    })
+
+    it('returns the upstream result even when post-forward bookkeeping throws', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const evidenceStore = new EvidenceStore({ cleanupIntervalMs: 0 })
+      vi.spyOn(evidenceStore, 'recordToolCall').mockImplementation(() => {
+        throw new Error('bookkeeping bug')
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        evidenceStore,
+      })
+
+      const result = await governed.forward(
+        toolsCallWithSession('stripe_charge', 's1', { amount: 5 }),
+      )
+
+      // The upstream call and the budget commit happened; a bookkeeping bug
+      // must not turn that into an error the caller would retry.
+      expect(result.response.status).toBe(200)
+      expect((result.response.body as { error?: unknown }).error).toBeUndefined()
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(5)
+      evidenceStore.close()
+    })
+
+    it('reports real accrued spend on invalid-amount denials', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([stripeBudget])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+      const denied = await governed.forward(toolsCallRequest('stripe_charge', { note: 'x' }, 2))
+
+      const budgets = errorFromResult(denied).data['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['reason']).toBe('invalid_amount')
+      expect(budgets[0]?.['spent']).toBe(30)
+      expect(budgets[0]?.['remaining']).toBe(70)
+    })
+
+    it('audits a budget denial with block_reason and the budgets chain', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([{ ...stripeBudget, limit: 10 }])
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        auditWriter,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+      auditWriter.flush()
+
+      const record = auditStore.list().records[0]
+      expect(record?.block_reason).toBe('budget_exceeded')
+      expect(record?.policy_decision).toBe('allow')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgets = chain['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['name']).toBe('daily-cap')
+      expect(budgets[0]?.['allowed']).toBe(false)
+    })
+
+    it('threads the pre-generated audit id into the budget ledger rows', async () => {
+      const rows: Array<Record<string, unknown>> = []
+      const { engine } = createBudgetEngine([stripeBudget])
+      // Re-create with a capturing sink.
+      const capturing = new BudgetEngine({
+        budgets: compileBudgets([stripeBudget]),
+        cleanupIntervalMs: 0,
+        ledger: { commitAll: (batch) => rows.push(...(batch as never[])) },
+      })
+      void engine
+      const inner = mockForwarder()
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: capturing,
+        auditWriter,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }))
+      auditWriter.flush()
+
+      const record = auditStore.list().records[0]
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.['audit_record_id']).toBe(record?.id)
+      expect(rows[0]?.['origin']).toBe('mcp')
+      expect(rows[0]?.['kind']).toBe('spend')
+    })
+  })
 
   describe('spend_limit action', () => {
     function createSpendLimiter() {

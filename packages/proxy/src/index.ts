@@ -17,6 +17,17 @@ export { compilePolicies, PolicyParseError, matchRule, evaluatePolicy } from './
 export { GovernedForwarder } from './policy/index.js'
 export { RateLimiter } from './policy/index.js'
 export { SpendLimiter } from './policy/index.js'
+export { BudgetEngine, compileBudgets, BudgetParseError } from './budget/index.js'
+export type {
+  CompiledBudget,
+  CompiledBudgetContributor,
+  CompiledBudgetWindow,
+  BudgetState,
+  BudgetBucketState,
+  BudgetLedgerSink,
+  BudgetLedgerRow,
+  BudgetCommitEvent,
+} from './budget/index.js'
 export type {
   CompiledPolicy,
   CompiledPolicyRule,

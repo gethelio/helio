@@ -23,6 +23,7 @@ import {
 } from './approval/index.js'
 import { RateLimiter } from './policy/index.js'
 import { SpendLimiter } from './policy/index.js'
+import { BudgetEngine, compileBudgets } from './budget/index.js'
 import { parseDuration } from './config/schema.js'
 import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
 import type { AuditRecord } from './audit/index.js'
@@ -314,6 +315,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
     console.error(`Warning: policy ${label}: ${w.message}`)
   }
+  const budgets = compileBudgets(config.budgets)
 
   // Create dashboard event bus (used by all components for real-time events)
   const eventBus = new DashboardEventBus()
@@ -413,6 +415,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     },
   })
 
+  // One budget engine shared by both doors — one pot, MCP and sideband alike.
+  // Constructed even with zero budgets configured so a hot-reload can
+  // introduce budgets without a restart; the gate short-circuits when empty.
+  const budgetEngine = new BudgetEngine({ budgets })
+
   const governedForwarder = new GovernedForwarder(forwarder, policy, {
     environment: config.environment,
     auditWriter,
@@ -420,6 +427,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     approvalRouter,
     rateLimiter,
     spendLimiter,
+    budgetEngine,
   })
 
   const annotationPrime = await startAnnotationPrimeLoop(governedForwarder)
@@ -483,6 +491,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       approvalRouter,
       rateLimiter,
       spendLimiter,
+      budgetEngine,
       auditWriter,
       approvalTimeoutMs: parseDuration(config.approval.timeout),
       ttlMs: parseDuration(config.sdk.evaluation_ttl),
@@ -575,6 +584,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   )
   console.error(`Rate limits: enabled`)
   console.error(`Spend limits: enabled`)
+  const budgetCount = budgets.length
+  console.error(
+    `Budgets: ${String(budgetCount)} configured${budgetCount > 0 ? ` (${budgets.map((b) => b.name).join(', ')})` : ''}`,
+  )
   if (policy.dryRun) {
     console.error(`Dry-run: ENABLED (no requests will be forwarded to upstream)`)
   }
@@ -591,9 +604,14 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     configWatcher = new ConfigWatcher({
       configPath,
       initialConfig: config,
-      onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths) => {
+      onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
         governedForwarder.updatePolicy(newPolicy)
         governanceService?.updatePolicy(newPolicy)
+        budgetEngine.reconcile(newBudgets)
+        const budgetTotal = newBudgets.length
+        console.error(
+          `[helio] Budgets reloaded: ${String(budgetTotal)} budget${budgetTotal !== 1 ? 's' : ''}`,
+        )
         const count = newPolicy.rules.length
         console.error(
           `[helio] Policy reloaded: ${String(count)} rule${count !== 1 ? 's' : ''} (default: ${newPolicy.defaultAction})`,
@@ -637,6 +655,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     approvalQueue,
     rateLimiter,
     spendLimiter,
+    budgetEngine,
     closeDashboardApp,
     dashboardHandle,
     eventBus,
@@ -666,12 +685,14 @@ async function validateCommand(configPath: string): Promise<void> {
   try {
     const config = await loadConfig(configPath)
 
-    // Also compile policies to catch invalid globs, regex patterns, etc.
+    // Also compile policies and budgets to catch invalid globs, regex
+    // patterns, etc.
     const { warnings } = compilePolicies(config.policies)
     for (const w of warnings) {
       const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
       console.error(`Warning: policy ${label}: ${w.message}`)
     }
+    compileBudgets(config.budgets)
 
     if (config.dashboard.enabled && !getBundledDashboardDistPath()) {
       console.error(
@@ -807,6 +828,7 @@ function registerShutdown(
   approvalQueue?: ApprovalQueue,
   rateLimiter?: RateLimiter,
   spendLimiter?: SpendLimiter,
+  budgetEngine?: BudgetEngine,
   closeDashboardApp?: () => void,
   dashboardHandle?: ServerHandle,
   eventBus?: DashboardEventBus,
@@ -831,6 +853,7 @@ function registerShutdown(
       if (governanceService) governanceService.close()
       if (rateLimiter) rateLimiter.close()
       if (spendLimiter) spendLimiter.close()
+      if (budgetEngine) budgetEngine.close()
       if (approvalRouter) approvalRouter.close()
       if (approvalQueue) approvalQueue.close()
       if (dashboardHandle) await dashboardHandle.close()
