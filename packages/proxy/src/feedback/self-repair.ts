@@ -32,7 +32,14 @@ interface SelfRepairFeedbackBase {
   readonly blocked: true
   readonly reason: BlockReason
   readonly rule: string | null
+  /**
+   * @deprecated Emitted for one release as a compatibility alias of
+   * `rule_index` (issue #109) and removed in the next release. The camelCase
+   * name was the lone outlier in this otherwise snake_case wire family.
+   */
   readonly ruleIndex: number | null
+  /** Index of the matched rule in `policies.rules`, or null (issue #109). */
+  readonly rule_index: number | null
   readonly suggestion: string
   readonly retry_allowed: boolean
 }
@@ -145,11 +152,23 @@ export type SelfRepairFeedback =
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Extract rule name and index from a compiled rule. */
-function ruleInfo(rule?: CompiledPolicyRule): { rule: string | null; ruleIndex: number | null } {
+/**
+ * Extract rule name and index from a compiled rule.
+ *
+ * Emits the index under BOTH keys for the issue #109 dual-key window: this
+ * helper is the single alias site, so next release's removal of the
+ * deprecated `ruleIndex` touches only this return and the base interface.
+ */
+export function ruleInfo(rule?: CompiledPolicyRule): {
+  rule: string | null
+  ruleIndex: number | null
+  rule_index: number | null
+} {
+  const index = rule?.index ?? null
   return {
     rule: rule?.name ?? null,
-    ruleIndex: rule?.index ?? null,
+    ruleIndex: index,
+    rule_index: index,
   }
 }
 
@@ -166,18 +185,17 @@ function ruleInfo(rule?: CompiledPolicyRule): { rule: string | null; ruleIndex: 
  * 3. Auto-generated from template
  */
 export function buildPolicyDeniedFeedback(decision: PolicyDecision): PolicyDeniedFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
 
   const suggestion =
     decision.matchedRule?.feedback?.suggestion ??
     decision.matchedRule?.feedback?.message ??
-    `This action was denied by policy${rule ? ` (rule: "${rule}")` : ''}. Review the policy configuration or use an allowed tool instead.`
+    `This action was denied by policy${info.rule ? ` (rule: "${info.rule}")` : ''}. Review the policy configuration or use an allowed tool instead.`
 
   return {
     blocked: true,
     reason: 'policy_denied',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'deny',
     policy_reason: decision.reason,
     suggestion,
@@ -191,7 +209,7 @@ export function buildEvidenceMissingFeedback(
   evidenceResult: EvidenceCheckResult | undefined,
   dependencyResult: DependencyCheckResult | undefined,
 ): EvidenceMissingFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const missing = evidenceResult?.missing ?? []
 
   const suggestion =
@@ -202,8 +220,7 @@ export function buildEvidenceMissingFeedback(
   return {
     blocked: true,
     reason: 'evidence_missing',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'deny',
     missing_evidence: missing,
     expired_evidence: evidenceResult?.expired ?? [],
@@ -219,7 +236,7 @@ export function buildEvidenceExpiredFeedback(
   evidenceResult: EvidenceCheckResult | undefined,
   dependencyResult: DependencyCheckResult | undefined,
 ): EvidenceExpiredFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const expired = evidenceResult?.expired ?? []
 
   const suggestion =
@@ -230,8 +247,7 @@ export function buildEvidenceExpiredFeedback(
   return {
     blocked: true,
     reason: 'evidence_expired',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'deny',
     missing_evidence: evidenceResult?.missing ?? [],
     expired_evidence: expired,
@@ -247,7 +263,7 @@ export function buildDependencyMissingFeedback(
   evidenceResult: EvidenceCheckResult | undefined,
   dependencyResult: DependencyCheckResult | undefined,
 ): DependencyMissingFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const missing = dependencyResult?.missing ?? []
 
   const suggestion =
@@ -258,8 +274,7 @@ export function buildDependencyMissingFeedback(
   return {
     blocked: true,
     reason: 'dependency_missing',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'deny',
     missing_evidence: evidenceResult?.missing ?? [],
     expired_evidence: evidenceResult?.expired ?? [],
@@ -282,7 +297,7 @@ export function buildApprovalDeniedFeedback(
   deniedBy: string,
   denialReason?: string,
 ): ApprovalDeniedFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
 
   const suggestion =
     decision.matchedRule?.feedback?.suggestion ??
@@ -292,8 +307,7 @@ export function buildApprovalDeniedFeedback(
   return {
     blocked: true,
     reason: 'approval_denied',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'require_approval',
     denied_by: deniedBy,
     denial_reason: denialReason ?? null,
@@ -307,7 +321,7 @@ export function buildApprovalTimeoutFeedback(
   decision: PolicyDecision,
   timeoutMs: number,
 ): ApprovalTimeoutFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const timeoutSeconds = Math.round(timeoutMs / 1_000)
 
   const suggestion =
@@ -318,8 +332,7 @@ export function buildApprovalTimeoutFeedback(
   return {
     blocked: true,
     reason: 'approval_timeout',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'require_approval',
     timeout_seconds: timeoutSeconds,
     suggestion,
@@ -331,7 +344,7 @@ export function buildApprovalTimeoutFeedback(
 export function buildClientDisconnectedFeedback(
   decision: PolicyDecision,
 ): ClientDisconnectedFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const suggestion =
     decision.matchedRule?.feedback?.suggestion ??
     decision.matchedRule?.feedback?.message ??
@@ -340,8 +353,7 @@ export function buildClientDisconnectedFeedback(
   return {
     blocked: true,
     reason: 'client_disconnected',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'require_approval',
     suggestion,
     retry_allowed: true,
@@ -352,7 +364,7 @@ export function buildClientDisconnectedFeedback(
 export function buildShutdownCancelledFeedback(
   decision: PolicyDecision,
 ): ShutdownCancelledFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const suggestion =
     decision.matchedRule?.feedback?.suggestion ??
     decision.matchedRule?.feedback?.message ??
@@ -361,8 +373,7 @@ export function buildShutdownCancelledFeedback(
   return {
     blocked: true,
     reason: 'shutdown_cancelled',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'require_approval',
     suggestion,
     retry_allowed: true,
@@ -374,7 +385,7 @@ export function buildRateLimitedFeedback(
   decision: PolicyDecision,
   result: RateLimitResult,
 ): RateLimitedFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const windowSeconds = Math.round(result.windowMs / 1_000)
   const resetAt = new Date(result.resetAtMs).toISOString()
 
@@ -386,8 +397,7 @@ export function buildRateLimitedFeedback(
   return {
     blocked: true,
     reason: 'rate_limited',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'rate_limit',
     current_calls: result.current,
     max_calls: result.limit,
@@ -407,8 +417,7 @@ export function buildToolDriftFeedback(
   return {
     blocked: true,
     reason: 'tool_definition_drift',
-    rule: null,
-    ruleIndex: null,
+    ...ruleInfo(undefined),
     action,
     drifted_aspects: aspects,
     suggestion:
@@ -425,7 +434,7 @@ export function buildSpendLimitedFeedback(
   result: SpendLimitResult,
   currency: string,
 ): SpendLimitedFeedback {
-  const { rule, ruleIndex } = ruleInfo(decision.matchedRule)
+  const info = ruleInfo(decision.matchedRule)
   const windowSeconds = Math.round(result.windowMs / 1_000)
 
   // Invalid amount: input-level deny, no bucket state to surface. Retry is
@@ -436,8 +445,7 @@ export function buildSpendLimitedFeedback(
     return {
       blocked: true,
       reason: 'spend_limited',
-      rule,
-      ruleIndex,
+      ...info,
       action: 'spend_limit',
       current_spend: result.currentSpend,
       max_spend: result.limit,
@@ -462,8 +470,7 @@ export function buildSpendLimitedFeedback(
   return {
     blocked: true,
     reason: 'spend_limited',
-    rule,
-    ruleIndex,
+    ...info,
     action: 'spend_limit',
     current_spend: result.currentSpend,
     max_spend: result.limit,

@@ -527,7 +527,66 @@ describe('GovernanceService.audit', () => {
     const ev = service.evaluate(evalInput({ arguments: { cost: 10 } }))
     const id = ev.body['evaluation_id'] as string
     service.audit(auditInput(id, { actual_amount: 42 }), 'h')
-    expect(spendLimiter?.getKeyState('tool:send')?.current_spend).toBe(42)
+    expect(spendLimiter?.getKeyState('tool:send:rule:0')?.current_spend).toBe(42)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Spend bucket keys are rule-discriminated (issue #14 groundwork)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — rule-discriminated spend bucket keys', () => {
+  it('commits spend into the rule-discriminated bucket, not the shared key', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'sp',
+          match: { tool: 'send' },
+          action: 'spend_limit',
+          limits: { max_spend: { field: '$.cost', limit: 100, currency: 'USD', window: '1d' } },
+        },
+      ],
+    })
+    const { service, spendLimiter } = makeService({ policy, withLimiters: true })
+    const ev = service.evaluate(evalInput({ arguments: { cost: 10 } }))
+    const id = ev.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    expect(spendLimiter?.getKeyState('tool:send:rule:0')?.current_spend).toBe(10)
+    expect(spendLimiter?.getKeyState('tool:send')).toBeUndefined()
+  })
+
+  it('keeps the sender: prefix on discriminated sender-keyed spend buckets', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'sp-sender',
+          match: { tool: 'send' },
+          action: 'spend_limit',
+          limits: {
+            max_spend: {
+              field: '$.cost',
+              limit: 100,
+              currency: 'USD',
+              window: '1d',
+              key: 'sender_id',
+            },
+          },
+        },
+      ],
+    })
+    const { service, spendLimiter } = makeService({ policy, withLimiters: true })
+    const ev = service.evaluate(
+      evalInput({ arguments: { cost: 10 }, metadata: { sender_id: 'U7' } }),
+    )
+    const id = ev.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    // Suffix (not prefix) discrimination: the sender-key cardinality registry
+    // gates on the `sender:` prefix, which must survive the rule suffix.
+    expect(spendLimiter?.getKeyState('sender:U7:rule:0')?.current_spend).toBe(10)
   })
 })
 

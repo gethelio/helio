@@ -535,6 +535,66 @@ describe('SpendLimiter', () => {
       expect(limiter.getKeyState('tool:refund')).toBeUndefined()
     })
 
+    it('evicts a rule-suffixed bucket when its index no longer carries a matching tuple', () => {
+      const { limiter } = createLimiter()
+
+      // Spend rule at index 0 accrued state; a rule inserted above it moves it
+      // to index 1 on reload. The old-index bucket must not linger as an
+      // orphan (nothing reads it again) nor be adopted by whatever rule now
+      // sits at index 0.
+      limiter.check({ key: 'tool:pay:rule:0', amount: 300, limit: 1000, windowMs: 3_600_000 })
+      limiter.setCurrency('tool:pay:rule:0', 'USD')
+
+      limiter.reconcile([{ limit: 1000, currency: 'USD', windowMs: 3_600_000, ruleIndex: 1 }])
+
+      expect(limiter.getKeyState('tool:pay:rule:0')).toBeUndefined()
+    })
+
+    it('preserves a rule-suffixed bucket when the same index keeps the same tuple', () => {
+      const { limiter } = createLimiter()
+
+      limiter.check({ key: 'tool:pay:rule:2', amount: 300, limit: 1000, windowMs: 3_600_000 })
+      limiter.setCurrency('tool:pay:rule:2', 'USD')
+
+      limiter.reconcile([{ limit: 1000, currency: 'USD', windowMs: 3_600_000, ruleIndex: 2 }])
+
+      expect(limiter.getKeyState('tool:pay:rule:2')?.current_spend).toBe(300)
+    })
+
+    it('evicts a rule-suffixed bucket when the rule at its index changed tuple', () => {
+      const { limiter } = createLimiter()
+
+      // Two spend rules with different limits are swapped: the bucket at
+      // rule:0 must not be inherited by the rule that now sits at index 0.
+      limiter.check({ key: 'session:abc:rule:0', amount: 90, limit: 100, windowMs: 3_600_000 })
+      limiter.setCurrency('session:abc:rule:0', 'USD')
+
+      limiter.reconcile([
+        { limit: 5000, currency: 'USD', windowMs: 3_600_000, ruleIndex: 0 },
+        { limit: 100, currency: 'USD', windowMs: 3_600_000, ruleIndex: 1 },
+      ])
+
+      expect(limiter.getKeyState('session:abc:rule:0')).toBeUndefined()
+    })
+
+    it('matches suffixed buckets by index even when another index has the tuple', () => {
+      const { limiter } = createLimiter()
+
+      limiter.check({ key: 'tool:pay:rule:0', amount: 300, limit: 1000, windowMs: 3_600_000 })
+      limiter.setCurrency('tool:pay:rule:0', 'USD')
+      limiter.check({ key: 'tool:mail:rule:1', amount: 50, limit: 200, windowMs: 3_600_000 })
+      limiter.setCurrency('tool:mail:rule:1', 'USD')
+
+      // Index 0 keeps its tuple; index 1's tuple moved to index 2.
+      limiter.reconcile([
+        { limit: 1000, currency: 'USD', windowMs: 3_600_000, ruleIndex: 0 },
+        { limit: 200, currency: 'USD', windowMs: 3_600_000, ruleIndex: 2 },
+      ])
+
+      expect(limiter.getKeyState('tool:pay:rule:0')?.current_spend).toBe(300)
+      expect(limiter.getKeyState('tool:mail:rule:1')).toBeUndefined()
+    })
+
     it('is a no-op when there are no buckets', () => {
       const { limiter } = createLimiter()
 

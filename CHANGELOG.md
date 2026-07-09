@@ -41,6 +41,31 @@ Maintainer notes:
   `feedback`; gating decisions without configured feedback omit it, and a
   plain `allow` rule's feedback is never surfaced (a global dry-run that
   shadows an allowed call stays feedback-free).
+- **Each `spend_limit` rule now tracks its own bucket (#14 groundwork).**
+  Spend bucket keys carry a `:rule:<index>` suffix (for example
+  `session:abc:rule:2`), fixing a silent collision where two spend rules
+  sharing a scope — such as two session-keyed rules — pooled their spend in
+  one bucket with last-write-wins config and no currency guard. Hot-reload
+  reconciliation matches suffixed buckets at their own rule index, so a
+  config edit that shifts a spend rule's position evicts its bucket and the
+  rule starts a fresh window rather than stranding accrued spend under a
+  label no rule reads. Operator notes: bucket labels change in
+  `GET /api/limits`, `limit_warning` events, and denial messages; accrued
+  spend resets whenever a spend rule's position in the rules list changes;
+  and each sender-keyed `spend_limit` rule now holds its own slot in the
+  sideband's sender-key registry, so effective sender capacity is
+  `50,000 / (1 + sender-keyed spend rules)` instead of a flat 50,000. Rate
+  bucket keys are unchanged.
+
+### Changed
+
+- **MCP self-repair feedback renames `ruleIndex` to `rule_index` (#109).**
+  The `error.data` field carrying the matched rule's index now uses
+  `rule_index`, aligning the last camelCase holdout with the snake_case wire
+  convention used everywhere else (`matched_rule_index` on audit records and
+  `/evaluate`, `rule_index` on approval tickets). `ruleIndex` is still
+  emitted as a deprecated alias for this release and will be removed in the
+  next; migrate any agent self-repair handlers that read it.
 
 ## [0.9.0] - 2026-07-05
 

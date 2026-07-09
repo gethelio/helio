@@ -34,6 +34,7 @@ import type { ApprovalRouter, NativeResolution } from '../approval/router.js'
 import type { ApprovalAuditContext, ApprovalTicket } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
+import { spendBucketKey } from '../policy/spend-limiter.js'
 import { GovernanceConfigError } from './errors.js'
 
 // ---------------------------------------------------------------------------
@@ -1135,7 +1136,12 @@ export class GovernanceService {
     const maxSpend = decision.matchedRule?.limits?.maxSpend
     if (!this.spendLimiter || !maxSpend) return { allowed: true }
 
-    const key = buildLimitKey(maxSpend.key, toolName, sessionId, senderId)
+    // Spend buckets are rule-discriminated via the shared composer so both
+    // doors — which feed the same limiter — cannot drift apart on key format.
+    const key = spendBucketKey(
+      buildLimitKey(maxSpend.key, toolName, sessionId, senderId),
+      decision.matchedRule.index,
+    )
     const rawAmount = resolvePath(maxSpend.field, args ?? {})
     if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount) || rawAmount < 0) {
       // Invalid amount — terminal block (mirrors the MCP invalid-amount deny).

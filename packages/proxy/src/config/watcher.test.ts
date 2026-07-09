@@ -707,13 +707,13 @@ policies:
       method: 'tools/call',
       params: { name: 'create_payment', arguments: { amount: 600 } },
     })
-    expect(spendLimiter.getKeyState('tool:create_payment')?.current_spend).toBe(600)
+    expect(spendLimiter.getKeyState('tool:create_payment:rule:1')?.current_spend).toBe(600)
 
     // Benign rewrite — same limit. Spend state preserved.
     await writeFile(configPath, spendYaml(1000))
     await wait(500)
 
-    expect(spendLimiter.getKeyState('tool:create_payment')?.current_spend).toBe(600)
+    expect(spendLimiter.getKeyState('tool:create_payment:rule:1')?.current_spend).toBe(600)
 
     // A $500 follow-up would push us over 1000 → must be denied because we
     // remember the 600 we already spent.

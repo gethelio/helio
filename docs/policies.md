@@ -234,7 +234,7 @@ The request is blocked immediately. No upstream request is made. The response is
 }
 ```
 
-The `data` object also carries `ruleIndex` and `policy_reason`; the fields shown above are the ones an agent typically acts on.
+The `data` object also carries `rule_index` and `policy_reason`; the fields shown above are the ones an agent typically acts on. (`ruleIndex` is still emitted as a deprecated alias of `rule_index` for this release and will be removed in the next.)
 
 ### require_approval
 
@@ -451,7 +451,7 @@ When evidence is missing, the proxy returns self-repair feedback telling the age
 }
 ```
 
-The `data` object also carries `rule`, `ruleIndex`, `action`, `expired_evidence`, and `missing_dependencies`.
+The `data` object also carries `rule`, `rule_index` (plus its deprecated alias `ruleIndex`), `action`, `expired_evidence`, and `missing_dependencies`.
 
 Evidence entries have a configurable TTL (default: 300 seconds). If evidence has expired, the response includes `"reason": "evidence_expired"` with a suggestion to refresh it.
 

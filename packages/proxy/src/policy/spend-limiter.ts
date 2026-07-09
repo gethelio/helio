@@ -70,6 +70,23 @@ export interface SpendLimitKeyState {
   readonly reset_at_ms: number
 }
 
+/**
+ * Compose a spend bucket key discriminated by the matched rule's index.
+ *
+ * Two spend_limit rules sharing a scope (e.g. two session-keyed rules) must
+ * not share a bucket — the shared key had last-write-wins config and no
+ * currency guard. The suffix — not a prefix — keeps the sideband's
+ * `sender:`-prefixed cardinality accounting working. Both doors MUST build
+ * spend keys through this function: they feed the same limiter instance, so
+ * key-format agreement is load-bearing (issue #14 groundwork).
+ */
+export function spendBucketKey(baseKey: string, ruleIndex: number): string {
+  return `${baseKey}:rule:${String(ruleIndex)}`
+}
+
+/** Parse the rule index out of a key built by {@link spendBucketKey}. */
+const RULE_SUFFIX_RE = /:rule:(\d+)$/
+
 /** A single spend entry: timestamp + amount. */
 interface SpendEntry {
   timestamp: number
@@ -405,21 +422,43 @@ export class SpendLimiter {
    * whose config is gone (rule changed or removed) are evicted so the next
    * check lazy-creates a fresh bucket under the new config.
    *
+   * Keys built by {@link spendBucketKey} carry the owning rule's index, and
+   * for those the tuple must match at THAT index (`config.ruleIndex`): a
+   * reorder that shifts a spend rule's index evicts its old-index bucket
+   * instead of leaving an orphan no rule reads again — or worse, letting
+   * whatever rule now sits at that index adopt another rule's accrued spend.
+   * Un-suffixed keys keep the tuple-anywhere match.
+   *
    * Currency is part of the tuple because a USD→EUR switch is a meaningful
    * policy change — the same numeric limit buys a different amount of real
    * spend, so the bucket must reset. This replaces the old `reset()` call
    * on every hot-reload, which wiped all state even when the matching rule
    * was unchanged.
    */
-  reconcile(validConfigs: Iterable<{ limit: number; currency: string; windowMs: number }>): void {
+  reconcile(
+    validConfigs: Iterable<{
+      limit: number
+      currency: string
+      windowMs: number
+      ruleIndex?: number
+    }>,
+  ): void {
     const valid = new Set<string>()
+    const byIndex = new Map<number, string>()
     for (const config of validConfigs) {
-      valid.add(`${String(config.limit)}|${config.currency}|${String(config.windowMs)}`)
+      const tuple = `${String(config.limit)}|${config.currency}|${String(config.windowMs)}`
+      if (config.ruleIndex === undefined) {
+        valid.add(tuple)
+      } else {
+        byIndex.set(config.ruleIndex, tuple)
+      }
     }
 
     for (const [key, bucket] of this.buckets) {
       const tuple = `${String(bucket.limit)}|${bucket.currency}|${String(bucket.windowMs)}`
-      if (!valid.has(tuple)) {
+      const suffix = RULE_SUFFIX_RE.exec(key)
+      const survives = suffix ? byIndex.get(Number(suffix[1])) === tuple : valid.has(tuple)
+      if (!survives) {
         this.buckets.delete(key)
       }
     }
