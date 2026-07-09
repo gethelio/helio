@@ -22,7 +22,9 @@ const originSchema = z
 const metadataSchema = z.record(z.string(), z.unknown()).nullish()
 
 const toolDefinitionSchema = z.object({
-  name: z.string().min(1),
+  // Stored verbatim in pending entries and audit rows; capped so a
+  // caller-minted name cannot inflate the pending-entry footprint.
+  name: z.string().min(1).max(256),
   description: z.string().optional(),
   input_schema: z.unknown().optional(),
   output_schema: z.unknown().optional(),
@@ -33,8 +35,10 @@ const toolDefinitionSchema = z.object({
 const evaluateBody = z.object({
   origin: originSchema,
   adapter_version: z.string().max(64).optional(),
-  agent_id: z.string().nullish(),
-  session_id: z.string().nullish(),
+  // Stored in pending entries and limit bucket keys; capped (like origin and
+  // adapter_version) so caller-minted ids cannot inflate memory unaccounted.
+  agent_id: z.string().max(128).nullish(),
+  session_id: z.string().max(256).nullish(),
   tool: toolDefinitionSchema,
   arguments: z.record(z.string(), z.unknown()).optional(),
   metadata: metadataSchema,
@@ -42,8 +46,8 @@ const evaluateBody = z.object({
 
 const installScanBody = z.object({
   origin: originSchema,
-  agent_id: z.string().nullish(),
-  session_id: z.string().nullish(),
+  agent_id: z.string().max(128).nullish(),
+  session_id: z.string().max(256).nullish(),
   package: z.object({
     name: z.string().min(1),
     version: z.string().optional(),

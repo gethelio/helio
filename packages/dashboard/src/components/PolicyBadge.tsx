@@ -19,6 +19,7 @@ const COLORS: Record<string, string> = {
   shutdown_cancelled: 'bg-slate-100 text-slate-700 ring-slate-500/20',
   rate_limited: 'bg-orange-50 text-orange-700 ring-orange-600/20',
   spend_limited: 'bg-purple-50 text-purple-700 ring-purple-600/20',
+  budget_exceeded: 'bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-600/20',
   dry_run: 'bg-blue-50 text-blue-700 ring-blue-600/20',
 }
 

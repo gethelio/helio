@@ -35,6 +35,8 @@ import type { ApprovalAuditContext, ApprovalTicket } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
 import { spendBucketKey } from '../policy/spend-limiter.js'
+import type { BudgetEngine, BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
+import type { CompiledBudget } from '../budget/types.js'
 import { GovernanceConfigError } from './errors.js'
 
 // ---------------------------------------------------------------------------
@@ -73,6 +75,7 @@ export type WireDecision =
   | 'require_approval'
   | 'rate_limited'
   | 'spend_limited'
+  | 'budget_exceeded'
   | 'dry_run'
 
 /** Tool definition carried by /evaluate (optional; enables the drift guard). */
@@ -175,6 +178,19 @@ interface LimitPlan {
   readonly currency?: string
 }
 
+/** A budget's share of a call, frozen at /evaluate and committed at /audit. */
+interface BudgetPlan {
+  readonly kind: 'budget'
+  readonly budget: CompiledBudget
+  readonly bucketKey: string
+  readonly amount: number
+  /** Config generation at evaluate time; stale charges are skipped at commit. */
+  readonly generation: number
+}
+
+/** Everything /audit must commit once the call actually executed. */
+type Plan = LimitPlan | BudgetPlan
+
 interface PendingEvaluation {
   readonly evaluationId: string
   readonly origin: string
@@ -187,7 +203,20 @@ interface PendingEvaluation {
   readonly matchedRuleName: string | null
   readonly matchedRuleIndex: number | null
   readonly flaggedDestructive: boolean
-  readonly limitPlan: LimitPlan | undefined
+  readonly plans: readonly Plan[]
+  /**
+   * Set once the plans have been committed (mutable latch): a throw AFTER the
+   * commit (evidence, audit write) surfaces as a 500 the adapter retries, and
+   * the retry must reuse this state instead of committing a second time.
+   */
+  commitState?: {
+    auditId: string
+    limitsChain: Record<string, unknown> | undefined
+    /** Hash of the payload that performed the commit — a retry with a
+     * DIFFERENT payload must 409 rather than finalize audit data that
+     * disagrees with the committed amounts. */
+    payloadHash: string
+  }
   readonly approvalTicketId: string | undefined
   readonly timestampIso: string
   readonly createdAtMs: number
@@ -222,6 +251,8 @@ export interface GovernanceServiceOptions {
   readonly approvalRouter?: ApprovalRouter
   readonly rateLimiter?: RateLimiter
   readonly spendLimiter?: SpendLimiter
+  /** Budget engine for named cross-tool budgets (issue #14). */
+  readonly budgetEngine?: BudgetEngine
   readonly auditWriter?: AuditWriter
   /** Default approval timeout (ms) when a rule sets none. */
   readonly approvalTimeoutMs?: number
@@ -250,6 +281,7 @@ export class GovernanceService {
   private readonly approvalRouter: ApprovalRouter | undefined
   private readonly rateLimiter: RateLimiter | undefined
   private readonly spendLimiter: SpendLimiter | undefined
+  private readonly budgetEngine: BudgetEngine | undefined
   private readonly auditWriter: AuditWriter | undefined
   private readonly approvalTimeoutMs: number
   private readonly ttlMs: number
@@ -284,6 +316,7 @@ export class GovernanceService {
     this.approvalRouter = options.approvalRouter
     this.rateLimiter = options.rateLimiter
     this.spendLimiter = options.spendLimiter
+    this.budgetEngine = options.budgetEngine
     this.auditWriter = options.auditWriter
     this.approvalTimeoutMs = options.approvalTimeoutMs ?? 300_000
     this.ttlMs = options.ttlMs ?? 600_000
@@ -328,8 +361,18 @@ export class GovernanceService {
       return { status: 413, body: { error: 'tool_input_too_large' } }
     }
     // Account for this entry's footprint up front so the global cap cannot be
-    // overshot by the entry that crosses it.
-    const entryBytes = inputBytes + byteLength(req.metadata ?? {})
+    // overshot by the entry that crosses it. Every stored caller-controlled
+    // string counts — tool name, agent id, session id — not just the two
+    // object payloads (the route also length-caps each of them).
+    const entryBytes =
+      inputBytes +
+      byteLength(req.metadata ?? {}) +
+      byteLength({
+        tool: req.tool.name,
+        agent_id: req.agent_id,
+        session_id: req.session_id,
+        origin: req.origin,
+      })
     if (!this.caches.has(req.origin) && this.caches.size >= MAX_ORIGINS) {
       return { status: 400, body: { error: 'origin_limit_exceeded' } }
     }
@@ -377,8 +420,19 @@ export class GovernanceService {
 
     // Resolve the limit step (peek — never consume at /evaluate).
     let wire: WireDecision
-    let limitPlan: LimitPlan | undefined
+    const plans: Plan[] = []
     let limitsBlock: Record<string, unknown> | undefined
+    // Sender-key slots inserted by THIS call, released if a later gate 503s.
+    const reservedThisCall: string[] = []
+    const reserve = (key: string): boolean => {
+      const preexisting = this.senderKeys.has(key)
+      if (!this.reserveSenderKey(key)) return false
+      if (!preexisting && this.senderKeys.has(key)) reservedThisCall.push(key)
+      return true
+    }
+    const releaseReservations = (): void => {
+      for (const key of reservedThisCall) this.senderKeys.delete(key)
+    }
 
     // sender_id is sourced from adapter metadata (host-enforced path only).
     const senderId = senderIdOf(req.metadata)
@@ -391,22 +445,87 @@ export class GovernanceService {
       wire = 'require_approval'
     } else if (decision.action === 'rate_limit') {
       const planned = this.planRate(decision, toolName, req.session_id, senderId)
-      if (planned?.plan && !this.reserveSenderKey(planned.plan.key)) {
+      if (planned?.plan && !reserve(planned.plan.key)) {
         return { status: 503, body: { error: 'limit_capacity_exhausted' } }
       }
-      limitPlan = planned?.plan
+      if (planned?.plan) plans.push(planned.plan)
       limitsBlock = planned?.block ? { rate: planned.block } : undefined
       wire = planned?.allowed ? 'allow' : 'rate_limited'
     } else if (decision.action === 'spend_limit') {
       const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
-      if (planned?.plan && !this.reserveSenderKey(planned.plan.key)) {
+      if (planned?.plan && !reserve(planned.plan.key)) {
         return { status: 503, body: { error: 'limit_capacity_exhausted' } }
       }
-      limitPlan = planned?.plan
+      if (planned?.plan) plans.push(planned.plan)
       limitsBlock = planned?.block ? { spend: planned.block } : undefined
       wire = planned?.allowed ? 'allow' : 'spend_limited'
     } else {
       wire = 'allow'
+    }
+
+    // Budget gate (issue #14): peek every matching budget, all-or-nothing.
+    // Runs for calls that could still execute (allow / require_approval) and
+    // as a pure peek for dry-run. A deny-breach is terminal even under a
+    // require_approval rule — the money gate forbids what the approver would
+    // be asked to allow, and this release only ships on_exceed: deny.
+    let budgetsBlock: Array<Record<string, unknown>> | undefined
+    let budgetDryRunOk = true
+    let budgetDenial: { breached: string[]; invalid: string[] } | undefined
+    if (
+      this.budgetEngine &&
+      (wire === 'allow' || wire === 'require_approval' || wire === 'dry_run')
+    ) {
+      const { charges, failures } = this.budgetEngine.resolveCharges({
+        toolName,
+        toolArguments: req.arguments,
+        sessionId: req.session_id,
+        senderId,
+      })
+
+      if (charges.length > 0 || failures.length > 0) {
+        // Peek the valid charges even when failures deny the call: the
+        // response must show every failure AND every simultaneous breach.
+        const peek =
+          charges.length > 0
+            ? this.budgetEngine.peekAll(charges)
+            : { allowed: true, entries: [] as BudgetPeekEntry[] }
+        budgetsBlock = [
+          ...peek.entries.map((entry) => budgetWireBlock(entry)),
+          ...failures.map((failure) => budgetFailureBlock(failure)),
+        ]
+
+        if (failures.length > 0 || !peek.allowed) {
+          budgetDryRunOk = false
+          if (wire !== 'dry_run') {
+            releaseReservations()
+            plans.length = 0
+            wire = 'budget_exceeded'
+            budgetDenial = {
+              breached: peek.entries
+                .filter((entry) => !entry.allowed)
+                .map((entry) => entry.budget.name),
+              invalid: failures.map((failure) => failure.budget.name),
+            }
+          }
+        } else if (wire !== 'dry_run') {
+          for (const charge of charges) {
+            if (!reserve(charge.bucketKey)) {
+              releaseReservations()
+              return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+            }
+            plans.push({
+              kind: 'budget',
+              budget: charge.budget,
+              bucketKey: charge.bucketKey,
+              amount: charge.amount,
+              generation: charge.generation,
+            })
+          }
+        }
+      }
+    }
+    if (budgetsBlock) {
+      limitsBlock = { ...(limitsBlock ?? {}), budgets: budgetsBlock }
     }
 
     const matchedRuleName = decision.matchedRule?.name ?? null
@@ -422,12 +541,27 @@ export class GovernanceService {
     if (shouldAttachFeedback(wire, decision)) {
       responseBody['feedback'] = buildFeedback(decision.matchedRule, decision.reason)
     }
+    if (wire === 'budget_exceeded' && budgetDenial) {
+      // Budget-specific by design: the matched rule's feedback (and the
+      // decision reason, which may literally say the call was allowed)
+      // describes the RULE, not the budget that denied the call.
+      responseBody['feedback'] = {
+        message:
+          budgetDenial.invalid.length > 0
+            ? `Budget ${budgetDenial.invalid.map((n) => `"${n}"`).join(', ')} could not read a valid spend amount from this call`
+            : `Budget ${budgetDenial.breached.map((n) => `"${n}"`).join(', ')} would be exceeded by this call`,
+        suggestion:
+          budgetDenial.invalid.length > 0
+            ? 'Retry with a non-negative finite amount in the expected field.'
+            : 'Wait for the window to reset or reduce the amount.',
+      }
+    }
     if (limitsBlock) responseBody['limits'] = limitsBlock
     if (wire === 'dry_run') {
       responseBody['dry_run'] = {
-        would_forward: decision.action === 'allow' && !pipeline.evidenceBlocked,
+        would_forward: decision.action === 'allow' && !pipeline.evidenceBlocked && budgetDryRunOk,
         evidence_satisfied: !pipeline.evidenceBlocked,
-        limits_ok: true,
+        limits_ok: budgetDryRunOk,
       }
     }
     if (pipeline.driftEvent) {
@@ -460,6 +594,18 @@ export class GovernanceService {
         expiresAtMs: this.now() + this.ttlMs,
       })
       return { status: 200, body: responseBody }
+    }
+
+    // The admission check above ran before planning; the plans list (and its
+    // caller-influenced bucket keys) is part of the entry's real footprint,
+    // so re-check the byte cap with it counted BEFORE creating any approval
+    // ticket — a late refusal must not leave an orphaned native ticket
+    // (amended per implementation review). Over the cap → release this
+    // call's sender reservations and refuse.
+    const totalBytes = entryBytes + planBytes(plans)
+    if (this.pendingBytes + totalBytes > this.maxPendingBytes) {
+      releaseReservations()
+      return { status: 503, body: { error: 'evaluation_backlog_full' } }
     }
 
     // allow / require_approval → pending entry awaiting /audit.
@@ -507,16 +653,16 @@ export class GovernanceService {
       matchedRuleName,
       matchedRuleIndex,
       flaggedDestructive: pipeline.flaggedDestructive,
-      limitPlan,
+      plans,
       approvalTicketId,
       timestampIso,
       createdAtMs: this.now(),
       evaluationExpiresAtMs: this.now() + this.ttlMs,
       ticketTimeoutAtMs,
-      bytes: entryBytes,
+      bytes: totalBytes,
     }
     this.pending.set(evaluationId, entry)
-    this.pendingBytes += entryBytes
+    this.pendingBytes += totalBytes
     if (approvalTicketId) this.ticketToEvaluation.set(approvalTicketId, evaluationId)
 
     return { status: 200, body: responseBody }
@@ -603,17 +749,39 @@ export class GovernanceService {
       if (!Number.isFinite(req.actual_amount) || req.actual_amount < 0) {
         return { status: 400, body: { error: 'invalid_actual_amount' } }
       }
-      if (entry.limitPlan?.kind !== 'spend') {
+      // The override applies to anything that tracks this call's money: the
+      // spend-rule plan and every budget plan (a call has one true cost).
+      const hasMoneyPlan = entry.plans.some(
+        (plan) => plan.kind === 'spend' || plan.kind === 'budget',
+      )
+      if (!hasMoneyPlan) {
         return { status: 400, body: { error: 'no_spend_rule' } }
       }
     }
 
     const callHappened = req.status === 'success' || req.status === 'error'
 
-    // Consume limit counters now — only when the call actually executed.
-    let limitsChain: Record<string, unknown> | undefined
-    if (callHappened && entry.limitPlan) {
-      limitsChain = this.commitLimit(entry.limitPlan, req.actual_amount)
+    // Pre-generated so budget ledger rows can reference the audit record; a
+    // retry after a post-commit failure reuses the latched id so the rows
+    // already written keep pointing at the record that finally lands.
+    // A post-commit retry must present the SAME payload the commit ran with;
+    // anything else would finalize an audit row inconsistent with the
+    // committed amounts (same contract as the tombstone replay path).
+    if (entry.commitState && entry.commitState.payloadHash !== payloadHash) {
+      return { status: 409, body: { error: 'evaluation_conflict' } }
+    }
+
+    const auditId = entry.commitState?.auditId ?? randomUUID()
+
+    // Consume limit counters now — only when the call actually executed. All
+    // plans of the call commit together. A budget ledger failure throws out
+    // of audit() BEFORE the latch is set, so the retry re-attempts the whole
+    // commit; any failure AFTER the latch (evidence, audit write) makes the
+    // retry skip straight past the commit — exactly-once either way.
+    let limitsChain = entry.commitState?.limitsChain
+    if (callHappened && entry.plans.length > 0 && !entry.commitState) {
+      limitsChain = this.commitPlans(entry, req.actual_amount, auditId)
+      entry.commitState = { auditId, limitsChain, payloadHash }
     }
 
     // Record the tool call for evidence/dependency tracking.
@@ -628,7 +796,8 @@ export class GovernanceService {
     // would be worse than a dropped evidence entry.
     const evidenceOutcomes = this.populateEvidence(req, entry)
 
-    const auditId = this.writeAudit({
+    this.writeAudit({
+      id: auditId,
       timestampIso: entry.timestampIso,
       origin: entry.origin,
       agentId: entry.agentId,
@@ -965,7 +1134,7 @@ export class GovernanceService {
    * closed, so an emptied bucket frees its slot without waiting for the sweep.
    */
   private reserveSenderKey(key: string): boolean {
-    if (!key.startsWith('sender:')) return true
+    if (!isSenderScopedKey(key)) return true
     if (this.senderKeys.has(key)) return true
     if (this.hasLiveBucket(key)) {
       this.senderKeys.add(key)
@@ -984,8 +1153,9 @@ export class GovernanceService {
     if (this.senderKeys.size === 0) return
     const inUse = new Set<string>()
     for (const entry of this.pending.values()) {
-      if (entry.limitPlan && entry.limitPlan.key.startsWith('sender:')) {
-        inUse.add(entry.limitPlan.key)
+      for (const plan of entry.plans) {
+        const key = plan.kind === 'budget' ? plan.bucketKey : plan.key
+        if (isSenderScopedKey(key)) inUse.add(key)
       }
     }
     for (const key of this.senderKeys) {
@@ -1003,7 +1173,8 @@ export class GovernanceService {
   private hasLiveBucket(key: string): boolean {
     return (
       this.rateLimiter?.getKeyState(key) !== undefined ||
-      this.spendLimiter?.getKeyState(key) !== undefined
+      this.spendLimiter?.getKeyState(key) !== undefined ||
+      this.budgetEngine?.hasBucket(key) === true
     )
   }
 
@@ -1172,51 +1343,95 @@ export class GovernanceService {
     }
   }
 
-  /** Commit a limit plan at /audit time and return the evidence_chain block. */
-  private commitLimit(
-    plan: LimitPlan,
+  /** Commit every plan of one call at /audit time; returns the chain blocks. */
+  private commitPlans(
+    entry: PendingEvaluation,
     actualAmount: number | undefined,
+    auditId: string,
   ): Record<string, unknown> | undefined {
-    if (plan.kind === 'rate' && this.rateLimiter && plan.limits.maxCalls && plan.limits.windowMs) {
-      const r = this.rateLimiter.record({
-        key: plan.key,
-        maxCalls: plan.limits.maxCalls,
-        windowMs: plan.limits.windowMs,
-      })
-      return {
-        rate_limit: {
-          allowed: r.allowed,
-          current: r.current,
-          limit: r.limit,
-          window_ms: r.windowMs,
-          reset_at_ms: r.resetAtMs,
+    let chain: Record<string, unknown> | undefined
+
+    // The fallible budget ledger commits FIRST: a throw here propagates out
+    // of audit() with the entry still pending and NO limiter state consumed,
+    // so the adapter's idempotent retry cannot double-record rate/spend.
+    const budgetPlans = entry.plans.filter((plan): plan is BudgetPlan => plan.kind === 'budget')
+    if (budgetPlans.length > 0 && this.budgetEngine) {
+      // actual_amount, when supplied, is the call's one true realized cost
+      // and overrides every budget plan amount.
+      const snapshots = this.budgetEngine.recordAll(
+        budgetPlans.map((plan) => ({
+          budget: plan.budget,
+          bucketKey: plan.bucketKey,
+          amount: actualAmount ?? plan.amount,
+          generation: plan.generation,
+        })),
+        {
+          kind: 'spend',
+          auditRecordId: auditId,
+          origin: entry.origin,
+          toolName: entry.toolName,
+          timestampIso: new Date(this.now()).toISOString(),
         },
+      )
+      chain = {
+        ...(chain ?? {}),
+        budgets: snapshots.map((snapshot) => budgetWireBlock(snapshot, 'spend')),
       }
     }
-    if (plan.kind === 'spend' && this.spendLimiter && plan.limits.maxSpend) {
-      const amount = actualAmount ?? plan.amount ?? 0
-      const r = this.spendLimiter.record({
-        key: plan.key,
-        amount,
-        limit: plan.limits.maxSpend.limit,
-        windowMs: plan.limits.maxSpend.windowMs,
-      })
-      this.spendLimiter.setCurrency(plan.key, plan.limits.maxSpend.currency)
-      return {
-        spend_limit: {
-          allowed: r.allowed,
-          current_spend: r.currentSpend,
-          limit: r.limit,
-          window_ms: r.windowMs,
-          reset_at_ms: r.resetAtMs,
-        },
+
+    for (const plan of entry.plans) {
+      if (plan.kind === 'budget') {
+        continue
+      }
+      if (
+        plan.kind === 'rate' &&
+        this.rateLimiter &&
+        plan.limits.maxCalls &&
+        plan.limits.windowMs
+      ) {
+        const r = this.rateLimiter.record({
+          key: plan.key,
+          maxCalls: plan.limits.maxCalls,
+          windowMs: plan.limits.windowMs,
+        })
+        chain = {
+          ...(chain ?? {}),
+          rate_limit: {
+            allowed: r.allowed,
+            current: r.current,
+            limit: r.limit,
+            window_ms: r.windowMs,
+            reset_at_ms: r.resetAtMs,
+          },
+        }
+      }
+      if (plan.kind === 'spend' && this.spendLimiter && plan.limits.maxSpend) {
+        const amount = actualAmount ?? plan.amount ?? 0
+        const r = this.spendLimiter.record({
+          key: plan.key,
+          amount,
+          limit: plan.limits.maxSpend.limit,
+          windowMs: plan.limits.maxSpend.windowMs,
+        })
+        this.spendLimiter.setCurrency(plan.key, plan.limits.maxSpend.currency)
+        chain = {
+          ...(chain ?? {}),
+          spend_limit: {
+            allowed: r.allowed,
+            current_spend: r.currentSpend,
+            limit: r.limit,
+            window_ms: r.windowMs,
+            reset_at_ms: r.resetAtMs,
+          },
+        }
       }
     }
-    return undefined
+
+    return chain
   }
 
   private writeAudit(args: WriteAuditArgs): string {
-    const id = randomUUID()
+    const id = args.id ?? randomUUID()
     if (!this.auditWriter) return id
 
     const blockReason = deriveBlockReason(args)
@@ -1282,6 +1497,8 @@ export class GovernanceService {
 // ---------------------------------------------------------------------------
 
 interface WriteAuditArgs {
+  /** Caller-supplied record id (pre-allocated when ledger rows reference it). */
+  id?: string
   timestampIso: string
   origin: string
   agentId: string | null
@@ -1322,6 +1539,8 @@ function deriveBlockReason(args: WriteAuditArgs): string | null {
       return 'rate_limited'
     case 'spend_limited':
       return 'spend_limited'
+    case 'budget_exceeded':
+      return 'budget_exceeded'
     default:
       return null
   }
@@ -1337,7 +1556,12 @@ function buildFeedback(
 }
 
 function isBlocking(wire: WireDecision): boolean {
-  return wire === 'deny' || wire === 'rate_limited' || wire === 'spend_limited'
+  return (
+    wire === 'deny' ||
+    wire === 'rate_limited' ||
+    wire === 'spend_limited' ||
+    wire === 'budget_exceeded'
+  )
 }
 
 /**
@@ -1357,7 +1581,11 @@ function shouldAttachFeedback(
 
 function isTerminalAtEvaluate(wire: WireDecision): boolean {
   return (
-    wire === 'deny' || wire === 'rate_limited' || wire === 'spend_limited' || wire === 'dry_run'
+    wire === 'deny' ||
+    wire === 'rate_limited' ||
+    wire === 'spend_limited' ||
+    wire === 'budget_exceeded' ||
+    wire === 'dry_run'
   )
 }
 
@@ -1444,3 +1672,71 @@ function byteLength(value: unknown): number {
 
 /** Drift changes are re-exported for the route layer's response typing. */
 export type { ToolDriftChange }
+
+/**
+ * Whether a limiter/budget bucket key is scoped to a caller-minted sender id
+ * and therefore consumes a sender-cardinality slot. Budget names are
+ * charset-constrained (no ":"), so the prefix parse is unambiguous.
+ */
+function isSenderScopedKey(key: string): boolean {
+  if (key.startsWith('sender:')) return true
+  if (!key.startsWith('budget:')) return false
+  const scope = key.slice('budget:'.length)
+  const sep = scope.indexOf(':')
+  return sep !== -1 && scope.slice(sep + 1).startsWith('sender:')
+}
+
+/** Wire block for one budget's view of a call (epoch-ms reset, limiter idiom). */
+function budgetWireBlock(
+  entry: BudgetPeekEntry,
+  kind?: 'spend' | 'approved_overage',
+): Record<string, unknown> {
+  return {
+    ...(kind ? { kind } : {}),
+    name: entry.budget.name,
+    limit: entry.budget.limit,
+    spent: entry.spent,
+    remaining: entry.remaining,
+    attempted_amount: entry.amount,
+    currency: entry.budget.currency,
+    window: entry.budget.windowRaw,
+    on_exceed: entry.budget.onExceed,
+    allowed: entry.allowed,
+    reset_at_ms: entry.resetAtMs,
+    ...(entry.stale ? { stale: true } : {}),
+  }
+}
+
+/** Wire block for a fail-closed invalid-amount contributor (real snapshot). */
+function budgetFailureBlock(failure: BudgetChargeFailure): Record<string, unknown> {
+  return {
+    name: failure.budget.name,
+    limit: failure.budget.limit,
+    spent: failure.spent,
+    remaining: failure.remaining,
+    attempted_amount: null,
+    currency: failure.budget.currency,
+    window: failure.budget.windowRaw,
+    on_exceed: failure.budget.onExceed,
+    allowed: false,
+    reason: 'invalid_amount',
+    reset_at_ms: failure.resetAtMs,
+  }
+}
+
+/**
+ * Byte footprint of a pending entry's plans for admission accounting. Plans
+ * hold compiled objects (matcher functions), so serialize a projection of the
+ * caller-influenced parts instead of the plan itself.
+ */
+function planBytes(plans: readonly Plan[]): number {
+  let total = 0
+  for (const plan of plans) {
+    total += byteLength(
+      plan.kind === 'budget'
+        ? { kind: plan.kind, name: plan.budget.name, key: plan.bucketKey, amount: plan.amount }
+        : { kind: plan.kind, key: plan.key, amount: plan.amount ?? 0 },
+    )
+  }
+  return total
+}

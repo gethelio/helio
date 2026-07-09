@@ -33,6 +33,7 @@ An adapter built on this API **MUST**:
 2. **Resolve before auditing.** For a `require_approval` decision, call `/approval/:id/resolve` before `/audit` (see [Approvals](#approvals)).
 3. **Carry tool definitions where it can** (`tool.input_schema`, `tool.annotations`, …) so adapter-origin tools get the same rug-pull / drift guard as MCP tools.
 4. **Authenticate** with the adapter-scope bearer token (`HELIO_ADAPTER_TOKEN`), never the SDK token.
+5. **Treat any `decision` value you do not recognize as `deny`.** The decision vocabulary grows (this release adds `budget_exceeded`); an adapter that falls through an unknown value to "proceed" turns every future vocabulary addition into a governance bypass. Parsing the response against a closed enum and blocking on parse failure satisfies this.
 
 ## Authentication
 
@@ -47,10 +48,10 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
 {
   "origin": "openclaw",                  // optional; default "sideband"; ^[a-z0-9_-]{1,64}$
   "adapter_version": "0.1.0",            // optional, ≤64 chars; per-origin liveness (dashboard GET /api/adapters)
-  "agent_id": "main",                    // optional
-  "session_id": "oc-session-1",          // optional; required for evidence/dependency rules
+  "agent_id": "main",                    // optional, ≤128 chars
+  "session_id": "oc-session-1",          // optional, ≤256 chars; required for evidence/dependency rules
   "tool": {
-    "name": "send_message",              // required
+    "name": "send_message",              // required, ≤256 chars
     "description": "…",                  // optional ┐ full definition enables the drift guard
     "input_schema": { },                 // optional ┤
     "annotations": { "destructiveHint": false } // optional ┘
@@ -62,19 +63,21 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
 // Response 200
 {
   "evaluation_id": "5f2…",               // correlate with /audit; present even for terminal decisions
-  "decision": "allow",                   // allow | deny | require_approval | rate_limited | spend_limited | dry_run
+  "decision": "allow",                   // allow | deny | require_approval | rate_limited | spend_limited | budget_exceeded | dry_run
   "reason": "Matched \"allow-chat\" → allow",
   "matched_rule": "allow-chat",          // null when the default policy applied
   "matched_rule_index": 2,
   "feedback": { "message": "…" },        // always on blocking decisions; on require_approval / dry_run when the gating rule configures feedback
   "approval": { "id": "…", "timeout_ms": 300000, "resolve_path": "/approval/…/resolve" }, // require_approval only
-  "limits": { "rate": { } },             // present when a limit rule matched
+  "limits": { "rate": { } },             // present when a limit rule or a named budget matched (rate | spend | budgets)
   "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only
   "tool_drift": { "changes": [ ] }       // present when the drift gate fired
 }
 ```
 
 The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limit` rule that still has headroom returns `"allow"` with a `limits.rate` block; only when the bucket is exhausted does it return `"rate_limited"`. There is no `modify` decision — argument rewriting has no engine support today.
+
+**Named budgets (issue #14).** When the call's tool matches a configured budget's contributors, the response carries a `limits.budgets` array — one block per matching budget with `name`, `limit`, `spent`, `remaining`, `attempted_amount`, `currency`, `window`, `on_exceed`, `allowed`, and `reset_at_ms` (epoch ms; `null` for `session` windows, which never replenish). A breach returns `decision: "budget_exceeded"` — **terminal at `/evaluate`**, like the other blocking decisions: the audit record is written immediately and nothing is recorded on any budget. A budget whose contributor cannot read a valid amount from the arguments fails closed the same way, with `reason: "invalid_amount"` inside its block. On an allowed call the budget charges commit at `/audit`, only when the call actually executed; `actual_amount`, when supplied, overrides every budget charge (a call has one true realized cost) as well as the spend-rule amount.
 
 **Errors:** `400` validation / invalid JSON, `401` wrong-or-missing adapter token, `403` Origin header, `413` oversized `metadata`/`tool_input`/body, `400 reserved_metadata_key` (a reserved column key — currently `agent_id` — was passed inside `metadata`; use the top-level field), `400 origin_limit_exceeded` / `400 tool_baseline_limit` / `503 evaluation_backlog_full` / `503 limit_capacity_exhausted` (memory/cardinality budgets — see below), `503 governance_unavailable` (sideband running without the service). Unhandled server faults return `500 { "error": "Internal server error" }`; adapters must fail closed on any 5xx.
 
@@ -108,9 +111,9 @@ The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limi
 
 Counters are consumed here (not at `/evaluate`), and only when the call actually ran (`success`/`error`, not `not_executed`). `/audit` is **idempotent on `evaluation_id`**: an identical replay returns `200 { already_finalized: true }` with no double-consumption, so a network retry after a lost response is safe. Finalized ids are remembered for one `sdk.evaluation_ttl` after finalization; past that window a replay gets `404 evaluation_unknown`. A different payload under the same id is an adapter bug → `409 evaluation_conflict`.
 
-**Decision finalization.** `deny`, `rate_limited`, `spend_limited`, and `dry_run` are **terminal at `/evaluate`** — their audit record is written immediately, so completeness never depends on the adapter calling `/audit`. A later `/audit` for such an evaluation returns `200 { finalized_by: "evaluate" }` and accepts any payload, so adapters may audit unconditionally (within the same one-TTL window).
+**Decision finalization.** `deny`, `rate_limited`, `spend_limited`, `budget_exceeded`, and `dry_run` are **terminal at `/evaluate`** — their audit record is written immediately, so completeness never depends on the adapter calling `/audit`. A later `/audit` for such an evaluation returns `200 { finalized_by: "evaluate" }` and accepts any payload, so adapters may audit unconditionally (within the same one-TTL window).
 
-`actual_amount` must be finite and `>= 0` (`400 invalid_actual_amount` otherwise) and only applies to evaluations whose decision carried a spend rule (`400 no_spend_rule` if sent for any other evaluation).
+`actual_amount` must be finite and `>= 0` (`400 invalid_actual_amount` otherwise) and only applies to evaluations that track money — a spend rule or one or more matched budgets (`400 no_spend_rule` if sent for any other evaluation). It is the call's one true realized cost: it overrides the spend-rule amount AND every matched budget's charge.
 
 ### Populating evidence
 
@@ -143,7 +146,7 @@ A token-bearing adapter is in the threat model, so several caller-controlled gro
 | Pending evaluations             | 10,000 / 64 MiB | `503 evaluation_backlog_full`                                             |
 | Distinct `sender_id` limit keys | 50,000          | `503 limit_capacity_exhausted`                                            |
 
-The `sender_id` budget is a **reservation registry**: because `sender_id` is caller-minted, a new sender key is reserved at `/evaluate` (pre-execution, so it can fail closed) and released once its limiter bucket empties. It is scoped to `sender:*` keys only, so a flood of sender ids can never starve the structural MCP path's `tool`/`session` limits — the two doors share one limiter, but only the untrusted key family is capped.
+The `sender_id` budget is a **reservation registry**: because `sender_id` is caller-minted, a new sender key is reserved at `/evaluate` (pre-execution, so it can fail closed) and released once its limiter or budget bucket empties. It is scoped to sender-derived keys only — `sender:*` rule-limit keys and `budget:<name>:sender:*` budget buckets — so a flood of sender ids can never starve the structural MCP path's `tool`/`session` limits. A sender that exercises several sender-keyed rules or budgets holds one slot per exercised bucket.
 
 ## `POST /install-scan`
 

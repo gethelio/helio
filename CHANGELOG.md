@@ -19,6 +19,29 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Named budgets: cumulative cross-tool spend enforcement (#14).** A new
+  top-level `budgets:` section defines depleting spend pots independent of
+  policy rules: each budget aggregates spend across every tool its
+  `contributors` match (e.g. Stripe and PayPal into one cap, each with its own
+  amount field), scoped `global`, per `session`, or per adapter `sender_id`.
+  Windows are sliding durations or `session` (a pot that never replenishes on
+  a timer; idle pots are collected after `idle_ttl`, default 24h). The gate is
+  all-or-nothing on both doors: every matching budget is peeked before the
+  call proceeds, one breach denies it, and a denied call records nothing on
+  any budget — nor on rule-level rate/spend counters, which now also commit
+  only when the call actually forwards. Denials return structured feedback
+  with `reason: budget_exceeded` and a per-budget breakdown; the sideband
+  `/evaluate` gains the `budget_exceeded` decision (terminal, fail-closed for
+  adapters that treat unknown decisions as deny — now a normative adapter
+  requirement) and a `limits.budgets` block, with charges committed at
+  `/audit` only when the call executed. Budgets hot-reload by name identity:
+  contributor edits preserve accrued spend; `limit`/`currency`/`window`
+  changes reset it. `on_exceed: deny` is the only breach mode in this
+  release; break-glass approvals, persistence, and the dashboard Budgets view
+  land next in this release train. State is in-memory for now.
+
 ### Fixed
 
 - **Nameless `tools/call` requests are rejected and audited instead of
@@ -52,10 +75,10 @@ Maintainer notes:
   label no rule reads. Operator notes: bucket labels change in
   `GET /api/limits`, `limit_warning` events, and denial messages; accrued
   spend resets whenever a spend rule's position in the rules list changes;
-  and each sender-keyed `spend_limit` rule now holds its own slot in the
-  sideband's sender-key registry, so effective sender capacity is
-  `50,000 / (1 + sender-keyed spend rules)` instead of a flat 50,000. Rate
-  bucket keys are unchanged.
+  and the sideband's sender-key registry counts distinct live
+  sender-scoped KEYS (capped at 50,000), so a sender that exercises several
+  sender-keyed spend rules occupies one slot per exercised rule bucket
+  rather than one slot total. Rate bucket keys are unchanged.
 
 ### Changed
 

@@ -9,6 +9,9 @@ import type { AuditRecord } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
+import type { BudgetConfig } from '../config/schema.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
 import { EvidenceStore } from '../evidence/index.js'
@@ -49,6 +52,8 @@ interface ServiceHarness {
   spendLimiter: SpendLimiter | undefined
   approvalRouter: ApprovalRouter | undefined
   evidenceStore: EvidenceStore | undefined
+  budgetEngine?: BudgetEngine
+  queue?: ApprovalQueue
 }
 
 function makeService(opts?: {
@@ -58,6 +63,8 @@ function makeService(opts?: {
   withEvidence?: boolean
   ttlMs?: number
   maxSenderKeys?: number
+  maxPendingBytes?: number
+  budgets?: BudgetConfig[]
 }): ServiceHarness {
   let time = 1_000_000
   const now = () => time
@@ -85,6 +92,9 @@ function makeService(opts?: {
         })
       : undefined
   const evidenceStore = opts?.withEvidence ? new EvidenceStore({ now }) : undefined
+  const budgetEngine = opts?.budgets
+    ? new BudgetEngine({ budgets: compileBudgets(opts.budgets), now, cleanupIntervalMs: 0 })
+    : undefined
 
   const service = new GovernanceService({
     policy,
@@ -97,9 +107,21 @@ function makeService(opts?: {
     now,
     sweepIntervalMs: 0,
     ...(opts?.maxSenderKeys !== undefined && { maxSenderKeys: opts.maxSenderKeys }),
+    ...(opts?.maxPendingBytes !== undefined && { maxPendingBytes: opts.maxPendingBytes }),
+    budgetEngine,
   })
 
-  return { service, records, advance, rateLimiter, spendLimiter, approvalRouter, evidenceStore }
+  return {
+    service,
+    queue,
+    records,
+    advance,
+    rateLimiter,
+    spendLimiter,
+    approvalRouter,
+    evidenceStore,
+    budgetEngine,
+  }
 }
 
 function evalInput(overrides?: Partial<EvaluateInput>): EvaluateInput {
@@ -1040,7 +1062,7 @@ describe('GovernanceService /audit validation and budgets', () => {
     const service = new GovernanceService({
       policy: compile({ default: 'allow', rules: [] }),
       sweepIntervalMs: 0,
-      maxPendingBytes: 30,
+      maxPendingBytes: 120,
     })
     // First evaluate fits; second would push pendingBytes over the cap.
     const first = service.evaluate(evalInput({ arguments: { a: 'xxxxxxxxxx' } }))
@@ -1597,5 +1619,445 @@ describe('GovernanceService tool baseline cap', () => {
     expect(update.status).toBe(200)
     expect(update.body['error']).toBeUndefined()
     expect(update.body['tool_drift']).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Budget gate (issue #14)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — spend rule bucket isolation and capacity (PR 0 rider)', () => {
+  it('gives each session-keyed spend rule its own bucket on the sideband', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'cap-a',
+          match: { tool: 'payment_a' },
+          action: 'spend_limit',
+          limits: {
+            max_spend: {
+              field: '$.amount',
+              limit: 100,
+              currency: 'USD',
+              window: '1h',
+              key: 'session',
+            },
+          },
+        },
+        {
+          name: 'cap-b',
+          match: { tool: 'payment_b' },
+          action: 'spend_limit',
+          limits: {
+            max_spend: {
+              field: '$.amount',
+              limit: 100,
+              currency: 'USD',
+              window: '1h',
+              key: 'session',
+            },
+          },
+        },
+      ],
+    })
+    const { service, spendLimiter } = makeService({ policy, withLimiters: true })
+
+    const first = service.evaluate(
+      evalInput({ tool: { name: 'payment_a' }, arguments: { amount: 90 }, session_id: 's1' }),
+    )
+    service.audit(auditInput(first.body['evaluation_id'] as string), 'h')
+
+    // Under the old shared session:<id> bucket this second call would be
+    // blocked by rule cap-a's spend (90 + 90 > 100).
+    const second = service.evaluate(
+      evalInput({ tool: { name: 'payment_b' }, arguments: { amount: 90 }, session_id: 's1' }),
+    )
+    expect(second.body['decision']).toBe('allow')
+    service.audit(auditInput(second.body['evaluation_id'] as string), 'h')
+
+    expect(spendLimiter?.getKeyState('session:s1:rule:0')?.current_spend).toBe(90)
+    expect(spendLimiter?.getKeyState('session:s1:rule:1')?.current_spend).toBe(90)
+  })
+
+  it('suffixed sender spend keys still consume sender-capacity slots', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'sp-sender',
+          match: { tool: 'send' },
+          action: 'spend_limit',
+          limits: {
+            max_spend: {
+              field: '$.cost',
+              limit: 100,
+              currency: 'USD',
+              window: '1d',
+              key: 'sender_id',
+            },
+          },
+        },
+      ],
+    })
+    const { service } = makeService({ policy, withLimiters: true, maxSenderKeys: 1 })
+
+    const first = service.evaluate(
+      evalInput({ arguments: { cost: 1 }, metadata: { sender_id: 'U1' } }),
+    )
+    expect(first.status).toBe(200)
+
+    const second = service.evaluate(
+      evalInput({ arguments: { cost: 1 }, metadata: { sender_id: 'U2' } }),
+    )
+    expect(second.status).toBe(503)
+    expect(second.body['error']).toBe('limit_capacity_exhausted')
+  })
+})
+
+describe('GovernanceService — budget gate (issue #14)', () => {
+  const stripeBudget = (overrides: Partial<BudgetConfig> = {}): BudgetConfig => ({
+    name: 'cap',
+    limit: 100,
+    currency: 'USD',
+    window: '24h',
+    key: 'global',
+    on_exceed: 'deny',
+    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    ...overrides,
+  })
+  const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
+    evalInput({ tool: { name: 'stripe_charge' }, arguments: { amount }, ...extra })
+
+  it('returns budget_exceeded terminally on a deny-breach and records nothing', () => {
+    const { service, budgetEngine, records } = makeService({
+      budgets: [stripeBudget({ limit: 10 })],
+    })
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.status).toBe(200)
+    expect(res.body['decision']).toBe('budget_exceeded')
+    expect(res.body['feedback']).toBeDefined()
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['name']).toBe('cap')
+    expect(limits.budgets[0]?.['remaining']).toBe(10)
+
+    // Terminal at evaluate: audit already finalized, nothing recorded anywhere.
+    const id = res.body['evaluation_id'] as string
+    const replay = service.audit(auditInput(id), 'h')
+    expect(replay.status).toBe(200)
+    expect(replay.body['finalized_by']).toBe('evaluate')
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+    expect(records[0]?.record.block_reason).toBe('budget_exceeded')
+  })
+
+  it('fails closed terminally when the contributor amount is invalid', () => {
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
+    const res = service.evaluate(stripeEval('not-a-number'))
+
+    expect(res.body['decision']).toBe('budget_exceeded')
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['reason']).toBe('invalid_amount')
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+  })
+
+  it('stores budget plans on allow and commits them at /audit', () => {
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
+    const res = service.evaluate(stripeEval(30))
+
+    expect(res.body['decision']).toBe('allow')
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['remaining']).toBe(100)
+
+    // Nothing recorded until the call actually ran.
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+
+    const id = res.body['evaluation_id'] as string
+    const audit = service.audit(auditInput(id), 'h')
+    expect(audit.status).toBe(201)
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+  })
+
+  it('commits nothing on not_executed', () => {
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+  })
+
+  it('commits nothing when the evaluation expires', () => {
+    const { service, budgetEngine, advance } = makeService({
+      budgets: [stripeBudget()],
+      ttlMs: 1_000,
+    })
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    advance(1_001)
+    const res = service.audit(auditInput(id), 'h')
+    expect(res.status).toBe(404)
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+  })
+
+  it('actual_amount overrides every budget plan amount', () => {
+    const { service, budgetEngine } = makeService({
+      budgets: [stripeBudget({ name: 'a' }), stripeBudget({ name: 'b' })],
+    })
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    const res = service.audit(auditInput(id, { actual_amount: 42 }), 'h')
+    expect(res.status).toBe(201)
+    expect(budgetEngine?.listStates().map((s2) => s2.buckets[0]?.spent)).toEqual([42, 42])
+  })
+
+  it('commits rule spend plans and budget plans together', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'rule-cap',
+          match: { tool: 'stripe_*' },
+          action: 'spend_limit',
+          limits: {
+            max_spend: { field: '$.amount', limit: 1000, currency: 'USD', window: '1h' },
+          },
+        },
+      ],
+    })
+    const { service, budgetEngine, spendLimiter } = makeService({
+      policy,
+      withLimiters: true,
+      budgets: [stripeBudget()],
+    })
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    expect(spendLimiter?.getKeyState('tool:stripe_charge:rule:0')?.current_spend).toBe(30)
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+  })
+
+  it('reserves sender-key slots for sender-keyed budget buckets', () => {
+    const { service } = makeService({
+      budgets: [stripeBudget({ name: 'sb', key: 'sender_id' })],
+      maxSenderKeys: 1,
+    })
+    const first = service.evaluate(stripeEval(1, { metadata: { sender_id: 'U1' } }))
+    expect(first.status).toBe(200)
+    const firstId = first.body['evaluation_id'] as string
+    void firstId
+
+    const second = service.evaluate(stripeEval(1, { metadata: { sender_id: 'U2' } }))
+    expect(second.status).toBe(503)
+    expect(second.body['error']).toBe('limit_capacity_exhausted')
+  })
+
+  it('counts the plans list into pending-entry byte accounting', () => {
+    // The cap (250) sits between each call's BASE size (~110–160, which
+    // passes the early admission check) and the long-sender call's base +
+    // plans (~304) — only the post-planning re-check can refuse it. The
+    // short-sender call (~204 with plans) fits end to end THROUGH THE SAME
+    // SERVICE, which with maxSenderKeys: 1 also proves the refused call
+    // released its sender reservation.
+    const budgets = [stripeBudget({ name: 'cap-for-senders', key: 'sender_id' })]
+    const { service } = makeService({ budgets, maxSenderKeys: 1, maxPendingBytes: 250 })
+
+    const refused = service.evaluate(
+      stripeEval(10, {
+        metadata: { sender_id: 'sender-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      }),
+    )
+    expect(refused.status).toBe(503)
+    expect(refused.body['error']).toBe('evaluation_backlog_full')
+
+    const admitted = service.evaluate(stripeEval(10, { metadata: { sender_id: 'B' } }))
+    expect(admitted.status).toBe(200)
+    expect(admitted.body['decision']).toBe('allow')
+  })
+
+  it('releases sender reservations and creates no ticket when the byte re-check refuses', () => {
+    // require_approval + sender-keyed budget: the late 503 must not leave an
+    // orphaned native ticket, and the retry runs through the SAME service.
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+    })
+    const budgets = [stripeBudget({ name: 'cap-for-senders', key: 'sender_id' })]
+    const { service, queue } = makeService({
+      policy,
+      withApprovals: true,
+      budgets,
+      maxSenderKeys: 1,
+      maxPendingBytes: 250,
+    })
+
+    const refused = service.evaluate(
+      stripeEval(10, {
+        metadata: { sender_id: 'sender-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      }),
+    )
+    expect(refused.status).toBe(503)
+    expect(refused.body['error']).toBe('evaluation_backlog_full')
+    expect(queue?.list({ status: 'pending' })).toEqual([])
+
+    // Same service: the refused call's slot must be free for the next sender.
+    const admitted = service.evaluate(stripeEval(10, { metadata: { sender_id: 'C' } }))
+    expect(admitted.status).toBe(200)
+    expect(admitted.body['decision']).toBe('require_approval')
+    expect(queue?.list({ status: 'pending' })).toHaveLength(1)
+  })
+
+  it('dry-run peeks budgets, reports limits_ok, and records nothing', () => {
+    const policy = compile({ default: 'allow', dry_run: true, rules: [] })
+    const { service, budgetEngine } = makeService({
+      policy,
+      budgets: [stripeBudget({ limit: 10 })],
+    })
+
+    const res = service.evaluate(stripeEval(50))
+    expect(res.body['decision']).toBe('dry_run')
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['would_forward']).toBe(false)
+    expect(dryRun['limits_ok']).toBe(false)
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['allowed']).toBe(false)
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+  })
+
+  it('budget_exceeded feedback names the budget, not the policy decision', () => {
+    // The matched decision here is the default allow — its reason ("No
+    // matching rule; applied default policy: allow") must never surface as
+    // the denial message.
+    const { service } = makeService({ budgets: [stripeBudget({ limit: 10 })] })
+    const res = service.evaluate(stripeEval(50))
+
+    const feedback = res.body['feedback'] as { message: string; suggestion?: string }
+    expect(feedback.message).toContain('"cap"')
+    expect(feedback.message).not.toContain('allow')
+    expect(feedback.suggestion).toBeDefined()
+  })
+
+  it('reports simultaneous breaches and invalid amounts together', () => {
+    const { service } = makeService({
+      budgets: [
+        stripeBudget({ name: 'valid-but-breached', limit: 10 }),
+        stripeBudget({
+          name: 'invalid-field',
+          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+        }),
+      ],
+    })
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.body['decision']).toBe('budget_exceeded')
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    const names = limits.budgets.map((b) => b['name'])
+    expect(names).toContain('valid-but-breached')
+    expect(names).toContain('invalid-field')
+    const invalid = limits.budgets.find((b) => b['name'] === 'invalid-field')
+    expect(invalid?.['reason']).toBe('invalid_amount')
+    expect(invalid?.['spent']).toBe(0)
+  })
+
+  it('retries after a post-commit failure without double-recording (exactly-once)', () => {
+    // An evidence store whose recordToolCall throws once: the first /audit
+    // commits the plans, then dies post-commit → the adapter retries → the
+    // retry must reuse the latched commit instead of recording again.
+    const policy = compile({ default: 'allow', rules: [] })
+    const { service, budgetEngine, evidenceStore } = makeService({
+      policy,
+      withEvidence: true,
+      budgets: [stripeBudget()],
+    })
+    const original = evidenceStore?.recordToolCall.bind(evidenceStore)
+    let threw = false
+    vi.spyOn(evidenceStore as EvidenceStore, 'recordToolCall').mockImplementation(
+      (...args: Parameters<EvidenceStore['recordToolCall']>) => {
+        if (!threw) {
+          threw = true
+          throw new Error('bookkeeping bug')
+        }
+        return original?.(...args)
+      },
+    )
+
+    const ev = service.evaluate(stripeEval(30, { session_id: 's1' }))
+    const id = ev.body['evaluation_id'] as string
+
+    expect(() => service.audit(auditInput(id), 'h')).toThrow('bookkeeping bug')
+    // Committed exactly once already.
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+
+    const retry = service.audit(auditInput(id), 'h')
+    expect(retry.status).toBe(201)
+    // Still exactly once.
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+  })
+
+  it('marks committed sideband budget audit blocks with kind: spend', () => {
+    const { service, records } = makeService({ budgets: [stripeBudget()] })
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    const record = records.find((r) => r.record.tool_name === 'stripe_charge')
+    const chain = record?.record.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['kind']).toBe('spend')
+  })
+
+  it('rejects a post-commit retry that presents a different payload', () => {
+    const policy = compile({ default: 'allow', rules: [] })
+    const { service, budgetEngine, evidenceStore } = makeService({
+      policy,
+      withEvidence: true,
+      budgets: [stripeBudget()],
+    })
+    let threw = false
+    vi.spyOn(evidenceStore as EvidenceStore, 'recordToolCall').mockImplementation(() => {
+      if (!threw) {
+        threw = true
+        throw new Error('bookkeeping bug')
+      }
+    })
+
+    const id = service.evaluate(stripeEval(30, { session_id: 's1' })).body[
+      'evaluation_id'
+    ] as string
+    expect(() => service.audit(auditInput(id, { actual_amount: 30 }), 'hash-a')).toThrow()
+
+    // The commit ran with actual_amount 30; a retry claiming a different
+    // amount must conflict, not finalize inconsistent audit data.
+    const conflicting = service.audit(auditInput(id, { actual_amount: 999 }), 'hash-b')
+    expect(conflicting.status).toBe(409)
+    expect(conflicting.body['error']).toBe('evaluation_conflict')
+
+    // The identical payload still completes exactly-once.
+    const retry = service.audit(auditInput(id, { actual_amount: 30 }), 'hash-a')
+    expect(retry.status).toBe(201)
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+  })
+
+  it('documents the sideband TOCTOU: two concurrent evaluates can both peek the last slot', () => {
+    // Decision and execution are separate calls on this door: both evaluates
+    // see headroom, both calls run, both audits commit — the pot ends over
+    // its limit but the counters stay truthful after the fact. This is the
+    // documented host-enforced-tier caveat, pinned as a regression.
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget({ limit: 100 })] })
+
+    const first = service.evaluate(stripeEval(60))
+    const second = service.evaluate(stripeEval(60))
+    expect(first.body['decision']).toBe('allow')
+    expect(second.body['decision']).toBe('allow')
+
+    service.audit(auditInput(first.body['evaluation_id'] as string), 'h1')
+    service.audit(auditInput(second.body['evaluation_id'] as string), 'h2')
+
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(120)
+    // The NEXT evaluate sees the truthful, over-limit pot and denies.
+    expect(service.evaluate(stripeEval(1)).body['decision']).toBe('budget_exceeded')
+  })
+
+  it('keeps working without limiters configured (budget-only deployment)', () => {
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
+    const id = service.evaluate(stripeEval(5)).body['evaluation_id'] as string
+    const res = service.audit(auditInput(id), 'h')
+    expect(res.status).toBe(201)
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(5)
   })
 })

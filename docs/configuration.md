@@ -220,6 +220,40 @@ Limiter actions are startup-fatal when incomplete:
 - `action: rate_limit` must include both `limits.max_calls` and `limits.window`.
 - `action: spend_limit` must include `limits.max_spend`.
 
+### budgets
+
+Named cross-tool spend budgets — a first-class layer independent of policy rules. One call depletes every budget whose contributors match, all-or-nothing: the call proceeds only if every matching budget allows it, a breach denies it, and rejected calls never consume budget anywhere. Budgets are enforced deterministically at the MCP gate; on the host-enforced adapter tier they inherit the documented [TOCTOU caveat](./adapter-api.md#the-crash-ttl-and-toctou-caveats).
+
+```yaml
+budgets:
+  - name: daily-cap # unique; letters, digits, "_", "-" only
+    limit: 50
+    currency: USD # single currency per budget, the operator's assertion
+    window: 24h # a duration, or "session" (a depleting pot per session key)
+    key: global # global | session | sender_id (default: global)
+    on_exceed: deny # deny is the only mode in this release
+    contributors:
+      - tool: 'stripe_*' # picomatch glob, same engine as match.tool
+        field: '$.amount' # dot-path into the tool arguments
+      - tool: 'paypal_*'
+        field: '$.total'
+```
+
+| Field          | Type     | Required | Default  | Description                                                                                            |
+| -------------- | -------- | -------- | -------- | ------------------------------------------------------------------------------------------------------ |
+| `name`         | string   | Yes      | —        | Unique budget identity; preserves accrued spend across config edits. Charset: `[A-Za-z0-9_-]`, ≤64.    |
+| `limit`        | number   | Yes      | —        | Maximum cumulative spend within the window. Must be positive.                                          |
+| `currency`     | string   | Yes      | —        | Display/validation currency. Whether tools actually charge in it is the operator's assertion.          |
+| `window`       | string   | Yes      | —        | A [duration](#duration-strings) (sliding window) or `session` (never replenishes on a timer).          |
+| `key`          | string   | No       | `global` | Bucket scope: one shared pot (`global`), per session, or per adapter-supplied sender.                  |
+| `on_exceed`    | string   | No       | `deny`   | What a breach does. Only `deny` ships in this release; break-glass approval is planned.                |
+| `idle_ttl`     | duration | No       | `24h`    | Session windows only: idle time before an inactive session pot is collected.                           |
+| `contributors` | list     | Yes      | —        | Non-empty. Which tools feed the budget and which argument field carries the amount (first match wins). |
+
+Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true`. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied.
+
+Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors` preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure). Budget state is in-memory in this release; persistence and a spend ledger are planned.
+
 ### approval
 
 Configuration for human-in-the-loop approval workflows. See [Approval Workflows](./approvals.md) for full documentation.
@@ -437,11 +471,12 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 
 ### Reload boundary
 
-Only compiled policy behavior is hot-reloadable. Startup-bound sections still require restart.
+Compiled policy behavior and named budgets are hot-reloadable. Startup-bound sections still require restart.
 
 | Config path                 | Reloads on save? | Notes                                                                                     |
 | --------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
 | `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                        |
+| `budgets`                   | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.          |
 | `policies.default`          | Yes              | Takes effect immediately on the next request.                                             |
 | `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                             |
 | `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                             |

@@ -40,22 +40,24 @@ Each audit record contains the following fields:
 
 `block_reason` is the column to alert on: it is non-null exactly when Helio blocked the call. The vocabulary:
 
-| Reason                  | Set when                                                                                                                                                               |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `policy_denied`         | A `deny` rule (or the default deny) matched, or a session-required evidence gate had no session.                                                                       |
-| `evidence_missing`      | A required evidence key was never stored for the session.                                                                                                              |
-| `evidence_expired`      | A required evidence key was stored but its TTL lapsed.                                                                                                                 |
-| `dependency_missing`    | A `requires` / `requires_success` dependency was not satisfied.                                                                                                        |
-| `approval_denied`       | An approver denied the call.                                                                                                                                           |
-| `approval_timeout`      | The approval window elapsed (with `default_on_timeout: deny`).                                                                                                         |
-| `client_disconnected`   | The MCP client disconnected before request completion (while awaiting approval, or after approval resolved but before completion).                                     |
-| `shutdown_cancelled`    | Proxy shutdown cancelled a pending approval.                                                                                                                           |
-| `cancelled`             | A sideband-resolved ticket was cancelled by the adapter.                                                                                                               |
-| `rate_limited`          | A `rate_limit` rule's window was exhausted.                                                                                                                            |
-| `spend_limited`         | A `spend_limit` rule's window budget was exhausted (or the amount was invalid).                                                                                        |
-| `tool_definition_drift` | The call hit a drifted tool under `on_tool_drift: block`.                                                                                                              |
-| `install_denied`        | An install scan matched a `deny_install` rule.                                                                                                                         |
-| `missing_tool_name`     | A `tools/call` carried no usable tool name (missing, non-string, or empty `params.name`) and was rejected (see [Nameless Call Rejections](#nameless-call-rejections)). |
+| Reason                       | Set when                                                                                                                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `policy_denied`              | A `deny` rule (or the default deny) matched, or a session-required evidence gate had no session.                                                                       |
+| `evidence_missing`           | A required evidence key was never stored for the session.                                                                                                              |
+| `evidence_expired`           | A required evidence key was stored but its TTL lapsed.                                                                                                                 |
+| `dependency_missing`         | A `requires` / `requires_success` dependency was not satisfied.                                                                                                        |
+| `approval_denied`            | An approver denied the call.                                                                                                                                           |
+| `approval_timeout`           | The approval window elapsed (with `default_on_timeout: deny`).                                                                                                         |
+| `client_disconnected`        | The MCP client disconnected before request completion (while awaiting approval, or after approval resolved but before completion).                                     |
+| `shutdown_cancelled`         | Proxy shutdown cancelled a pending approval.                                                                                                                           |
+| `cancelled`                  | A sideband-resolved ticket was cancelled by the adapter.                                                                                                               |
+| `rate_limited`               | A `rate_limit` rule's window was exhausted.                                                                                                                            |
+| `spend_limited`              | A `spend_limit` rule's window budget was exhausted (or the amount was invalid).                                                                                        |
+| `budget_exceeded`            | A named budget denied the call — the policy decision itself may be `allow`; the budget gate blocked it. `evidence_chain.budgets` carries the per-budget snapshots.     |
+| `budget_ledger_write_failed` | The budget ledger's durable write failed, so the call was blocked without consuming any counters. The failure detail is in `evidence_chain.budgets`.                   |
+| `tool_definition_drift`      | The call hit a drifted tool under `on_tool_drift: block`.                                                                                                              |
+| `install_denied`             | An install scan matched a `deny_install` rule.                                                                                                                         |
+| `missing_tool_name`          | A `tools/call` carried no usable tool name (missing, non-string, or empty `params.name`) and was rejected (see [Nameless Call Rejections](#nameless-call-rejections)). |
 
 `evaluation_expired` records keep `block_reason` null: an expired evaluation is a reporting failure, not an enforcement block. One caveat for library embedders: when Helio's forwarder is embedded without an approval router or rate/spend limiter, a rule requiring the missing handler blocks with the free-text policy reason instead of a fixed value. This cannot happen under `helio start`, which always wires all three.
 

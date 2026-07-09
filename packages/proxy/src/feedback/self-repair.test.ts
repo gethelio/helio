@@ -11,6 +11,7 @@ import {
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
+  buildBudgetExceededFeedback,
 } from './self-repair.js'
 import type { PolicyDecision } from '../policy/engine.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/index.js'
@@ -841,6 +842,52 @@ describe('rule_index dual-key window (issue #109)', () => {
     const feedback = buildPolicyDeniedFeedback(defaultDenyDecision())
     expect(feedback).toHaveProperty('rule_index', null)
     expect(feedback).toHaveProperty('ruleIndex', null)
+  })
+
+  it('budget_exceeded is not retryable when a session breach rides with an invalid amount', () => {
+    const sessionBudget = {
+      name: 'sc',
+      limit: 100,
+      currency: 'USD',
+      window: { kind: 'session' as const, idleTtlMs: 1 },
+      windowRaw: 'session',
+      key: 'session' as const,
+      onExceed: 'deny' as const,
+      contributors: [],
+    }
+    const invalidBudget = {
+      ...sessionBudget,
+      name: 'iv',
+      window: { kind: 'duration' as const, windowMs: 1000 },
+      windowRaw: '1s',
+    }
+    const feedback = buildBudgetExceededFeedback(
+      denyDecision(),
+      [
+        {
+          budget: sessionBudget,
+          bucketKey: 'budget:sc:session:s1',
+          amount: 5,
+          allowed: false,
+          spent: 100,
+          remaining: 0,
+          resetAtMs: null,
+        },
+      ],
+      [
+        {
+          budget: invalidBudget,
+          bucketKey: 'budget:iv:global',
+          reason: 'invalid_amount',
+          spent: 0,
+          remaining: 100,
+          resetAtMs: 1_000,
+        },
+      ],
+    )
+    // The session pot never replenishes: fixing the invalid amount cannot
+    // make the breached call succeed, so the denial is not retryable.
+    expect(feedback.retry_allowed).toBe(false)
   })
 
   it('buildToolDriftFeedback emits null under both keys', () => {

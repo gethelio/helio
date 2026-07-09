@@ -9,6 +9,8 @@ import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { compilePolicies } from '../policy/parser.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mcp/types.js'
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,222 @@ describe('ConfigWatcher', () => {
     expect(reloads[0]?.policy.rules[0]?.name).toBe('block-delete')
     expect(reloads[0]?.policy.rules[0]?.action).toBe('deny')
     expect(restartRequiredPaths).toEqual([[]])
+  })
+
+  it('passes compiled budgets to the reload callback', async () => {
+    await writeFile(configPath, validConfig())
+
+    const budgetReloads: unknown[][] = []
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+        budgetReloads.push([...budgets])
+      },
+      onError: () => {},
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    await writeFile(
+      configPath,
+      `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules: []
+budgets:
+  - name: daily-cap
+    limit: 50
+    currency: USD
+    window: 24h
+    contributors:
+      - tool: "stripe_*"
+        field: "$.amount"
+`,
+    )
+    await wait(500)
+
+    expect(budgetReloads).toHaveLength(1)
+    const budget = budgetReloads[0]?.[0] as { name: string; limit: number } | undefined
+    expect(budget?.name).toBe('daily-cap')
+    expect(budget?.limit).toBe(50)
+  })
+
+  it('reconciles the budget engine across hot-reloads by name identity', async () => {
+    const budgetYaml = (limit: number, extraContributor = '') => `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules: []
+budgets:
+  - name: daily-cap
+    limit: ${String(limit)}
+    currency: USD
+    window: 24h
+    contributors:
+      - tool: "stripe_*"
+        field: "$.amount"
+${extraContributor}
+`
+    await writeFile(configPath, budgetYaml(100))
+
+    const engine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'daily-cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+        engine.reconcile(budgets)
+      },
+      onError: () => {},
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    // Accrue 60 of the 100 pot.
+    const { charges } = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 60 },
+      sessionId: null,
+      senderId: null,
+    })
+    engine.recordAll(charges, {
+      kind: 'spend',
+      auditRecordId: 'a1',
+      origin: 'mcp',
+      toolName: 'stripe_charge',
+      timestampIso: new Date().toISOString(),
+    })
+
+    // Contributor-only edit — accrued spend must survive.
+    await writeFile(
+      configPath,
+      budgetYaml(100, '      - tool: "paypal_*"\n        field: "$.total"'),
+    )
+    await wait(500)
+    expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+
+    // Limit change — a different pool; the pot resets.
+    await writeFile(configPath, budgetYaml(500))
+    await wait(500)
+    expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+    engine.close()
+  })
+
+  it('keeps budgets and accrued state when a reload fails budget validation', async () => {
+    const validYaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules: []
+budgets:
+  - name: daily-cap
+    limit: 100
+    currency: USD
+    window: 24h
+    contributors:
+      - tool: "stripe_*"
+        field: "$.amount"
+`
+    // Duplicate budget names fail the schema refinement at load time.
+    const invalidYaml = validYaml.replace(
+      'budgets:',
+      `budgets:
+  - name: daily-cap
+    limit: 999
+    currency: USD
+    window: 1h
+    contributors:
+      - tool: "other_*"
+        field: "$.x"`,
+    )
+    await writeFile(configPath, validYaml)
+
+    const engine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'daily-cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+    const errors: Error[] = []
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+        engine.reconcile(budgets)
+      },
+      onError: (err) => errors.push(err),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    const { charges } = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 60 },
+      sessionId: null,
+      senderId: null,
+    })
+    engine.recordAll(charges, {
+      kind: 'spend',
+      auditRecordId: 'a1',
+      origin: 'mcp',
+      toolName: 'stripe_charge',
+      timestampIso: new Date().toISOString(),
+    })
+
+    await writeFile(configPath, invalidYaml)
+    await wait(500)
+
+    // The bad config was refused wholesale; accrued spend is untouched and
+    // in-flight charges from before the failed reload are still current.
+    expect(errors).toHaveLength(1)
+    expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+    const post = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 50 },
+      sessionId: null,
+      senderId: null,
+    })
+    expect(engine.peekAll(post.charges).allowed).toBe(false)
+
+    engine.close()
   })
 
   it('reloads with updated flag_destructive setting', async () => {

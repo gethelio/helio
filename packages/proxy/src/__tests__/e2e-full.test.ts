@@ -23,6 +23,8 @@ import { EvidenceStore, createSidebandApp } from '../evidence/index.js'
 import { ApprovalQueue, ApprovalRouter, createChannels } from '../approval/index.js'
 import { RateLimiter } from '../policy/index.js'
 import { SpendLimiter } from '../policy/index.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 import { createDashboardApp, DashboardEventBus } from '../dashboard/index.js'
 import type { DashboardEventType, DashboardEvents } from '../dashboard/index.js'
 
@@ -45,6 +47,7 @@ let approvalQueue: ApprovalQueue
 let approvalRouter: ApprovalRouter
 let rateLimiter: RateLimiter
 let spendLimiter: SpendLimiter
+let budgetEngine: BudgetEngine
 let evidenceStore: EvidenceStore
 let eventBus: DashboardEventBus
 let unsubscribeEvents: () => void
@@ -85,6 +88,13 @@ const policiesConfig: PoliciesConfig = {
     {
       name: 'allow-lookup',
       match: { tool: 'lookup_order' },
+      action: 'allow' as const,
+    },
+    // 3b: Allowed probe tool for the named-budget flow (issue #14) — the
+    // budget gate, not the rule, is what constrains it.
+    {
+      name: 'allow-budgeted-probe',
+      match: { tool: 'budgeted_*' },
       action: 'allow' as const,
     },
     // 4: Spend-limited payment (amount >= 1000 — must be before evidence-gated payment)
@@ -223,8 +233,22 @@ beforeAll(async () => {
     },
   })
 
-  // 7. Compile policies + create governed forwarder
+  // 7. Compile policies + create governed forwarder (budgets: issue #14)
   const { policy } = compilePolicies(policiesConfig)
+  budgetEngine = new BudgetEngine({
+    budgets: compileBudgets([
+      {
+        name: 'e2e-cap',
+        limit: 100,
+        currency: 'USD',
+        window: '24h',
+        key: 'global',
+        on_exceed: 'deny',
+        contributors: [{ tool: 'budgeted_*', field: '$.amount' }],
+      },
+    ]),
+    cleanupIntervalMs: 0,
+  })
   const rawForwarder = new StreamableHttpForwarder({ url: upstreamUrl })
   const governed = new GovernedForwarder(rawForwarder, policy, {
     auditWriter,
@@ -232,6 +256,7 @@ beforeAll(async () => {
     approvalRouter,
     rateLimiter,
     spendLimiter,
+    budgetEngine,
   })
 
   // 8. Build config for createApp
@@ -277,6 +302,7 @@ afterAll(async () => {
   approvalQueue.close()
   rateLimiter.close()
   spendLimiter.close()
+  budgetEngine.close()
   evidenceStore.close()
   auditWriter.close() // also closes auditStore internally
   await dashboardManaged.close()
@@ -793,5 +819,49 @@ describe('E2E: full MVP integration', () => {
       expect(rec.proxy_compute_ms).toBeGreaterThanOrEqual(0)
       expect(rec.created_at).toBeDefined()
     }
+  })
+
+  // --- Named budgets (issue #14) ---
+
+  it('depletes the cross-tool budget over HTTP and then denies with feedback', async () => {
+    // First call consumes 60 of the 100 pot.
+    const first = await sendMcpRequest(
+      proxyUrl,
+      'tools/call',
+      { name: 'budgeted_probe', arguments: { amount: 60 } },
+      70,
+    )
+    expect((first.body as { error?: unknown }).error).toBeUndefined()
+
+    // Second call would exceed: denied with budget feedback, nothing recorded.
+    const denied = await sendMcpRequest(
+      proxyUrl,
+      'tools/call',
+      { name: 'budgeted_probe', arguments: { amount: 50 } },
+      71,
+    )
+    const data = getErrorData(denied.body)
+    expect(data['reason']).toBe('budget_exceeded')
+    const budgets = data['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['name']).toBe('e2e-cap')
+    expect(budgets[0]?.['remaining']).toBe(40)
+
+    // A call within the remainder still forwards.
+    const third = await sendMcpRequest(
+      proxyUrl,
+      'tools/call',
+      { name: 'budgeted_probe', arguments: { amount: 40 } },
+      72,
+    )
+    expect((third.body as { error?: unknown }).error).toBeUndefined()
+
+    // The denial is on the audit trail with the budget chain.
+    auditWriter.flush()
+    const rec = auditStore
+      .list({ tool_name: 'budgeted_probe' })
+      .records.find((r) => r.block_reason === 'budget_exceeded')
+    expect(rec).toBeDefined()
+    const chain = rec?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('e2e-cap')
   })
 })

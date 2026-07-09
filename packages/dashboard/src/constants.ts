@@ -16,6 +16,7 @@ export const DECISION_FILTERS: ReadonlyArray<{ label: string; value: OutcomeFilt
     { label: 'Shutdown Cancelled', value: 'shutdown_cancelled' },
     { label: 'Rate Limited', value: 'rate_limited' },
     { label: 'Spend Limited', value: 'spend_limited' },
+    { label: 'Budget Exceeded', value: 'budget_exceeded' },
     { label: 'Dry Run', value: 'dry_run' },
   ]
 

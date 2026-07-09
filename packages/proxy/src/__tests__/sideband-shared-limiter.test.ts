@@ -3,6 +3,8 @@ import { GovernanceService } from '../sideband/governance-service.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { compilePolicies } from '../policy/parser.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 import type { McpForwarder, McpRequest, ForwardResult } from '../mcp/types.js'
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,74 @@ describe('sideband ↔ MCP shared rate limiter', () => {
     expect(rateLimiter.getKeyState('sender:U2')?.current).toBe(1)
 
     rateLimiter.close()
+    service.close()
+  })
+})
+
+describe('sideband ↔ MCP shared budget engine (issue #14)', () => {
+  it('pools budget spend across both doors — one pot', async () => {
+    const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
+    const budgetEngine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'send', field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+    const service = new GovernanceService({ policy, budgetEngine, sweepIntervalMs: 0 })
+    const forwarder = new GovernedForwarder(mockForwarder(), policy, { budgetEngine })
+
+    // 1) Sideband evaluate + audit commits 60 of the 100 pot.
+    const ev = service.evaluate({
+      origin: 'openclaw',
+      agent_id: null,
+      session_id: null,
+      tool: { name: 'send' },
+      arguments: { amount: 60 },
+      metadata: null,
+    })
+    expect(ev.body['decision']).toBe('allow')
+    service.audit({ evaluation_id: ev.body['evaluation_id'] as string, status: 'success' }, 'h')
+    expect(budgetEngine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+
+    // 2) An MCP call sees the sideband's spend: 50 more would exceed.
+    const mcpDenied = await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'send', arguments: { amount: 50 } },
+    })
+    expect(isBlocked(mcpDenied)).toBe(true)
+
+    // 3) An MCP call within the remainder records into the same pot...
+    const mcpAllowed = await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'send', arguments: { amount: 40 } },
+    })
+    expect(isBlocked(mcpAllowed)).toBe(false)
+    expect(budgetEngine.listStates()[0]?.buckets[0]?.spent).toBe(100)
+
+    // 4) ...and the sideband now sees a depleted pot.
+    const evDenied = service.evaluate({
+      origin: 'openclaw',
+      agent_id: null,
+      session_id: null,
+      tool: { name: 'send' },
+      arguments: { amount: 1 },
+      metadata: null,
+    })
+    expect(evDenied.body['decision']).toBe('budget_exceeded')
+
+    budgetEngine.close()
     service.close()
   })
 })
