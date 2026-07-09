@@ -645,6 +645,21 @@ describe('GovernedForwarder', () => {
         expect(error.message).toContain('not yet supported')
       },
     )
+
+    it('emits rule_index beside ruleIndex on the unsupported error (issue #109)', async () => {
+      const inner = mockForwarder()
+      const policy = compile({
+        default: 'allow',
+        rules: [{ name: 'needs-router', match: { tool: 'test_tool' }, action: 'require_approval' }],
+      })
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsCallRequest('test_tool'))
+
+      const error = errorFromResult(result)
+      expect(error.data['ruleIndex']).toBe(0)
+      expect(error.data['rule_index']).toBe(0)
+    })
   })
 
   describe('environment', () => {
@@ -3319,6 +3334,152 @@ describe('GovernedForwarder', () => {
       expect(result.response.status).toBe(200)
     })
 
+    it('gives each session-keyed spend rule its own bucket (rule-discriminated keys)', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createSpendLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'cap-a',
+            match: { tool: 'payment_a' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: {
+                field: '$.amount',
+                limit: 100,
+                currency: 'USD',
+                window: '1h',
+                key: 'session',
+              },
+            },
+          },
+          {
+            name: 'cap-b',
+            match: { tool: 'payment_b' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: {
+                field: '$.amount',
+                limit: 100,
+                currency: 'USD',
+                window: '1h',
+                key: 'session',
+              },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { spendLimiter: limiter })
+
+      await governed.forward(toolsCallWithSession('payment_a', 's1', { amount: 90 }))
+      // Under the shared session:<id> bucket this second call would be blocked
+      // (90 + 90 > 100) by rule cap-a's spend — the collision this fixes.
+      await governed.forward(toolsCallWithSession('payment_b', 's1', { amount: 90 }))
+
+      expect(inner.forward).toHaveBeenCalledTimes(2)
+      const keys = limiter
+        .listKeyStates()
+        .map((state) => state.key)
+        .sort()
+      expect(keys).toEqual(['session:s1:rule:0', 'session:s1:rule:1'])
+    })
+
+    it('discriminates tool-keyed spend buckets by rule as well', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createSpendLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'spend-limit-payments',
+            match: { tool: 'create_payment' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: { field: '$.amount', limit: 5000, currency: 'GBP', window: '24h' },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { spendLimiter: limiter })
+
+      await governed.forward(toolsCallRequest('create_payment', { amount: 1000 }))
+
+      expect(limiter.getKeyState('tool:create_payment:rule:0')).toBeDefined()
+      expect(limiter.getKeyState('tool:create_payment')).toBeUndefined()
+    })
+
+    it('updatePolicy evicts a spend bucket stranded by a rule reorder', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createSpendLimiter()
+      const spendRule = {
+        name: 'cap',
+        match: { tool: 'create_payment' },
+        action: 'spend_limit' as const,
+        limits: {
+          max_spend: { field: '$.amount', limit: 1000, currency: 'USD', window: '1h' },
+        },
+      }
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', rules: [spendRule] }),
+        { spendLimiter: limiter },
+      )
+
+      await governed.forward(toolsCallRequest('create_payment', { amount: 300 }))
+      expect(limiter.getKeyState('tool:create_payment:rule:0')?.current_spend).toBe(300)
+
+      // Insert an unrelated rule above: the spend rule moves to index 1. The
+      // old-index bucket must be evicted, not left as an orphan no rule reads
+      // (or worse, adopted by whatever rule lands at index 0 later).
+      governed.updatePolicy(
+        compile({
+          default: 'allow',
+          rules: [{ name: 'block-admin', match: { tool: 'admin_*' }, action: 'deny' }, spendRule],
+        }),
+      )
+
+      expect(limiter.listKeyStates()).toEqual([])
+      await governed.forward(toolsCallRequest('create_payment', { amount: 100 }, 2))
+      expect(limiter.getKeyState('tool:create_payment:rule:1')?.current_spend).toBe(100)
+    })
+
+    it('dry-run peeks the same rule-discriminated bucket as enforcement', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createSpendLimiter()
+      const rules = [
+        {
+          name: 'cap',
+          match: { tool: 'create_payment' },
+          action: 'spend_limit' as const,
+          limits: {
+            max_spend: { field: '$.amount', limit: 100, currency: 'USD', window: '1h' },
+          },
+        },
+      ]
+      const enforcing = new GovernedForwarder(inner, compile({ default: 'allow', rules }), {
+        spendLimiter: limiter,
+      })
+      const dryRunning = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', dry_run: true, rules }),
+        { spendLimiter: limiter },
+      )
+
+      await enforcing.forward(toolsCallRequest('create_payment', { amount: 60 }))
+
+      const result = await dryRunning.forward(toolsCallRequest('create_payment', { amount: 50 }))
+      const body = result.response.body as {
+        result: { content: Array<{ text: string }> }
+      }
+      const payload = JSON.parse(body.result.content[0]?.text ?? '{}') as Record<string, unknown>
+      expect(payload['dry_run']).toBe(true)
+      // 60 already spent + 50 peeked > 100: only true if dry-run reads the
+      // same discriminated bucket the enforcement path recorded into.
+      expect(payload['would_forward']).toBe(false)
+      expect(payload['limits_ok']).toBe(false)
+    })
+
     it('blocks request when cumulative spend exceeds limit', async () => {
       const inner = mockForwarder()
       const { limiter } = createSpendLimiter()
@@ -3707,7 +3868,7 @@ describe('GovernedForwarder', () => {
       const governed = new GovernedForwarder(inner, policy, { spendLimiter: limiter })
 
       await governed.forward(toolsCallRequest('create_payment', { amount: 300 }, 1))
-      expect(limiter.getKeyState('tool:create_payment')?.current_spend).toBe(300)
+      expect(limiter.getKeyState('tool:create_payment:rule:0')?.current_spend).toBe(300)
 
       // Switch currency GBP → EUR while keeping the numeric limit. This is a
       // meaningful policy change — the budget pool resets.
@@ -3725,7 +3886,7 @@ describe('GovernedForwarder', () => {
       })
       governed.updatePolicy(eurPolicy)
 
-      expect(limiter.getKeyState('tool:create_payment')).toBeUndefined()
+      expect(limiter.getKeyState('tool:create_payment:rule:0')).toBeUndefined()
     })
 
     it('uses feedback.message from rule when present', async () => {
@@ -3864,7 +4025,7 @@ describe('GovernedForwarder', () => {
         expect(inner.forward).not.toHaveBeenCalled()
         expect(errorFromResult(attack).data['reason']).toBe('spend_limited')
         // Bucket state must still reflect 500 — the attack did not corrupt it
-        expect(limiter.getKeyState('tool:create_payment')?.current_spend).toBe(500)
+        expect(limiter.getKeyState('tool:create_payment:rule:0')?.current_spend).toBe(500)
 
         // Step 3: legitimate follow-up consumes budget normally
         const followUp = await governed.forward(
@@ -3872,7 +4033,7 @@ describe('GovernedForwarder', () => {
         )
         expect(inner.forward).toHaveBeenCalled()
         expect(followUp.response.status).toBe(200)
-        expect(limiter.getKeyState('tool:create_payment')?.current_spend).toBe(900)
+        expect(limiter.getKeyState('tool:create_payment:rule:0')?.current_spend).toBe(900)
 
         // Step 4: exceeding the cap is correctly denied (would be 1100 > 1000)
         inner.forward.mockClear()
@@ -3881,7 +4042,7 @@ describe('GovernedForwarder', () => {
         )
         expect(inner.forward).not.toHaveBeenCalled()
         expect(errorFromResult(overflow).data['reason']).toBe('spend_limited')
-        expect(limiter.getKeyState('tool:create_payment')?.current_spend).toBe(900)
+        expect(limiter.getKeyState('tool:create_payment:rule:0')?.current_spend).toBe(900)
 
         consoleSpy.mockRestore()
       })

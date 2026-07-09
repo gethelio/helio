@@ -27,11 +27,13 @@ import {
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
+  ruleInfo,
 } from '../feedback/self-repair.js'
 import type { ApprovalRouter } from '../approval/router.js'
 import type { ApprovalAuditContext, ApprovalOutcome } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
+import { spendBucketKey } from './spend-limiter.js'
 import { resolvePath } from './matchers.js'
 
 /** Custom JSON-RPC error code for policy denials. */
@@ -131,7 +133,12 @@ export class GovernedForwarder implements McpForwarder {
     }
 
     if (this.spendLimiter) {
-      const spendConfigs: Array<{ limit: number; currency: string; windowMs: number }> = []
+      const spendConfigs: Array<{
+        limit: number
+        currency: string
+        windowMs: number
+        ruleIndex: number
+      }> = []
       for (const rule of policy.rules) {
         const maxSpend = rule.limits?.maxSpend
         if (maxSpend) {
@@ -139,6 +146,9 @@ export class GovernedForwarder implements McpForwarder {
             limit: maxSpend.limit,
             currency: maxSpend.currency,
             windowMs: maxSpend.windowMs,
+            // Spend bucket keys are rule-discriminated (spendBucketKey), so
+            // reconcile must match tuples at the owning rule's index.
+            ruleIndex: rule.index,
           })
         }
       }
@@ -640,7 +650,7 @@ export class GovernedForwarder implements McpForwarder {
     }
 
     // Extract the monetary amount from tool arguments
-    const key = this.buildLimitKey(maxSpend.key, toolName, request)
+    const key = this.buildSpendLimitKey(maxSpend.key, toolName, request, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, toolArguments ?? {})
     if (typeof rawAmount !== 'number') {
       // eslint-disable-next-line no-console -- Intentional operational warning
@@ -758,7 +768,12 @@ export class GovernedForwarder implements McpForwarder {
                 wouldForward = false
                 limitsOk = false
               } else {
-                const key = this.buildLimitKey(maxSpend.key, toolName, request)
+                const key = this.buildSpendLimitKey(
+                  maxSpend.key,
+                  toolName,
+                  request,
+                  decision.matchedRule.index,
+                )
                 const peekResult = this.spendLimiter.peek({
                   key,
                   amount: rawAmount,
@@ -813,6 +828,20 @@ export class GovernedForwarder implements McpForwarder {
       default:
         return `tool:${toolName}`
     }
+  }
+
+  /**
+   * Construct a spend bucket key via the shared {@link spendBucketKey}
+   * composer — see its doc for why spend buckets are rule-discriminated.
+   * Rate buckets keep the undiscriminated keys.
+   */
+  private buildSpendLimitKey(
+    keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
+    toolName: string,
+    request: McpRequest,
+    ruleIndex: number,
+  ): string {
+    return spendBucketKey(this.buildLimitKey(keyType, toolName, request), ruleIndex)
   }
 
   /** Determine if the request was actually forwarded to the upstream MCP server. */
@@ -1027,8 +1056,7 @@ export class GovernedForwarder implements McpForwarder {
 
     return makeErrorResult(request, POLICY_DENIED, message, {
       blocked: true,
-      rule: decision.matchedRule?.name ?? null,
-      ruleIndex: decision.matchedRule?.index ?? null,
+      ...ruleInfo(decision.matchedRule),
       action,
       reason: decision.reason,
       unsupported: true,

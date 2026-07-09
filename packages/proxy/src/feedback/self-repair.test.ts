@@ -82,7 +82,7 @@ describe('buildPolicyDeniedFeedback', () => {
     expect(feedback.reason).toBe('policy_denied')
     expect(feedback.action).toBe('deny')
     expect(feedback.rule).toBe('block-destructive')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
     expect(feedback.retry_allowed).toBe(false)
     expect(feedback.suggestion).toContain('block-destructive')
     expect(feedback.suggestion).toContain('denied by policy')
@@ -92,7 +92,7 @@ describe('buildPolicyDeniedFeedback', () => {
     const feedback = buildPolicyDeniedFeedback(defaultDenyDecision())
 
     expect(feedback.rule).toBeNull()
-    expect(feedback.ruleIndex).toBeNull()
+    expect(feedback.rule_index).toBeNull()
     expect(feedback.suggestion).toContain('denied by policy')
     expect(feedback.suggestion).not.toContain('(rule:')
   })
@@ -335,7 +335,7 @@ describe('buildApprovalDeniedFeedback', () => {
     expect(feedback.denied_by).toBe('alice')
     expect(feedback.denial_reason).toBe('Budget exceeded')
     expect(feedback.rule).toBe('approve-payments')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
   })
 
   it('sets denial_reason to null when no reason provided', () => {
@@ -438,7 +438,7 @@ describe('buildClientDisconnectedFeedback', () => {
     expect(feedback.reason).toBe('client_disconnected')
     expect(feedback.action).toBe('require_approval')
     expect(feedback.rule).toBe('approve-payments')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
     expect(feedback.retry_allowed).toBe(true)
   })
 
@@ -461,7 +461,7 @@ describe('buildShutdownCancelledFeedback', () => {
     expect(feedback.reason).toBe('shutdown_cancelled')
     expect(feedback.action).toBe('require_approval')
     expect(feedback.rule).toBe('approve-payments')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
     expect(feedback.retry_allowed).toBe(true)
   })
 
@@ -504,7 +504,7 @@ describe('buildRateLimitedFeedback', () => {
     expect(feedback.reason).toBe('rate_limited')
     expect(feedback.action).toBe('rate_limit')
     expect(feedback.rule).toBe('rate-limit-api')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
     expect(feedback.current_calls).toBe(5)
     expect(feedback.max_calls).toBe(5)
     expect(feedback.window_seconds).toBe(60)
@@ -584,7 +584,7 @@ describe('buildSpendLimitedFeedback', () => {
     expect(feedback.reason).toBe('spend_limited')
     expect(feedback.action).toBe('spend_limit')
     expect(feedback.rule).toBe('spend-limit-payments')
-    expect(feedback.ruleIndex).toBe(0)
+    expect(feedback.rule_index).toBe(0)
     expect(feedback.current_spend).toBe(4500)
     expect(feedback.max_spend).toBe(5000)
     expect(feedback.currency).toBe('GBP')
@@ -724,5 +724,128 @@ describe('buildToolDriftFeedback', () => {
   it('builds require_approval feedback', () => {
     const feedback = buildToolDriftFeedback(drift, 'require_approval')
     expect(feedback.action).toBe('require_approval')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// rule_index dual-key window (issue #109)
+// ---------------------------------------------------------------------------
+
+describe('rule_index dual-key window (issue #109)', () => {
+  const drift: ToolDriftEvent = {
+    toolName: 'send_email',
+    changes: [
+      {
+        aspect: 'annotations',
+        baseline: { destructiveHint: false },
+        current: { destructiveHint: true },
+      },
+    ],
+  }
+
+  const matchedRuleBuilders: ReadonlyArray<[name: string, build: () => Record<string, unknown>]> = [
+    ['buildPolicyDeniedFeedback', () => ({ ...buildPolicyDeniedFeedback(denyDecision()) })],
+    [
+      'buildEvidenceMissingFeedback',
+      () => ({
+        ...buildEvidenceMissingFeedback(
+          denyDecision(),
+          { satisfied: false, missing: ['key-a'], expired: [], found: [] },
+          undefined,
+        ),
+      }),
+    ],
+    [
+      'buildEvidenceExpiredFeedback',
+      () => ({
+        ...buildEvidenceExpiredFeedback(
+          denyDecision(),
+          { satisfied: false, missing: [], expired: ['key-a'], found: [] },
+          undefined,
+        ),
+      }),
+    ],
+    [
+      'buildDependencyMissingFeedback',
+      () => ({
+        ...buildDependencyMissingFeedback(denyDecision(), SATISFIED_EVIDENCE, {
+          satisfied: false,
+          missing: ['validate_payment'],
+        }),
+      }),
+    ],
+    [
+      'buildApprovalDeniedFeedback',
+      () => ({ ...buildApprovalDeniedFeedback(approvalDecision(), 'alice', 'too risky') }),
+    ],
+    [
+      'buildApprovalTimeoutFeedback',
+      () => ({ ...buildApprovalTimeoutFeedback(approvalDecision(), 300_000) }),
+    ],
+    [
+      'buildClientDisconnectedFeedback',
+      () => ({ ...buildClientDisconnectedFeedback(approvalDecision()) }),
+    ],
+    [
+      'buildShutdownCancelledFeedback',
+      () => ({ ...buildShutdownCancelledFeedback(approvalDecision()) }),
+    ],
+    [
+      'buildRateLimitedFeedback',
+      () => ({
+        ...buildRateLimitedFeedback(denyDecision({ action: 'rate_limit' }), {
+          allowed: false,
+          current: 5,
+          limit: 5,
+          windowMs: 60_000,
+          resetAtMs: 1_060_000,
+        }),
+      }),
+    ],
+    [
+      'buildSpendLimitedFeedback',
+      () => ({
+        ...buildSpendLimitedFeedback(
+          denyDecision({ action: 'spend_limit' }),
+          { allowed: false, currentSpend: 900, limit: 1000, windowMs: 3_600_000, resetAtMs: 1 },
+          'USD',
+        ),
+      }),
+    ],
+  ]
+
+  it.each(matchedRuleBuilders)('%s emits rule_index beside ruleIndex', (_name, build) => {
+    const feedback = build()
+    expect(feedback).toHaveProperty('rule_index', 0)
+    expect(feedback).toHaveProperty('ruleIndex', 0)
+  })
+
+  it('buildSpendLimitedFeedback invalid-amount variant emits both keys', () => {
+    const feedback = buildSpendLimitedFeedback(
+      denyDecision({ action: 'spend_limit' }),
+      {
+        allowed: false,
+        currentSpend: 0,
+        limit: 1000,
+        windowMs: 3_600_000,
+        resetAtMs: 0,
+        reason: 'invalid_amount',
+      },
+      'USD',
+    )
+    expect(feedback).toHaveProperty('rule_index', 0)
+    expect(feedback).toHaveProperty('ruleIndex', 0)
+  })
+
+  it('emits null under both keys when no rule matched', () => {
+    const feedback = buildPolicyDeniedFeedback(defaultDenyDecision())
+    expect(feedback).toHaveProperty('rule_index', null)
+    expect(feedback).toHaveProperty('ruleIndex', null)
+  })
+
+  it('buildToolDriftFeedback emits null under both keys', () => {
+    const feedback = buildToolDriftFeedback(drift, 'deny')
+    expect(feedback).toHaveProperty('rule_index', null)
+    expect(feedback).toHaveProperty('ruleIndex', null)
   })
 })
