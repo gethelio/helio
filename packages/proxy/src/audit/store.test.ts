@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -896,6 +896,63 @@ CREATE TABLE IF NOT EXISTS audit_records (
       store.insert(makeRecord(), '2019-12-01T00:00:00.000Z')
       const deleted = store.purgeExpired()
       expect(deleted).toBe(3)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Retention sweep hooks (issue #14 — budget ledger co-residence)
+  // -------------------------------------------------------------------------
+
+  describe('runRetentionSweep', () => {
+    it('purges expired audit records like purgeExpired', () => {
+      store.insert(makeRecord(), '2020-01-01T00:00:00.000Z')
+      store.insert(makeRecord()) // recent
+      store.runRetentionSweep()
+      expect(store.count()).toBe(1)
+    })
+
+    it('fires registered hooks with the sweep cutoff in both spellings', () => {
+      const cutoffs: Array<{ iso: string; ms: number }> = []
+      store.onRetentionSweep((cutoff) => {
+        cutoffs.push(cutoff)
+      })
+
+      const before = Date.now()
+      store.runRetentionSweep()
+      const after = Date.now()
+
+      expect(cutoffs).toHaveLength(1)
+      const cutoff = cutoffs[0]
+      if (!cutoff) throw new Error('hook did not fire')
+      // retention is 90d in this store; the cutoff is now - retention,
+      // computed once per sweep and shared with every hook.
+      const retentionMs = 90 * 24 * 60 * 60 * 1000
+      expect(cutoff.ms).toBeGreaterThanOrEqual(before - retentionMs)
+      expect(cutoff.ms).toBeLessThanOrEqual(after - retentionMs)
+      expect(cutoff.iso).toBe(new Date(cutoff.ms).toISOString())
+    })
+
+    it('isolates a throwing hook: the purge and other hooks still run', () => {
+      const seen: string[] = []
+      store.onRetentionSweep(() => {
+        seen.push('first')
+        throw new Error('hook bug')
+      })
+      store.onRetentionSweep(() => {
+        seen.push('second')
+      })
+      store.insert(makeRecord(), '2020-01-01T00:00:00.000Z')
+
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        expect(() => {
+          store.runRetentionSweep()
+        }).not.toThrow()
+      } finally {
+        errorSpy.mockRestore()
+      }
+      expect(seen).toEqual(['first', 'second'])
+      expect(store.count()).toBe(0)
     })
   })
 

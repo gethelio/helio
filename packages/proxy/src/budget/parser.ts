@@ -1,6 +1,6 @@
 import picomatch from 'picomatch'
 import { parseDuration } from '../config/schema.js'
-import type { BudgetConfig } from '../config/schema.js'
+import type { BudgetsConfig } from '../config/schema.js'
 import type { CompiledBudget, CompiledBudgetContributor } from './types.js'
 
 /** Default idle TTL for `window: session` pots when `idle_ttl` is omitted. */
@@ -25,7 +25,7 @@ export class BudgetParseError extends Error {
  *
  * @throws {BudgetParseError} On an invalid contributor glob.
  */
-export function compileBudgets(budgets: readonly BudgetConfig[]): CompiledBudget[] {
+export function compileBudgets(budgets: BudgetsConfig): CompiledBudget[] {
   return budgets.map((budget) => ({
     name: budget.name,
     limit: budget.limit,

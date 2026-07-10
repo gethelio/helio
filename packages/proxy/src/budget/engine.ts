@@ -111,6 +111,93 @@ export interface BudgetLedgerSink {
   commitAll(rows: readonly BudgetLedgerRow[]): void
 }
 
+/**
+ * On-disk identity and epoch of one budget (a `budget_meta` row). The
+ * `{limit_amount, currency, window, key}` tuple is the reset tuple persisted
+ * across restarts; `epoch` is the on-disk spelling of the engine's config
+ * generation. `key` is typed as a plain string because it is only ever
+ * compared, never dispatched on.
+ */
+export interface BudgetMetaRow {
+  readonly budget_name: string
+  readonly limit_amount: number
+  readonly currency: string
+  /** Raw config window string: '1h' | 'session'. */
+  readonly window: string
+  readonly key: string
+  readonly epoch: number
+}
+
+/** One replayed `budget_events` row for rebuilding a duration window. */
+export interface BudgetReplayEvent {
+  readonly bucket_key: string
+  readonly amount: number
+  readonly timestamp_ms: number
+}
+
+/** One rebuilt session pot: post-watermark lifetime sum + last activity. */
+export interface BudgetReplayBucket {
+  readonly bucket_key: string
+  readonly total: number
+  readonly last_activity_ms: number
+}
+
+/**
+ * Full persistence contract the SQLite ledger implements on top of the
+ * commit sink: meta/epoch bookkeeping, startup replay reads, and GC
+ * watermarks. The engine probes its sink for these capabilities once and
+ * persists exactly what the sink can persist — a plain sink (tests, no-op)
+ * keeps the PR 1 in-memory behavior.
+ */
+export interface BudgetPersistence extends BudgetLedgerSink {
+  readMeta(budgetName: string): BudgetMetaRow | undefined
+  /** Every meta row on disk, including names no longer configured. */
+  readAllMeta(): readonly BudgetMetaRow[]
+  /** Upsert: the on-disk epoch must be authoritative at all times. */
+  writeMeta(meta: BudgetMetaRow): void
+  /**
+   * Upsert every row in ONE transaction: a reload's epoch mints land
+   * together or not at all, so a failed reload can be rejected with disk
+   * and memory both untouched.
+   */
+  writeMetaBatch(metas: readonly BudgetMetaRow[]): void
+  /**
+   * The highest epoch present in `budget_events` for the name; 0 when none.
+   * Epoch minting consults this so an epoch that already has rows — for
+   * example after a swallowed reconcile-time meta-write failure — can never
+   * be re-minted for a different pot.
+   */
+  maxEventEpoch(budgetName: string): number
+  /** MUST return rows in ascending `timestamp_ms` order (ties by insert order). */
+  replayDurationEvents(
+    budgetName: string,
+    epoch: number,
+    sinceMs: number,
+  ): readonly BudgetReplayEvent[]
+  /**
+   * Every bucket of the epoch with its post-watermark sum and last activity.
+   * Liveness policy (idle-TTL) is the engine's job, not the store's.
+   */
+  replaySessionBuckets(budgetName: string, epoch: number): readonly BudgetReplayBucket[]
+  /** Upsert the idle-GC watermark for one session bucket. */
+  recordBucketGc(budgetName: string, bucketKey: string, gcAfterMs: number): void
+}
+
+/** Whether a sink carries the full persistence contract. */
+export function isBudgetPersistence(sink: BudgetLedgerSink): sink is BudgetPersistence {
+  const candidate = sink as Partial<BudgetPersistence>
+  return (
+    typeof candidate.readMeta === 'function' &&
+    typeof candidate.readAllMeta === 'function' &&
+    typeof candidate.writeMeta === 'function' &&
+    typeof candidate.writeMetaBatch === 'function' &&
+    typeof candidate.maxEventEpoch === 'function' &&
+    typeof candidate.replayDurationEvents === 'function' &&
+    typeof candidate.replaySessionBuckets === 'function' &&
+    typeof candidate.recordBucketGc === 'function'
+  )
+}
+
 /** Payload for the per-charge commit callback (dashboard event bus). */
 export interface BudgetCommitEvent {
   readonly name: string
@@ -174,13 +261,17 @@ export class BudgetEngine {
   private readonly generations = new Map<string, number>()
   private readonly now: () => number
   private readonly ledger: BudgetLedgerSink
+  /** The sink again, when it carries the full persistence contract. */
+  private readonly persistence: BudgetPersistence | null
   private readonly onCommit: ((event: BudgetCommitEvent) => void) | undefined
   private timer: ReturnType<typeof setInterval> | null = null
   private closed = false
+  private hydrated = false
 
   constructor(options: BudgetEngineOptions = {}) {
     this.now = options.now ?? Date.now
     this.ledger = options.ledger ?? NOOP_LEDGER
+    this.persistence = isBudgetPersistence(this.ledger) ? this.ledger : null
     this.onCommit = options.onCommit
     for (const budget of options.budgets ?? []) {
       this.budgets.set(budget.name, budget)
@@ -362,35 +453,156 @@ export class BudgetEngine {
   // -------------------------------------------------------------------------
 
   /**
+   * Rebuild in-memory state from the ledger. Call once at startup, after
+   * construction and before serving traffic; a no-op when the configured
+   * sink does not carry the persistence contract (in-memory mode).
+   *
+   * Per configured budget, `budget_meta` decides:
+   * - no row → first boot for this name: mint epoch 1, nothing to replay;
+   * - a different `{limit, currency, window, key}` tuple → the config
+   *   changed while down: bump the epoch, replay nothing (the same reset a
+   *   live tuple-changing reload performs, extended across restarts). Old
+   *   rows keep their epoch — history stays queryable, replay ignores it;
+   * - a matching tuple → replay at the meta epoch: duration windows rebuild
+   *   entry lists from a window lookback (bit-equivalent to never having
+   *   restarted), session windows rebuild still-live pots (idle-TTL bound)
+   *   from their post-GC-watermark lifetime sums.
+   *
+   * Meta writes here propagate failures: a ledger that cannot record epochs
+   * at startup must fail the boot loudly, the same posture as the audit
+   * store's schema assertion.
+   */
+  hydrate(): void {
+    if (!this.persistence) return
+    // Latched: a second hydrate would append every replayed duration entry
+    // again, double-counting real money.
+    if (this.hydrated) return
+    this.hydrated = true
+    const nowMs = this.now()
+
+    const metaByName = new Map(
+      this.persistence.readAllMeta().map((meta) => [meta.budget_name, meta]),
+    )
+
+    for (const budget of this.budgets.values()) {
+      const meta = metaByName.get(budget.name)
+      if (!meta) {
+        // First boot for this name. Minting still consults the rows: a
+        // swallowed reconcile-time meta-write failure can leave rows at an
+        // epoch no meta row records, and re-minting that epoch would replay
+        // them into a pot they never belonged to. Those retired rows stay
+        // history only.
+        const epoch = this.persistence.maxEventEpoch(budget.name) + 1
+        this.persistence.writeMeta(metaOf(budget, epoch))
+        this.generations.set(budget.name, epoch)
+        continue
+      }
+      if (metaTupleChanged(meta, budget)) {
+        const epoch = Math.max(meta.epoch, this.persistence.maxEventEpoch(budget.name)) + 1
+        this.persistence.writeMeta(metaOf(budget, epoch))
+        this.generations.set(budget.name, epoch)
+        continue
+      }
+
+      this.generations.set(budget.name, meta.epoch)
+      if (budget.window.kind === 'duration') {
+        const events = this.persistence.replayDurationEvents(
+          budget.name,
+          meta.epoch,
+          nowMs - budget.window.windowMs,
+        )
+        for (const event of events) {
+          const bucket = this.bucketFor(budget.name, event.bucket_key)
+          bucket.entries.push({ timestampMs: event.timestamp_ms, amount: event.amount })
+          // Events arrive time-ordered, so the last assignment is the max.
+          bucket.lastActivityMs = event.timestamp_ms
+        }
+      } else {
+        const liveAfterMs = nowMs - budget.window.idleTtlMs
+        for (const row of this.persistence.replaySessionBuckets(budget.name, meta.epoch)) {
+          if (row.last_activity_ms >= liveAfterMs) {
+            const bucket = this.bucketFor(budget.name, row.bucket_key)
+            bucket.total = row.total
+            bucket.lastActivityMs = row.last_activity_ms
+          } else if (row.total > 0) {
+            // The pot crossed its idle TTL while no sweep could observe it
+            // (downtime, or a crash before the next sweep tick). Durably
+            // retire it now: without the watermark, a same-key resurrection
+            // followed by another restart would re-absorb this dead pot's
+            // spend. All of the pot's rows are strictly older than nowMs,
+            // so the inclusive watermark bound stays safe.
+            this.persistence.recordBucketGc(budget.name, row.bucket_key, nowMs)
+          }
+        }
+      }
+    }
+
+    // Removal observed at boot: a meta row whose name is not configured was
+    // removed while the proxy was down (a live removal writes its tombstone
+    // in reconcile). Retire whatever the current epoch accrued so a later
+    // re-add starts fresh, exactly like a live removal. Idempotent: after
+    // the bump no rows exist at or above the new epoch, so later boots skip
+    // the write.
+    for (const [name, meta] of metaByName) {
+      if (this.budgets.has(name)) continue
+      const maxEventEpoch = this.persistence.maxEventEpoch(name)
+      if (maxEventEpoch < meta.epoch) continue
+      this.persistence.writeMeta({ ...meta, epoch: Math.max(meta.epoch, maxEventEpoch) + 1 })
+    }
+  }
+
+  /**
    * Swap budget configs on hot-reload. Identity is the NAME: removed names
    * drop their live buckets; a changed `{limit, currency, window, key}` tuple
    * resets the budget's buckets (a different pool or scope structure);
    * everything else — contributors, on_exceed — applies to the accrued state
    * as-is, because those edits do not change what was already spent.
+   *
+   * Persist-before-swap: every epoch this reload mints lands in
+   * `budget_meta` in ONE transaction BEFORE any memory changes. A throw
+   * rejects the whole reload — the caller keeps the previous config — so
+   * disk and memory can never diverge; a failed reload simply never
+   * happened, and no later restart can misread it. (A swallow-and-continue
+   * posture here would let an A→B reload with a failed flush resurrect the
+   * retired A pot after a revert-and-restart.)
+   *
+   * Removed names mint too: an in-flight charge frozen before the removal
+   * must go stale, or its commit would recreate hidden bucket state for a
+   * budget that no longer exists — and without the on-disk tombstone, a
+   * restart with the budget back in the config would resurrect the
+   * pre-removal pot that the removal had reset. Generations for removed
+   * names are kept (not deleted) so a later re-add keeps counting up.
+   *
+   * @throws When the epoch flush fails; the engine is unchanged.
    */
   reconcile(next: readonly CompiledBudget[]): void {
     const nextByName = new Map(next.map((budget) => [budget.name, budget]))
 
+    // Phase 1 — compute every pot reset this swap needs, mutating nothing.
+    const mints: Array<{ name: string; tuple: CompiledBudget; epoch: number }> = []
     for (const [name, budget] of nextByName) {
       const current = this.budgets.get(name)
       if (!current || tupleChanged(current, budget)) {
         // New name or a different pool: reset state and invalidate any
         // in-flight charges frozen under the old generation.
-        this.state.delete(name)
-        this.generations.set(name, (this.generations.get(name) ?? 0) + 1)
+        mints.push({ name, tuple: budget, epoch: this.nextEpoch(name) })
       }
     }
-    for (const name of [...this.budgets.keys()]) {
+    for (const [name, removed] of this.budgets) {
       if (nextByName.has(name)) continue
-      this.state.delete(name)
-      // A removed budget's generation bumps too: an in-flight charge frozen
-      // before the removal must go stale, or its commit would recreate
-      // hidden bucket state for a budget that no longer exists. Generations
-      // for removed names are kept (not deleted) so a later re-add keeps
-      // counting up instead of colliding with older in-flight charges.
-      this.generations.set(name, (this.generations.get(name) ?? 0) + 1)
+      mints.push({ name, tuple: removed, epoch: this.nextEpoch(name) })
     }
 
+    // Phase 2 — durability, all-or-nothing.
+    if (this.persistence && mints.length > 0) {
+      this.persistence.writeMetaBatch(mints.map((mint) => metaOf(mint.tuple, mint.epoch)))
+    }
+
+    // Phase 3 — memory: pure Map operations, nothing here can throw.
+    for (const mint of mints) {
+      this.state.delete(mint.name)
+      this.generations.set(mint.name, mint.epoch)
+    }
     this.budgets = nextByName
   }
 
@@ -405,7 +617,27 @@ export class BudgetEngine {
       }
       for (const [key, bucket] of buckets) {
         if (budget.window.kind === 'session') {
-          if (nowMs - bucket.lastActivityMs > budget.window.idleTtlMs) buckets.delete(key)
+          if (nowMs - bucket.lastActivityMs > budget.window.idleTtlMs) {
+            // Watermark before eviction: replaying without it would let a
+            // later resurrection of the same key re-absorb pre-GC spend
+            // after a restart. If the watermark cannot be written, keep the
+            // pot and retry on the next sweep — an over-held bucket is
+            // recoverable, silently revived spend is not.
+            if (this.persistence) {
+              try {
+                this.persistence.recordBucketGc(name, key, nowMs)
+              } catch (err) {
+                // eslint-disable-next-line no-console -- Intentional operational warning
+                console.error(
+                  `[helio] Budget "${name}": failed to record the GC watermark for ` +
+                    `"${key}"; keeping the idle pot until the next sweep:`,
+                  err,
+                )
+                continue
+              }
+            }
+            buckets.delete(key)
+          }
         } else {
           this.evictExpired(bucket, budget.window.windowMs, nowMs)
           if (bucket.entries.length === 0) buckets.delete(key)
@@ -479,6 +711,31 @@ export class BudgetEngine {
   // Internals
   // -------------------------------------------------------------------------
 
+  /**
+   * The next epoch for a name: one past the highest that memory, the meta
+   * row, or the rows themselves have seen. Pure — the caller applies it to
+   * `generations` only after the mint is durable. The meta consult matters
+   * for names this process has no memory of (a hot-reload re-add after a
+   * restart); the rows consult is a backstop against historical divergence
+   * (rows at an epoch no meta row records) — minting from memory or meta
+   * alone could collide into an epoch that already has rows and replay them
+   * into a different pot.
+   */
+  private nextEpoch(name: string): number {
+    const memory = this.generations.get(name) ?? 0
+    const disk = this.persistence
+      ? Math.max(this.persistence.readMeta(name)?.epoch ?? 0, this.persistence.maxEventEpoch(name))
+      : 0
+    return Math.max(memory, disk) + 1
+  }
+
+  /**
+   * The key format is part of the ON-DISK contract: hydrate rebuilds buckets
+   * from `budget_events.bucket_key` verbatim, so renaming any segment here
+   * would strand every persisted bucket of an unchanged tuple as an
+   * unreachable ghost (displayed, never charged). Changing the format
+   * requires folding a format version into the epoch decision.
+   */
   private bucketKey(budget: CompiledBudget, ctx: BudgetChargeContext): string {
     switch (budget.key) {
       case 'session':
@@ -564,6 +821,27 @@ export class BudgetEngine {
       resetAtMs,
     }
   }
+}
+
+function metaOf(budget: CompiledBudget, epoch: number): BudgetMetaRow {
+  return {
+    budget_name: budget.name,
+    limit_amount: budget.limit,
+    currency: budget.currency,
+    window: budget.windowRaw,
+    key: budget.key,
+    epoch,
+  }
+}
+
+/** The on-disk spelling of {@link tupleChanged}: meta row vs compiled budget. */
+function metaTupleChanged(meta: BudgetMetaRow, budget: CompiledBudget): boolean {
+  return (
+    meta.limit_amount !== budget.limit ||
+    meta.currency !== budget.currency ||
+    meta.window !== budget.windowRaw ||
+    meta.key !== budget.key
+  )
 }
 
 function tupleChanged(a: CompiledBudget, b: CompiledBudget): boolean {

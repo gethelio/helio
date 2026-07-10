@@ -23,7 +23,7 @@ import {
 } from './approval/index.js'
 import { RateLimiter } from './policy/index.js'
 import { SpendLimiter } from './policy/index.js'
-import { BudgetEngine, compileBudgets } from './budget/index.js'
+import { BudgetEngine, BudgetLedger, compileBudgets } from './budget/index.js'
 import { parseDuration } from './config/schema.js'
 import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
 import type { AuditRecord } from './audit/index.js'
@@ -34,7 +34,9 @@ import {
   warnIfSdkSidebandExposed,
   warnIfDashboardOpenMode,
   warnIfNoEnforcement,
+  warnIfBudgetWindowExceedsRetention,
 } from './startup-warnings.js'
+import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
 
 // ---------------------------------------------------------------------------
@@ -326,6 +328,18 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     retention: config.audit.retention,
     includeResponses: config.audit.include_responses,
   })
+
+  // Budget ledger: co-located in the audit database (one connection, one WAL
+  // domain, one hardening pass) and joined to the store's single retention
+  // sweep. The store's constructor purge ran before this hook could exist,
+  // so one full sweep runs now — budget rows that aged out while the proxy
+  // was down must not wait a day for the timer.
+  const budgetLedger = new BudgetLedger({ database: auditStore.database })
+  auditStore.onRetentionSweep((cutoff) => {
+    budgetLedger.purgeExpired(cutoff.ms)
+  })
+  auditStore.runRetentionSweep()
+
   const auditWriter = new AuditWriter({
     store: auditStore,
     onPersist: (record, id) => {
@@ -418,7 +432,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // One budget engine shared by both doors — one pot, MCP and sideband alike.
   // Constructed even with zero budgets configured so a hot-reload can
   // introduce budgets without a restart; the gate short-circuits when empty.
-  const budgetEngine = new BudgetEngine({ budgets })
+  // Hydration replays persisted spend BEFORE any server starts listening, so
+  // the first governed call already sees the rebuilt pots.
+  const budgetEngine = new BudgetEngine({ budgets, ledger: budgetLedger })
+  budgetEngine.hydrate()
 
   const governedForwarder = new GovernedForwarder(forwarder, policy, {
     environment: config.environment,
@@ -578,6 +595,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   warnIfWebhookChannelUnreachable(config)
   warnIfSdkSidebandExposed(config)
   warnIfDashboardOpenMode(config)
+  warnIfBudgetWindowExceedsRetention(config)
   const channelCount = config.approval.channels.length
   console.error(
     `Approvals: timeout ${config.approval.timeout}, default on timeout: ${config.approval.default_on_timeout}, ${String(channelCount)} channel${channelCount !== 1 ? 's' : ''} configured`,
@@ -605,9 +623,13 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       configPath,
       initialConfig: config,
       onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
+        // Budgets reconcile FIRST: it persists the reload's epoch mints and
+        // throws when the flush fails, which rejects the whole reload (the
+        // watcher's onError keeps the current config) before any policy
+        // swap — the reload applies all-or-nothing across the file.
+        budgetEngine.reconcile(newBudgets)
         governedForwarder.updatePolicy(newPolicy)
         governanceService?.updatePolicy(newPolicy)
-        budgetEngine.reconcile(newBudgets)
         const budgetTotal = newBudgets.length
         console.error(
           `[helio] Budgets reloaded: ${String(budgetTotal)} budget${budgetTotal !== 1 ? 's' : ''}`,
@@ -632,7 +654,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         }
       },
       onError: (error) => {
-        console.error(`[helio] Config reload failed (keeping current policy): ${error.message}`)
+        console.error(
+          `[helio] Config reload failed (keeping current configuration): ${error.message}`,
+        )
       },
     })
     configWatcher.start()
@@ -845,26 +869,24 @@ function registerShutdown(
     }, SHUTDOWN_TIMEOUT_MS)
     forceShutdownTimer.unref()
 
-    const closeAll = async () => {
-      if (annotationPrime) annotationPrime.stop()
-      if (configWatcher) configWatcher.close()
-      if (closeDashboardApp) closeDashboardApp()
-      if (eventBus) eventBus.close()
-      if (governanceService) governanceService.close()
-      if (rateLimiter) rateLimiter.close()
-      if (spendLimiter) spendLimiter.close()
-      if (budgetEngine) budgetEngine.close()
-      if (approvalRouter) approvalRouter.close()
-      if (approvalQueue) approvalQueue.close()
-      if (dashboardHandle) await dashboardHandle.close()
-      if (sidebandHandle) await sidebandHandle.close()
-      await handle.close()
-      if (evidenceStore) evidenceStore.close()
-      if (auditWriter) auditWriter.close()
-      if (closeForwarder) await closeForwarder()
-    }
-
-    void closeAll()
+    void closeResources({
+      handle,
+      annotationPrime,
+      closeForwarder,
+      auditWriter,
+      configWatcher,
+      sidebandHandle,
+      evidenceStore,
+      approvalRouter,
+      approvalQueue,
+      rateLimiter,
+      spendLimiter,
+      budgetEngine,
+      closeDashboardApp,
+      dashboardHandle,
+      eventBus,
+      governanceService,
+    })
       .then(() => {
         clearTimeout(forceShutdownTimer)
         process.exit(0)

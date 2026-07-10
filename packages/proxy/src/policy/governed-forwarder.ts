@@ -461,7 +461,9 @@ export class GovernedForwarder implements McpForwarder {
             // ledger commits FIRST: a durable-write failure must block the
             // call WITHOUT having consumed the rule counters, and it reports
             // its own failure class instead of masquerading as an upstream
-            // error.
+            // error. INVARIANT: commitRuleLimit below must not throw (it
+            // records with config-validated params) — a throw there would
+            // block the call with the budget spend already durably counted.
             let ledgerBlock: ForwardResult | undefined
             try {
               budgetsChain = budgetGate.commit?.(auditRecordId) ?? budgetsChain

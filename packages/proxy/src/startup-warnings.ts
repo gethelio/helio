@@ -1,7 +1,48 @@
 /* eslint-disable no-console -- surfaces operator-visible startup warnings */
 
+import { parseDuration } from './config/schema.js'
+
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'
+}
+
+/**
+ * Emit a startup warning for every budget whose replay horizon exceeds
+ * `audit.retention`. The budget ledger is purged on the audit retention
+ * sweep, so a duration window (or a session pot's `idle_ttl`) longer than
+ * the retention loses its oldest rows while they still matter: a restart
+ * then under-counts the pot and silently re-opens spend the window should
+ * still be holding. Surfaced at boot because the misconfiguration is
+ * otherwise invisible until a restart.
+ */
+export function warnIfBudgetWindowExceedsRetention(
+  config: {
+    budgets: ReadonlyArray<{ name: string; window: string; idle_ttl?: string }>
+    audit: { retention: string }
+  },
+  log: (message: string) => void = console.error,
+): boolean {
+  const retentionMs = parseDuration(config.audit.retention)
+  let warned = false
+  for (const budget of config.budgets) {
+    const horizonMs =
+      budget.window === 'session'
+        ? parseDuration(budget.idle_ttl ?? '24h')
+        : parseDuration(budget.window)
+    const horizonLabel =
+      budget.window === 'session'
+        ? `idle_ttl ${budget.idle_ttl ?? '24h'}`
+        : `window ${budget.window}`
+    if (horizonMs <= retentionMs) continue
+    log(
+      `[helio] Warning: budget "${budget.name}" has ${horizonLabel}, longer than ` +
+        `audit.retention ${config.audit.retention}. The spend ledger is purged on the ` +
+        'retention sweep, so a restart can forget in-window spend and re-open the pot. ' +
+        'Raise audit.retention or shorten the budget window.',
+    )
+    warned = true
+  }
+  return warned
 }
 
 /**

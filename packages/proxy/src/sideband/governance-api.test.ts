@@ -1,8 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import Database from 'better-sqlite3'
 import { createSidebandApp } from '../evidence/api.js'
 import { EvidenceStore } from '../evidence/store.js'
 import { GovernanceService } from './governance-service.js'
 import { BudgetEngine } from '../budget/engine.js'
+import type { BudgetLedgerSink } from '../budget/engine.js'
+import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import { compilePolicies } from '../policy/parser.js'
 import { ApprovalRouter } from '../approval/router.js'
@@ -492,6 +495,69 @@ describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
     expect(limits.budgets[0]?.['reset_at_ms']).toBeDefined()
     const feedback = body['feedback'] as { message: string }
     expect(feedback.message).toContain('"cap"')
+
+    budgetEngine.close()
+    governance.close()
+    store.close()
+  })
+
+  it('a budget ledger fault maps to a 500 on /audit; the adapter retry gets 201 (PR 2)', async () => {
+    const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    let failNext = true
+    const failOnce: BudgetLedgerSink = {
+      commitAll: (rows) => {
+        if (failNext) {
+          failNext = false
+          throw new Error('disk full')
+        }
+        ledger.commitAll(rows)
+      },
+    }
+    const budgetEngine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'send', field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+      ledger: failOnce,
+    })
+    const governance = new GovernanceService({ policy, budgetEngine, sweepIntervalMs: 0 })
+    const store = new EvidenceStore()
+    const app = createSidebandApp(store, { governance })
+    const post = (path: string, body: unknown) =>
+      app.request(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+    const evalRes = await post('/evaluate', {
+      origin: 'openclaw',
+      tool: { name: 'send' },
+      arguments: { amount: 30 },
+    })
+    const evaluationId = ((await evalRes.json()) as Record<string, unknown>)['evaluation_id']
+
+    // First /audit: the durable write fails → 500, nothing committed, the
+    // pending entry survives for the idempotent retry.
+    const failed = await post('/audit', { evaluation_id: evaluationId, status: 'success' })
+    expect(failed.status).toBe(500)
+    const countRows = () =>
+      (db.prepare('SELECT COUNT(*) AS count FROM budget_events').get() as { count: number }).count
+    expect(countRows()).toBe(0)
+
+    const retry = await post('/audit', { evaluation_id: evaluationId, status: 'success' })
+    expect(retry.status).toBe(201)
+    expect(countRows()).toBe(1)
 
     budgetEngine.close()
     governance.close()

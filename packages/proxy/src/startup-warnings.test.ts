@@ -4,6 +4,7 @@ import {
   warnIfSdkSidebandExposed,
   warnIfDashboardOpenMode,
   warnIfNoEnforcement,
+  warnIfBudgetWindowExceedsRetention,
 } from './startup-warnings.js'
 
 describe('warnIfWebhookChannelUnreachable', () => {
@@ -242,5 +243,93 @@ describe('warnIfNoEnforcement', () => {
 
     expect(warned).toBe(false)
     expect(messages).toHaveLength(0)
+  })
+})
+
+describe('warnIfBudgetWindowExceedsRetention', () => {
+  function makeConfig(
+    budgets: Array<{ name: string; window: string; idle_ttl?: string }>,
+    retention = '90d',
+  ) {
+    return { budgets, audit: { retention } }
+  }
+
+  it('warns when a duration window is longer than the retention', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig([{ name: 'long-cap', window: '30d' }], '7d'),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain('long-cap')
+    expect(messages[0]).toContain('window 30d')
+    expect(messages[0]).toContain('audit.retention 7d')
+  })
+
+  it('warns when a session idle_ttl is longer than the retention', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig([{ name: 'sc', window: 'session', idle_ttl: '14d' }], '7d'),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(true)
+    expect(messages[0]).toContain('idle_ttl 14d')
+  })
+
+  it('uses the 24h default idle_ttl for session windows', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig([{ name: 'sc', window: 'session' }], '12h'),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(true)
+    expect(messages[0]).toContain('idle_ttl 24h')
+  })
+
+  it('does not warn when every horizon fits inside the retention', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig([
+        { name: 'daily', window: '24h' },
+        { name: 'sc', window: 'session', idle_ttl: '48h' },
+      ]),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn at exactly the retention bound', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig([{ name: 'edge', window: '90d' }], '90d'),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('warns once per offending budget', () => {
+    const messages: string[] = []
+    const warned = warnIfBudgetWindowExceedsRetention(
+      makeConfig(
+        [
+          { name: 'a', window: '30d' },
+          { name: 'b', window: '20d' },
+          { name: 'ok', window: '1h' },
+        ],
+        '7d',
+      ),
+      (m) => messages.push(m),
+    )
+
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(2)
   })
 })
