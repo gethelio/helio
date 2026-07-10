@@ -113,9 +113,21 @@ audit:
 
 **Indexes** are created on `created_at`, `tool_name`, `policy_decision`, `block_reason`, `session_id`, `record_kind`, and `origin` for fast queries, plus a composite `(upstream_http_status, created_at)` index for upstream status rollups and status-over-time alert queries.
 
+### Budget Ledger Tables
+
+Named budgets ([configuration reference](./configuration.md#budgets)) persist their spend in the same database file, in three tables the budget ledger owns:
+
+- **`budget_events`** — one row per committed charge. Columns: `id` (UUID, primary key), `budget_name`, `epoch`, `bucket_key`, `kind` (`spend`, or `approved_overage` once break-glass approvals ship later in this release train), `amount`, `currency`, `tool_name`, `origin` (`mcp` or the adapter origin), `audit_record_id` (the pre-generated id of the call's audit record; no foreign key), `timestamp` (ISO 8601 event time), `timestamp_ms` (the same instant in epoch milliseconds — the axis every replay and retention query uses), and `created_at` (insert time). Every charge of one call is written in a single synchronous transaction at record time, so the ledger can never disagree with the in-memory pots about money. Record time differs per door: the MCP proxy commits before forwarding, so a failed ledger write there blocks the call itself (`block_reason: budget_ledger_write_failed`) without consuming any counters; the sideband commits at `/audit`, after the host already executed the call, so a failed write there fails the `/audit` report and the adapter's idempotent retry re-attempts the commit — again with nothing counted until the write lands.
+- **`budget_meta`** — one small row per budget name: the config identity tuple (`limit_amount`, `currency`, `window`, `key`), the `epoch` counter, and `updated_at`. A change the proxy observes — a tuple edit or a removal, live via hot-reload or discovered at startup — bumps the epoch and resets the pot; rows from older epochs stay queryable as history but are never replayed.
+- **`budget_bucket_gc`** — idle-collection watermarks for session pots (`budget_name` + `bucket_key` primary key, `gc_after_ms`), so a session key that reappears after its pot was collected does not re-absorb pre-collection spend on the next restart.
+
+Two indexes serve the hot paths: `idx_budget_events_replay` on `(budget_name, epoch, bucket_key, timestamp_ms)` for startup replay, and `idx_budget_events_timestamp_ms` for the retention sweep. The schema is validated at startup against the canonical definition — names, types, constraints, and keys — under the same clean-break policy as the audit table.
+
+At startup the engine replays the ledger: duration windows rebuild from the rows inside the window (equivalent to never having restarted), and `window: session` pots rebuild from their lifetime sums if their last activity is within `idle_ttl`. Ledger rows may reference an audit record that is still in the async writer buffer (or was lost to a crash): the ledger is the source of truth for spend, the audit table for calls.
+
 ### Local Schema Resets (Pre-1.0)
 
-Helio currently uses a clean-break local schema policy for the audit SQLite file. If startup reports an audit schema mismatch (for example after pulling a new build that introduces a required column), reset local audit files and restart:
+Helio currently uses a clean-break local schema policy for the audit SQLite file, covering the audit table and the budget ledger tables alike. If startup reports a schema mismatch (for example after pulling a new build that introduces a required column), reset local audit files and restart:
 
 ```bash
 rm helio-audit.db helio-audit.db-wal helio-audit.db-shm
@@ -268,8 +280,11 @@ audit:
 - Records older than the retention period are permanently deleted.
 - Cleanup runs automatically every 24 hours and at proxy startup.
 - Set a larger value (e.g. `365d`) if you need longer retention.
+- The same sweep purges budget ledger events older than the retention cutoff and prunes idle-collection watermarks that no longer guard any surviving row, so `budget_events` and `budget_bucket_gc` stay bounded by the retention window. `budget_meta` is not swept: it keeps one small row per budget name the proxy has ever seen configured, because the epoch history is what keeps retired spend retired.
 
 > **Note:** Retention cleanup is irreversible. If you need permanent audit records, export them before they expire or set retention to a very large value.
+
+> **Bound:** a `window: session` budget pot that stays continuously active for longer than the retention period loses its oldest ledger rows to the sweep, so a restart after that point under-counts its lifetime spend. With the 90-day default this is a theoretical bound, not an expected operating mode. The same bound applies to a duration window (or a session `idle_ttl`) configured **longer** than `audit.retention` — that combination can forget in-window spend on every restart, so Helio logs a startup warning for it.
 
 ## Performance
 

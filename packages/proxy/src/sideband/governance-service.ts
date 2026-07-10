@@ -1354,6 +1354,12 @@ export class GovernanceService {
     // The fallible budget ledger commits FIRST: a throw here propagates out
     // of audit() with the entry still pending and NO limiter state consumed,
     // so the adapter's idempotent retry cannot double-record rate/spend.
+    // INVARIANT: nothing between this recordAll and the commitState latch in
+    // audit() may throw — the rate/spend records below run on inputs already
+    // validated at /evaluate and /audit — because a throw there would make
+    // the retry re-run recordAll and double-commit the budgets. Adding a
+    // fallible step to this window requires latching the budget commit
+    // separately first.
     const budgetPlans = entry.plans.filter((plan): plan is BudgetPlan => plan.kind === 'budget')
     if (budgetPlans.length > 0 && this.budgetEngine) {
       // actual_amount, when supplied, is the call's one true realized cost

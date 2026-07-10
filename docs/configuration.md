@@ -252,7 +252,9 @@ budgets:
 
 Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true`. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied.
 
-Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors` preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure). Budget state is in-memory in this release; persistence and a spend ledger are planned.
+Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors` preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure).
+
+Budget spend **persists across restarts**: every charge is written to a ledger in the audit database (see [Budget Ledger Tables](./audit.md#budget-ledger-tables)) synchronously at record time, and startup replays it — duration windows resume mid-window exactly where they left off, and `session` pots whose last activity is within `idle_ttl` come back with their full accrued spend. The reset rules above extend across restarts: if the `limit`/`currency`/`window`/`key` tuple in the config differs from what the ledger last saw, the pot starts fresh instead of replaying, and a removal the proxy observes — live via hot-reload, or discovered at a startup without the budget — retires the accrued spend, so re-adding the budget later starts fresh even with an identical tuple. Ledger rows follow `audit.retention` on the audit store's sweep schedule; configuring a budget window (or session `idle_ttl`) longer than the retention draws a startup warning, because the sweep would forget in-window spend across restarts. Unlike budgets, rule-level rate/spend limit buckets remain in-memory and reset on restart.
 
 ### approval
 
@@ -434,10 +436,10 @@ On successful reload:
 [helio] Policy reloaded: 5 rules (default: allow)
 ```
 
-If the new configuration is invalid, Helio keeps the current policy and logs the error:
+If the new configuration is invalid — or its budget epoch changes cannot be durably recorded — Helio rejects the reload as a whole, keeps the complete current configuration (policy rules and budgets alike), and logs the error:
 
 ```
-[helio] Config reload failed (keeping current policy): YAML parse error in helio.yaml: ...
+[helio] Config reload failed (keeping current configuration): YAML parse error in helio.yaml: ...
 ```
 
 ### Limit reconciliation
@@ -446,7 +448,7 @@ Rate and spend limit buckets survive a hot-reload as long as their underlying ru
 
 Spend bucket keys carry a `:rule:<index>` suffix (for example `session:abc:rule:2`), so two `spend_limit` rules that share a scope — say, two session-keyed rules — track their spend in separate buckets instead of silently sharing one with last-write-wins config. The suffixed keys are what you see in `GET /api/limits`, `limit_warning` events, and denial messages. Rate bucket keys are unchanged. For suffixed keys, reconciliation matches the tuple at the bucket's own rule index: an edit that shifts a spend rule's position (inserting or removing a rule above it, or reordering) evicts its bucket and the rule starts a fresh window — accrued spend does not follow a rule to its new position. Two caveats: swapping two spend rules with identical `limit`/`currency`/`window` keeps each bucket at its position, so the rules exchange accrued spend; and a sideband call evaluated before a reload commits its spend (at `/audit`) into the bucket keyed at evaluation time, which may be a just-evicted label.
 
-> **Note:** Limit state is reconciled, not persisted. Restarting the proxy still clears all buckets. Persistence across restarts is planned for a later release.
+> **Note:** Rule-level limit state is reconciled, not persisted — restarting the proxy clears rate/spend rule buckets. Named budgets are different: their spend persists across restarts via the budget ledger (see [budgets](#budgets)).
 
 ### Disabling hot reload
 

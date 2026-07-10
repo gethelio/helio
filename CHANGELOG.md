@@ -39,8 +39,27 @@ Maintainer notes:
   `/audit` only when the call executed. Budgets hot-reload by name identity:
   contributor edits preserve accrued spend; `limit`/`currency`/`window`
   changes reset it. `on_exceed: deny` is the only breach mode in this
-  release; break-glass approvals, persistence, and the dashboard Budgets view
-  land next in this release train. State is in-memory for now.
+  release; break-glass approvals and the dashboard Budgets view land next in
+  this release train.
+- **Budget spend persists across restarts (#14).** Every budget charge is
+  written to a ledger in the audit database — synchronously, in one
+  transaction per call, at record time — and replayed at startup: duration
+  windows resume mid-window exactly where they left off, and `session` pots
+  still within their `idle_ttl` come back with their full accrued spend.
+  Config identity extends across restarts: a
+  `limit`/`currency`/`window`/`key` change while the proxy was down resets
+  the pot instead of replaying, matching hot-reload semantics, and a removal
+  the proxy observes (live, or at a startup without the budget) retires the
+  spend so a later re-add starts fresh. Ledger writes fail closed per door:
+  the MCP door blocks the call before forwarding, with
+  `failure_class: budget_ledger_write_failed` in the error feedback and the
+  same value as the audit record's `block_reason`, consuming no counters;
+  the sideband door fails the `/audit` report and keeps the evaluation
+  pending, so nothing is counted unless the adapter's idempotent retry
+  lands the write. Ledger rows follow `audit.retention` on the audit
+  store's existing sweep, and a budget window longer than the retention
+  draws a startup warning. Rule-level rate/spend limit buckets remain
+  in-memory and still reset on restart.
 
 ### Fixed
 

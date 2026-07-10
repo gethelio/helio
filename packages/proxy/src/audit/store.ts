@@ -298,6 +298,16 @@ function restrictAuditFilePerms(dbPath: string): void {
 // ---------------------------------------------------------------------------
 
 /**
+ * The retention cutoff of one sweep, computed once and shared with every
+ * registered hook: `iso` for `created_at`-style string comparisons, `ms`
+ * for epoch-millisecond columns.
+ */
+export interface RetentionSweepCutoff {
+  readonly iso: string
+  readonly ms: number
+}
+
+/**
  * SQLite-backed audit record store.
  *
  * All read/write operations are synchronous (better-sqlite3 design).
@@ -308,6 +318,7 @@ export class AuditStore {
   private readonly insertStmt: Statement
   private readonly retentionMs: number
   private readonly includeResponses: boolean
+  private readonly retentionSweepHooks: Array<(cutoff: RetentionSweepCutoff) => void> = []
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: AuditStoreOptions) {
@@ -347,11 +358,54 @@ export class AuditStore {
     const intervalMs = options.cleanupIntervalMs ?? 86_400_000
     if (intervalMs > 0) {
       this.cleanupTimer = setInterval(() => {
-        this.purgeExpired()
+        this.runRetentionSweep()
         restrictAuditFilePerms(options.path)
       }, intervalMs)
       this.cleanupTimer.unref()
     }
+  }
+
+  /**
+   * Register a hook to run on every retention sweep, receiving the sweep's
+   * cutoff. This is how co-resident tables (the budget ledger) join the
+   * store's single sweep schedule instead of running their own timers.
+   * Hooks registered after construction miss the constructor's initial
+   * purge — call {@link runRetentionSweep} once after registering to cover
+   * rows that aged out while the process was down.
+   */
+  onRetentionSweep(fn: (cutoff: RetentionSweepCutoff) => void): void {
+    this.retentionSweepHooks.push(fn)
+  }
+
+  /**
+   * One full retention sweep: purge expired audit records, then fire every
+   * registered hook with the sweep's cutoff. Hook failures degrade to a
+   * logged error — a broken co-resident purge must not stop the audit
+   * table's own retention.
+   */
+  runRetentionSweep(): void {
+    const ms = Date.now() - this.retentionMs
+    const cutoff: RetentionSweepCutoff = { iso: new Date(ms).toISOString(), ms }
+    this.purgeBefore(cutoff.iso)
+    for (const hook of this.retentionSweepHooks) {
+      try {
+        hook(cutoff)
+      } catch (err) {
+        // eslint-disable-next-line no-console -- Intentional operational warning
+        console.error('[helio] retention sweep hook failed:', err)
+      }
+    }
+  }
+
+  /**
+   * Package-internal: the store's open database handle, for components that
+   * co-locate their tables in the audit db (the budget ledger). Sharing the
+   * handle keeps one connection, one WAL domain, and one file-permission
+   * hardening pass. Not part of the public embedding API — do not re-export
+   * anything built on this from the package root.
+   */
+  get database(): DatabaseType {
+    return this.db
   }
 
   /**
@@ -633,8 +687,11 @@ export class AuditStore {
 
   /** Delete records older than the retention period. Returns the count of deleted records. */
   purgeExpired(): number {
-    const cutoff = new Date(Date.now() - this.retentionMs).toISOString()
-    const result = this.db.prepare('DELETE FROM audit_records WHERE created_at < ?').run(cutoff)
+    return this.purgeBefore(new Date(Date.now() - this.retentionMs).toISOString())
+  }
+
+  private purgeBefore(cutoffIso: string): number {
+    const result = this.db.prepare('DELETE FROM audit_records WHERE created_at < ?').run(cutoffIso)
     return result.changes
   }
 

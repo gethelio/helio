@@ -7,9 +7,12 @@ import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
+import Database from 'better-sqlite3'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { BudgetEngine } from '../budget/engine.js'
+import type { BudgetLedgerSink } from '../budget/engine.js'
+import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import type { BudgetConfig } from '../config/schema.js'
 import { ApprovalRouter } from '../approval/router.js'
@@ -65,6 +68,7 @@ function makeService(opts?: {
   maxSenderKeys?: number
   maxPendingBytes?: number
   budgets?: BudgetConfig[]
+  budgetLedger?: BudgetLedgerSink
 }): ServiceHarness {
   let time = 1_000_000
   const now = () => time
@@ -93,7 +97,12 @@ function makeService(opts?: {
       : undefined
   const evidenceStore = opts?.withEvidence ? new EvidenceStore({ now }) : undefined
   const budgetEngine = opts?.budgets
-    ? new BudgetEngine({ budgets: compileBudgets(opts.budgets), now, cleanupIntervalMs: 0 })
+    ? new BudgetEngine({
+        budgets: compileBudgets(opts.budgets),
+        now,
+        cleanupIntervalMs: 0,
+        ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
+      })
     : undefined
 
   const service = new GovernanceService({
@@ -1999,6 +2008,71 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     const chain = record?.record.evidence_chain as Record<string, unknown>
     const budgets = chain['budgets'] as Array<Record<string, unknown>>
     expect(budgets[0]?.['kind']).toBe('spend')
+  })
+
+  it('persists real ledger rows at /audit sharing the audit record id (PR 2)', () => {
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    const { service, records } = makeService({
+      budgets: [stripeBudget()],
+      budgetLedger: ledger,
+    })
+
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
+
+    const rows = db.prepare('SELECT * FROM budget_events').all() as Array<Record<string, unknown>>
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      budget_name: 'cap',
+      epoch: 1,
+      bucket_key: 'budget:cap:global',
+      kind: 'spend',
+      amount: 30,
+      currency: 'USD',
+      tool_name: 'stripe_charge',
+      origin: 'openclaw',
+    })
+    // The row references the pre-generated id of the call's audit record.
+    const record = records.find((r) => r.record.tool_name === 'stripe_charge')
+    expect(rows[0]?.['audit_record_id']).toBe(record?.id)
+  })
+
+  it('a ledger write failure keeps the entry pending; the adapter retry succeeds (PR 2)', () => {
+    // A REAL SQLite ledger behind a fail-once gate: the first /audit throws
+    // (the route layer maps this to a 500) BEFORE the commit latch is set,
+    // so nothing persists anywhere and the idempotent retry re-attempts the
+    // whole commit cleanly.
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    let failNext = true
+    const failOnce: BudgetLedgerSink = {
+      commitAll: (rows) => {
+        if (failNext) {
+          failNext = false
+          throw new Error('disk full')
+        }
+        ledger.commitAll(rows)
+      },
+    }
+    const { service, budgetEngine } = makeService({
+      budgets: [stripeBudget()],
+      budgetLedger: failOnce,
+    })
+
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    expect(() => service.audit(auditInput(id), 'h')).toThrow('disk full')
+
+    // Hard atomicity: no rows, no memory, entry still pending.
+    const countRows = () =>
+      (db.prepare('SELECT COUNT(*) AS count FROM budget_events').get() as { count: number }).count
+    expect(countRows()).toBe(0)
+    expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+
+    const retry = service.audit(auditInput(id), 'h')
+    expect(retry.status).toBe(201)
+    expect(countRows()).toBe(1)
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
   })
 
   it('rejects a post-commit retry that presents a different payload', () => {

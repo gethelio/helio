@@ -14,6 +14,8 @@ import type { ApprovalChannel } from '../approval/types.js'
 import { RateLimiter } from './rate-limiter.js'
 import { SpendLimiter } from './spend-limiter.js'
 import { BudgetEngine } from '../budget/engine.js'
+import type { BudgetLedgerSink } from '../budget/engine.js'
+import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 
 // ---------------------------------------------------------------------------
@@ -3742,6 +3744,102 @@ describe('GovernedForwarder', () => {
       const chain = record?.evidence_chain as Record<string, unknown>
       const budgets = chain['budgets'] as Array<Record<string, unknown>>
       expect(budgets[0]?.['ledger_write_failed']).toBe(true)
+    })
+
+    it('persists real ledger rows sharing the pre-generated audit record id (PR 2)', async () => {
+      const inner = mockForwarder()
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const ledger = new BudgetLedger({ database: auditStore.database })
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([stripeBudget]),
+        cleanupIntervalMs: 0,
+        ledger,
+      })
+      engine.hydrate()
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        auditWriter,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      // Read BEFORE the audit flush: the ledger write is synchronous at
+      // record time, never buffered behind the audit writer.
+      const row = auditStore.database.prepare('SELECT * FROM budget_events').get() as Record<
+        string,
+        unknown
+      >
+      expect(row).toMatchObject({
+        budget_name: 'daily-cap',
+        epoch: 1,
+        bucket_key: 'budget:daily-cap:global',
+        kind: 'spend',
+        amount: 30,
+        currency: 'USD',
+        tool_name: 'stripe_charge',
+        origin: 'mcp',
+      })
+
+      // The ledger row references the audit record even though the audit
+      // write itself is buffered: the id is pre-generated at the gate.
+      auditWriter.flush()
+      expect(row['audit_record_id']).toBe(auditStore.list().records[0]?.id)
+      auditStore.close()
+    })
+
+    it('a real-ledger fault blocks the call, persists nothing, and the next call recovers (PR 2)', async () => {
+      const inner = mockForwarder()
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const ledger = new BudgetLedger({ database: auditStore.database })
+      let failNext = true
+      const failOnce: BudgetLedgerSink = {
+        commitAll: (rows) => {
+          if (failNext) {
+            failNext = false
+            throw new Error('disk full')
+          }
+          ledger.commitAll(rows)
+        },
+      }
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([stripeBudget]),
+        cleanupIntervalMs: 0,
+        ledger: failOnce,
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const blocked = await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }))
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(blocked).data['failure_class']).toBe('budget_ledger_write_failed')
+      const countRows = () =>
+        (
+          auditStore.database.prepare('SELECT COUNT(*) AS count FROM budget_events').get() as {
+            count: number
+          }
+        ).count
+      expect(countRows()).toBe(0)
+      expect(engine.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+
+      // The fault was transient: the next call commits and forwards.
+      const ok = await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }))
+      expect(ok.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(countRows()).toBe(1)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(5)
+      auditStore.close()
     })
 
     it('returns the upstream result even when post-forward bookkeeping throws', async () => {
