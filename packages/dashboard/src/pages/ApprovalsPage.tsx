@@ -448,6 +448,29 @@ export function ApprovalsPage() {
 // Sub-components
 // ---------------------------------------------------------------------------
 
+function BreachedBudgets({ ticket }: { ticket: ApprovalTicket }) {
+  if (!ticket.breached_budgets || ticket.breached_budgets.length === 0) return null
+  return (
+    <DetailSection label="Breached Budgets">
+      <ul className="space-y-1">
+        {ticket.breached_budgets.map((b) => (
+          <li key={b.name} className="text-xs">
+            <span className="font-mono text-amber-800">{b.name}</span>
+            <span className="text-gray-600">
+              {' \u2014 '}
+              {b.spent}/{b.limit} {b.currency} spent, attempting +{b.attempted_amount} ({b.window}{' '}
+              window)
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-[11px] text-amber-700">
+        Approving spends past the limit on every budget listed (recorded as an approved overage).
+      </p>
+    </DetailSection>
+  )
+}
+
 function PendingCard({
   ticket,
   now,
@@ -531,6 +554,8 @@ function PendingCard({
               </p>
             )}
           </DetailSection>
+
+          <BreachedBudgets ticket={ticket} />
 
           <DetailSection label="Session ID">
             <span className="font-mono text-xs">{ticket.session_id ?? '\u2014'}</span>
@@ -638,6 +663,8 @@ function ResolvedRow({
                   </p>
                 )}
               </DetailSection>
+
+              <BreachedBudgets ticket={ticket} />
 
               <DetailSection label="Requested At">
                 <span className="text-xs tabular-nums">{formatTimestamp(ticket.requested_at)}</span>

@@ -86,6 +86,7 @@ export type {
   ApprovalAppOptions,
   ApprovalQueueOptions,
   ApprovalRouterOptions,
+  BudgetBreachContext,
   WebhookChannelOptions,
   SlackChannelOptions,
   SlackActionAppOptions,

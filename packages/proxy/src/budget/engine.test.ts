@@ -295,6 +295,37 @@ describe('BudgetEngine ledger sink', () => {
       timestamp: '2026-07-09T12:00:00.000Z',
     })
   })
+
+  it('applies per-budget kinds from the kinds map in one batch (break-glass)', () => {
+    const rows: Array<Record<string, unknown>> = []
+    const sink: BudgetLedgerSink = {
+      commitAll: (batch) => {
+        rows.push(...(batch as unknown as Array<Record<string, unknown>>))
+      },
+    }
+    const events: BudgetCommitEvent[] = []
+    const { engine } = createEngine(
+      [budgetConfig({ name: 'small', limit: 10 }), budgetConfig({ name: 'big', limit: 1000 })],
+      { ledger: sink, onCommit: (event) => events.push(event) },
+    )
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 50 }))
+
+    engine.recordAll(charges, {
+      ...COMMIT_META,
+      kinds: new Map([['small', 'approved_overage' as const]]),
+    })
+
+    // One transaction, mixed kinds: the breached budget's row is marked as an
+    // approved overage while the unbreached one stays plain spend.
+    expect(rows.map((row) => [row['budget_name'], row['kind']])).toEqual([
+      ['small', 'approved_overage'],
+      ['big', 'spend'],
+    ])
+    expect(events.map((event) => [event.name, event.kind])).toEqual([
+      ['small', 'approved_overage'],
+      ['big', 'spend'],
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -769,6 +800,30 @@ describe('BudgetEngine persistence (PR 2)', () => {
     // timestamp, so it ages out exactly when it would have without a restart.
     advance(1_800_001)
     expect(spentAfterBoot(second)).toBe(0)
+  })
+
+  it('persists an approved overage with its kind and replays it after a restart', () => {
+    const { boot, db, advance } = persistentHarness()
+    const config = budgetConfig({ window: '1h', limit: 50 })
+    const first = boot([config])
+    const { charges } = first.resolveCharges(chargeCtx('stripe_charge', { amount: 80 }))
+    first.recordAll(charges, {
+      ...COMMIT_META,
+      kinds: new Map([['daily-cap', 'approved_overage' as const]]),
+    })
+
+    const row = db.prepare('SELECT kind, amount FROM budget_events').get() as {
+      kind: string
+      amount: number
+    }
+    expect(row).toEqual({ kind: 'approved_overage', amount: 80 })
+
+    advance(60_000)
+    const second = boot([config])
+    // An overage stays spent: the pot comes back over its limit.
+    expect(spentAfterBoot(second)).toBe(80)
+    const next = second.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
+    expect(second.peekAll(next.charges).allowed).toBe(false)
   })
 
   it('replays nothing for a duration window when the whole window elapsed while down', () => {

@@ -850,4 +850,127 @@ describe('ApprovalRouter', () => {
       expect(router.resolveNativeTicket('nope', 'approved')).toBe(false)
     })
   })
+
+  // -----------------------------------------------------------------------
+  // budget break-glass tickets (issue #14)
+  // -----------------------------------------------------------------------
+
+  describe('budget break-glass tickets (issue #14)', () => {
+    const breached = [
+      {
+        name: 'daily-cap',
+        limit: 50,
+        spent: 49,
+        attempted_amount: 5,
+        currency: 'USD',
+        window: '24h',
+      },
+    ]
+
+    it('threads breached_budgets onto the queue ticket and the notification', async () => {
+      const { router, queue, channel } = createRouter()
+
+      const promise = router.submit(submitParams({ breached_budgets: breached }))
+      const ticket = queue.listPending()[0]
+      expect(ticket?.breached_budgets).toEqual(breached)
+      expect(channel.calls[0]?.breached_budgets).toEqual(breached)
+
+      router.close()
+      await promise
+    })
+
+    it('the submit-level approval override wins over the matched rule config', async () => {
+      const oncall = mockChannel('slack')
+      const dashboard = mockChannel('dashboard')
+      const channels = new Map<string, ApprovalChannel>([
+        ['dashboard', dashboard],
+        ['oncall', oncall],
+      ])
+      vi.useFakeTimers()
+      const { router, queue } = createRouter({ channels, defaultTimeoutMs: 300_000 })
+
+      // The matched rule (say, an allow rule that happens to carry approval
+      // config) must NOT influence a budget ticket: the override is total.
+      const rule = makeRule({ approval: { channel: 'dashboard', timeoutMs: 60_000 } })
+      const promise = router.submit(
+        submitParams({
+          matched_rule: rule,
+          breached_budgets: breached,
+          approval: { channel: 'oncall', timeoutMs: 2_000 },
+        }),
+      )
+
+      expect(oncall.calls).toHaveLength(1)
+      expect(dashboard.calls).toHaveLength(0)
+      expect(queue.listPending()[0]?.timeout_ms).toBe(2_000)
+
+      vi.advanceTimersByTime(2_001)
+      const outcome = await promise
+      expect(outcome.status).toBe('timeout')
+      if (outcome.status === 'timeout') expect(outcome.timeoutMs).toBe(2_000)
+    })
+
+    it('override escalation fires via the override delegates', async () => {
+      const delegate = mockChannel('slack')
+      const dashboard = mockChannel('dashboard')
+      const channels = new Map<string, ApprovalChannel>([
+        ['dashboard', dashboard],
+        ['oncall-backup', delegate],
+      ])
+      vi.useFakeTimers()
+      const { router, queue } = createRouter({ channels })
+
+      const promise = router.submit(
+        submitParams({
+          matched_rule: undefined,
+          breached_budgets: breached,
+          approval: {
+            channel: 'dashboard',
+            timeoutMs: 10_000,
+            delegates: ['oncall-backup'],
+            escalationAfterMs: 1_000,
+          },
+        }),
+      )
+
+      vi.advanceTimersByTime(1_001)
+      expect(delegate.calls).toHaveLength(1)
+      const ticket = queue.listPending()[0]
+      expect(ticket?.escalated_to).toEqual(['oncall-backup'])
+
+      router.close()
+      await promise
+    })
+
+    it('an override without a timeout falls back to the router default, not the rule', async () => {
+      vi.useFakeTimers()
+      const { router, queue } = createRouter({ defaultTimeoutMs: 7_000 })
+
+      const rule = makeRule({ approval: { channel: 'dashboard', timeoutMs: 1_000 } })
+      const promise = router.submit(
+        submitParams({
+          matched_rule: rule,
+          breached_budgets: breached,
+          approval: { channel: 'dashboard' },
+        }),
+      )
+
+      expect(queue.listPending()[0]?.timeout_ms).toBe(7_000)
+      router.close()
+      await promise
+    })
+
+    it('createNativeTicket carries breached_budgets', () => {
+      const { router } = createRouter()
+      const ticket = router.createNativeTicket({
+        tool_name: 'stripe_charge',
+        tool_input: { amount: 5 },
+        matched_rule: undefined,
+        session_id: null,
+        origin: 'openclaw',
+        breached_budgets: breached,
+      })
+      expect(router.getTicket(ticket.id)?.breached_budgets).toEqual(breached)
+    })
+  })
 })

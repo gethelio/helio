@@ -80,6 +80,16 @@ export type ApprovalStatus =
   | 'shutdown_cancelled'
   | 'cancelled'
 
+/** One breached budget on a break-glass approval ticket (issue #14). */
+export interface BudgetBreachContext {
+  readonly name: string
+  readonly limit: number
+  readonly spent: number
+  readonly attempted_amount: number
+  readonly currency: string
+  readonly window: string
+}
+
 export interface ApprovalTicket {
   readonly id: string
   readonly tool_name: string
@@ -91,6 +101,8 @@ export interface ApprovalTicket {
   readonly requested_at: string
   readonly timeout_at: string
   readonly timeout_ms: number
+  /** Present on break-glass (budget) tickets: the overages one approval covers. */
+  readonly breached_budgets?: readonly BudgetBreachContext[]
   readonly status: ApprovalStatus
   readonly resolved_at?: string
   readonly resolved_by?: string

@@ -38,9 +38,38 @@ Maintainer notes:
   requirement) and a `limits.budgets` block, with charges committed at
   `/audit` only when the call executed. Budgets hot-reload by name identity:
   contributor edits preserve accrued spend; `limit`/`currency`/`window`
-  changes reset it. `on_exceed: deny` is the only breach mode in this
-  release; break-glass approvals and the dashboard Budgets view land next in
-  this release train.
+  changes reset it. Breach modes are `on_exceed: deny` and
+  `on_exceed: require_approval` (break-glass, below); the dashboard Budgets
+  view lands next in this release train.
+- **Break-glass approvals for budget overages (#14).** A budget with
+  `on_exceed: require_approval` turns a breach into a human decision instead
+  of a denial. One call raises one composite ticket listing every breached
+  budget under a new `breached_budgets` field, rendered on the dashboard,
+  webhook payloads, and Slack messages. Budget-only tickets route by the
+  breached budget's own `approval` block (first breached budget wins when
+  configs differ; dashboard channel and the global timeout when omitted) —
+  never by the matched rule's. Channel, delegates, and escalation apply on
+  the MCP door; sideband tickets are adapter-native and inherit only the
+  selected timeout. On approval the overage records as
+  `kind: approved_overage` on the ledger and in the audit record's
+  `evidence_chain.budgets`, and only then does the call proceed; a denial,
+  timeout, or disconnect records nothing (on the sideband, when the adapter
+  honors it). Budget tickets always fail closed
+  on timeout — `approval.default_on_timeout: allow` does not apply to money
+  gates. A simultaneous `on_exceed: deny` breach wins outright and raises no
+  ticket. Per door: the MCP proxy keeps a rule approval and a budget breach
+  as two sequential decisions (the budget ticket attributed under
+  `evidence_chain.budget_approval`), while the sideband merges both gates
+  into the call's single native ticket in the standard `approval` block —
+  a deliberate, documented interpretation of the execution order for the
+  one-round-trip `/evaluate` contract, with no second approval block ever
+  on the wire (verified compatible with `@gethelio/helio-openclaw` 0.1.0).
+  Executed-despite-denied reports stay truthful: the spend commits as plain
+  `spend` with the denied `approval_status` on the audit record. Budget
+  approvals are scope-once by definition (`scope: "always"` is inert on
+  budget-context tickets — issue #127), and any budget using
+  `on_exceed: require_approval` now requires `dashboard.api_secret`, like
+  approval rules.
 - **Budget spend persists across restarts (#14).** Every budget charge is
   written to a ledger in the audit database — synchronously, in one
   transaction per call, at record time — and replayed at startup: duration
@@ -63,6 +92,17 @@ Maintainer notes:
 
 ### Fixed
 
+- **Approval channel references now validate against the runtime registry
+  (#14 rider).** A channel that sets `name` is registered only under that
+  name, but validation also accepted its bare `type` — so
+  `approval.channel: slack` with a named Slack channel passed `helio
+validate` and then never delivered a notification. Rule and budget channel
+  (and delegate) references now resolve exactly the way the runtime does;
+  previously-accepted configs with dangling type references are rejected at
+  startup. Relatedly, a budget routing break-glass tickets to the dashboard
+  channel (explicitly, via a delegate, or by fallback) now requires
+  `dashboard.enabled: true` — with the dashboard off such a ticket had no
+  resolution surface and could only time out.
 - **Nameless `tools/call` requests are rejected and audited instead of
   forwarded unrecorded (#132).** A `tools/call` that carries no usable tool
   name (missing, non-string, or empty `params.name`) previously bypassed both

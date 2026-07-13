@@ -63,6 +63,28 @@ describe('WebhookChannel', () => {
     expect(body.ticket.tool_name).toBe('create_payment')
   })
 
+  it('serializes breached_budgets verbatim on break-glass tickets (issue #14)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const breached = [
+      {
+        name: 'daily-cap',
+        limit: 50,
+        spent: 49.1,
+        attempted_amount: 5,
+        currency: 'USD',
+        window: '24h',
+      },
+    ]
+    const channel = new WebhookChannel({ url: 'https://example.com/hook' })
+    await channel.notify(makeTicket({ breached_budgets: breached }))
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as { ticket: ApprovalTicket }
+    expect(body.ticket.breached_budgets).toEqual(breached)
+  })
+
   it('includes x-helio-signature header when secret is configured', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', mockFetch)

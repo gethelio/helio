@@ -25,6 +25,7 @@ import { RateLimiter } from '../policy/index.js'
 import { SpendLimiter } from '../policy/index.js'
 import { BudgetEngine } from '../budget/engine.js'
 import { compileBudgets } from '../budget/parser.js'
+import { GovernanceService } from '../sideband/governance-service.js'
 import { createDashboardApp, DashboardEventBus } from '../dashboard/index.js'
 import type { DashboardEventType, DashboardEvents } from '../dashboard/index.js'
 
@@ -48,6 +49,7 @@ let approvalRouter: ApprovalRouter
 let rateLimiter: RateLimiter
 let spendLimiter: SpendLimiter
 let budgetEngine: BudgetEngine
+let governanceService: GovernanceService
 let evidenceStore: EvidenceStore
 let eventBus: DashboardEventBus
 let unsubscribeEvents: () => void
@@ -95,6 +97,13 @@ const policiesConfig: PoliciesConfig = {
     {
       name: 'allow-budgeted-probe',
       match: { tool: 'budgeted_*' },
+      action: 'allow' as const,
+    },
+    // 3c: Allowed probe for the break-glass flow (issue #14, PR 3) — the
+    // budget below flips it into a merged native ticket on the sideband.
+    {
+      name: 'allow-glass-probe',
+      match: { tool: 'glass_*' },
       action: 'allow' as const,
     },
     // 4: Spend-limited payment (amount >= 1000 — must be before evidence-gated payment)
@@ -246,6 +255,15 @@ beforeAll(async () => {
         on_exceed: 'deny',
         contributors: [{ tool: 'budgeted_*', field: '$.amount' }],
       },
+      {
+        name: 'e2e-glass',
+        limit: 10,
+        currency: 'USD',
+        window: '24h',
+        key: 'global',
+        on_exceed: 'require_approval',
+        contributors: [{ tool: 'glass_*', field: '$.amount' }],
+      },
     ]),
     cleanupIntervalMs: 0,
   })
@@ -273,8 +291,18 @@ beforeAll(async () => {
   proxyManaged = startOnDynamicPort(app)
   proxyUrl = `http://127.0.0.1:${String(proxyManaged.port)}/mcp`
 
-  // 10. Start sideband server (evidence API)
-  const sidebandApp = createSidebandApp(evidenceStore)
+  // 10. Start sideband server (evidence API + governance endpoints)
+  governanceService = new GovernanceService({
+    policy,
+    evidenceStore,
+    approvalRouter,
+    rateLimiter,
+    spendLimiter,
+    budgetEngine,
+    auditWriter,
+    sweepIntervalMs: 0,
+  })
+  const sidebandApp = createSidebandApp(evidenceStore, { governance: governanceService })
   sidebandManaged = startOnDynamicPort(sidebandApp)
   sidebandUrl = `http://127.0.0.1:${String(sidebandManaged.port)}`
 
@@ -302,6 +330,7 @@ afterAll(async () => {
   approvalQueue.close()
   rateLimiter.close()
   spendLimiter.close()
+  governanceService.close()
   budgetEngine.close()
   evidenceStore.close()
   auditWriter.close() // also closes auditStore internally
@@ -863,5 +892,58 @@ describe('E2E: full MVP integration', () => {
     expect(rec).toBeDefined()
     const chain = rec?.evidence_chain as Record<string, unknown>
     expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('e2e-cap')
+  })
+
+  // --- Break-glass over the sideband (issue #14, PR 3) ---
+
+  it('break-glass roundtrip: evaluate → single ticket → resolve → audit commits an overage', async () => {
+    // A 0.1.0-shaped adapter flow over real HTTP: the breach flips the
+    // allowed call into ONE native ticket in the standard approval block.
+    const evalRes = await fetch(`${sidebandUrl}/evaluate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        origin: 'openclaw',
+        tool: { name: 'glass_pay' },
+        arguments: { amount: 50 },
+      }),
+    })
+    expect(evalRes.status).toBe(200)
+    const evalBody = (await evalRes.json()) as {
+      decision: string
+      evaluation_id: string
+      approval?: { id: string; resolve_path: string; timeout_ms: number }
+      limits?: { budgets?: Array<Record<string, unknown>> }
+    }
+    expect(evalBody.decision).toBe('require_approval')
+    expect(evalBody.approval?.id).toBeTruthy()
+    // Regression pin (re-review amendment): never a second approval block.
+    expect(JSON.stringify(evalBody)).not.toContain('budget_approval')
+    expect(evalBody.limits?.budgets?.[0]?.['allowed']).toBe(false)
+
+    const resolveRes = await fetch(`${sidebandUrl}${evalBody.approval?.resolve_path ?? ''}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ resolution: 'approved', resolved_by: 'operator' }),
+    })
+    expect(resolveRes.status).toBe(200)
+
+    const auditRes = await fetch(`${sidebandUrl}/audit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ evaluation_id: evalBody.evaluation_id, status: 'success' }),
+    })
+    expect(auditRes.status).toBe(201)
+
+    auditWriter.flush()
+    const rec = auditStore.list({ tool_name: 'glass_pay' }).records[0]
+    expect(rec?.approval_status).toBe('approved')
+    const chain = rec?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['name']).toBe('e2e-glass')
+    expect(budgets[0]?.['kind']).toBe('approved_overage')
+    // The overage is live in the shared pot.
+    const state = budgetEngine.listStates().find((s) => s.name === 'e2e-glass')
+    expect(state?.buckets[0]?.spent).toBe(50)
   })
 })

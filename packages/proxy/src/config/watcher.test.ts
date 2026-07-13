@@ -72,7 +72,7 @@ describe('ConfigWatcher', () => {
   // Successful reload
   // -------------------------------------------------------------------------
 
-  it('calls onPolicyReload when config file changes', async () => {
+  it('calls onReload when config file changes', async () => {
     // Start with a basic config
     await writeFile(configPath, validConfig())
     const initialConfig = await loadConfig(configPath)
@@ -83,7 +83,7 @@ describe('ConfigWatcher', () => {
     watcher = new ConfigWatcher({
       configPath,
       initialConfig,
-      onPolicyReload: (policy, warnings, paths) => {
+      onReload: (policy, warnings, paths) => {
         reloads.push({ policy, warnings })
         restartRequiredPaths.push([...paths])
       },
@@ -115,7 +115,7 @@ describe('ConfigWatcher', () => {
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+      onReload: (_policy, _warnings, _paths, budgets) => {
         budgetReloads.push([...budgets])
       },
       onError: () => {},
@@ -192,7 +192,7 @@ ${extraContributor}
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+      onReload: (_policy, _warnings, _paths, budgets) => {
         engine.reconcile(budgets)
       },
       onError: () => {},
@@ -283,7 +283,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (_policy, _warnings, _paths, budgets) => {
+      onReload: (_policy, _warnings, _paths, budgets) => {
         engine.reconcile(budgets)
       },
       onError: (err) => errors.push(err),
@@ -331,7 +331,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
     })
@@ -358,7 +358,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
     })
@@ -382,7 +382,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
     })
@@ -425,7 +425,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 200,
     })
@@ -458,7 +458,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
     })
@@ -484,7 +484,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
     })
@@ -502,7 +502,7 @@ policies:
   it('close() is idempotent — calling twice does not throw', () => {
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: () => {},
+      onReload: () => {},
       onError: () => {},
     })
     watcher.start()
@@ -547,7 +547,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
     })
@@ -604,7 +604,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
     })
@@ -647,7 +647,7 @@ policies:
     watcher = new ConfigWatcher({
       configPath,
       initialConfig,
-      onPolicyReload: (policy, _warnings, paths) => {
+      onReload: (policy, _warnings, paths) => {
         reloads.push(policy)
         restartRequiredPaths.push([...paths])
       },
@@ -764,7 +764,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (newPolicy) => {
+      onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
       onError: () => {},
@@ -819,7 +819,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (newPolicy) => {
+      onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
       onError: () => {},
@@ -909,7 +909,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (newPolicy) => {
+      onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
       onError: () => {},
@@ -958,7 +958,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (policy) => reloads.push(policy),
+      onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
     })

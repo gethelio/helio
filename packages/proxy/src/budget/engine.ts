@@ -72,11 +72,24 @@ export interface BudgetPeekEntry {
 
 /** Metadata recorded with every committed charge of one call. */
 export interface BudgetCommitMeta {
+  /** Default kind for every charge of the call. */
   readonly kind: 'spend' | 'approved_overage'
+  /**
+   * Per-budget overrides by budget name (break-glass): one approved call can
+   * mix kinds — breached budgets commit as `approved_overage` while
+   * unbreached ones stay `spend` — and all rows must still land in ONE
+   * ledger transaction, so the split is expressed here, not via two calls.
+   */
+  readonly kinds?: ReadonlyMap<string, 'spend' | 'approved_overage'>
   readonly auditRecordId: string
   readonly origin: string
   readonly toolName: string
   readonly timestampIso: string
+}
+
+/** The effective ledger kind for one charge of a call. */
+function kindOf(meta: BudgetCommitMeta, budgetName: string): 'spend' | 'approved_overage' {
+  return meta.kinds?.get(budgetName) ?? meta.kind
 }
 
 /**
@@ -387,7 +400,7 @@ export class BudgetEngine {
       charges.map((charge) => ({
         budget_name: charge.budget.name,
         bucket_key: charge.bucketKey,
-        kind: meta.kind,
+        kind: kindOf(meta, charge.budget.name),
         amount: charge.amount,
         currency: charge.budget.currency,
         tool_name: meta.toolName,
@@ -432,7 +445,7 @@ export class BudgetEngine {
         this.onCommit({
           name: charge.budget.name,
           bucket_key: charge.bucketKey,
-          kind: meta.kind,
+          kind: kindOf(meta, charge.budget.name),
           amount: charge.amount,
           spent: snapshot.spent,
           remaining: snapshot.remaining,

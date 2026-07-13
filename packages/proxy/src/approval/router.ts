@@ -1,6 +1,11 @@
-import type { ApprovalChannel, ApprovalOutcome, ApprovalTicket } from './types.js'
+import type {
+  ApprovalChannel,
+  ApprovalOutcome,
+  ApprovalTicket,
+  BudgetBreachContext,
+} from './types.js'
 import type { ApprovalQueue } from './queue.js'
-import type { CompiledPolicyRule } from '../policy/types.js'
+import type { CompiledApproval, CompiledPolicyRule } from '../policy/types.js'
 
 // ---------------------------------------------------------------------------
 // ApprovalRouter — orchestrates the approval workflow.
@@ -65,6 +70,17 @@ export interface ApprovalSubmitParams {
   readonly tool_input: Record<string, unknown>
   readonly matched_rule: CompiledPolicyRule | undefined
   readonly session_id: string | null
+  /** Breached budget context; marks the ticket as break-glass (issue #14). */
+  readonly breached_budgets?: readonly BudgetBreachContext[]
+  /**
+   * Total approval-config override. When set, channel/timeout/delegates/
+   * escalation come from HERE and the matched rule's approval config is
+   * ignored entirely — budget tickets are routed by the breached BUDGET's
+   * config (the matched rule may be an allow rule whose approval block, if
+   * any, has no authority over the money gate). Fields the override omits
+   * fall back to the router defaults, never to the rule.
+   */
+  readonly approval?: CompiledApproval
 }
 
 /** Resolution statuses a native (sideband) ticket can be moved to. */
@@ -80,6 +96,8 @@ export interface NativeTicketParams {
   readonly origin: string
   /** Ticket timeout in ms (rule timeout, else the router default). */
   readonly timeout_ms?: number
+  /** Breached budget context; marks the ticket as break-glass (issue #14). */
+  readonly breached_budgets?: readonly BudgetBreachContext[]
 }
 
 export class ApprovalRouter {
@@ -118,8 +136,11 @@ export class ApprovalRouter {
     }
 
     const rule = params.matched_rule
-    const timeoutMs = rule?.approval?.timeoutMs ?? this.defaultTimeoutMs
-    const channelName = rule?.approval?.channel ?? 'dashboard'
+    // A submit-level override is TOTAL: its fields (and the router defaults
+    // for fields it omits) apply, never the rule's — see ApprovalSubmitParams.
+    const approvalConfig = params.approval ?? rule?.approval
+    const timeoutMs = approvalConfig?.timeoutMs ?? this.defaultTimeoutMs
+    const channelName = approvalConfig?.channel ?? 'dashboard'
 
     // Create ticket in the queue
     const ticket = this.queue.add({
@@ -130,6 +151,7 @@ export class ApprovalRouter {
       channel_name: channelName,
       session_id: params.session_id,
       timeout_ms: timeoutMs,
+      breached_budgets: params.breached_budgets,
     })
 
     this.onSubmit?.(ticket)
@@ -154,8 +176,8 @@ export class ApprovalRouter {
 
       // Escalation timer — fires before timeout to re-notify via delegates
       let escalationTimer: ReturnType<typeof setTimeout> | undefined
-      const delegates = rule?.approval?.delegates
-      const escalationAfterMs = rule?.approval?.escalationAfterMs
+      const delegates = approvalConfig?.delegates
+      const escalationAfterMs = approvalConfig?.escalationAfterMs
 
       if (
         escalationAfterMs !== undefined &&
@@ -244,6 +266,7 @@ export class ApprovalRouter {
       channel_name: `${NATIVE_CHANNEL_PREFIX}${params.origin}`,
       session_id: params.session_id,
       timeout_ms: timeoutMs,
+      breached_budgets: params.breached_budgets,
     })
 
     this.onSubmit?.(ticket)

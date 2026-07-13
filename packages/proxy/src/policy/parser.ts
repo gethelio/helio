@@ -250,7 +250,12 @@ function flattenMetadataConditions(
   return conditions
 }
 
-function compileApproval(approval: PolicyRule['approval']): CompiledApproval | undefined {
+/**
+ * Compile a raw approval block (rule-level or budget-level — both use the
+ * same config schema) into milliseconds form. Exported for the budget parser
+ * so break-glass approval config compiles identically to rule approvals.
+ */
+export function compileApproval(approval: PolicyRule['approval']): CompiledApproval | undefined {
   if (!approval) return undefined
 
   return {

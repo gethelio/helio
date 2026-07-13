@@ -17,7 +17,7 @@ The resolution is recorded in the [audit trail](./audit.md) on the tool call's a
 
 ## Channels
 
-Helio supports three approval channel types. You can configure multiple channels — each rule specifies which channel to use via the `approval.channel` field. A channel can also set an optional `name`; `approval.channel` (and escalation `delegates`) reference a channel by its `name`, falling back to its `type`, which is what lets two channels of the same type coexist.
+Helio supports three approval channel types. You can configure multiple channels — each rule specifies which channel to use via the `approval.channel` field. A channel can also set an optional `name`; `approval.channel` (and escalation `delegates`) reference a channel by its `name` when one is set, or by its `type` otherwise — which is what lets two channels of the same type coexist. A channel that sets `name` is reachable ONLY by that name (referencing its bare type is rejected at validation, since no channel would answer to it at runtime).
 
 ### Dashboard
 
@@ -192,6 +192,7 @@ approval:
 - `default_on_timeout: deny` returns `approval_timeout` self-repair feedback to the caller.
 - `default_on_timeout: allow` forwards the original `tools/call` upstream after the timeout elapses.
 - In both modes, the approval ticket status remains `timeout` (for audit/SSE consistency).
+- Exception: [budget break-glass tickets](#budget-break-glass-tickets) always fail closed on timeout — `default_on_timeout: allow` never applies to money gates.
 
 You can override the timeout per rule:
 
@@ -294,6 +295,26 @@ Break-glass is intentionally not exposed as a button on chat-channel approval me
 - **Reason quality.** Break-glass requires a substantive reason, which is the audit record's most valuable field. Forcing the reason through a dashboard form (rather than a chat-side modal under incident pressure) tends to produce more useful audit text.
 
 This is a defensible default for early deployments, but it does have real cost during 24/7 incident workflows where the on-call engineer is in chat (often on mobile) rather than at a dashboard. A future Slack break-glass surface would need: an operator-allowlist of Slack user IDs, a forced reason modal, and a confirmation step before submission. None of that exists today; track this as a known trade-off, not a missing feature.
+
+## Budget Break-Glass Tickets
+
+A [named budget](./policies.md#named-budgets-cross-tool) with `on_exceed: require_approval` turns a breach into an approval instead of a denial. (This is a different mechanism from the break-glass _override_ above, which force-approves an existing ticket; a budget break-glass ticket is an ordinary ticket that happens to gate money.)
+
+One call raises **one composite ticket** no matter how many budgets it breached. The ticket carries a `breached_budgets` array — one entry per breached budget with `name`, `limit`, `spent`, `attempted_amount`, `currency`, and `window` — which every surface shows: the dashboard and webhook payloads serialize it verbatim, and Slack messages render a "Breached budgets" section. Approving the ticket approves every listed overage at once; there is never a per-budget decision.
+
+Ticket routing is deterministic:
+
+- A **budget-only ticket** (the matched rule allowed the call; only the money gate objected) takes the breached budget's `approval` config. When several breached budgets carry different configs, the **first breached budget in config order** wins: one ticket means one channel. A budget without an `approval` block falls back to the dashboard channel and the global `approval.timeout`. The matched rule's `approval` config never applies to a budget ticket. Scope per door: on the MCP door the full config applies (channel, timeout, delegates, escalation); on the sideband the ticket is native (`channel_name: native:<origin>`, resolved by the adapter's own UI, never notified through Helio channels), so only the selected config's **timeout** takes effect there.
+- On the **MCP door**, a rule-level approval plus a budget breach are **two sequential human decisions**: the rule ticket resolves first (per the execution order), and only then does the budget gate raise its own ticket. Both are attributed on the one audit record — the `approval_status`/`approved_by` columns keep their rule-gate meaning, and the budget decision is recorded unconditionally under `evidence_chain.budget_approval` (`ticket_id`, `status`, `resolved_by`, plus `denial_reason`/escalation fields when present). On a budget-only ticket the columns carry the budget decision itself.
+- On the **sideband**, the two gates merge into the call's single native ticket — see [the adapter API](./adapter-api.md#approvals) for that contract; the merged ticket takes the RULE's approval timeout.
+
+Semantics that deviate from rule approvals, by design:
+
+- **Timeout always fails closed.** `approval.default_on_timeout: allow` never applies to a ticket carrying `breached_budgets` — a timeout-allow would forward an unapproved overage. Money gates do not fail open.
+- **Scope-once.** Approval covers exactly this call's overage. No standing grant exists (`scope: "always"` on a sideband resolve is inert for budget-context tickets — the next identical call breaches again). This pins the issue #127 interaction.
+- **Deny wins.** If one call simultaneously breaches an `on_exceed: deny` budget and a `require_approval` budget, the call is denied outright and no ticket is raised.
+
+On approval, the overage is recorded on every breached budget as `kind: approved_overage` (ledger row and the audit record's `evidence_chain.budgets[].kind`) — unbreached budgets the same call matched record plain `spend` in the same atomic batch — and only then does the call forward. The approval is authoritative: nothing is re-checked after the human decides, so a rule-level rate/spend counter peeked before the wait also records unconditionally on approval — it can go past its limit for that one approved call (the counter stays truthful, and the next unapproved call is blocked by the exhausted counter). A denial, timeout, disconnect, or shutdown records nothing on any budget or rule counter — on the MCP door unconditionally, and on the sideband whenever the adapter honors the decision (`not_executed`); a sideband host that executes anyway commits the spend as plain `spend` with the denied/timeout status on the record (the documented TOCTOU caveat). The blocked response reuses the budget feedback shape: `reason: budget_exceeded` with a `budgets` array listing every breach, plus `denied_by`/`denial_reason` or `timeout_seconds`.
 
 ## REST API Reference
 

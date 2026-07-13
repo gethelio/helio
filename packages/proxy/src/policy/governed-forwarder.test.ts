@@ -3943,6 +3943,820 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  // -------------------------------------------------------------------------
+  // budget break-glass (issue #14, PR 3)
+  // -------------------------------------------------------------------------
+
+  describe('budget break-glass (issue #14)', () => {
+    function createBudgetEngine(
+      configs: Parameters<typeof compileBudgets>[0],
+      ledger?: BudgetLedgerSink,
+    ) {
+      return new BudgetEngine({
+        budgets: compileBudgets(configs),
+        cleanupIntervalMs: 0,
+        ...(ledger ? { ledger } : {}),
+      })
+    }
+
+    function createApproval(options?: {
+      defaultOnTimeout?: 'allow' | 'deny'
+      defaultTimeoutMs?: number
+      channels?: Map<string, ApprovalChannel>
+    }) {
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const channels =
+        options?.channels ?? new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]])
+      const approvalRouter = new ApprovalRouter({
+        defaultTimeoutMs: options?.defaultTimeoutMs ?? 300_000,
+        defaultOnTimeout: options?.defaultOnTimeout ?? 'deny',
+        channels,
+        queue,
+      })
+      return { queue, approvalRouter }
+    }
+
+    function createAudit() {
+      const auditStore = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+      return { auditStore, auditWriter }
+    }
+
+    const smallBreakGlass = {
+      name: 'small',
+      limit: 10,
+      currency: 'USD',
+      window: '24h',
+      key: 'global' as const,
+      on_exceed: 'require_approval' as const,
+      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    }
+    const bigDeny = {
+      ...smallBreakGlass,
+      name: 'big',
+      limit: 1000,
+      on_exceed: 'deny' as const,
+    }
+
+    async function pendingTicket(queue: ApprovalQueue) {
+      await vi.waitFor(() => {
+        expect(queue.listPending().length).toBeGreaterThan(0)
+      })
+      return queue.listPending()[0] as NonNullable<ReturnType<ApprovalQueue['get']>>
+    }
+
+    it('raises one composite ticket listing every breached budget', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([
+        smallBreakGlass,
+        { ...smallBreakGlass, name: 'tiny', limit: 5 },
+      ])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      expect(queue.listPending()).toHaveLength(1)
+      expect(ticket.tool_name).toBe('stripe_charge')
+      expect(ticket.breached_budgets).toEqual([
+        {
+          name: 'small',
+          limit: 10,
+          spent: 0,
+          attempted_amount: 20,
+          currency: 'USD',
+          window: '24h',
+        },
+        { name: 'tiny', limit: 5, spent: 0, attempted_amount: 20, currency: 'USD', window: '24h' },
+      ])
+
+      approvalRouter.deny(ticket.id, 'bob')
+      await pending
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('approve records the overage as approved_overage and only then forwards', async () => {
+      const rows: Array<Record<string, unknown>> = []
+      const rowsAtForwardTime: number[] = []
+      const inner = mockForwarder()
+      // Capture the ledger state at the moment of the upstream call: the
+      // commit must ALREADY be durable when the forward happens, not merely
+      // by the time the response settles. (vi.fn()'s inferred signature is
+      // void-returning, so the promise-returning stub trips the lint rule.)
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- forward legitimately returns a Promise<ForwardResult>
+      inner.forward.mockImplementation(() => {
+        rowsAtForwardTime.push(rows.length)
+        return Promise.resolve(successResult({ jsonrpc: '2.0', id: 1, result: {} }))
+      })
+      const engine = createBudgetEngine([smallBreakGlass, { ...bigDeny, name: 'wide' }], {
+        commitAll: (batch) => rows.push(...(batch as never[])),
+      })
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      // Nothing recorded, nothing forwarded while the human decides.
+      expect(rows).toHaveLength(0)
+      expect(inner.forward).not.toHaveBeenCalled()
+
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(result.response.status).toBe(200)
+      // ORDER: both ledger rows were already written when the forward ran.
+      expect(rowsAtForwardTime).toEqual([2])
+      // Breached budget → approved_overage; unbreached rides along as spend,
+      // in one batch.
+      expect(rows.map((row) => [row['budget_name'], row['kind']])).toEqual([
+        ['small', 'approved_overage'],
+        ['wide', 'spend'],
+      ])
+      expect(
+        engine
+          .listStates()
+          .map((s) => [s.name, s.buckets[0]?.spent])
+          .sort(),
+      ).toEqual([
+        ['small', 20],
+        ['wide', 20],
+      ])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('audits an approved overage: budgets chain kinds and budget_approval context', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      approvalRouter.approve(ticket.id, 'alice')
+      await pending
+      auditWriter.flush()
+
+      const record = auditStore.list().records[0]
+      expect(record?.approval_status).toBe('approved')
+      expect(record?.approved_by).toBe('alice')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgets = chain['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['kind']).toBe('approved_overage')
+      const budgetApproval = chain['budget_approval'] as Record<string, unknown>
+      expect(budgetApproval['ticket_id']).toBe(ticket.id)
+      expect(budgetApproval['status']).toBe('approved')
+      expect(budgetApproval['resolved_by']).toBe('alice')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('deny records nothing and the feedback lists the breached budgets', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      approvalRouter.deny(ticket.id, 'bob', 'Not this quarter')
+      const result = await pending
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.data['reason']).toBe('budget_exceeded')
+      expect(error.data['denied_by']).toBe('bob')
+      expect(error.data['denial_reason']).toBe('Not this quarter')
+      const budgets = error.data['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]?.['name']).toBe('small')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      expect(record?.block_reason).toBe('budget_exceeded')
+      expect(record?.approval_status).toBe('denied')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgetApproval = chain['budget_approval'] as Record<string, unknown>
+      expect(budgetApproval['status']).toBe('denied')
+      expect(budgetApproval['denial_reason']).toBe('Not this quarter')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('timeout fails closed even with default_on_timeout: allow', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval({
+        defaultOnTimeout: 'allow',
+        defaultTimeoutMs: 20,
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+      // The fail-closed deviation: a rule ticket would forward here.
+      expect(inner.forward).not.toHaveBeenCalled()
+      const error = errorFromResult(result)
+      expect(error.data['reason']).toBe('budget_exceeded')
+      expect(error.data['timeout_seconds']).toBe(0) // 20ms rounds to 0s
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('client disconnect during the budget approval records nothing', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const controller = new AbortController()
+      const request: McpRequest = {
+        ...toolsCallRequest('stripe_charge', { amount: 20 }),
+        signal: controller.signal,
+      }
+      const pending = governed.forward(request)
+      await pendingTicket(queue)
+      controller.abort()
+      const result = await pending
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('client_disconnected')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('a simultaneous deny-breach wins: no ticket, nothing recorded', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass, { ...bigDeny, limit: 15 }])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(queue.list()).toHaveLength(0)
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('fails closed when no approval router is configured', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+    })
+
+    it('routes the ticket by the first breached budget approval config', async () => {
+      const inner = mockForwarder()
+      const recordingChannel = (): ApprovalChannel & { notified: string[] } => {
+        const notified: string[] = []
+        return {
+          type: 'dashboard',
+          notified,
+          notify(ticket) {
+            notified.push(ticket.id)
+            return Promise.resolve()
+          },
+        }
+      }
+      const oncall = recordingChannel()
+      const backup = recordingChannel()
+      const dashboard = recordingChannel()
+      const engine = createBudgetEngine([
+        {
+          ...smallBreakGlass,
+          name: 'first',
+          approval: { channel: 'oncall', timeout: '120s' },
+        },
+        { ...smallBreakGlass, name: 'second', approval: { channel: 'backup' } },
+      ])
+      const { queue, approvalRouter } = createApproval({
+        channels: new Map<string, ApprovalChannel>([
+          ['dashboard', dashboard],
+          ['oncall', oncall],
+          ['backup', backup],
+        ]),
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      // First-breached-wins in config order; one ticket ⇒ one channel.
+      expect(ticket.channel_name).toBe('oncall')
+      expect(ticket.timeout_ms).toBe(120_000)
+      expect(oncall.notified).toEqual([ticket.id])
+      expect(backup.notified).toHaveLength(0)
+      expect(dashboard.notified).toHaveLength(0)
+
+      approvalRouter.deny(ticket.id, 'bob')
+      await pending
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('a rule approval and a budget breach yield two sequential tickets, both attributed', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const policy = compile({
+        default: 'allow',
+        rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+      // Ticket 1: the rule gate — no budget context.
+      const ruleTicket = await pendingTicket(queue)
+      expect(ruleTicket.matched_rule).toBe('gate')
+      expect(ruleTicket.breached_budgets).toBeUndefined()
+      approvalRouter.approve(ruleTicket.id, 'alice')
+
+      // Ticket 2: the money gate, raised only after the rule gate resolved.
+      await vi.waitFor(() => {
+        expect(queue.listPending()).toHaveLength(1)
+      })
+      const budgetTicket = queue.listPending()[0] as NonNullable<ReturnType<ApprovalQueue['get']>>
+      expect(budgetTicket.id).not.toBe(ruleTicket.id)
+      expect(budgetTicket.breached_budgets?.[0]?.name).toBe('small')
+      approvalRouter.approve(budgetTicket.id, 'carol')
+
+      const result = await pending
+      expect(result.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(20)
+
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      // The approval columns keep their rule-gate meaning; the budget ticket
+      // is attributed in evidence_chain.budget_approval.
+      expect(record?.approval_status).toBe('approved')
+      expect(record?.approved_by).toBe('alice')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgetApproval = chain['budget_approval'] as Record<string, unknown>
+      expect(budgetApproval['ticket_id']).toBe(budgetTicket.id)
+      expect(budgetApproval['status']).toBe('approved')
+      expect(budgetApproval['resolved_by']).toBe('carol')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('payload mutation during the approval wait cannot change what forwards', async () => {
+      // The caller shares params by reference. The approved call must
+      // forward and audit the payload the human saw — not whatever the
+      // embedder rewrote while the ticket was pending.
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const args: Record<string, unknown> = { amount: 20 }
+      const request = toolsCallRequest('stripe_charge', args)
+      const pending = governed.forward(request)
+      const ticket = await pendingTicket(queue)
+
+      // Hostile/buggy embedder: swap the amount mid-wait.
+      args['amount'] = 2_000_000
+      ;(request.params as Record<string, unknown>)['arguments'] = { amount: 2_000_000 }
+
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+      expect(result.response.status).toBe(200)
+
+      const forwarded = inner.forward.mock.calls[0]?.[0] as McpRequest
+      const forwardedParams = forwarded.params as Record<string, unknown>
+      expect(forwardedParams['arguments']).toEqual({ amount: 20 })
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(20)
+
+      auditWriter.flush()
+      expect(auditStore.list().records[0]?.tool_input).toEqual({ amount: 20 })
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('a submit against a closed router blocks with nothing recorded', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      // The router is already closed when the breach arrives: submit()
+      // returns its synthetic ticketless denial. Fail closed, record nothing.
+      approvalRouter.close()
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      expect(queue.list()).toEqual([])
+
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      expect(record?.approval_status).toBe('denied')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      // No ticket ever existed — the synthetic denial must not fabricate a
+      // budget_approval attribution with an empty ticket id.
+      expect(chain['budget_approval']).toBeUndefined()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('proxy shutdown during a budget ticket blocks with nothing recorded', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      await pendingTicket(queue)
+      approvalRouter.close()
+      const result = await pending
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('shutdown_cancelled')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      queue.close()
+    })
+
+    it('an abort landing right after the approval blocks with nothing recorded', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const controller = new AbortController()
+      const request: McpRequest = {
+        ...toolsCallRequest('stripe_charge', { amount: 20 }),
+        signal: controller.signal,
+      }
+      const pending = governed.forward(request)
+      const ticket = await pendingTicket(queue)
+
+      // approve() settles the held promise synchronously (its continuation
+      // is a queued microtask) and removes the abort listener; the abort
+      // right after must still be honored by the post-approval signal check.
+      approvalRouter.approve(ticket.id, 'alice')
+      controller.abort()
+      const result = await pending
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['reason']).toBe('client_disconnected')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('a ledger failure after approval blocks honestly: approved but not forwarded', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass], {
+        commitAll: () => {
+          throw new Error('disk full')
+        },
+      })
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'freq',
+            match: { tool: 'stripe_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1h', key: 'tool' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+        rateLimiter: limiter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+
+      // The human approval could not be honored: blocked with the ledger
+      // failure class, nothing forwarded, no counters consumed anywhere —
+      // and the audit record shows BOTH facts (approved, then blocked).
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).data['failure_class']).toBe('budget_ledger_write_failed')
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+      expect(limiter.getKeyState('tool:stripe_charge')).toBeUndefined()
+
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      expect(record?.approval_status).toBe('approved')
+      expect(record?.block_reason).toBe('budget_ledger_write_failed')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      expect((chain['budget_approval'] as Record<string, unknown>)['status']).toBe('approved')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('a tuple-change reload during the wait makes the approved charge stale', async () => {
+      const rows: Array<Record<string, unknown>> = []
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass], {
+        commitAll: (batch) => rows.push(...(batch as never[])),
+      })
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      // Hot-reload with a changed limit: the pot resets, the frozen charge
+      // goes stale. The human decision still stands for THIS call.
+      engine.reconcile(compileBudgets([{ ...smallBreakGlass, limit: 500 }]))
+
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+
+      // Executed and ledgered under the evaluate-time generation, but the
+      // reset pot is untouched.
+      expect(result.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(rows.map((row) => [row['budget_name'], row['kind'], row['generation']])).toEqual([
+        ['small', 'approved_overage', 1],
+      ])
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+      // The audit evidence keeps the EVALUATE-TIME breach the human approved
+      // (limit 10, not allowed) — never the post-reload limit-500 view that
+      // would make an approved overage read as an ordinary allowed call.
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgets = chain['budgets'] as Array<Record<string, unknown>>
+      expect(budgets[0]).toMatchObject({
+        name: 'small',
+        limit: 10,
+        allowed: false,
+        amount: 20,
+        kind: 'approved_overage',
+        stale: true,
+      })
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('a dashboard break-glass override on a budget ticket records the overage', async () => {
+      const rows: Array<Record<string, unknown>> = []
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass], {
+        commitAll: (batch) => rows.push(...(batch as never[])),
+      })
+      const { queue, approvalRouter } = createApproval()
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      approvalRouter.breakGlass(ticket.id, 'ops-oncall', 'prod incident 42')
+      const result = await pending
+
+      expect(result.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect(rows.map((row) => [row['budget_name'], row['kind']])).toEqual([
+        ['small', 'approved_overage'],
+      ])
+
+      auditWriter.flush()
+      const record = auditStore.list().records[0]
+      expect(record?.approval_status).toBe('break_glass')
+      expect(record?.approved_by).toBe('ops-oncall')
+      const chain = record?.evidence_chain as Record<string, unknown>
+      expect(chain['break_glass']).toEqual({
+        reason: 'prod incident 42',
+        invoked_by: 'ops-oncall',
+      })
+      const budgetApproval = chain['budget_approval'] as Record<string, unknown>
+      expect(budgetApproval['status']).toBe('break_glass')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('budget-ticket escalation lands in evidence_chain.budget_approval', async () => {
+      const inner = mockForwarder()
+      const oncall = new QueueChannel()
+      const engine = createBudgetEngine([
+        {
+          ...smallBreakGlass,
+          approval: {
+            channel: 'dashboard',
+            timeout: '30s',
+            delegates: ['oncall'],
+            escalation_after: '1s',
+          },
+        },
+      ])
+      const { queue, approvalRouter } = createApproval({
+        channels: new Map<string, ApprovalChannel>([
+          ['dashboard', new QueueChannel()],
+          ['oncall', oncall],
+        ]),
+      })
+      const { auditStore, auditWriter } = createAudit()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        auditWriter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      // The budget approval config drives the escalation timer.
+      await vi.waitFor(
+        () => {
+          expect(queue.get(ticket.id)?.escalated_at).toBeTruthy()
+        },
+        { timeout: 3_000 },
+      )
+      approvalRouter.deny(ticket.id, 'bob', 'still no')
+      await pending
+      auditWriter.flush()
+
+      const record = auditStore.list().records[0]
+      const chain = record?.evidence_chain as Record<string, unknown>
+      const budgetApproval = chain['budget_approval'] as Record<string, unknown>
+      expect(budgetApproval['escalated_at']).toBeTruthy()
+      expect(budgetApproval['escalated_to']).toEqual(['oncall'])
+      expect(budgetApproval['denial_reason']).toBe('still no')
+      approvalRouter.close()
+      queue.close()
+      auditStore.close()
+    })
+
+    it('rule limit peeked before the wait also records post-approval without re-peeking', async () => {
+      // The budget-approval await is the one interleaving point where a
+      // rate/spend rule counter is peeked long before it commits. The pinned
+      // semantics mirror the budget pot itself: the human approval is
+      // authoritative, the counter records unconditionally (it may go over,
+      // staying truthful), and the NEXT unapproved call is what gets blocked.
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([smallBreakGlass])
+      const { queue, approvalRouter } = createApproval()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            name: 'freq',
+            match: { tool: 'stripe_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 1, window: '1h', key: 'tool' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        budgetEngine: engine,
+        approvalRouter,
+        rateLimiter: limiter,
+      })
+
+      // Call 1 peeks the last rate slot, then waits on the budget ticket.
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      // Call 2 (small amount, no breach) consumes the slot during the wait.
+      const second = await governed.forward(toolsCallRequest('stripe_charge', { amount: 1 }, 2))
+      expect(second.response.status).toBe(200)
+      expect(limiter.getKeyState('tool:stripe_charge')?.current).toBe(1)
+
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+
+      // The approved call still forwards and records: counter goes over,
+      // truthfully, exactly like an approved budget overage.
+      expect(result.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(2)
+      expect(limiter.getKeyState('tool:stripe_charge')?.current).toBe(2)
+
+      // The next unapproved call is blocked by the exhausted counter.
+      const third = await governed.forward(toolsCallRequest('stripe_charge', { amount: 1 }, 3))
+      expect(errorFromResult(third).data['reason']).toBe('rate_limited')
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('records post-approval without re-peeking (the approval is authoritative)', async () => {
+      const inner = mockForwarder()
+      const engine = createBudgetEngine([{ ...smallBreakGlass, limit: 30 }])
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      // Breaches (25 > 30? no — first spend 20 to make the pot 20/30).
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 25 }, 2))
+      const ticket = await pendingTicket(queue)
+
+      // While the human decides, another allowed call depletes the pot more.
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 5 }, 3))
+
+      approvalRouter.approve(ticket.id, 'alice')
+      const result = await pending
+
+      // No re-peek: the human's decision stands, the pot goes over.
+      expect(result.response.status).toBe(200)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(50)
+      approvalRouter.close()
+      queue.close()
+    })
+  })
+
   describe('spend_limit action', () => {
     function createSpendLimiter() {
       let time = 1_000_000

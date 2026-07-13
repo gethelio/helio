@@ -5,7 +5,7 @@
 // pre-parsed millisecond durations for zero-overhead evaluation.
 // ---------------------------------------------------------------------------
 
-import type { ToolMatcher } from '../policy/types.js'
+import type { CompiledApproval, ToolMatcher } from '../policy/types.js'
 
 /** One compiled contributor: which tools feed the budget, and from which field. */
 export interface CompiledBudgetContributor {
@@ -35,11 +35,13 @@ export interface CompiledBudget {
   /** The raw config window string ("1h" | "session") for wire/docs surfaces. */
   readonly windowRaw: string
   readonly key: 'global' | 'session' | 'sender_id'
-  /**
-   * `require_approval` (break-glass) arrives later in this release train; the
-   * compiled union is forward-shaped so the engine's exhaustive handling is
-   * already in place, but the config schema only admits `deny` today.
-   */
+  /** What a breach does: deny the call, or raise a break-glass ticket. */
   readonly onExceed: 'deny' | 'require_approval'
+  /**
+   * Break-glass ticket routing (`on_exceed: require_approval` only). Absent
+   * means the dashboard channel and the router's default timeout. Budget
+   * tickets never consult `default_on_timeout` — timeout fails closed.
+   */
+  readonly approval?: CompiledApproval
   readonly contributors: readonly CompiledBudgetContributor[]
 }

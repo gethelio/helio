@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import { loadConfig, ConfigError, ConfigWatcher } from './config/index.js'
+import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { createApp, startServer, startSidebandServer } from './server.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
@@ -379,6 +380,8 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // Create approval router
   const approvalQueue = new ApprovalQueue()
   const channels = createChannels(config.approval.channels)
+  // Snapshot of the runtime registry the hot-reload guard validates against.
+  const runtimeChannelTypes = new Map([...channels].map(([key, ch]) => [key, ch.type]))
   const approvalRouter = new ApprovalRouter({
     defaultTimeoutMs: parseDuration(config.approval.timeout),
     defaultOnTimeout: config.approval.default_on_timeout,
@@ -622,7 +625,23 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     configWatcher = new ConfigWatcher({
       configPath,
       initialConfig: config,
-      onPolicyReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
+      onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
+        // The RUNNING approval surface is startup-bound: a reload whose
+        // policy or budgets reference channels (or a dashboard) that only
+        // exist in the NEW file would validate on paper and then route
+        // tickets into the void. Reject the whole reload instead — the
+        // throw lands in onError, keeping the current configuration.
+        const unroutable = findUnroutableApprovalReferences(newPolicy, newBudgets, {
+          channelTypes: runtimeChannelTypes,
+          dashboardEnabled: config.dashboard.enabled,
+          defaultApprovalTimeoutMs: parseDuration(config.approval.timeout),
+        })
+        if (unroutable.length > 0) {
+          throw new Error(
+            `approval routing is not available in the running process (restart required ` +
+              `to apply approval.channels/dashboard changes): ${unroutable.join('; ')}`,
+          )
+        }
         // Budgets reconcile FIRST: it persists the reload's epoch mints and
         // throws when the flush fails, which rejects the whole reload (the
         // watcher's onError keeps the current config) before any policy

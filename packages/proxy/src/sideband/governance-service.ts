@@ -31,7 +31,11 @@ import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { ApprovalRouter, NativeResolution } from '../approval/router.js'
-import type { ApprovalAuditContext, ApprovalTicket } from '../approval/types.js'
+import type {
+  ApprovalAuditContext,
+  ApprovalTicket,
+  BudgetBreachContext,
+} from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
 import { spendBucketKey } from '../policy/spend-limiter.js'
@@ -186,6 +190,12 @@ interface BudgetPlan {
   readonly amount: number
   /** Config generation at evaluate time; stale charges are skipped at commit. */
   readonly generation: number
+  /**
+   * Whether this charge breached its budget at /evaluate (issue #14 break-
+   * glass): a breached plan whose ticket was APPROVED commits as
+   * `approved_overage`; every other executed plan commits as plain `spend`.
+   */
+  readonly breached: boolean
 }
 
 /** Everything /audit must commit once the call actually executed. */
@@ -205,6 +215,14 @@ interface PendingEvaluation {
   readonly flaggedDestructive: boolean
   readonly plans: readonly Plan[]
   /**
+   * Wire-ready per-budget peek blocks frozen at /evaluate (issue #14): the
+   * numbers the decision — and any break-glass approver — actually saw.
+   * Audited verbatim when the call never executes (`not_executed`, expiry),
+   * because a re-peek at report time could show a pot other calls or a
+   * reload mutated in the meantime. Counted into the entry's byte footprint.
+   */
+  readonly budgetsAtEvaluate?: readonly Record<string, unknown>[]
+  /**
    * Set once the plans have been committed (mutable latch): a throw AFTER the
    * commit (evidence, audit write) surfaces as a 500 the adapter retries, and
    * the retry must reuse this state instead of committing a second time.
@@ -218,6 +236,20 @@ interface PendingEvaluation {
     payloadHash: string
   }
   readonly approvalTicketId: string | undefined
+  /**
+   * The native ticket's terminal resolution, snapshotted the moment it is
+   * observed (mutable latch). The queue's resolved-ticket retention (1h) can
+   * be SHORTER than the evaluation TTL: once cleanup drops the ticket, this
+   * snapshot is the only place the human decision survives for /audit and
+   * for the expiry record.
+   */
+  ticketResolution?: {
+    readonly status: ApprovalTicket['status']
+    readonly resolvedBy: string | null
+    readonly denialReason?: string
+    readonly escalatedAt?: string
+    readonly escalatedTo?: readonly string[]
+  }
   readonly timestampIso: string
   readonly createdAtMs: number
   readonly evaluationExpiresAtMs: number
@@ -465,12 +497,22 @@ export class GovernanceService {
 
     // Budget gate (issue #14): peek every matching budget, all-or-nothing.
     // Runs for calls that could still execute (allow / require_approval) and
-    // as a pure peek for dry-run. A deny-breach is terminal even under a
-    // require_approval rule — the money gate forbids what the approver would
-    // be asked to allow, and this release only ships on_exceed: deny.
+    // as a pure peek for dry-run. A deny-breach (or invalid amount) is
+    // terminal even under a require_approval rule — the money gate forbids
+    // what the approver would be asked to allow. Breaches that are all
+    // `on_exceed: require_approval` merge into the call's SINGLE native
+    // ticket instead (see D7): one decision resolves the rule gate and the
+    // money gate together, because the one-round-trip /evaluate contract
+    // cannot sequence them and the host executes after the one resolution.
     let budgetsBlock: Array<Record<string, unknown>> | undefined
     let budgetDryRunOk = true
     let budgetDenial: { breached: string[]; invalid: string[] } | undefined
+    /** Set when require_approval breaches ride the call's native ticket. */
+    let budgetBreachContexts: BudgetBreachContext[] | undefined
+    /** Break-glass timeout for BUDGET-ONLY tickets (first-breached-wins). */
+    let budgetTicketTimeoutMs: number | undefined
+    /** True when budgets alone flipped an allow into require_approval. */
+    let budgetTriggeredApproval = false
     if (
       this.budgetEngine &&
       (wire === 'allow' || wire === 'require_approval' || wire === 'dry_run')
@@ -493,33 +535,57 @@ export class GovernanceService {
           ...peek.entries.map((entry) => budgetWireBlock(entry)),
           ...failures.map((failure) => budgetFailureBlock(failure)),
         ]
+        const breaches = peek.entries.filter((entry) => !entry.allowed)
+        // Without a router the money gate cannot ask anyone — fail closed
+        // like a deny breach (config validation demands approval capability
+        // for break-glass budgets; this guards direct embedders).
+        const canBreakGlass =
+          this.approvalRouter !== undefined &&
+          breaches.every((entry) => entry.budget.onExceed === 'require_approval')
 
-        if (failures.length > 0 || !peek.allowed) {
+        if (failures.length > 0 || (breaches.length > 0 && !canBreakGlass)) {
           budgetDryRunOk = false
           if (wire !== 'dry_run') {
             releaseReservations()
             plans.length = 0
             wire = 'budget_exceeded'
             budgetDenial = {
-              breached: peek.entries
-                .filter((entry) => !entry.allowed)
-                .map((entry) => entry.budget.name),
+              breached: breaches.map((entry) => entry.budget.name),
               invalid: failures.map((failure) => failure.budget.name),
             }
           }
-        } else if (wire !== 'dry_run') {
-          for (const charge of charges) {
-            if (!reserve(charge.bucketKey)) {
-              releaseReservations()
-              return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+        } else {
+          if (breaches.length > 0) budgetDryRunOk = false
+          if (wire !== 'dry_run') {
+            for (const [index, charge] of charges.entries()) {
+              if (!reserve(charge.bucketKey)) {
+                releaseReservations()
+                return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+              }
+              plans.push({
+                kind: 'budget',
+                budget: charge.budget,
+                bucketKey: charge.bucketKey,
+                amount: charge.amount,
+                generation: charge.generation,
+                breached: peek.entries[index]?.allowed === false,
+              })
             }
-            plans.push({
-              kind: 'budget',
-              budget: charge.budget,
-              bucketKey: charge.bucketKey,
-              amount: charge.amount,
-              generation: charge.generation,
-            })
+            if (breaches.length > 0) {
+              budgetBreachContexts = breaches.map((entry) => ({
+                name: entry.budget.name,
+                limit: entry.budget.limit,
+                spent: entry.spent,
+                attempted_amount: entry.amount,
+                currency: entry.budget.currency,
+                window: entry.budget.windowRaw,
+              }))
+              budgetTicketTimeoutMs = breaches[0]?.budget.approval?.timeoutMs
+              if (wire === 'allow') {
+                budgetTriggeredApproval = true
+                wire = 'require_approval'
+              }
+            }
           }
         }
       }
@@ -540,6 +606,17 @@ export class GovernanceService {
     }
     if (shouldAttachFeedback(wire, decision)) {
       responseBody['feedback'] = buildFeedback(decision.matchedRule, decision.reason)
+    }
+    if (wire === 'require_approval' && budgetTriggeredApproval && budgetBreachContexts) {
+      // Budgets alone flipped an allowed call into an approval: the matched
+      // rule (if any) said allow, so its feedback never applies — tell the
+      // host WHY a dialog is appearing. Merged tickets (a require_approval
+      // rule plus breaches) keep the rule-feedback contract untouched.
+      responseBody['feedback'] = {
+        message: `Budget ${budgetBreachContexts.map((b) => `"${b.name}"`).join(', ')} would be exceeded by this call; break-glass approval required`,
+        suggestion:
+          'Await the approval decision, reduce the amount, or wait for the window to reset.',
+      }
     }
     if (wire === 'budget_exceeded' && budgetDenial) {
       // Budget-specific by design: the matched rule's feedback (and the
@@ -602,7 +679,15 @@ export class GovernanceService {
     // ticket — a late refusal must not leave an orphaned native ticket
     // (amended per implementation review). Over the cap → release this
     // call's sender reservations and refuse.
-    const totalBytes = entryBytes + planBytes(plans)
+    // The frozen per-budget view for entries that carry budget plans — what
+    // /audit reports if the call never executes. Snapshot, not a re-peek —
+    // and a CLONE: budgetsBlock is also the response's limits.budgets, and a
+    // direct embedder mutating the returned body must not rewrite evidence.
+    const budgetsAtEvaluate = plans.some((plan) => plan.kind === 'budget')
+      ? structuredClone(budgetsBlock)
+      : undefined
+    const totalBytes =
+      entryBytes + planBytes(plans) + (budgetsAtEvaluate ? byteLength(budgetsAtEvaluate) : 0)
     if (this.pendingBytes + totalBytes > this.maxPendingBytes) {
       releaseReservations()
       return { status: 503, body: { error: 'evaluation_backlog_full' } }
@@ -623,14 +708,27 @@ export class GovernanceService {
           '[helio] invariant violation: require_approval decision without an approvalRouter',
         )
       }
-      const timeoutMs = decision.matchedRule?.approval?.timeoutMs ?? this.approvalTimeoutMs
+      // One merged native ticket per call (D7). Its timeout comes from the
+      // RULE's approval config when the rule gate itself requires approval
+      // (the rule gate is first in the execution order); a budget-only
+      // ticket takes the first breached budget's config. Channel/delegates
+      // never apply here — native tickets are resolved by the adapter's own
+      // UI, not notified through Helio channels.
+      const timeoutMs =
+        (decision.action === 'require_approval'
+          ? decision.matchedRule?.approval?.timeoutMs
+          : budgetTicketTimeoutMs) ?? this.approvalTimeoutMs
       const ticket = router.createNativeTicket({
         tool_name: toolName,
-        tool_input: req.arguments ?? {},
+        // Cloned: the ticket is what the APPROVER sees, and a direct
+        // embedder mutating its arguments object after /evaluate must not
+        // rewrite it (same guard as the pending entry's evidence below).
+        tool_input: structuredClone(req.arguments ?? {}),
         matched_rule: decision.matchedRule,
         session_id: req.session_id,
         origin: req.origin,
         timeout_ms: timeoutMs,
+        breached_budgets: budgetBreachContexts,
       })
       approvalTicketId = ticket.id
       ticketTimeoutAtMs = this.now() + timeoutMs
@@ -647,13 +745,18 @@ export class GovernanceService {
       agentId: req.agent_id,
       sessionId: req.session_id,
       toolName,
-      toolInput: req.arguments ?? {},
-      metadata: req.metadata,
+      // Cloned: direct embedders share these references and could otherwise
+      // mutate the audit evidence (and desync the byte accounting) after
+      // admission. The HTTP route always builds fresh objects; this guards
+      // the library surface.
+      toolInput: structuredClone(req.arguments ?? {}),
+      metadata: req.metadata === null ? null : structuredClone(req.metadata),
       action: decision.action,
       matchedRuleName,
       matchedRuleIndex,
       flaggedDestructive: pipeline.flaggedDestructive,
       plans,
+      budgetsAtEvaluate,
       approvalTicketId,
       timestampIso,
       createdAtMs: this.now(),
@@ -719,23 +822,25 @@ export class GovernanceService {
     let approvedBy: string | null = null
     let approvalContext: ApprovalAuditContext | undefined
     if (entry.approvalTicketId) {
-      const ticket = this.getTicketStatus(entry.approvalTicketId)
-      const status = ticket?.status
-      if (!status || status === 'pending') {
+      // Latch the live resolution first: the queue may clean the resolved
+      // ticket long before this /audit arrives (retention < evaluation TTL).
+      this.snapshotTicketResolution(entry)
+      const resolution = entry.ticketResolution
+      if (!resolution) {
         return { status: 409, body: { error: 'approval_unresolved' } }
       }
-      approvalStatus = status
-      approvedBy = ticket.resolved_by ?? null
+      approvalStatus = resolution.status
+      approvedBy = resolution.resolvedBy
       // Same durable approval context the MCP path emits. Only denial reasons
       // apply here in practice — native tickets never start escalation timers.
-      if (ticket.denial_reason || ticket.escalated_at) {
+      if (resolution.denialReason || resolution.escalatedAt) {
         approvalContext = {
           ticket_id: entry.approvalTicketId,
-          ...(ticket.denial_reason ? { denial_reason: ticket.denial_reason } : {}),
-          ...(ticket.escalated_at
+          ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
+          ...(resolution.escalatedAt
             ? {
-                escalated_at: ticket.escalated_at,
-                escalated_to: [...(ticket.escalated_to ?? [])],
+                escalated_at: resolution.escalatedAt,
+                escalated_to: [...(resolution.escalatedTo ?? [])],
               }
             : {}),
         }
@@ -780,9 +885,30 @@ export class GovernanceService {
     // retry skip straight past the commit — exactly-once either way.
     let limitsChain = entry.commitState?.limitsChain
     if (callHappened && entry.plans.length > 0 && !entry.commitState) {
-      limitsChain = this.commitPlans(entry, req.actual_amount, auditId)
+      limitsChain = this.commitPlans(entry, req.actual_amount, auditId, approvalStatus)
       entry.commitState = { auditId, limitsChain, payloadHash }
+    } else if (!callHappened && !entry.commitState && entry.budgetsAtEvaluate) {
+      // Nothing committed (`not_executed`): the record must still carry the
+      // money-gate context — which budgets the call fed and, for a denied or
+      // timed-out break-glass ticket, which breach the human was deciding.
+      // The EVALUATE-TIME snapshot is audited verbatim: a re-peek here could
+      // show a pot other calls or a reload mutated since the decision. No
+      // kind on the blocks — nothing was recorded.
+      limitsChain = { ...(limitsChain ?? {}), budgets: entry.budgetsAtEvaluate }
     }
+
+    // Cross-door block_reason parity (issue #14): a budget-only break-glass
+    // ticket that was denied or timed out AND honored by the adapter is a
+    // BUDGET block — the same event records block_reason budget_exceeded on
+    // the MCP door. Merged tickets keep the rule-gate reason (the rule gate
+    // is first in the settled order), and an executed-despite report keeps
+    // the plain approval reason (the block never happened; the TOCTOU caveat
+    // covers it).
+    const budgetBreachBlocked =
+      !callHappened &&
+      entry.action !== 'require_approval' &&
+      (approvalStatus === 'denied' || approvalStatus === 'timeout') &&
+      entry.plans.some((plan) => plan.kind === 'budget' && plan.breached)
 
     // Record the tool call for evidence/dependency tracking.
     if (callHappened && this.evidenceStore && entry.sessionId) {
@@ -806,6 +932,7 @@ export class GovernanceService {
       toolInput: entry.toolInput,
       metadata: entry.metadata,
       action: entry.action,
+      budgetBreachBlocked,
       wire: entry.action === 'require_approval' ? 'require_approval' : 'allow',
       matchedRuleName: entry.matchedRuleName,
       matchedRuleIndex: entry.matchedRuleIndex,
@@ -1106,6 +1233,9 @@ export class GovernanceService {
     if (!resolved) {
       return { status: 409, body: { error: 'already_resolved' } }
     }
+    // Latch immediately: the queue's retention may drop the ticket before
+    // the adapter's /audit (or the evaluation's expiry) reads the outcome.
+    if (entry) this.snapshotTicketResolution(entry)
     return { status: 200, body: { ok: true } }
   }
 
@@ -1205,7 +1335,29 @@ export class GovernanceService {
     if (now >= entry.evaluationExpiresAtMs) {
       if (entry.approvalTicketId) {
         this.approvalRouter?.resolveNativeTicket(entry.approvalTicketId, 'timeout')
+        // Latch AFTER the transition: a still-live ticket reads as timeout,
+        // an earlier resolution is already latched (or still readable), and
+        // a queue-cleaned ticket falls back to the earlier latch.
+        this.snapshotTicketResolution(entry)
       }
+      // The expired record must not erase what IS known: a ticket the
+      // adapter resolved but never audited keeps its human decision, and
+      // entries that never committed keep the frozen evaluate-time budget
+      // context. A committed entry's chain is #149's problem — untouched.
+      const resolution = entry.ticketResolution
+      const approvalContext: ApprovalAuditContext | undefined =
+        entry.approvalTicketId && resolution && (resolution.denialReason || resolution.escalatedAt)
+          ? {
+              ticket_id: entry.approvalTicketId,
+              ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
+              ...(resolution.escalatedAt
+                ? {
+                    escalated_at: resolution.escalatedAt,
+                    escalated_to: [...(resolution.escalatedTo ?? [])],
+                  }
+                : {}),
+            }
+          : undefined
       const auditId = this.writeAudit({
         timestampIso: entry.timestampIso,
         origin: entry.origin,
@@ -1221,6 +1373,13 @@ export class GovernanceService {
         flaggedDestructive: entry.flaggedDestructive,
         dryRun: false,
         recordKind: 'evaluation_expired',
+        approvalStatus: resolution?.status ?? null,
+        approvedBy: resolution?.resolvedBy ?? null,
+        approvalContext,
+        limitsChain:
+          !entry.commitState && entry.budgetsAtEvaluate
+            ? { budgets: entry.budgetsAtEvaluate }
+            : undefined,
         sidebandUnreported: true,
       })
       this.discardPending(entry)
@@ -1245,6 +1404,7 @@ export class GovernanceService {
       now >= entry.ticketTimeoutAtMs
     ) {
       this.approvalRouter?.resolveNativeTicket(entry.approvalTicketId, 'timeout')
+      this.snapshotTicketResolution(entry)
     }
     return 'active'
   }
@@ -1267,6 +1427,21 @@ export class GovernanceService {
 
   private getTicketStatus(ticketId: string): ApprovalTicket | undefined {
     return this.approvalRouter?.getTicket(ticketId)
+  }
+
+  /** Latch the entry's ticket resolution while the ticket still exists. */
+  private snapshotTicketResolution(entry: PendingEvaluation): void {
+    if (entry.ticketResolution || !entry.approvalTicketId) return
+    const ticket = this.getTicketStatus(entry.approvalTicketId)
+    if (!ticket || ticket.status === 'pending') return
+    entry.ticketResolution = {
+      status: ticket.status,
+      resolvedBy: ticket.resolved_by ?? null,
+      ...(ticket.denial_reason ? { denialReason: ticket.denial_reason } : {}),
+      ...(ticket.escalated_at
+        ? { escalatedAt: ticket.escalated_at, escalatedTo: [...(ticket.escalated_to ?? [])] }
+        : {}),
+    }
   }
 
   private planRate(
@@ -1348,6 +1523,7 @@ export class GovernanceService {
     entry: PendingEvaluation,
     actualAmount: number | undefined,
     auditId: string,
+    approvalStatus: string | null,
   ): Record<string, unknown> | undefined {
     let chain: Record<string, unknown> | undefined
 
@@ -1362,6 +1538,16 @@ export class GovernanceService {
     // separately first.
     const budgetPlans = entry.plans.filter((plan): plan is BudgetPlan => plan.kind === 'budget')
     if (budgetPlans.length > 0 && this.budgetEngine) {
+      // Break-glass kinds (issue #14): a breached plan whose ticket was
+      // APPROVED committed a sanctioned overage. Any other executed breach
+      // (denied/timeout/cancelled ticket, host misbehavior or a race) counts
+      // as plain spend — the counters stay truthful and the audit row's
+      // approval_status carries the evidence.
+      const kinds = new Map<string, 'spend' | 'approved_overage'>(
+        budgetPlans
+          .filter((plan) => plan.breached && approvalStatus === 'approved')
+          .map((plan) => [plan.budget.name, 'approved_overage' as const]),
+      )
       // actual_amount, when supplied, is the call's one true realized cost
       // and overrides every budget plan amount.
       const snapshots = this.budgetEngine.recordAll(
@@ -1373,15 +1559,29 @@ export class GovernanceService {
         })),
         {
           kind: 'spend',
+          ...(kinds.size > 0 ? { kinds } : {}),
           auditRecordId: auditId,
           origin: entry.origin,
           toolName: entry.toolName,
           timestampIso: new Date(this.now()).toISOString(),
         },
       )
+      // Evidence for STALE commits (a tuple reload landed between /evaluate
+      // and /audit) keeps the frozen evaluate-time block — what the decision
+      // and any approver saw — with only the commit markers added; the live
+      // snapshot would describe the reset pot under the NEW config.
+      const frozenByName = new Map(
+        (entry.budgetsAtEvaluate ?? []).map((block) => [block['name'], block]),
+      )
       chain = {
         ...(chain ?? {}),
-        budgets: snapshots.map((snapshot) => budgetWireBlock(snapshot, 'spend')),
+        budgets: snapshots.map((snapshot) => {
+          const kind = kinds.get(snapshot.budget.name) ?? 'spend'
+          const frozen = frozenByName.get(snapshot.budget.name)
+          return snapshot.stale && frozen
+            ? { ...frozen, kind, stale: true }
+            : budgetWireBlock(snapshot, kind)
+        }),
       }
     }
 
@@ -1527,6 +1727,8 @@ interface WriteAuditArgs {
   upstreamResponse?: unknown
   upstreamLatencyMs?: number | null
   sidebandUnreported?: boolean
+  /** A budget-only break-glass denial/timeout the adapter honored (issue #14). */
+  budgetBreachBlocked?: boolean
 }
 
 function deriveBlockReason(args: WriteAuditArgs): string | null {
@@ -1535,6 +1737,10 @@ function deriveBlockReason(args: WriteAuditArgs): string | null {
   // and so they count into blocked_total (issue #13).
   if (args.recordKind === 'install_scan') return args.wire === 'deny' ? 'install_denied' : null
   if (args.dryRun) return null
+  // A budget-only break-glass denial/timeout is a BUDGET block — the same
+  // event the MCP door records as budget_exceeded (cross-door filter parity).
+  // The approval_status column still carries the denied/timeout outcome.
+  if (args.budgetBreachBlocked) return 'budget_exceeded'
   if (args.approvalStatus === 'denied') return 'approval_denied'
   if (args.approvalStatus === 'timeout') return 'approval_timeout'
   if (args.approvalStatus === 'cancelled') return 'cancelled'
@@ -1740,7 +1946,13 @@ function planBytes(plans: readonly Plan[]): number {
   for (const plan of plans) {
     total += byteLength(
       plan.kind === 'budget'
-        ? { kind: plan.kind, name: plan.budget.name, key: plan.bucketKey, amount: plan.amount }
+        ? {
+            kind: plan.kind,
+            name: plan.budget.name,
+            key: plan.bucketKey,
+            amount: plan.amount,
+            breached: plan.breached,
+          }
         : { kind: plan.kind, key: plan.key, amount: plan.amount ?? 0 },
     )
   }

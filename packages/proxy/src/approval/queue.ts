@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { ApprovalTicket, ApprovalStatus } from './types.js'
+import type { ApprovalTicket, ApprovalStatus, BudgetBreachContext } from './types.js'
 
 // ---------------------------------------------------------------------------
 // ApprovalQueue — in-memory storage for approval tickets.
@@ -64,6 +64,8 @@ export class ApprovalQueue {
     channel_name: string
     session_id: string | null
     timeout_ms: number
+    /** Breached budget context on break-glass / merged tickets (issue #14). */
+    breached_budgets?: readonly BudgetBreachContext[]
   }): ApprovalTicket {
     if (this.closed) throw new Error('ApprovalQueue is closed')
 
@@ -79,6 +81,9 @@ export class ApprovalQueue {
       requested_at: new Date(now).toISOString(),
       timeout_at: new Date(now + params.timeout_ms).toISOString(),
       timeout_ms: params.timeout_ms,
+      // Absent (not empty) on plain rule tickets: presence is the marker a
+      // future standing-approval store must exclude (issue #127).
+      ...(params.breached_budgets?.length ? { breached_budgets: params.breached_budgets } : {}),
       status: 'pending',
       notification_failures: [],
     }

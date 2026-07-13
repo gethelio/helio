@@ -11,4 +11,10 @@ export { createSlackActionApp } from './slack-actions.js'
 export type { SlackActionAppOptions } from './slack-actions.js'
 export { createApprovalApp } from './api.js'
 export type { ApprovalAppOptions } from './api.js'
-export type { ApprovalTicket, ApprovalOutcome, ApprovalStatus, ApprovalChannel } from './types.js'
+export type {
+  ApprovalTicket,
+  ApprovalOutcome,
+  ApprovalStatus,
+  ApprovalChannel,
+  BudgetBreachContext,
+} from './types.js'

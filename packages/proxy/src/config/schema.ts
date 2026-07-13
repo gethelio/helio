@@ -188,9 +188,9 @@ const policyActionSchema = z.enum([
 
 const ruleApprovalSchema = z
   .object({
-    channel: z.string(),
+    channel: z.string().min(1),
     timeout: durationSchema.optional(),
-    delegates: z.array(z.string()).optional(),
+    delegates: z.array(z.string().min(1)).optional(),
     escalation_after: durationSchema.optional(),
   })
   .strict()
@@ -337,17 +337,34 @@ const budgetSchema = z
     window: z.union([durationSchema, z.literal('session')]),
     key: z.enum(['global', 'session', 'sender_id']).default('global'),
     /**
-     * Break-glass (`require_approval`) ships later in this release train;
-     * until then the schema accepts only the default so the config surface
-     * never promises behavior that does not exist yet.
+     * What a breach does: `deny` blocks the call outright; `require_approval`
+     * raises one composite break-glass ticket per call listing every breached
+     * budget, and the call proceeds only on an explicit approval.
      */
-    on_exceed: z.literal('deny').default('deny'),
+    on_exceed: z.enum(['deny', 'require_approval']).default('deny'),
+    /**
+     * Break-glass ticket routing (same shape as rule-level `approval`). Only
+     * valid with `on_exceed: require_approval`; when omitted, tickets fall
+     * back to the dashboard channel and the global `approval.timeout`. Note
+     * that `default_on_timeout` never applies to budget tickets — they fail
+     * closed on timeout regardless (money gates do not fail open).
+     */
+    approval: ruleApprovalSchema.optional(),
     /** Session windows only: idle time before a session pot is collected. Default 24h. */
     idle_ttl: durationSchema.optional(),
     contributors: z.array(budgetContributorSchema).min(1),
   })
   .strict()
   .superRefine((budget, ctx) => {
+    if (budget.approval !== undefined && budget.on_exceed !== 'require_approval') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['approval'],
+        message:
+          'budget approval config only applies with on_exceed: "require_approval" — with ' +
+          'on_exceed: "deny" it is dead config. Remove it or switch on_exceed.',
+      })
+    }
     if (budget.window === 'session' && budget.key === 'global') {
       ctx.addIssue({
         code: 'custom',
@@ -375,7 +392,7 @@ const budgetSchema = z
 
 const slackChannelSchema = z.object({
   type: z.literal('slack'),
-  name: z.string().optional(),
+  name: z.string().min(1).optional(),
   bot_token: z.string(),
   signing_secret: z.string(),
   channel: z.string(),
@@ -383,14 +400,14 @@ const slackChannelSchema = z.object({
 
 const webhookChannelSchema = z.object({
   type: z.literal('webhook'),
-  name: z.string().optional(),
+  name: z.string().min(1).optional(),
   url: z.string(),
   secret: z.string().optional(),
 })
 
 const dashboardChannelSchema = z.object({
   type: z.literal('dashboard'),
-  name: z.string().optional(),
+  name: z.string().min(1).optional(),
 })
 
 const approvalChannelSchema = z.discriminatedUnion('type', [
@@ -464,7 +481,8 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
   const requiresSecret =
     cfg.policies.flag_destructive === 'require_approval' ||
     cfg.policies.on_tool_drift === 'require_approval' ||
-    cfg.policies.rules.some((rule) => rule.action === 'require_approval')
+    cfg.policies.rules.some((rule) => rule.action === 'require_approval') ||
+    cfg.budgets.some((budget) => budget.on_exceed === 'require_approval')
   const hasSecret = hasDashboardApiSecret(cfg.dashboard.api_secret)
 
   if (requiresSecret) {
@@ -473,8 +491,9 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
         code: 'custom',
         path: ['dashboard', 'api_secret'],
         message:
-          'dashboard.api_secret is required when any rule uses require_approval or ' +
-          'policies.flag_destructive or policies.on_tool_drift is "require_approval". ' +
+          'dashboard.api_secret is required when any rule uses require_approval, any budget ' +
+          'uses on_exceed: require_approval, or policies.flag_destructive or ' +
+          'policies.on_tool_drift is "require_approval". ' +
           'Generate one with: `openssl rand -hex 32` and set it under ' +
           '`dashboard.api_secret` in your helio.yaml. (See docs/approvals.md.)',
       })
@@ -508,9 +527,51 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
     })
   }
 
+  // Channel references (rules AND budgets) resolve against the RUNTIME
+  // registry keys, mirroring createChannels exactly: the built-in dashboard
+  // key plus each configured channel under `name ?? type`. A NAMED
+  // slack/webhook channel is NOT registered under its bare type at runtime,
+  // so accepting the type here would validate a reference that never gets a
+  // notification. The key → type map also lets refinements know which keys
+  // resolve to the dashboard surface.
+  const channelTypeByKey = new Map<string, string>([['dashboard', 'dashboard']])
+  for (const [channelIndex, channel] of cfg.approval.channels.entries()) {
+    const key = channel.name ?? channel.type
+    // The registry key "dashboard" is reserved for the built-in fallback: a
+    // slack/webhook channel under that key would silently REPLACE it, and
+    // every dashboard-routed ticket would go to the impostor.
+    if (key === 'dashboard' && channel.type !== 'dashboard') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['approval', 'channels', channelIndex, channel.name ? 'name' : 'type'],
+        message:
+          'The channel key "dashboard" is reserved for the built-in dashboard channel. ' +
+          'Pick a different name.',
+      })
+      continue
+    }
+    // Duplicate effective keys are last-write-wins at runtime — silent
+    // misrouting. (A dashboard-type channel re-registering the built-in
+    // "dashboard" key is the one harmless case.)
+    if (channelTypeByKey.has(key) && !(key === 'dashboard' && channel.type === 'dashboard')) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['approval', 'channels', channelIndex, channel.name ? 'name' : 'type'],
+        message:
+          `Duplicate approval channel key "${key}". Channels register under name ?? type — ` +
+          'give each channel a unique name.',
+      })
+      continue
+    }
+    channelTypeByKey.set(key, channel.type)
+  }
+  const knownChannelKeys = new Set<string>(channelTypeByKey.keys())
+  const resolvesToDashboard = (key: string): boolean => channelTypeByKey.get(key) === 'dashboard'
+
   // Budgets (issue #14): names are the identity for hot-reload state
   // preservation and persistence, so they must be unique; sender_id scoping
-  // mirrors the rule-limits sideband guard above.
+  // mirrors the rule-limits sideband guard above; break-glass approval
+  // references get the same channel checks as rules.
   const seenBudgetNames = new Set<string>()
   for (const [budgetIndex, budget] of cfg.budgets.entries()) {
     if (seenBudgetNames.has(budget.name)) {
@@ -533,6 +594,77 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
           'sender_id is supplied by hook adapters and is absent on the MCP path.',
       })
     }
+
+    const budgetChannel = budget.approval?.channel
+    if (budgetChannel && !knownChannelKeys.has(budgetChannel)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['budgets', budgetIndex, 'approval', 'channel'],
+        message:
+          `Unknown approval channel "${budgetChannel}". ` +
+          'Add it to approval.channels (type or name), or use "dashboard".',
+      })
+    }
+    for (const [delegateIndex, delegate] of (budget.approval?.delegates ?? []).entries()) {
+      if (!knownChannelKeys.has(delegate)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['budgets', budgetIndex, 'approval', 'delegates', delegateIndex],
+          message:
+            `Unknown delegate channel "${delegate}". ` +
+            'Delegates must reference configured approval channel names.',
+        })
+      }
+    }
+
+    // A dashboard-routed break-glass ticket resolves ONLY through the
+    // dashboard approvals API — with the dashboard server disabled the
+    // ticket has no resolution surface and always times out (fail closed).
+    // Dead config; reject it. Slack-routed tickets are fine: their action
+    // callbacks live on the main proxy server.
+    if (budget.on_exceed === 'require_approval' && !cfg.dashboard.enabled) {
+      const effectiveChannel = budget.approval?.channel ?? 'dashboard'
+      if (resolvesToDashboard(effectiveChannel)) {
+        ctx.addIssue({
+          code: 'custom',
+          path:
+            budget.approval?.channel !== undefined
+              ? ['budgets', budgetIndex, 'approval', 'channel']
+              : ['budgets', budgetIndex, 'on_exceed'],
+          message:
+            'This budget routes break-glass tickets to the dashboard channel, but ' +
+            'dashboard.enabled is false — the ticket could never be resolved and would ' +
+            'always time out. Enable the dashboard or route approval.channel to a ' +
+            'Slack channel.',
+        })
+      }
+      // Delegates only matter when the escalation timer can actually fire:
+      // the router escalates only when 0 < escalation_after < the effective
+      // timeout (budget timeout, else the global approval.timeout). An inert
+      // timer's delegates are config the router never consults, so the
+      // dashboard-availability guard must not reject them.
+      const escalationAfterMs =
+        budget.approval?.escalation_after !== undefined
+          ? parseDuration(budget.approval.escalation_after)
+          : undefined
+      const effectiveTimeoutMs = parseDuration(budget.approval?.timeout ?? cfg.approval.timeout)
+      const escalationCanFire =
+        escalationAfterMs !== undefined &&
+        escalationAfterMs > 0 &&
+        escalationAfterMs < effectiveTimeoutMs
+      for (const [delegateIndex, delegate] of (budget.approval?.delegates ?? []).entries()) {
+        if (escalationCanFire && knownChannelKeys.has(delegate) && resolvesToDashboard(delegate)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['budgets', budgetIndex, 'approval', 'delegates', delegateIndex],
+            message:
+              'This budget escalates break-glass tickets to a dashboard channel, but ' +
+              'dashboard.enabled is false — the delegate could never resolve the ticket. ' +
+              'Enable the dashboard or delegate to a Slack channel.',
+          })
+        }
+      }
+    }
   }
 
   const hasWebhookChannel = cfg.approval.channels.some((channel) => channel.type === 'webhook')
@@ -544,14 +676,6 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
         'dashboard.enabled must be true when approval.channels includes a webhook channel. ' +
         'Webhook notifications require the dashboard sideband approval API.',
     })
-  }
-
-  const knownChannelKeys = new Set<string>(['dashboard'])
-  for (const channel of cfg.approval.channels) {
-    knownChannelKeys.add(channel.type)
-    if (channel.name) {
-      knownChannelKeys.add(channel.name)
-    }
   }
 
   for (const [ruleIndex, rule] of cfg.policies.rules.entries()) {

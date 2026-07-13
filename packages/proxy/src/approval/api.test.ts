@@ -268,6 +268,33 @@ describe('Approval REST API', () => {
       const res = await ctx.get('/nonexistent-id')
       expect(res.status).toBe(404)
     })
+
+    it('serializes breached_budgets verbatim on break-glass tickets (issue #14)', async () => {
+      const ctx = setup()
+      router = ctx.router
+      const breached = [
+        {
+          name: 'daily-cap',
+          limit: 50,
+          spent: 49.1,
+          attempted_amount: 5,
+          currency: 'USD',
+          window: '24h',
+        },
+      ]
+      void ctx.router.submit({
+        tool_name: 'stripe_charge',
+        tool_input: { amount: 5 },
+        matched_rule: undefined,
+        session_id: null,
+        breached_budgets: breached,
+      })
+      const ticketId = ctx.queue.listPending()[0]?.id as string
+
+      const res = await ctx.get(`/${ticketId}`)
+      const body = (await res.json()) as { data: Record<string, unknown> }
+      expect(body.data['breached_budgets']).toEqual(breached)
+    })
   })
 
   // -----------------------------------------------------------------------

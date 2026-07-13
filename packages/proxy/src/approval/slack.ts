@@ -93,6 +93,16 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
     detailLines.push(`*Session:* \`${sanitizeCodeSpanContent(ticket.session_id)}\``)
   }
 
+  // Break-glass context (issue #14): the approver is deciding a budget
+  // overage, so every breached budget renders with its numbers. Budget names
+  // are config-charset-constrained, but currency and window are still passed
+  // through the sanitizers — this text renders as raw mrkdwn. Slack caps a
+  // section's text at 3,000 chars and a message at 50 blocks, so the lines
+  // are packed into a bounded number of sections; anything past the cap is
+  // disclosed as a count, never silently dropped (the approval ticket itself
+  // always carries the full list).
+  const budgetBlocks: KnownBlock[] = buildBudgetBlocks(ticket)
+
   return [
     {
       type: 'header',
@@ -102,6 +112,7 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
       type: 'section',
       text: { type: 'mrkdwn', text: detailLines.join('\n') },
     },
+    ...budgetBlocks,
     {
       type: 'context',
       elements: [
@@ -130,6 +141,70 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
       ],
     },
   ]
+}
+
+/** Slack rejects section text over 3,000 chars; leave margin for the header line. */
+const MAX_SECTION_TEXT = 2_900
+/**
+ * Bound the breach sections inside Slack's 50-block message cap (4 base
+ * blocks + up to 40 sections + 1 omission context line = 45). At ~16
+ * max-length lines per section this renders 600+ budgets — every realistic
+ * config fits entirely; the omission line is a pathological-config backstop,
+ * never the expected path.
+ */
+const MAX_BUDGET_SECTIONS = 40
+
+/** Render the breached-budgets sections for a break-glass ticket, bounded. */
+function buildBudgetBlocks(ticket: ApprovalTicket): KnownBlock[] {
+  const breached = ticket.breached_budgets
+  if (!breached?.length) return []
+
+  const lines = breached.map(
+    (b) =>
+      `• \`${sanitizeCodeSpanContent(b.name)}\` — ${String(b.spent)}/${String(b.limit)} ` +
+      `${sanitizeMrkdwnText(b.currency)} spent, attempting +${String(b.attempted_amount)} ` +
+      `(${sanitizeMrkdwnText(b.window)} window)`,
+  )
+
+  const sections: string[] = []
+  let current = '*Breached budgets (approval spends past the limit):*'
+  let pendingLines = 0
+  let rendered = 0
+  let capped = false
+  for (const line of lines) {
+    if (current.length + 1 + line.length > MAX_SECTION_TEXT) {
+      sections.push(current)
+      if (sections.length >= MAX_BUDGET_SECTIONS) {
+        capped = true
+        break
+      }
+      current = line
+      pendingLines = 1
+    } else {
+      current = `${current}\n${line}`
+      pendingLines += 1
+    }
+    rendered += 1
+  }
+  if (!capped && pendingLines > 0) sections.push(current)
+
+  const blocks: KnownBlock[] = sections.map((text) => ({
+    type: 'section',
+    text: { type: 'mrkdwn', text },
+  }))
+  const omitted = lines.length - rendered
+  if (omitted > 0) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `…and ${String(omitted)} more breached budget${omitted === 1 ? '' : 's'} — the approval ticket carries the full list (approvals REST API / dashboard).`,
+        },
+      ],
+    })
+  }
+  return blocks
 }
 
 // ---------------------------------------------------------------------------
