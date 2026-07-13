@@ -12,12 +12,13 @@ function renderSidebar(open = true, onClose = vi.fn()) {
 }
 
 describe('Sidebar', () => {
-  it('renders all 5 nav links', () => {
+  it('renders all 6 nav links', () => {
     renderSidebar()
     expect(screen.getByText('Feed')).toBeTruthy()
     expect(screen.getByText('Approvals')).toBeTruthy()
     expect(screen.getByText('Audit')).toBeTruthy()
     expect(screen.getByText('Limits')).toBeTruthy()
+    expect(screen.getByText('Budgets')).toBeTruthy()
     expect(screen.getByText('Analytics')).toBeTruthy()
   })
 

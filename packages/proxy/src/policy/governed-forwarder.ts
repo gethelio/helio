@@ -858,6 +858,14 @@ export class GovernedForwarder implements McpForwarder {
     const anyHardDeny =
       failures.length > 0 || breaches.some((entry) => entry.budget.onExceed === 'deny')
 
+    // Breach events fire here, the moment the gate's outcome is a fact:
+    // every breach-carrying path below either denies the call or raises the
+    // composite ticket, and this function never runs for dry-run
+    // (handleDryRun peeks on its own). Invalid-amount failures never emit —
+    // an unreadable amount is an input error with no truthful
+    // attempted_amount, not a breach.
+    if (breaches.length > 0) engine.reportBreaches(breaches)
+
     if (anyHardDeny) {
       if (failures.length > 0) {
         // eslint-disable-next-line no-console -- Intentional operational warning

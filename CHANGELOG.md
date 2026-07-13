@@ -39,8 +39,7 @@ Maintainer notes:
   `/audit` only when the call executed. Budgets hot-reload by name identity:
   contributor edits preserve accrued spend; `limit`/`currency`/`window`
   changes reset it. Breach modes are `on_exceed: deny` and
-  `on_exceed: require_approval` (break-glass, below); the dashboard Budgets
-  view lands next in this release train.
+  `on_exceed: require_approval` (break-glass, below).
 - **Break-glass approvals for budget overages (#14).** A budget with
   `on_exceed: require_approval` turns a breach into a human decision instead
   of a denial. One call raises one composite ticket listing every breached
@@ -89,6 +88,26 @@ Maintainer notes:
   store's existing sweep, and a budget window longer than the retention
   draws a startup warning. Rule-level rate/spend limit buckets remain
   in-memory and still reset on restart.
+- **Budgets dashboard view and API (#14).** The dashboard gains a Budgets
+  tab showing every configured pot with per-bucket depletion bars, reset
+  countdowns for duration windows, and an expandable per-budget spend
+  ledger where approved overages carry a distinct badge. Two new sideband
+  endpoints back it: `GET /api/budgets` (every configured budget with live
+  bucket states — configured pots appear at full headroom even before any
+  spend) and `GET /api/budgets/:name/events` (the budget's ledger rows,
+  newest first, paginated and clamped like the other list endpoints;
+  history spans config resets and follows `audit.retention`). The SSE
+  stream gains two events: `budget_update` fires per budget on every
+  committed charge with post-record numbers and the commit `kind` (an
+  approved overage is visible live; the sole exception is a charge
+  committing under a stale config generation after a pot-resetting
+  reload, which is ledgered without an event), and `budget_breached`
+  fires once per genuinely breached budget when a peek denies a call or
+  raises the break-glass ticket — dry-run simulations stay silent, and
+  an invalid-amount failure emits no event of its own, though genuine
+  breaches denied alongside one still do. There is no separate budget
+  warning event; `budget_update.utilization` drives dashboard
+  thresholds.
 
 ### Fixed
 

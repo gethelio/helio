@@ -162,12 +162,13 @@ Navigate to [http://localhost:3100](http://localhost:3100) to open the governanc
 
 ![Dashboard Feed](./images/dashboard-feed.png)
 
-The dashboard has five tabs:
+The dashboard has six tabs:
 
 - **Feed** — Real-time stream of tool calls and policy decisions
 - **Approvals** — Pending approval queue (for `require_approval` rules)
 - **Audit** — Searchable log of every recorded action with filters
 - **Limits** — Current rate and spend limit status per tool
+- **Budgets** — Named cross-tool spend pots with live depletion and the spend ledger
 - **Analytics** — Charts showing action volume, decision breakdown, and top tools
 
 ## Step 6: Send a Test Tool Call

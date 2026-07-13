@@ -1,7 +1,7 @@
 export { compileBudgets, BudgetParseError } from './parser.js'
 export { BudgetEngine } from './engine.js'
 export { BudgetLedger } from './ledger.js'
-export type { BudgetLedgerOptions } from './ledger.js'
+export type { BudgetLedgerOptions, BudgetEventRecord, BudgetEventsPage } from './ledger.js'
 export type {
   BudgetChargeContext,
   BudgetCharge,
@@ -15,6 +15,7 @@ export type {
   BudgetReplayEvent,
   BudgetReplayBucket,
   BudgetCommitEvent,
+  BudgetBreachEvent,
   BudgetBucketState,
   BudgetState,
   BudgetEngineOptions,

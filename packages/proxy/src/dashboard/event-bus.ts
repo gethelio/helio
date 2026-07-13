@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { AuditRecord } from '../audit/types.js'
+import type { BudgetBreachEvent, BudgetCommitEvent } from '../budget/engine.js'
 
 // ---------------------------------------------------------------------------
 // DashboardEventBus — typed event emitter for real-time dashboard updates.
@@ -65,6 +66,21 @@ export interface ApprovalNotificationFailedEvent {
   readonly error: string
 }
 
+/**
+ * Payload for a budget_update event: one committed charge with post-record
+ * numbers (issue #14). The engine's commit-event DTO is already snake_case
+ * wire shape, so it is emitted verbatim. `utilization` drives dashboard
+ * thresholds — there is no separate budget warning event.
+ */
+export type BudgetUpdateEvent = BudgetCommitEvent
+
+/**
+ * Payload for a budget_breached event: a peek denied the call or raised the
+ * composite break-glass ticket (issue #14). Emitted verbatim from the
+ * engine's breach-event DTO.
+ */
+export type BudgetBreachedEvent = BudgetBreachEvent
+
 /** Map of event type names to their payload types. */
 export interface DashboardEvents {
   action: ActionEvent
@@ -72,6 +88,8 @@ export interface DashboardEvents {
   approval_resolved: ApprovalResolvedEvent
   limit_warning: LimitWarningEvent
   approval_notification_failed: ApprovalNotificationFailedEvent
+  budget_update: BudgetUpdateEvent
+  budget_breached: BudgetBreachedEvent
 }
 
 /** Union of all dashboard event type names. */
@@ -84,6 +102,8 @@ const EVENT_TYPES: readonly DashboardEventType[] = [
   'approval_resolved',
   'limit_warning',
   'approval_notification_failed',
+  'budget_update',
+  'budget_breached',
 ]
 
 /**

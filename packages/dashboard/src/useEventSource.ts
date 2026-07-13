@@ -63,6 +63,8 @@ export function useEventSource(
       'approval_resolved',
       'approval_notification_failed',
       'limit_warning',
+      'budget_update',
+      'budget_breached',
     ]
 
     for (const eventType of eventTypes) {

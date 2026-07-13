@@ -4757,6 +4757,273 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  // -------------------------------------------------------------------------
+  // budget breach/commit events (issue #14, PR 4)
+  // -------------------------------------------------------------------------
+
+  describe('budget breach events (issue #14)', () => {
+    function createEventedEngine(
+      configs: Parameters<typeof compileBudgets>[0],
+      callbacks: {
+        onBreach?: (event: unknown) => void
+        onCommit?: (event: unknown) => void
+      },
+    ) {
+      return new BudgetEngine({
+        budgets: compileBudgets(configs),
+        cleanupIntervalMs: 0,
+        ...callbacks,
+      })
+    }
+
+    function createApproval() {
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const channels = new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]])
+      const approvalRouter = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels,
+        queue,
+      })
+      return { queue, approvalRouter }
+    }
+
+    async function pendingTicket(queue: ApprovalQueue) {
+      await vi.waitFor(() => {
+        expect(queue.listPending().length).toBeGreaterThan(0)
+      })
+      return queue.listPending()[0] as NonNullable<ReturnType<ApprovalQueue['get']>>
+    }
+
+    const smallDeny = {
+      name: 'small',
+      limit: 10,
+      currency: 'USD',
+      window: '24h',
+      key: 'global' as const,
+      on_exceed: 'deny' as const,
+      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    }
+
+    it('a deny breach emits budget_breached for the breached budget only', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const engine = createEventedEngine([{ ...smallDeny, name: 'big', limit: 1000 }, smallDeny], {
+        onBreach,
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(onBreach).toHaveBeenCalledTimes(1)
+      expect(onBreach.mock.calls[0]?.[0]).toEqual({
+        name: 'small',
+        bucket_key: 'budget:small:global',
+        on_exceed: 'deny',
+        attempted_amount: 50,
+        spent: 0,
+        limit: 10,
+        currency: 'USD',
+      })
+    })
+
+    it('a break-glass breach emits budget_breached when the ticket is raised', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const engine = createEventedEngine([{ ...smallDeny, on_exceed: 'require_approval' }], {
+        onBreach,
+      })
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+
+      // The breach is a fact the moment the ticket is raised — the event must
+      // not wait for the human's decision.
+      expect(onBreach).toHaveBeenCalledTimes(1)
+      expect(onBreach.mock.calls[0]?.[0]).toMatchObject({
+        name: 'small',
+        on_exceed: 'require_approval',
+        attempted_amount: 20,
+      })
+
+      approvalRouter.deny(ticket.id, 'bob')
+      await pending
+      expect(onBreach).toHaveBeenCalledTimes(1)
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('an approved overage emits budget_update with kind approved_overage', async () => {
+      const inner = mockForwarder()
+      const onCommit = vi.fn()
+      const engine = createEventedEngine([{ ...smallDeny, on_exceed: 'require_approval' }], {
+        onCommit,
+      })
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+      const ticket = await pendingTicket(queue)
+      expect(onCommit).not.toHaveBeenCalled()
+
+      approvalRouter.approve(ticket.id, 'alice')
+      await pending
+
+      expect(onCommit).toHaveBeenCalledTimes(1)
+      expect(onCommit.mock.calls[0]?.[0]).toEqual({
+        name: 'small',
+        bucket_key: 'budget:small:global',
+        kind: 'approved_overage',
+        amount: 20,
+        spent: 20,
+        remaining: 0,
+        limit: 10,
+        currency: 'USD',
+        utilization: 2,
+      })
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('a mixed deny + break-glass breach emits both and raises no ticket', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const engine = createEventedEngine(
+        [smallDeny, { ...smallDeny, name: 'soft', on_exceed: 'require_approval' as const }],
+        { onBreach },
+      )
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      // The deny-breach wins outright; the require_approval breach still
+      // happened and both are facts worth an event.
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(queue.listPending()).toHaveLength(0)
+      expect(onBreach).toHaveBeenCalledTimes(2)
+      const names = onBreach.mock.calls.map((c) => (c[0] as { name: string }).name).sort()
+      expect(names).toEqual(['small', 'soft'])
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('a throwing onBreach subscriber never changes the gate outcome', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const inner = mockForwarder()
+      const engine = createEventedEngine([smallDeny], {
+        onBreach: () => {
+          throw new Error('dashboard bug')
+        },
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      // Still a clean budget denial — not an internal error, nothing forwarded.
+      expect(inner.forward).not.toHaveBeenCalled()
+      expect(errorFromResult(result).code).toBe(-32001)
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      consoleSpy.mockRestore()
+    })
+
+    it('dry-run emits nothing even when the peek would breach', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const onCommit = vi.fn()
+      const engine = createEventedEngine([smallDeny], { onBreach, onCommit })
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', dry_run: true, rules: [] }),
+        { budgetEngine: engine },
+      )
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      expect(onBreach).not.toHaveBeenCalled()
+      expect(onCommit).not.toHaveBeenCalled()
+    })
+
+    it('an invalid-amount denial emits no budget_breached', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const engine = createEventedEngine([smallDeny], { onBreach })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      const result = await governed.forward(toolsCallRequest('stripe_charge', { note: 'no amt' }))
+
+      // The call is denied (fail closed), but an unreadable amount is an
+      // input error, not a breach — there is no truthful attempted_amount.
+      expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
+      expect(onBreach).not.toHaveBeenCalled()
+    })
+
+    it('a genuine breach still emits when an invalid amount co-denies the call', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const engine = createEventedEngine(
+        [
+          smallDeny,
+          {
+            ...smallDeny,
+            name: 'unreadable',
+            contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+          },
+        ],
+        { onBreach },
+      )
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 50 }))
+
+      // The invalid-amount failure emits nothing for itself, but the
+      // simultaneously breached budget is a fact and fires.
+      expect(onBreach).toHaveBeenCalledTimes(1)
+      expect(onBreach.mock.calls[0]?.[0]).toMatchObject({ name: 'small', attempted_amount: 50 })
+    })
+
+    it('an allowed call emits budget_update only', async () => {
+      const inner = mockForwarder()
+      const onBreach = vi.fn()
+      const onCommit = vi.fn()
+      const engine = createEventedEngine([smallDeny], { onBreach, onCommit })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 4 }))
+
+      expect(onBreach).not.toHaveBeenCalled()
+      expect(onCommit).toHaveBeenCalledTimes(1)
+      expect(onCommit.mock.calls[0]?.[0]).toMatchObject({
+        name: 'small',
+        kind: 'spend',
+        amount: 4,
+        utilization: 0.4,
+      })
+    })
+  })
+
   describe('spend_limit action', () => {
     function createSpendLimiter() {
       let time = 1_000_000

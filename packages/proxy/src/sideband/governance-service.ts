@@ -509,6 +509,12 @@ export class GovernanceService {
     let budgetDenial: { breached: string[]; invalid: string[] } | undefined
     /** Set when require_approval breaches ride the call's native ticket. */
     let budgetBreachContexts: BudgetBreachContext[] | undefined
+    /**
+     * The raw breach entries behind budgetBreachContexts, held for the
+     * breach event: it fires only AFTER the native ticket exists (the
+     * byte-cap 503 below refuses the call without raising one).
+     */
+    let budgetBreachEntries: BudgetPeekEntry[] | undefined
     /** Break-glass timeout for BUDGET-ONLY tickets (first-breached-wins). */
     let budgetTicketTimeoutMs: number | undefined
     /** True when budgets alone flipped an allow into require_approval. */
@@ -553,6 +559,10 @@ export class GovernanceService {
               breached: breaches.map((entry) => entry.budget.name),
               invalid: failures.map((failure) => failure.budget.name),
             }
+            // The peek denied for real (never for dry-run, whose guard we
+            // are inside). Invalid-amount failures never emit — an
+            // unreadable amount is an input error, not a breach.
+            if (breaches.length > 0) this.budgetEngine.reportBreaches(breaches)
           }
         } else {
           if (breaches.length > 0) budgetDryRunOk = false
@@ -572,6 +582,7 @@ export class GovernanceService {
               })
             }
             if (breaches.length > 0) {
+              budgetBreachEntries = breaches
               budgetBreachContexts = breaches.map((entry) => ({
                 name: entry.budget.name,
                 limit: entry.budget.limit,
@@ -737,6 +748,10 @@ export class GovernanceService {
         timeout_ms: timeoutMs,
         resolve_path: `/approval/${ticket.id}/resolve`,
       }
+      // Breach events fire only now that the composite ticket exists —
+      // covers budget-only AND merged tickets, and stays silent for the
+      // byte-cap 503 refusal above (breach detected, no ticket raised).
+      if (budgetBreachEntries) this.budgetEngine?.reportBreaches(budgetBreachEntries)
     }
 
     const entry: PendingEvaluation = {

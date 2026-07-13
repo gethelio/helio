@@ -49,6 +49,7 @@ vi.mock('./pages/FeedPage', () => ({ FeedPage: () => <div>Mock Feed Page</div> }
 vi.mock('./pages/ApprovalsPage', () => ({ ApprovalsPage: () => <div>Mock Approvals Page</div> }))
 vi.mock('./pages/AuditPage', () => ({ AuditPage: () => <div>Mock Audit Page</div> }))
 vi.mock('./pages/LimitsPage', () => ({ LimitsPage: () => <div>Mock Limits Page</div> }))
+vi.mock('./pages/BudgetsPage', () => ({ BudgetsPage: () => <div>Mock Budgets Page</div> }))
 vi.mock('./pages/AnalyticsPage', () => ({ AnalyticsPage: () => <div>Mock Analytics Page</div> }))
 
 describe('App auth gate', () => {
@@ -92,6 +93,22 @@ describe('App auth gate', () => {
 
     expect(await screen.findByText('Mock Feed Page')).toBeTruthy()
     expect(mockSetCsrfToken).toHaveBeenCalledWith('csrf-token')
+  })
+
+  it('renders the budgets route for an authenticated session', async () => {
+    mockFetchAuthSession.mockResolvedValue({
+      auth_required: false,
+      authenticated: true,
+    })
+
+    window.history.pushState({}, '', '/budgets')
+    try {
+      render(<App />)
+      expect(await screen.findByText('Mock Budgets Page')).toBeTruthy()
+      expect(screen.getByText('Mock Layout')).toBeTruthy()
+    } finally {
+      window.history.pushState({}, '', '/')
+    }
   })
 
   it('locks the app when unauthorized handler fires', async () => {

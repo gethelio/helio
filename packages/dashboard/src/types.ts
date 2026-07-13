@@ -144,6 +144,55 @@ export interface LimitsResponse {
   readonly spend_limits: readonly SpendLimitKeyState[]
 }
 
+// -- Budgets (issue #14) -------------------------------------------------------
+
+export interface BudgetBucketState {
+  readonly bucket_key: string
+  readonly spent: number
+  readonly remaining: number
+  /** Epoch ms when the oldest entry ages out; null for session pots. */
+  readonly reset_at_ms: number | null
+  readonly last_activity_ms: number
+}
+
+export interface BudgetState {
+  readonly name: string
+  readonly limit: number
+  readonly currency: string
+  /** Raw config window string: a duration like "24h", or "session". */
+  readonly window: string
+  readonly key: 'global' | 'session' | 'sender_id'
+  readonly on_exceed: 'deny' | 'require_approval'
+  readonly buckets: readonly BudgetBucketState[]
+}
+
+export interface BudgetsResponse {
+  readonly budgets: readonly BudgetState[]
+}
+
+/** One ledger row from GET /api/budgets/:name/events. */
+export interface BudgetEventRecord {
+  readonly id: string
+  readonly budget_name: string
+  readonly bucket_key: string
+  readonly kind: 'spend' | 'approved_overage'
+  readonly amount: number
+  readonly currency: string
+  readonly tool_name: string
+  readonly origin: string
+  readonly audit_record_id: string | null
+  readonly timestamp: string
+  readonly timestamp_ms: number
+  readonly created_at: string
+}
+
+export interface BudgetEventsResponse {
+  readonly data: readonly BudgetEventRecord[]
+  readonly total: number
+  readonly limit: number
+  readonly offset: number
+}
+
 // -- Analytics ---------------------------------------------------------------
 
 export interface TimeBucket {
@@ -241,12 +290,36 @@ export interface LimitWarningEvent {
   readonly utilization: number
 }
 
+export interface BudgetUpdateEvent {
+  readonly name: string
+  readonly bucket_key: string
+  readonly kind: 'spend' | 'approved_overage'
+  readonly amount: number
+  readonly spent: number
+  readonly remaining: number
+  readonly limit: number
+  readonly currency: string
+  readonly utilization: number
+}
+
+export interface BudgetBreachedEvent {
+  readonly name: string
+  readonly bucket_key: string
+  readonly on_exceed: 'deny' | 'require_approval'
+  readonly attempted_amount: number
+  readonly spent: number
+  readonly limit: number
+  readonly currency: string
+}
+
 export type DashboardEventType =
   | 'action'
   | 'approval_requested'
   | 'approval_resolved'
   | 'approval_notification_failed'
   | 'limit_warning'
+  | 'budget_update'
+  | 'budget_breached'
 
 export interface DashboardEventMap {
   action: ActionEvent
@@ -254,4 +327,6 @@ export interface DashboardEventMap {
   approval_resolved: ApprovalResolvedEvent
   approval_notification_failed: ApprovalNotificationFailedEvent
   limit_warning: LimitWarningEvent
+  budget_update: BudgetUpdateEvent
+  budget_breached: BudgetBreachedEvent
 }

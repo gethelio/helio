@@ -36,7 +36,7 @@ Endpoints that return a filtered collection wrap the array in `data` and flatten
 
 For pagination and boolean query fields, the sideband uses tolerant parsing at the boundary: empty or non-numeric `limit` / `offset` values fall back to endpoint defaults, and invalid boolean filter strings are treated as unset rather than causing a 400.
 
-Endpoints in this category: `GET /api/feed`, `GET /api/audit`, `GET /api/approvals`.
+Endpoints in this category: `GET /api/feed`, `GET /api/audit`, `GET /api/approvals`, `GET /api/budgets/:name/events`.
 
 Clients that need a page number compute it as `Math.floor(offset / limit) + 1`.
 
@@ -44,9 +44,9 @@ Clients that need a page number compute it as `Math.floor(offset / limit) + 1`.
 
 Endpoints that return a computed view of in-memory state are not "resources" in the REST sense, and wrapping them in `{ data }` adds ceremony without signal. They return their computed view directly, with shapes specific to each endpoint.
 
-Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`.
+Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`, `GET /api/budgets`.
 
-Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/limits`, and `GET /api/adapters` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
+Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`, and `GET /api/budgets` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
 
 `GET /api/health` in particular is preserved in this form so that container orchestrators (Kubernetes, Docker Compose, Nomad) can point healthcheck probes at it without a custom JSON parser: probes only evaluate the HTTP status code, and the flat `status`, `version`, and `uptime` keys stay easy to read for the humans and scripts that hit the same URL.
 
@@ -294,6 +294,93 @@ Per-origin liveness of the adapters driving the [SDK sideband's governance API](
 - `last_seen` — the most recent `/evaluate`, `/install-scan`, or successfully finalized `/audit` from the origin. Entries are sorted most recently seen first.
 
 **Raw-shape endpoint:** this is an RPC-style view.
+
+---
+
+### Budgets
+
+Named cross-tool spend budgets (the `budgets:` config section). See the [Policy Guide](./policies.md) for budget semantics.
+
+#### GET /api/budgets
+
+Every configured budget with its live bucket states. Unlike `GET /api/limits`, which lists only live keys, configured budgets appear even with zero live buckets (`"buckets": []`) — the dashboard shows every pot at full headroom. Zero budgets configured returns `{ "budgets": [] }`.
+
+**Response (200):**
+
+```json
+{
+  "budgets": [
+    {
+      "name": "session-cap",
+      "limit": 50,
+      "currency": "USD",
+      "window": "session",
+      "key": "session",
+      "on_exceed": "require_approval",
+      "buckets": [
+        {
+          "bucket_key": "budget:session-cap:session:abc123",
+          "spent": 12.5,
+          "remaining": 37.5,
+          "reset_at_ms": null,
+          "last_activity_ms": 1783944000000
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `window` — the raw config string: a duration like `"24h"`, or `"session"`.
+- `buckets[].reset_at_ms` — epoch ms at which the bucket's oldest recorded charge ages out of the sliding window; `null` for session windows (the pot never replenishes; idle pots are collected instead).
+- `buckets[].remaining` — headroom before the next charge: `max(0, limit - spent)`. An approved overage can push `spent` past `limit`; `remaining` floors at 0.
+
+**Raw-shape endpoint:** this is an RPC-style view.
+
+#### GET /api/budgets/:name/events
+
+One budget's spend history — the durable ledger rows behind the pot, newest first. This is the "where did the money go" surface: rows survive restarts and config changes (history spans config resets; a `limit`/`currency`/`window`/`key` change resets the live pot but not the listing), and are bounded by the audit `retention` window.
+
+**Query parameters:**
+
+| Param    | Default | Notes                       |
+| -------- | ------- | --------------------------- |
+| `limit`  | 50      | Page size, clamped to 1000. |
+| `offset` | 0       | Pagination offset.          |
+
+An unknown budget name returns `200` with an empty page (budget names are configuration, not secrets, and 404 semantics would race hot-reloads).
+
+**Response (200):**
+
+```json
+{
+  "data": [
+    {
+      "id": "0d9e7c3a-9be2-4de1-a2fc-6f0f4bfae1a2",
+      "budget_name": "session-cap",
+      "bucket_key": "budget:session-cap:session:abc123",
+      "kind": "approved_overage",
+      "amount": 5,
+      "currency": "USD",
+      "tool_name": "stripe_charge",
+      "origin": "mcp",
+      "audit_record_id": "b53a2f8e-6a3d-4a56-8a3c-2f1f9df1c001",
+      "timestamp": "2026-07-13T12:00:00.000Z",
+      "timestamp_ms": 1783944000000,
+      "created_at": "2026-07-13T12:00:00.012Z"
+    }
+  ],
+  "total": 137,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+- `kind` — `spend`, or `approved_overage` for charges committed through a break-glass approval.
+- `audit_record_id` — the audit record of the call that produced the charge. The ledger is the source of truth for spend; the audit trail for calls — the referenced audit row may lag briefly (async audit writer) or be missing after a crash.
+- `origin` — `mcp`, or the adapter origin for sideband-committed charges.
+
+A CSV export of the ledger is not available yet; use the JSON listing.
 
 ---
 
@@ -605,18 +692,20 @@ Server-Sent Events stream of dashboard events. The stream stays open indefinitel
 
 **Event types:**
 
-| Event                          | Payload fields                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `heartbeat`                    | empty `data`. Sent on connect and every `dashboard.sse_heartbeat_interval`.                                                                                                                                                                                                                                                                                                                                   |
-| `action`                       | `id`, `tool_name`, `policy_decision`, `block_reason`, `approval_status`, `session_id`, `agent_id`, `environment`, `timestamp`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `matched_rule`, `matched_rule_index`, `origin` (enforcement origin: `mcp` or adapter slug), `record_kind` (`tool_call` / `drift_event` / `install_scan` / `evaluation_expired`) |
-| `approval_requested`           | `ticket_id`, `tool_name`, `channel`, `requested_at`                                                                                                                                                                                                                                                                                                                                                           |
-| `approval_resolved`            | `ticket_id`, `status`, `resolved_by` (optional), `resolved_at`                                                                                                                                                                                                                                                                                                                                                |
-| `approval_notification_failed` | `ticket_id`, `channel`, `phase` (`initial`/`escalation`), `error`                                                                                                                                                                                                                                                                                                                                             |
-| `limit_warning`                | `key`, `type` (`rate`/`spend`), `current`, `limit`, `utilization`                                                                                                                                                                                                                                                                                                                                             |
+| Event                          | Payload fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `heartbeat`                    | empty `data`. Sent on connect and every `dashboard.sse_heartbeat_interval`.                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `action`                       | `id`, `tool_name`, `policy_decision`, `block_reason`, `approval_status`, `session_id`, `agent_id`, `environment`, `timestamp`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `matched_rule`, `matched_rule_index`, `origin` (enforcement origin: `mcp` or adapter slug), `record_kind` (`tool_call` / `drift_event` / `install_scan` / `evaluation_expired`)                                                                    |
+| `approval_requested`           | `ticket_id`, `tool_name`, `channel`, `requested_at`                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `approval_resolved`            | `ticket_id`, `status`, `resolved_by` (optional), `resolved_at`                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `approval_notification_failed` | `ticket_id`, `channel`, `phase` (`initial`/`escalation`), `error`                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `limit_warning`                | `key`, `type` (`rate`/`spend`), `current`, `limit`, `utilization`                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `budget_update`                | `name`, `bucket_key`, `kind` (`spend`/`approved_overage`), `amount`, `spent`, `remaining`, `limit`, `currency`, `utilization`. One event per budget per committed charge — `utilization` drives dashboard thresholds; there is no separate budget warning event. The one exception: a charge that commits under a stale config generation (an in-flight call outliving a pot-resetting reload) is ledgered but fires no event, since the pot it would describe no longer exists. |
+| `budget_breached`              | `name`, `bucket_key`, `on_exceed` (`deny`/`require_approval`), `attempted_amount`, `spent`, `limit`, `currency`. Fired once per genuinely breached budget when a peek denies a call or raises the break-glass ticket. Dry-run peeks never fire it, and an invalid-amount failure emits nothing for itself — though when such a denial also carries genuine breaches on other budgets, those still fire.                                                                          |
 
 For `approval_resolved`, `status` is one of `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, `shutdown_cancelled`, or — for adapter-owned tickets — `cancelled`.
 
-Every non-heartbeat event carries a unique `id:` line for client-side de-duplication and debugging. The SSE stream is **live-only** (no replay endpoint): reconnecting clients should backfill from REST endpoints (`/api/feed`, `/api/approvals`, `/api/limits`) before resuming live consumption.
+Every non-heartbeat event carries a unique `id:` line for client-side de-duplication and debugging. The SSE stream is **live-only** (no replay endpoint): reconnecting clients should backfill from REST endpoints (`/api/feed`, `/api/approvals`, `/api/limits`, `/api/budgets`) before resuming live consumption.
 
 **Non-JSON endpoint** — SSE stream, not a single response.
 

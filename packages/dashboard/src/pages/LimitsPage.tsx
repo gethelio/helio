@@ -3,7 +3,7 @@ import type { LimitsResponse, RateLimitKeyState, SpendLimitKeyState } from '../t
 import { MS_PER_MINUTE, MS_PER_HOUR, MS_PER_DAY } from '../constants'
 import { fetchLimits } from '../api'
 import { useEventSourceContext } from '../EventSourceContext'
-import { usageColor, usagePercent, formatCountdown } from '../utils'
+import { usageColor, usagePercent, formatCountdown, formatCurrency } from '../utils'
 import { PageError } from '../components/PageError'
 
 // ---------------------------------------------------------------------------
@@ -29,19 +29,6 @@ function formatWindow(ms: number): string {
   }
   const m = Math.round(ms / MS_PER_MINUTE)
   return `${String(m)}m`
-}
-
-function formatCurrency(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(amount)
-  } catch {
-    return `${currency} ${amount.toFixed(2)}`
-  }
 }
 
 function parseKeyLabel(key: string): { type: string; name: string } {

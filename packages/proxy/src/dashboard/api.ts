@@ -23,6 +23,8 @@ import { formatZodErrors } from '../util/format-zod-errors.js'
 import type { DashboardEventBus } from './event-bus.js'
 import { DashboardSessionStore } from './session.js'
 import type { AdapterLivenessEntry } from '../sideband/governance-service.js'
+import type { BudgetState } from '../budget/engine.js'
+import type { BudgetEventsPage } from '../budget/ledger.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,6 +45,17 @@ export interface DashboardAppDeps {
    * sideband is disabled; the endpoint then serves an empty list.
    */
   readonly adapterLiveness?: { listAdapters(): AdapterLivenessEntry[] }
+  /**
+   * Budget read surface for `GET /api/budgets` and
+   * `GET /api/budgets/:name/events` (issue #14) — narrow views of the
+   * BudgetEngine (live pot states) and BudgetLedger (spend history).
+   * Optional on the adapterLiveness pattern: absent (direct embedders),
+   * both endpoints serve empty lists with 200.
+   */
+  readonly budgets?: {
+    listStates(): BudgetState[]
+    listEvents(name: string, page: { limit: number; offset: number }): BudgetEventsPage
+  }
 }
 
 /** Options for the dashboard API. */
@@ -132,6 +145,11 @@ const auditQuerySchema = z.object({
   record_kind: optionalQueryString,
   channel_id: optionalQueryString,
   sender_id: optionalQueryString,
+})
+
+const budgetEventsQuerySchema = z.object({
+  limit: clampedQueryInt(50, 1, LIST_MAX_PAGE_SIZE),
+  offset: clampedQueryInt(0, 0, Number.MAX_SAFE_INTEGER),
 })
 
 const analyticsQuerySchema = z.object({
@@ -242,6 +260,7 @@ export function createDashboardAppWithLifecycle(
     evidenceStore,
     eventBus,
     adapterLiveness,
+    budgets,
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
@@ -556,6 +575,33 @@ export function createDashboardAppWithLifecycle(
   // (not 404/503) without the SDK sideband, so dashboards need no probe.
   app.get('/api/adapters', (c) => {
     return c.json({ adapters: adapterLiveness?.listAdapters() ?? [] })
+  })
+
+  // -------------------------------------------------------------------------
+  // Budgets (issue #14) — named cross-tool spend pots
+  // -------------------------------------------------------------------------
+
+  // Raw envelope like /api/limits, but configured budgets appear even with
+  // zero live buckets — the dashboard shows every pot at full headroom.
+  app.get('/api/budgets', (c) => {
+    return c.json({ budgets: budgets?.listStates() ?? [] })
+  })
+
+  // One budget's spend history (ledger rows), newest first. An unknown name
+  // lists nothing with 200: names are config, not secrets, and 404 semantics
+  // would race hot-reloads.
+  app.get('/api/budgets/:name/events', (c) => {
+    const query = budgetEventsQuerySchema.parse(c.req.query())
+    const page = budgets?.listEvents(c.req.param('name'), {
+      limit: query.limit,
+      offset: query.offset,
+    }) ?? { events: [], total: 0 }
+    return c.json({
+      data: page.events,
+      total: page.total,
+      limit: query.limit,
+      offset: query.offset,
+    })
   })
 
   // -------------------------------------------------------------------------

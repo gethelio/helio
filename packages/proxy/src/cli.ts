@@ -437,7 +437,16 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // introduce budgets without a restart; the gate short-circuits when empty.
   // Hydration replays persisted spend BEFORE any server starts listening, so
   // the first governed call already sees the rebuilt pots.
-  const budgetEngine = new BudgetEngine({ budgets, ledger: budgetLedger })
+  const budgetEngine = new BudgetEngine({
+    budgets,
+    ledger: budgetLedger,
+    onCommit: (event) => {
+      eventBus.emit('budget_update', event)
+    },
+    onBreach: (event) => {
+      eventBus.emit('budget_breached', event)
+    },
+  })
   budgetEngine.hydrate()
 
   const governedForwarder = new GovernedForwarder(forwarder, policy, {
@@ -541,6 +550,12 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         // Adapter liveness for GET /api/adapters (issue #126); undefined
         // unless the SDK sideband is enabled → endpoint serves an empty list.
         adapterLiveness: governanceService,
+        // Budget read surface (issue #14): live pot states from the engine,
+        // spend history from the ledger.
+        budgets: {
+          listStates: () => budgetEngine.listStates(),
+          listEvents: (name, page) => budgetLedger.listEvents(name, page),
+        },
       },
       {
         apiSecret: config.dashboard.api_secret,

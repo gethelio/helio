@@ -15,6 +15,8 @@ import {
   fetchAuditRecord,
   fetchApprovals,
   fetchLimits,
+  fetchBudgets,
+  fetchBudgetEvents,
   fetchAnalytics,
   fetchEvidence,
   approveTicket,
@@ -259,6 +261,44 @@ describe('read endpoints', () => {
     mockFetch.mockReturnValue(okJson({ rate_limits: [], spend_limits: [] }))
     await fetchLimits()
     expect(mockFetch).toHaveBeenCalledWith('/api/limits', { credentials: 'same-origin' })
+  })
+
+  it('fetchBudgets calls /api/budgets', async () => {
+    mockFetch.mockReturnValue(okJson({ budgets: [] }))
+    await fetchBudgets()
+    expect(mockFetch).toHaveBeenCalledWith('/api/budgets', { credentials: 'same-origin' })
+  })
+
+  it('fetchBudgetEvents encodes the name and passes pagination', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 20, offset: 0 }))
+    await fetchBudgetEvents('team/cap', { limit: 20, offset: 5 })
+    const url = calledUrl()
+    expect(url).toContain('/api/budgets/team%2Fcap/events')
+    expect(url).toContain('limit=20')
+    expect(url).toContain('offset=5')
+  })
+
+  it('fetchBudgetEvents omits pagination when not given', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
+    await fetchBudgetEvents('cap')
+    expect(calledUrl()).toBe('/api/budgets/cap/events')
+  })
+
+  it('fetchBudgets and fetchBudgetEvents forward an abort signal', async () => {
+    mockFetch.mockReturnValue(okJson({ budgets: [] }))
+    const controller = new AbortController()
+    await fetchBudgets({ signal: controller.signal })
+    expect(mockFetch).toHaveBeenCalledWith('/api/budgets', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
+    await fetchBudgetEvents('cap', undefined, { signal: controller.signal })
+    expect(mockFetch).toHaveBeenLastCalledWith('/api/budgets/cap/events', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
   })
 
   it('fetchAnalytics passes from and to', async () => {
