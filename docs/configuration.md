@@ -53,6 +53,16 @@ policies:
         message: 'Destructive operations are blocked.'
         suggestion: 'Use a non-destructive alternative.'
 
+budgets:
+  - name: daily-cap # Named cross-tool spend budget (see below)
+    limit: 50
+    currency: USD
+    window: 24h # Sliding duration, or "session"
+    on_exceed: deny # deny | require_approval (break-glass)
+    contributors:
+      - tool: 'stripe_*' # Tool glob feeding this budget
+        field: '$.amount' # Argument field carrying the amount
+
 approval:
   timeout: '300s' # Max wait for approval decision
   default_on_timeout: deny # What to do on timeout: deny | allow
@@ -377,7 +387,7 @@ Several fields accept duration strings in the format `<number><unit>`:
 | `h`  | Hours   | `1h` = 1 hour      |
 | `d`  | Days    | `90d` = 90 days    |
 
-Duration strings are used for `approval.timeout`, `audit.retention`, `dashboard.sse_heartbeat_interval`, `upstream.connect_timeout`, `upstream.request_timeout`, rate limit `window`, spend limit `window`, `sdk.evaluation_ttl`, and `escalation_after`.
+Duration strings are used for `approval.timeout`, `audit.retention`, `dashboard.sse_heartbeat_interval`, `upstream.connect_timeout`, `upstream.request_timeout`, rate limit `window`, spend limit `window`, budget `window` and `idle_ttl`, `sdk.evaluation_ttl`, and `escalation_after`.
 
 ## Environment Variable Interpolation
 
@@ -408,7 +418,7 @@ Validate your configuration without starting the proxy:
 helio validate
 ```
 
-The `validate` command runs the full pipeline: YAML parsing, environment variable interpolation, schema validation, and policy rule compilation (catches invalid glob patterns and regex syntax).
+The `validate` command runs the full pipeline: YAML parsing, environment variable interpolation, schema validation, and policy rule and budget compilation (catches invalid glob patterns and regex syntax).
 
 When the dashboard is enabled, validation also confirms that bundled dashboard assets are present.
 

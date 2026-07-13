@@ -29,15 +29,16 @@ Maintainer notes:
   Windows are sliding durations or `session` (a pot that never replenishes on
   a timer; idle pots are collected after `idle_ttl`, default 24h). The gate is
   all-or-nothing on both doors: every matching budget is peeked before the
-  call proceeds, one breach denies it, and a denied call records nothing on
-  any budget — nor on rule-level rate/spend counters, which now also commit
-  only when the call actually forwards. Denials return structured feedback
+  call proceeds, and one breach gates the call — denying it, or holding it
+  for a break-glass approval, per that budget's `on_exceed`. A blocked call
+  records nothing on any budget — nor on rule-level rate/spend counters,
+  which now also commit only when the call actually forwards. Denials return structured feedback
   with `reason: budget_exceeded` and a per-budget breakdown; the sideband
   `/evaluate` gains the `budget_exceeded` decision (terminal, fail-closed for
   adapters that treat unknown decisions as deny — now a normative adapter
   requirement) and a `limits.budgets` block, with charges committed at
   `/audit` only when the call executed. Budgets hot-reload by name identity:
-  contributor edits preserve accrued spend; `limit`/`currency`/`window`
+  contributor edits preserve accrued spend; `limit`/`currency`/`window`/`key`
   changes reset it. Breach modes are `on_exceed: deny` and
   `on_exceed: require_approval` (break-glass, below).
 - **Break-glass approvals for budget overages (#14).** A budget with
@@ -51,7 +52,8 @@ Maintainer notes:
   the MCP door; sideband tickets are adapter-native and inherit only the
   selected timeout. On approval the overage records as
   `kind: approved_overage` on the ledger and in the audit record's
-  `evidence_chain.budgets`, and only then does the call proceed; a denial,
+  `evidence_chain.budgets` — committed before the call forwards on the MCP
+  door, and at `/audit` after the host executed it on the sideband; a denial,
   timeout, or disconnect records nothing (on the sideband, when the adapter
   honors it). Budget tickets always fail closed
   on timeout — `approval.default_on_timeout: allow` does not apply to money
@@ -108,6 +110,18 @@ Maintainer notes:
   breaches denied alongside one still do. There is no separate budget
   warning event; `budget_update.utilization` drives dashboard
   thresholds.
+- **Budgets guide, runnable example, and demo (#14).** The docs gain a full
+  budget guide: semantics, atomicity, and the per-door enforcement claim in
+  the policy guide; the complete `budgets:` reference with hot-reload
+  identity rules in the configuration reference; a consolidated budget
+  section with the wire shapes in the adapter API doc; and the ledger
+  narrative in the audit doc. A new `examples/budgets/` walks the whole
+  flow against local demo tools — one session pot across `stripe_*` and
+  `paypal_*`, live depletion in the dashboard, a break-glass approval, the
+  approved overage in the ledger, and a restart that replays the spend.
+  The Docker quickstart's echo server gains the same payment tools and its
+  config a `demo-payments` budget, so the containerized demo covers the
+  breach-and-approve flow too.
 
 ### Fixed
 

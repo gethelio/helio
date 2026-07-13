@@ -101,7 +101,7 @@ pnpm start
 
 This starts:
 
-1. A local MCP echo server on port 8080 (5 demo tools)
+1. A local MCP echo server on port 8080 (7 demo tools)
 2. The Helio proxy on port 3000
 3. The dashboard on port 3100
 
@@ -170,3 +170,4 @@ If nobody responds within `timeout: 300s` (5 minutes), the `default_on_timeout: 
 
 - [Basic](../basic/) — Start with a simpler configuration
 - [Spend Limits](../spend-limits/) — Cap monetary spend across payment tools
+- [Budgets](../budgets/) — Break-glass budget approvals through the same Slack channel

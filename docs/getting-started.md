@@ -17,7 +17,7 @@ curl -O https://raw.githubusercontent.com/gethelio/helio/main/examples/_shared/m
 node mcp-echo-server.mjs
 ```
 
-It prints `MCP echo server listening on http://127.0.0.1:8080/mcp` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
+It prints `MCP echo server listening on http://127.0.0.1:8080/mcp` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`, `stripe_charge`, `paypal_payout`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
 
 ## Step 1: Install
 
@@ -262,4 +262,4 @@ The quickstart above is safe by default on a single-operator workstation. Before
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard
 - [Audit Trail](./audit.md) — What's recorded, how to search, and how to export
-- [Examples](../examples/) — Three runnable configurations: basic, slack-approvals, spend-limits
+- [Examples](../examples/) — Four runnable configurations: basic, slack-approvals, spend-limits, budgets

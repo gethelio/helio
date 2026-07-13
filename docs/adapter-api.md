@@ -77,11 +77,36 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
 
 The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limit` rule that still has headroom returns `"allow"` with a `limits.rate` block; only when the bucket is exhausted does it return `"rate_limited"`. There is no `modify` decision — argument rewriting has no engine support today.
 
-**Named budgets (issue #14).** When the call's tool matches a configured budget's contributors, the response carries a `limits.budgets` array — one block per matching budget with `name`, `limit`, `spent`, `remaining`, `attempted_amount`, `currency`, `window`, `on_exceed`, `allowed`, and `reset_at_ms` (epoch ms; `null` for `session` windows, which never replenish). A breach of an `on_exceed: deny` budget returns `decision: "budget_exceeded"` — **terminal at `/evaluate`**, like the other blocking decisions: the audit record is written immediately and nothing is recorded on any budget. A budget whose contributor cannot read a valid amount from the arguments fails closed the same way, with `reason: "invalid_amount"` inside its block, regardless of its `on_exceed`. A breach of an `on_exceed: require_approval` budget instead returns `decision: "require_approval"` with the standard `approval` block — the break-glass ticket; see [Approvals](#approvals) for how it merges with a rule-level approval. When budgets alone triggered the approval, `feedback` explains the breach so the host dialog can show why. On an allowed call the budget charges commit at `/audit`, only when the call actually executed; `actual_amount`, when supplied, overrides every budget charge (a call has one true realized cost) as well as the spend-rule amount.
-
 **Errors:** `400` validation / invalid JSON, `401` wrong-or-missing adapter token, `403` Origin header, `413` oversized `metadata`/`tool_input`/body, `400 reserved_metadata_key` (a reserved column key — currently `agent_id` — was passed inside `metadata`; use the top-level field), `400 origin_limit_exceeded` / `400 tool_baseline_limit` / `503 evaluation_backlog_full` / `503 limit_capacity_exhausted` (memory/cardinality budgets — see below), `503 governance_unavailable` (sideband running without the service). Unhandled server faults return `500 { "error": "Internal server error" }`; adapters must fail closed on any 5xx.
 
 `match.metadata.*` rules and `sender_id`-scoped limits read the `metadata` object you supply here (well-known keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`; the virtual `agent_id` comes from the top-level field). See the [Policy Guide](./policies.md#metadata).
+
+### Named budgets on this API
+
+When the call's tool matches a configured [budget](./policies.md#named-budgets-cross-tool)'s contributors, the response carries a `limits.budgets` array — one block per matching budget:
+
+```jsonc
+"limits": {
+  "budgets": [
+    {
+      "name": "demo-payments",
+      "limit": 50,
+      "spent": 40,
+      "remaining": 10,
+      "attempted_amount": 20,        // null when the amount could not be read
+      "currency": "USD",
+      "window": "1h",                // raw config string: "1h" | "session"
+      "on_exceed": "deny",
+      "allowed": false,
+      "reset_at_ms": 1783947600000   // epoch ms; null for session windows, which never replenish
+    }
+  ]
+}
+```
+
+(The MCP door's self-repair feedback spells the reset field as ISO-8601 `reset_at`; the sideband and `GET /api/budgets` use epoch `reset_at_ms`. Each door keeps its established reset-field idiom — a deliberate per-surface split, not drift.)
+
+A breach of an `on_exceed: deny` budget returns `decision: "budget_exceeded"` — **terminal at `/evaluate`**, like the other blocking decisions: the audit record is written immediately and nothing is recorded on any budget. A budget whose contributor cannot read a valid amount from the arguments fails closed the same way, with `reason: "invalid_amount"` inside its block, regardless of its `on_exceed`. A breach of an `on_exceed: require_approval` budget instead returns `decision: "require_approval"` with the standard `approval` block — the break-glass ticket; see [Approvals](#approvals) for how it merges with a rule-level approval. When budgets alone triggered the approval, `feedback` explains the breach so the host dialog can show why. On an allowed call the budget charges commit at `/audit`, only when the call actually executed; `actual_amount`, when supplied, overrides every budget charge (a call has one true realized cost) as well as the spend-rule amount. Budget enforcement on this tier is subject to [the TOCTOU caveat](#the-crash-ttl-and-toctou-caveats) below, like every other counter this API consumes at `/audit`.
 
 ## `POST /audit`
 

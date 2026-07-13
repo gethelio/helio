@@ -249,21 +249,21 @@ Every tool call recorded: timestamp, agent identity, tool name, inputs, policy d
 
 ## How Helio Compares
 
-|                                              | Helio                                  | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
-| -------------------------------------------- | -------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |
-| **What it governs**                          | Per-call actions with cross-call state | Which tools/MCPs are reachable | App-level authorization decisions | Agent permissions inside one platform | Agent behavior inside one framework |
-| **Architecture**                             | Out-of-process MCP proxy               | Out-of-process MCP gateway     | Sidecar / library                 | In-platform                           | In-framework                        |
-| **Open source**                              | ✅ Apache 2.0                          | ✅ Apache 2.0                  | ✅ Apache 2.0                     | ❌                                    | Varies                              |
-| **Time to value**                            | 5 minutes                              | Setup-dependent                | Hours                             | Built-in                              | Built-in                            |
-| **No agent code changes**                    | ✅                                     | ✅                             | ❌                                | ✅ (within platform)                  | ❌                                  |
-| **Governs agents you didn't build**          | ✅ Any MCP agent                       | ✅ Any MCP agent               | ✅ (any app)                      | ❌ One platform only                  | ❌ One framework only               |
-| **Evidence grounding**                       | ✅ Cumulative across calls             | ❌                             | ❌                                | ❌                                    | Limited                             |
-| **Self-repair feedback**                     | ✅ Structured retry hints              | ❌                             | ❌                                | ❌                                    | Limited                             |
-| **Stateful spend / rate limits**             | ✅ Per-tool, per-session¹              | Basic                          | ❌                                | ❌                                    | Limited                             |
-| **Approval workflows**                       | ✅ Slack, webhook, dashboard           | ✅                             | ❌                                | Limited                               | Limited                             |
-| **Audit trail (incl. downstream responses)** | ✅ Captures upstream MCP responses     | Decision logs                  | Decision logs                     | Platform telemetry                    | Framework logs                      |
+|                                              | Helio                                    | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
+| -------------------------------------------- | ---------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |
+| **What it governs**                          | Per-call actions with cross-call state   | Which tools/MCPs are reachable | App-level authorization decisions | Agent permissions inside one platform | Agent behavior inside one framework |
+| **Architecture**                             | Out-of-process MCP proxy                 | Out-of-process MCP gateway     | Sidecar / library                 | In-platform                           | In-framework                        |
+| **Open source**                              | ✅ Apache 2.0                            | ✅ Apache 2.0                  | ✅ Apache 2.0                     | ❌                                    | Varies                              |
+| **Time to value**                            | 5 minutes                                | Setup-dependent                | Hours                             | Built-in                              | Built-in                            |
+| **No agent code changes**                    | ✅                                       | ✅                             | ❌                                | ✅ (within platform)                  | ❌                                  |
+| **Governs agents you didn't build**          | ✅ Any MCP agent                         | ✅ Any MCP agent               | ✅ (any app)                      | ❌ One platform only                  | ❌ One framework only               |
+| **Evidence grounding**                       | ✅ Cumulative across calls               | ❌                             | ❌                                | ❌                                    | Limited                             |
+| **Self-repair feedback**                     | ✅ Structured retry hints                | ❌                             | ❌                                | ❌                                    | Limited                             |
+| **Stateful spend / rate limits**             | ✅ Cross-tool budgets + per-rule limits¹ | Basic                          | ❌                                | ❌                                    | Limited                             |
+| **Approval workflows**                       | ✅ Slack, webhook, dashboard             | ✅                             | ❌                                | Limited                               | Limited                             |
+| **Audit trail (incl. downstream responses)** | ✅ Captures upstream MCP responses       | Decision logs                  | Decision logs                     | Platform telemetry                    | Framework logs                      |
 
-\* Per-tool and per-session spend limits ship in v0.1. Cross-tool spend aggregation is planned for v0.2.
+¹ Per-rule rate and spend limits, plus named cross-tool budgets: persistent depleting pots with break-glass approvals for overages.
 
 ## Works With
 
@@ -293,6 +293,7 @@ Ready-made configurations for common patterns:
 - **[Basic](https://github.com/gethelio/helio/tree/main/examples/basic)**: Deny destructive operations, allow everything else
 - **[Slack Approvals](https://github.com/gethelio/helio/tree/main/examples/slack-approvals)**: Route destructive actions to Slack
 - **[Spend Limits](https://github.com/gethelio/helio/tree/main/examples/spend-limits)**: Govern payment tool usage
+- **[Budgets](https://github.com/gethelio/helio/tree/main/examples/budgets)**: One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
 
 ## Contributing
 
