@@ -15,6 +15,7 @@ import { FeedPage } from './pages/FeedPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { AuditPage } from './pages/AuditPage'
 import { LimitsPage } from './pages/LimitsPage'
+import { BudgetsPage } from './pages/BudgetsPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
 
 type AppViewState = 'booting' | 'locked' | 'authenticating' | 'ready'
@@ -171,6 +172,7 @@ export function App() {
               <Route path="approvals" element={<ApprovalsPage />} />
               <Route path="audit" element={<AuditPage />} />
               <Route path="limits" element={<LimitsPage />} />
+              <Route path="budgets" element={<BudgetsPage />} />
               <Route path="analytics" element={<AnalyticsPage />} />
             </Route>
           </Routes>

@@ -17,6 +17,7 @@
 import Database from 'better-sqlite3'
 import type { Database as DatabaseType, Statement } from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
+import { LIST_MAX_PAGE_SIZE } from '../audit/store.js'
 import type {
   BudgetLedgerRow,
   BudgetMetaRow,
@@ -142,6 +143,51 @@ GROUP BY e.bucket_key
 ORDER BY e.bucket_key ASC
 `
 
+// Newest first on timestamp_ms — the same event-time axis replay and
+// retention filter on — with rowid breaking same-millisecond ties by insert
+// order. No epoch filter: the listing is spend HISTORY ("where did the money
+// go"), and money that moved under a since-retired config tuple still moved;
+// retention bounds the depth.
+const LIST_EVENTS_SQL = `
+SELECT id, budget_name, bucket_key, kind, amount, currency, tool_name,
+       origin, audit_record_id, timestamp, timestamp_ms, created_at
+FROM budget_events
+WHERE budget_name = ?
+ORDER BY timestamp_ms DESC, rowid DESC
+LIMIT ? OFFSET ?
+`
+
+const COUNT_EVENTS_SQL = 'SELECT COUNT(*) AS total FROM budget_events WHERE budget_name = ?'
+
+/** Default page size for {@link BudgetLedger.listEvents}. */
+const LIST_EVENTS_DEFAULT_LIMIT = 50
+
+/**
+ * One `budget_events` row as listed by `GET /api/budgets/:name/events` —
+ * the table columns minus `epoch` (internal replay bookkeeping), snake_case
+ * verbatim. `budget_name` stays in the row so a page is self-describing.
+ */
+export interface BudgetEventRecord {
+  readonly id: string
+  readonly budget_name: string
+  readonly bucket_key: string
+  readonly kind: 'spend' | 'approved_overage'
+  readonly amount: number
+  readonly currency: string
+  readonly tool_name: string
+  readonly origin: string
+  readonly audit_record_id: string | null
+  readonly timestamp: string
+  readonly timestamp_ms: number
+  readonly created_at: string
+}
+
+/** One page of a budget's event history plus the unpaginated total. */
+export interface BudgetEventsPage {
+  readonly events: readonly BudgetEventRecord[]
+  readonly total: number
+}
+
 function describeColumn(column: ColumnInfo): string {
   return `"${column.type}${column.notnull ? ' NOT NULL' : ''}${column.pk ? ' PRIMARY KEY' : ''}"`
 }
@@ -168,6 +214,8 @@ export class BudgetLedger implements BudgetPersistence {
   private readonly maxEventEpochStmt: Statement
   private readonly replayDurationStmt: Statement
   private readonly replaySessionStmt: Statement
+  private readonly listEventsStmt: Statement
+  private readonly countEventsStmt: Statement
   private readonly commitTxn: (rows: readonly BudgetLedgerRow[]) => void
   private readonly writeMetaTxn: (metas: readonly BudgetMetaRow[]) => void
   private readonly purgeTxn: (cutoffMs: number) => { events: number; watermarks: number }
@@ -194,6 +242,8 @@ export class BudgetLedger implements BudgetPersistence {
     )
     this.replayDurationStmt = this.db.prepare(REPLAY_DURATION_SQL)
     this.replaySessionStmt = this.db.prepare(REPLAY_SESSION_SQL)
+    this.listEventsStmt = this.db.prepare(LIST_EVENTS_SQL)
+    this.countEventsStmt = this.db.prepare(COUNT_EVENTS_SQL)
 
     // One transaction for both DELETEs: a crash between them must not be
     // able to drop a watermark while its guarded rows survive.
@@ -342,6 +392,27 @@ export class BudgetLedger implements BudgetPersistence {
       bucket_key: bucketKey,
       gc_after_ms: gcAfterMs,
     })
+  }
+
+  // -------------------------------------------------------------------------
+  // Dashboard read surface
+  // -------------------------------------------------------------------------
+
+  /**
+   * One page of a budget's spend history for the dashboard, newest first.
+   * `limit` defaults to 50 and clamps to `LIST_MAX_PAGE_SIZE`; `offset`
+   * floors at 0. An unknown budget name simply lists nothing (names are
+   * config, not secrets — no 404 semantics on hot-reload races).
+   */
+  listEvents(budgetName: string, page: { limit?: number; offset?: number }): BudgetEventsPage {
+    const limit = Math.min(
+      Math.max(Math.trunc(page.limit ?? LIST_EVENTS_DEFAULT_LIMIT), 1),
+      LIST_MAX_PAGE_SIZE,
+    )
+    const offset = Math.max(Math.trunc(page.offset ?? 0), 0)
+    const events = this.listEventsStmt.all(budgetName, limit, offset) as BudgetEventRecord[]
+    const { total } = this.countEventsStmt.get(budgetName) as { total: number }
+    return { events, total }
   }
 
   // -------------------------------------------------------------------------

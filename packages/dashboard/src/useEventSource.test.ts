@@ -140,6 +140,30 @@ describe('useEventSource', () => {
     expect(listener).toHaveBeenCalledWith({ tool_name: 'test' })
   })
 
+  it('dispatches budget_update and budget_breached events (#14)', () => {
+    const { result } = renderHook(() => useEventSource('/test'))
+    const updates: unknown[] = []
+    const breaches: unknown[] = []
+    act(() => {
+      result.current.subscribe('budget_update', (e) => updates.push(e))
+      result.current.subscribe('budget_breached', (e) => breaches.push(e))
+    })
+
+    act(() => {
+      latestInstance()._simulateEvent(
+        'budget_update',
+        JSON.stringify({ name: 'daily-cap', kind: 'approved_overage', utilization: 1.2 }),
+      )
+      latestInstance()._simulateEvent(
+        'budget_breached',
+        JSON.stringify({ name: 'daily-cap', on_exceed: 'deny', attempted_amount: 50 }),
+      )
+    })
+
+    expect(updates).toEqual([{ name: 'daily-cap', kind: 'approved_overage', utilization: 1.2 }])
+    expect(breaches).toEqual([{ name: 'daily-cap', on_exceed: 'deny', attempted_amount: 50 }])
+  })
+
   it('unsubscribe removes listener', () => {
     const { result } = renderHook(() => useEventSource('/test'))
     const listener = vi.fn()

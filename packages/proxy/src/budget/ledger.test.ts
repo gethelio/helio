@@ -410,6 +410,107 @@ describe('BudgetLedger.readAllMeta', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Dashboard events listing (PR 4)
+// ---------------------------------------------------------------------------
+
+describe('BudgetLedger.listEvents', () => {
+  it('lists a budget name newest first, same-ms ties by insert order', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([
+      ledgerRow({ timestamp_ms: 1_000, tool_name: 'oldest' }),
+      ledgerRow({ timestamp_ms: 3_000, tool_name: 'tie-first' }),
+      ledgerRow({ timestamp_ms: 3_000, tool_name: 'tie-second' }),
+      ledgerRow({ timestamp_ms: 2_000, tool_name: 'middle' }),
+    ])
+
+    const { events, total } = ledger.listEvents('daily-cap', {})
+    expect(total).toBe(4)
+    expect(events.map((e) => e.tool_name)).toEqual(['tie-second', 'tie-first', 'middle', 'oldest'])
+  })
+
+  it('returns exactly the wire columns — no epoch, no generation', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow({ generation: 7 })])
+
+    const { events } = ledger.listEvents('daily-cap', {})
+    expect(Object.keys(events[0] ?? {}).sort()).toEqual([
+      'amount',
+      'audit_record_id',
+      'bucket_key',
+      'budget_name',
+      'created_at',
+      'currency',
+      'id',
+      'kind',
+      'origin',
+      'timestamp',
+      'timestamp_ms',
+      'tool_name',
+    ])
+  })
+
+  it('lists history across epochs — a config reset does not hide old spend', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([
+      ledgerRow({ generation: 1, timestamp_ms: 1_000 }),
+      ledgerRow({ generation: 2, timestamp_ms: 2_000 }),
+    ])
+
+    const { events, total } = ledger.listEvents('daily-cap', {})
+    expect(total).toBe(2)
+    expect(events.map((e) => e.timestamp_ms)).toEqual([2_000, 1_000])
+  })
+
+  it('defaults the page size to 50', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(Array.from({ length: 60 }, (_, i) => ledgerRow({ timestamp_ms: 10_000 + i })))
+
+    const { events, total } = ledger.listEvents('daily-cap', {})
+    expect(total).toBe(60)
+    expect(events).toHaveLength(50)
+    expect(events[0]?.timestamp_ms).toBe(10_059)
+  })
+
+  it('clamps the page size to LIST_MAX_PAGE_SIZE', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(
+      Array.from({ length: 1_005 }, (_, i) => ledgerRow({ timestamp_ms: 10_000 + i })),
+    )
+
+    const { events, total } = ledger.listEvents('daily-cap', { limit: 5_000 })
+    expect(total).toBe(1_005)
+    expect(events).toHaveLength(1_000)
+  })
+
+  it('paginates with offset against the same newest-first order', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(Array.from({ length: 5 }, (_, i) => ledgerRow({ timestamp_ms: 1_000 + i })))
+
+    const page = ledger.listEvents('daily-cap', { limit: 2, offset: 2 })
+    expect(page.total).toBe(5)
+    expect(page.events.map((e) => e.timestamp_ms)).toEqual([1_002, 1_001])
+  })
+
+  it('floors nonsense paging values instead of throwing', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow()])
+
+    const page = ledger.listEvents('daily-cap', { limit: -3, offset: -10 })
+    expect(page.events).toHaveLength(1)
+    expect(page.total).toBe(1)
+  })
+
+  it('returns an empty page for an unknown budget name', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow()])
+
+    const page = ledger.listEvents('no-such-budget', {})
+    expect(page.events).toEqual([])
+    expect(page.total).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // GC watermarks
 // ---------------------------------------------------------------------------
 

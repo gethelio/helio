@@ -1,7 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import Database from 'better-sqlite3'
 import { BudgetEngine } from './engine.js'
-import type { BudgetCommitEvent, BudgetLedgerSink, BudgetPersistence } from './engine.js'
+import type {
+  BudgetBreachEvent,
+  BudgetCommitEvent,
+  BudgetLedgerSink,
+  BudgetPersistence,
+} from './engine.js'
 import { BudgetLedger } from './ledger.js'
 import { compileBudgets } from './parser.js'
 import type { BudgetConfig } from '../config/schema.js'
@@ -28,6 +33,7 @@ function createEngine(
   options: {
     ledger?: BudgetLedgerSink
     onCommit?: (event: BudgetCommitEvent) => void
+    onBreach?: (event: BudgetBreachEvent) => void
   } = {},
 ) {
   let time = 1_000_000
@@ -351,6 +357,64 @@ describe('BudgetEngine commit events', () => {
       currency: 'USD',
       utilization: 0.4,
     })
+  })
+})
+
+describe('BudgetEngine breach events (PR 4)', () => {
+  it('reportBreaches fires one onBreach per entry with the wire payload', () => {
+    const onBreach = vi.fn()
+    const { engine } = createEngine([budgetConfig({ on_exceed: 'require_approval' })], {
+      onBreach,
+    })
+    const seed = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 90 }))
+    engine.recordAll(seed.charges, COMMIT_META)
+
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }))
+    const peek = engine.peekAll(charges)
+    expect(peek.allowed).toBe(false)
+
+    engine.reportBreaches(peek.entries.filter((entry) => !entry.allowed))
+
+    expect(onBreach).toHaveBeenCalledTimes(1)
+    expect(onBreach.mock.calls[0]?.[0]).toEqual({
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      on_exceed: 'require_approval',
+      attempted_amount: 20,
+      spent: 90,
+      limit: 100,
+      currency: 'USD',
+    })
+  })
+
+  it('isolates a throwing onBreach subscriber and still reports later entries', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const seen: string[] = []
+    const onBreach = (event: BudgetBreachEvent) => {
+      seen.push(event.name)
+      if (event.name === 'a') throw new Error('subscriber bug')
+    }
+    const { engine } = createEngine(
+      [budgetConfig({ name: 'a', limit: 10 }), budgetConfig({ name: 'b', limit: 10 })],
+      { onBreach },
+    )
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 25 }))
+    const peek = engine.peekAll(charges)
+
+    expect(() => {
+      engine.reportBreaches(peek.entries)
+    }).not.toThrow()
+    expect(seen).toEqual(['a', 'b'])
+    consoleSpy.mockRestore()
+  })
+
+  it('reportBreaches is a no-op without an onBreach subscriber', () => {
+    const { engine } = createEngine([budgetConfig({ limit: 10 })])
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 25 }))
+    const peek = engine.peekAll(charges)
+    expect(() => {
+      engine.reportBreaches(peek.entries)
+    }).not.toThrow()
   })
 })
 

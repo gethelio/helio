@@ -16,6 +16,8 @@ import type {
   ApprovalsResponse,
   ApprovalStatus,
   LimitsResponse,
+  BudgetsResponse,
+  BudgetEventsResponse,
   AnalyticsResponse,
   EvidenceResponse,
 } from './types'
@@ -185,6 +187,27 @@ export function fetchApprovals(
 
 export function fetchLimits(): Promise<LimitsResponse> {
   return apiFetch('/api/limits', getInit())
+}
+
+export function fetchBudgets(options?: { signal?: AbortSignal }): Promise<BudgetsResponse> {
+  return apiFetch('/api/budgets', {
+    ...getInit(),
+    ...(options?.signal ? { signal: options.signal } : {}),
+  })
+}
+
+export function fetchBudgetEvents(
+  name: string,
+  pagination?: { limit?: number; offset?: number },
+  options?: { signal?: AbortSignal },
+): Promise<BudgetEventsResponse> {
+  return apiFetch(
+    '/api/budgets/' +
+      encodeURIComponent(name) +
+      '/events' +
+      qs({ limit: pagination?.limit, offset: pagination?.offset }),
+    { ...getInit(), ...(options?.signal ? { signal: options.signal } : {}) },
+  )
 }
 
 export function fetchAnalytics(from?: string, to?: string): Promise<AnalyticsResponse> {

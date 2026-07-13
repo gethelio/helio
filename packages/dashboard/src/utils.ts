@@ -100,3 +100,17 @@ export function formatCountdown(remainingMs: number): string {
   if (min > 0) return `${String(min)}m ${String(sec)}s`
   return `${String(sec)}s`
 }
+
+/** Format an amount in a currency, falling back to a plain prefix form. */
+export function formatCurrency(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount)
+  } catch {
+    return `${currency} ${amount.toFixed(2)}`
+  }
+}

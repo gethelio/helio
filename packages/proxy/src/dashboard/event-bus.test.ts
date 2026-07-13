@@ -126,13 +126,69 @@ describe('DashboardEventBus', () => {
       phase: 'initial',
       error: 'connection refused',
     })
+    bus.emit('budget_update', {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      kind: 'spend',
+      amount: 5,
+      spent: 45,
+      remaining: 55,
+      limit: 100,
+      currency: 'USD',
+      utilization: 0.45,
+    })
+    bus.emit('budget_breached', {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      on_exceed: 'deny',
+      attempted_amount: 80,
+      spent: 45,
+      limit: 100,
+      currency: 'USD',
+    })
 
-    expect(received).toHaveLength(5)
+    expect(received).toHaveLength(7)
     expect(received[0]).toMatchObject({ event: 'action' })
     expect(received[1]).toMatchObject({ event: 'approval_requested' })
     expect(received[2]).toMatchObject({ event: 'approval_resolved' })
     expect(received[3]).toMatchObject({ event: 'limit_warning' })
     expect(received[4]).toMatchObject({ event: 'approval_notification_failed' })
+    expect(received[5]).toMatchObject({ event: 'budget_update' })
+    expect(received[6]).toMatchObject({ event: 'budget_breached' })
+  })
+
+  it('budget events round-trip typed payloads (#14 PR 4)', () => {
+    bus = new DashboardEventBus()
+    const updates: unknown[] = []
+    const breaches: unknown[] = []
+    bus.on('budget_update', (e) => updates.push(e))
+    bus.on('budget_breached', (e) => breaches.push(e))
+
+    const update = {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      kind: 'approved_overage' as const,
+      amount: 30,
+      spent: 120,
+      remaining: 0,
+      limit: 100,
+      currency: 'USD',
+      utilization: 1.2,
+    }
+    const breach = {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      on_exceed: 'require_approval' as const,
+      attempted_amount: 30,
+      spent: 90,
+      limit: 100,
+      currency: 'USD',
+    }
+    bus.emit('budget_update', update)
+    bus.emit('budget_breached', breach)
+
+    expect(updates).toEqual([update])
+    expect(breaches).toEqual([breach])
   })
 
   it('onAny() returns an unsubscribe function', () => {

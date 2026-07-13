@@ -224,6 +224,23 @@ export interface BudgetCommitEvent {
   readonly utilization: number
 }
 
+/**
+ * Payload for the per-budget breach callback (dashboard event bus). Fired
+ * via {@link BudgetEngine.reportBreaches} by the DOORS at the moment a peek
+ * actually denies a call or raises the composite break-glass ticket — never
+ * by `peekAll` itself, which is pure and also runs for dry-run.
+ */
+export interface BudgetBreachEvent {
+  readonly name: string
+  readonly bucket_key: string
+  /** The budget's configured posture, even when the outcome was a deny. */
+  readonly on_exceed: 'deny' | 'require_approval'
+  readonly attempted_amount: number
+  readonly spent: number
+  readonly limit: number
+  readonly currency: string
+}
+
 /** Wire-ready bucket state for `GET /api/budgets` (snake_case DTO). */
 export interface BudgetBucketState {
   readonly bucket_key: string
@@ -254,6 +271,8 @@ export interface BudgetEngineOptions {
   readonly ledger?: BudgetLedgerSink
   /** Fired once per committed charge with post-record numbers. */
   readonly onCommit?: (event: BudgetCommitEvent) => void
+  /** Fired once per breached budget when a door denies or raises a ticket. */
+  readonly onBreach?: (event: BudgetBreachEvent) => void
 }
 
 interface BudgetBucket {
@@ -277,6 +296,7 @@ export class BudgetEngine {
   /** The sink again, when it carries the full persistence contract. */
   private readonly persistence: BudgetPersistence | null
   private readonly onCommit: ((event: BudgetCommitEvent) => void) | undefined
+  private readonly onBreach: ((event: BudgetBreachEvent) => void) | undefined
   private timer: ReturnType<typeof setInterval> | null = null
   private closed = false
   private hydrated = false
@@ -286,6 +306,7 @@ export class BudgetEngine {
     this.ledger = options.ledger ?? NOOP_LEDGER
     this.persistence = isBudgetPersistence(this.ledger) ? this.ledger : null
     this.onCommit = options.onCommit
+    this.onBreach = options.onBreach
     for (const budget of options.budgets ?? []) {
       this.budgets.set(budget.name, budget)
       this.generations.set(budget.name, 1)
@@ -459,6 +480,33 @@ export class BudgetEngine {
       }
     }
     return snapshots
+  }
+
+  /**
+   * Fire one `onBreach` event per breached entry. Called by the doors at the
+   * moment a peek outcome actually denies the call or raises the composite
+   * break-glass ticket (never for dry-run peeks, never for invalid-amount
+   * failures — those are input errors, not breaches). Subscriber throws are
+   * isolated: a dashboard bug must never affect a gate outcome.
+   */
+  reportBreaches(entries: readonly BudgetPeekEntry[]): void {
+    if (!this.onBreach) return
+    for (const entry of entries) {
+      try {
+        this.onBreach({
+          name: entry.budget.name,
+          bucket_key: entry.bucketKey,
+          on_exceed: entry.budget.onExceed,
+          attempted_amount: entry.amount,
+          spent: entry.spent,
+          limit: entry.budget.limit,
+          currency: entry.budget.currency,
+        })
+      } catch (err) {
+        // eslint-disable-next-line no-console -- Subscriber bugs must not affect gate outcomes
+        console.error('[helio] budget onBreach subscriber threw:', err)
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

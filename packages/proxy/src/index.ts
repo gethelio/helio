@@ -27,6 +27,9 @@ export type {
   BudgetLedgerSink,
   BudgetLedgerRow,
   BudgetCommitEvent,
+  BudgetBreachEvent,
+  BudgetEventRecord,
+  BudgetEventsPage,
 } from './budget/index.js'
 export type {
   CompiledPolicy,

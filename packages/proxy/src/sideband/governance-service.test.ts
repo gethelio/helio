@@ -69,6 +69,8 @@ function makeService(opts?: {
   maxPendingBytes?: number
   budgets?: BudgetConfig[]
   budgetLedger?: BudgetLedgerSink
+  onBudgetBreach?: (event: unknown) => void
+  onBudgetCommit?: (event: unknown) => void
 }): ServiceHarness {
   let time = 1_000_000
   const now = () => time
@@ -102,6 +104,8 @@ function makeService(opts?: {
         now,
         cleanupIntervalMs: 0,
         ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
+        ...(opts.onBudgetBreach && { onBreach: opts.onBudgetBreach }),
+        ...(opts.onBudgetCommit && { onCommit: opts.onBudgetCommit }),
       })
     : undefined
 
@@ -2702,5 +2706,270 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     const audit = harness.service.audit(auditInput(body.evaluation_id), 'h')
     expect(audit.status).toBe(201)
     expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(50)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// budget breach/commit events (issue #14, PR 4)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — budget breach/commit events (issue #14)', () => {
+  const evBudget = (overrides: Partial<BudgetConfig> = {}): BudgetConfig => ({
+    name: 'cap',
+    limit: 10,
+    currency: 'USD',
+    window: '24h',
+    key: 'global',
+    on_exceed: 'deny',
+    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    ...overrides,
+  })
+  const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
+    evalInput({ tool: { name: 'stripe_charge' }, arguments: { amount }, ...extra })
+
+  it('a deny-breach at /evaluate emits budget_breached and no budget_update', () => {
+    const onBudgetBreach = vi.fn()
+    const onBudgetCommit = vi.fn()
+    const { service } = makeService({
+      budgets: [evBudget()],
+      onBudgetBreach,
+      onBudgetCommit,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.body['decision']).toBe('budget_exceeded')
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+    expect(onBudgetBreach.mock.calls[0]?.[0]).toEqual({
+      name: 'cap',
+      bucket_key: 'budget:cap:global',
+      on_exceed: 'deny',
+      attempted_amount: 50,
+      spent: 0,
+      limit: 10,
+      currency: 'USD',
+    })
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+  })
+
+  it('an invalid-amount denial emits no budget_breached', () => {
+    const onBudgetBreach = vi.fn()
+    const { service } = makeService({ budgets: [evBudget()], onBudgetBreach })
+
+    const res = service.evaluate(stripeEval('not-a-number'))
+
+    expect(res.body['decision']).toBe('budget_exceeded')
+    expect(onBudgetBreach).not.toHaveBeenCalled()
+  })
+
+  it('a genuine breach still emits when an invalid amount co-denies the call', () => {
+    const onBudgetBreach = vi.fn()
+    const { service } = makeService({
+      budgets: [
+        evBudget(),
+        evBudget({
+          name: 'unreadable',
+          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+        }),
+      ],
+      onBudgetBreach,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+
+    // The invalid-amount failure emits nothing for itself, but the
+    // simultaneously breached budget is a fact and fires.
+    expect(res.body['decision']).toBe('budget_exceeded')
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+    expect(onBudgetBreach.mock.calls[0]?.[0]).toMatchObject({ name: 'cap', attempted_amount: 50 })
+  })
+
+  it('a budget-only break-glass ticket emits budget_breached when raised', () => {
+    const onBudgetBreach = vi.fn()
+    const { service } = makeService({
+      withApprovals: true,
+      budgets: [evBudget({ on_exceed: 'require_approval' })],
+      onBudgetBreach,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.body['decision']).toBe('require_approval')
+    expect(res.body['approval']).toBeDefined()
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+    expect(onBudgetBreach.mock.calls[0]?.[0]).toMatchObject({
+      name: 'cap',
+      on_exceed: 'require_approval',
+      attempted_amount: 50,
+    })
+  })
+
+  it('a merged rule+budget ticket emits budget_breached', () => {
+    const onBudgetBreach = vi.fn()
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+    })
+    const { service } = makeService({
+      policy,
+      withApprovals: true,
+      budgets: [evBudget({ on_exceed: 'require_approval' })],
+      onBudgetBreach,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.body['decision']).toBe('require_approval')
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+  })
+
+  it('the byte-cap 503 after planning emits nothing — no ticket was raised', () => {
+    // Same tuning as the orphan-ticket test: the cap sits between each
+    // call's base size (passes the early admission check) and the
+    // long-sender call's base + plans + frozen budget snapshot — only the
+    // post-planning re-check refuses it. The breach was detected, but the
+    // call was refused for capacity: no deny, no ticket, so no event. The
+    // short-sender call goes through the SAME service and emits exactly one.
+    const onBudgetBreach = vi.fn()
+    const { service } = makeService({
+      withApprovals: true,
+      budgets: [evBudget({ on_exceed: 'require_approval', key: 'sender_id' })],
+      maxSenderKeys: 1,
+      maxPendingBytes: 450,
+      onBudgetBreach,
+    })
+
+    const refused = service.evaluate(
+      stripeEval(50, {
+        metadata: { sender_id: 'sender-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      }),
+    )
+    expect(refused.status).toBe(503)
+    expect(refused.body['error']).toBe('evaluation_backlog_full')
+    expect(onBudgetBreach).not.toHaveBeenCalled()
+
+    const admitted = service.evaluate(stripeEval(50, { metadata: { sender_id: 'B' } }))
+    expect(admitted.status).toBe(200)
+    expect(admitted.body['decision']).toBe('require_approval')
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+  })
+
+  it('sideband dry-run emits nothing even when the peek would breach', () => {
+    const onBudgetBreach = vi.fn()
+    const onBudgetCommit = vi.fn()
+    const policy = compile({ default: 'allow', dry_run: true, rules: [] })
+    const { service } = makeService({
+      policy,
+      budgets: [evBudget()],
+      onBudgetBreach,
+      onBudgetCommit,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+
+    expect(res.body['decision']).toBe('dry_run')
+    expect(onBudgetBreach).not.toHaveBeenCalled()
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+  })
+
+  it('a denied ticket and its not_executed /audit emit no second breach event', () => {
+    const onBudgetBreach = vi.fn()
+    const onBudgetCommit = vi.fn()
+    const { service } = makeService({
+      withApprovals: true,
+      budgets: [evBudget({ on_exceed: 'require_approval' })],
+      onBudgetBreach,
+      onBudgetCommit,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+    const approval = res.body['approval'] as { id: string }
+    const id = res.body['evaluation_id'] as string
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+
+    service.resolveApproval(approval.id, { resolution: 'denied', resolved_by: 'bob' })
+    const audit = service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    expect(audit.status).toBe(201)
+    // The breach event fired once at ticket time; the resolution and the
+    // compliant not_executed report add nothing, and nothing committed.
+    expect(onBudgetBreach).toHaveBeenCalledTimes(1)
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+  })
+
+  it('evaluation expiry emits no breach or commit events', () => {
+    const onBudgetBreach = vi.fn()
+    const onBudgetCommit = vi.fn()
+    const { service, advance } = makeService({
+      budgets: [evBudget({ limit: 100 })],
+      ttlMs: 1_000,
+      onBudgetBreach,
+      onBudgetCommit,
+    })
+
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    advance(1_001)
+    service.sweep()
+    expect(service.audit(auditInput(id), 'h').status).toBe(404)
+
+    expect(onBudgetBreach).not.toHaveBeenCalled()
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+  })
+
+  it('an allowed call emits budget_update at /audit commit time, not at /evaluate', () => {
+    const onBudgetCommit = vi.fn()
+    const { service } = makeService({
+      budgets: [evBudget({ limit: 100 })],
+      onBudgetCommit,
+    })
+
+    const res = service.evaluate(stripeEval(30))
+    expect(res.body['decision']).toBe('allow')
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+
+    service.audit(auditInput(res.body['evaluation_id'] as string), 'h')
+
+    expect(onBudgetCommit).toHaveBeenCalledTimes(1)
+    expect(onBudgetCommit.mock.calls[0]?.[0]).toEqual({
+      name: 'cap',
+      bucket_key: 'budget:cap:global',
+      kind: 'spend',
+      amount: 30,
+      spent: 30,
+      remaining: 70,
+      limit: 100,
+      currency: 'USD',
+      utilization: 0.3,
+    })
+  })
+
+  it('an approved overage emits budget_update with kind approved_overage', () => {
+    const onBudgetCommit = vi.fn()
+    const { service } = makeService({
+      withApprovals: true,
+      budgets: [evBudget({ on_exceed: 'require_approval' })],
+      onBudgetCommit,
+    })
+
+    const res = service.evaluate(stripeEval(50))
+    const approval = res.body['approval'] as { id: string }
+    const id = res.body['evaluation_id'] as string
+    service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    expect(onBudgetCommit).not.toHaveBeenCalled()
+
+    service.audit(auditInput(id), 'h')
+
+    expect(onBudgetCommit).toHaveBeenCalledTimes(1)
+    expect(onBudgetCommit.mock.calls[0]?.[0]).toEqual({
+      name: 'cap',
+      bucket_key: 'budget:cap:global',
+      kind: 'approved_overage',
+      amount: 50,
+      spent: 50,
+      remaining: 0,
+      limit: 10,
+      currency: 'USD',
+      utilization: 5,
+    })
   })
 })

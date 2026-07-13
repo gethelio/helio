@@ -14,6 +14,9 @@ import { QueueChannel } from '../approval/channels.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { EvidenceStore } from '../evidence/store.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { BudgetLedger } from '../budget/ledger.js'
+import { compileBudgets } from '../budget/parser.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +36,7 @@ function at<T>(arr: readonly T[], index: number): T {
 function setup(options?: {
   apiSecret?: string
   adapterLiveness?: DashboardAppDeps['adapterLiveness']
+  budgets?: DashboardAppDeps['budgets']
 }) {
   const auditStore = new AuditStore({
     path: ':memory:',
@@ -63,6 +67,7 @@ function setup(options?: {
       evidenceStore,
       eventBus,
       adapterLiveness: options?.adapterLiveness,
+      budgets: options?.budgets,
     },
     { apiSecret: options?.apiSecret },
   )
@@ -830,6 +835,225 @@ describe('GET /api/adapters', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Budgets (issue #14, PR 4)
+// ---------------------------------------------------------------------------
+
+/** A real engine + real ledger co-located in a fresh :memory: audit db. */
+function budgetFixture(configs: Parameters<typeof compileBudgets>[0]) {
+  const auditStore = new AuditStore({
+    path: ':memory:',
+    retention: '90d',
+    includeResponses: true,
+    cleanupIntervalMs: 0,
+  })
+  const ledger = new BudgetLedger({ database: auditStore.database })
+  const engine = new BudgetEngine({
+    budgets: compileBudgets(configs),
+    cleanupIntervalMs: 0,
+    ledger,
+  })
+  const budgets = {
+    listStates: () => engine.listStates(),
+    listEvents: (name: string, page: { limit: number; offset: number }) =>
+      ledger.listEvents(name, page),
+  }
+  cleanup.push(engine, auditStore)
+  return { engine, ledger, budgets }
+}
+
+const stripeBudgetConfig = {
+  name: 'daily-cap',
+  limit: 100,
+  currency: 'USD',
+  window: '24h',
+  key: 'global' as const,
+  on_exceed: 'deny' as const,
+  contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+}
+
+describe('GET /api/budgets', () => {
+  it('returns configured budgets in a raw envelope, with buckets when live', async () => {
+    const { engine, budgets } = budgetFixture([stripeBudgetConfig])
+    const { charges } = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 30 },
+      sessionId: null,
+      senderId: null,
+    })
+    engine.recordAll(charges, {
+      kind: 'spend',
+      auditRecordId: 'audit-1',
+      origin: 'mcp',
+      toolName: 'stripe_charge',
+      timestampIso: new Date().toISOString(),
+    })
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { budgets: Array<Record<string, unknown>> }
+    expect(body.budgets).toHaveLength(1)
+    expect(body.budgets[0]).toMatchObject({
+      name: 'daily-cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global',
+      on_exceed: 'deny',
+    })
+    const buckets = body.budgets[0]?.['buckets'] as Array<Record<string, unknown>>
+    expect(buckets).toHaveLength(1)
+    expect(buckets[0]).toMatchObject({
+      bucket_key: 'budget:daily-cap:global',
+      spent: 30,
+      remaining: 70,
+    })
+    expect(typeof buckets[0]?.['reset_at_ms']).toBe('number')
+  })
+
+  it('lists a configured budget with zero live buckets at full headroom', async () => {
+    const { budgets } = budgetFixture([stripeBudgetConfig])
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets')
+    const body = (await res.json()) as { budgets: Array<Record<string, unknown>> }
+    expect(body.budgets).toHaveLength(1)
+    expect(body.budgets[0]?.['buckets']).toEqual([])
+  })
+
+  it('returns an empty list when zero budgets are configured', async () => {
+    const { budgets } = budgetFixture([])
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ budgets: [] })
+  })
+
+  it('returns an empty list when the budgets dep is absent', async () => {
+    const { get } = setup()
+    const res = await get('/api/budgets')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ budgets: [] })
+  })
+
+  it('requires auth like the other read endpoints when a secret is set', async () => {
+    const { get } = setup({ apiSecret: 'test-secret' })
+    const res = await get('/api/budgets')
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('GET /api/budgets/:name/events', () => {
+  function seedEvents(
+    ledger: BudgetLedger,
+    count: number,
+    overrides: Partial<Record<string, unknown>> = {},
+  ) {
+    ledger.commitAll(
+      Array.from({ length: count }, (_, i) => ({
+        budget_name: 'daily-cap',
+        bucket_key: 'budget:daily-cap:global',
+        kind: 'spend' as const,
+        amount: 5,
+        currency: 'USD',
+        tool_name: `tool-${String(i)}`,
+        origin: 'mcp',
+        audit_record_id: `audit-${String(i)}`,
+        timestamp: new Date(1_000_000 + i).toISOString(),
+        timestamp_ms: 1_000_000 + i,
+        generation: 1,
+        ...overrides,
+      })),
+    )
+  }
+
+  it('lists events newest first in the standard list envelope', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedEvents(ledger, 3)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>
+      total: number
+      limit: number
+      offset: number
+    }
+    expect(body.total).toBe(3)
+    expect(body.limit).toBe(50)
+    expect(body.offset).toBe(0)
+    expect(body.data.map((e) => e['tool_name'])).toEqual(['tool-2', 'tool-1', 'tool-0'])
+    // Wire rows carry no internal epoch/generation column.
+    expect(body.data[0]).not.toHaveProperty('epoch')
+    expect(body.data[0]).not.toHaveProperty('generation')
+    expect(body.data[0]).toMatchObject({ kind: 'spend', amount: 5, currency: 'USD' })
+  })
+
+  it('paginates with limit and offset, echoing them in the envelope', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedEvents(ledger, 5)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events?limit=2&offset=2')
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>
+      total: number
+      limit: number
+      offset: number
+    }
+    expect(body.total).toBe(5)
+    expect(body.limit).toBe(2)
+    expect(body.offset).toBe(2)
+    expect(body.data.map((e) => e['tool_name'])).toEqual(['tool-2', 'tool-1'])
+  })
+
+  it('clamps limit to LIST_MAX_PAGE_SIZE', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedEvents(ledger, 1)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events?limit=5000')
+    const body = (await res.json()) as { limit: number }
+    expect(body.limit).toBe(1000)
+  })
+
+  it('lists rows from every epoch — history survives config resets', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedEvents(ledger, 1, { generation: 1, timestamp_ms: 1_000, tool_name: 'old-epoch' })
+    seedEvents(ledger, 1, { generation: 2, timestamp_ms: 2_000, tool_name: 'new-epoch' })
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events')
+    const body = (await res.json()) as { data: Array<Record<string, unknown>>; total: number }
+    expect(body.total).toBe(2)
+    expect(body.data.map((e) => e['tool_name'])).toEqual(['new-epoch', 'old-epoch'])
+  })
+
+  it('returns 200 with an empty page for an unknown budget name', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedEvents(ledger, 1)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/no-such-budget/events')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ data: [], total: 0, limit: 50, offset: 0 })
+  })
+
+  it('returns an empty page when the budgets dep is absent', async () => {
+    const { get } = setup()
+    const res = await get('/api/budgets/daily-cap/events')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ data: [], total: 0, limit: 50, offset: 0 })
+  })
+
+  it('requires auth like the other read endpoints when a secret is set', async () => {
+    const { get } = setup({ apiSecret: 'test-secret' })
+    const res = await get('/api/budgets/daily-cap/events')
+    expect(res.status).toBe(401)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Analytics
 // ---------------------------------------------------------------------------
 
@@ -977,6 +1201,60 @@ describe('GET /api/events', () => {
     const eventData = await readWithTimeout(1000)
     expect(eventData).toContain('event: action')
     expect(eventData).toContain('test_tool')
+
+    await reader.cancel()
+  })
+
+  it('streams budget_update and budget_breached to connected clients (#14)', async () => {
+    const { app, eventBus } = setup()
+
+    const res = await app.request('/api/events')
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- SSE body always streams
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    const readWithTimeout = async (ms: number): Promise<string> => {
+      return Promise.race([
+        reader
+          .read()
+          .then((chunk) => (chunk.value ? decoder.decode(chunk.value as Uint8Array) : '')),
+        new Promise<string>((_resolve, reject) => {
+          setTimeout(() => {
+            reject(new Error('timeout'))
+          }, ms)
+        }),
+      ])
+    }
+
+    const initial = await readWithTimeout(1000)
+    expect(initial).toContain('event: heartbeat')
+
+    eventBus.emit('budget_update', {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      kind: 'approved_overage',
+      amount: 30,
+      spent: 120,
+      remaining: 0,
+      limit: 100,
+      currency: 'USD',
+      utilization: 1.2,
+    })
+    const update = await readWithTimeout(1000)
+    expect(update).toContain('event: budget_update')
+    expect(update).toContain('approved_overage')
+
+    eventBus.emit('budget_breached', {
+      name: 'daily-cap',
+      bucket_key: 'budget:daily-cap:global',
+      on_exceed: 'deny',
+      attempted_amount: 50,
+      spent: 90,
+      limit: 100,
+      currency: 'USD',
+    })
+    const breach = await readWithTimeout(1000)
+    expect(breach).toContain('event: budget_breached')
+    expect(breach).toContain('attempted_amount')
 
     await reader.cancel()
   })
