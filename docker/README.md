@@ -72,8 +72,10 @@ dashboard API calls.
 
 The demo runs Helio's policy engine in front of the echo server, so you
 can watch governance act. The config (`helio.docker.yaml`) allows
-read-only tools, denies destructive ones, and requires approval before
-sending email. Send a couple of calls through the proxy on port 3000:
+read-only tools, denies destructive ones, requires approval before
+sending email, and caps what the payment tools spend together with a
+named budget (next section). Send a couple of calls through the proxy
+on port 3000:
 
 ```bash
 # Allowed: get_weather is read-only
@@ -112,17 +114,72 @@ No agent handy? You can also point the official
 at <http://localhost:3000/mcp> (run `npx @modelcontextprotocol/inspector`,
 transport: Streamable HTTP) and call the tools from its UI.
 
+## Break the budget
+
+The config also defines a [named budget](../docs/policies.md#named-budgets-cross-tool):
+one `demo-payments` pot of $50 per hour, shared by the `stripe_charge`
+and `paypal_payout` demo tools. Open the dashboard's **Budgets** tab —
+the pot is already there at full headroom — and keep it visible while
+you deplete it:
+
+```bash
+# Stripe charge: $20 (20/50 used)
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}'
+
+# PayPal payout: $20 into the SAME pot (40/50 used)
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"paypal_payout","arguments":{"total":20,"recipient":"ops@example.com"}}}'
+```
+
+Both succeed, and the Budgets tab bar moves on each one: two different
+providers, each exposing its amount under a different argument field
+(`$.amount` vs `$.total`), depleting one shared cap. Now push past it:
+
+```bash
+# Stripe charge: $20 — would exceed $50, so this call WAITS
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}'
+```
+
+The budget is `on_exceed: require_approval`, so the breach raises a
+break-glass approval instead of a denial. Go to **Approvals**: the
+pending ticket lists the breached budget — spent, limit, and the
+attempted amount — and warns that approving spends past the limit.
+Approve it and the curl returns; deny it (or let the 120s timeout fire)
+and the call is blocked. Budget tickets always fail closed on timeout.
+
+After approving, the Budgets tab shows $60 spent of $50 — an approved
+overage legitimately pushes the pot past its limit. Expand the pot's
+event list: the third charge carries the **approved overage** badge,
+and that marking is durable — it is how the ledger and the call's audit
+record store the charge.
+
+Budget spend also survives restarts (it lives in the `helio-data`
+volume next to the audit records — sliding-window pots resume
+mid-window):
+
+```bash
+docker compose restart helio
+```
+
+Reload the Budgets tab: still $60 of $50, mid-window.
+
 That is as far as the demo goes. To govern your own MCP server, with
 Helio in its own container next to an agent, see
 [Running Helio as a Sidecar](../docs/deployment-sidecar.md).
 
 ## Reset the demo
 
-Audit records persist in the `helio-data` Docker volume across restarts.
-`docker compose down` stops the containers but keeps that volume, so a
-later `docker compose up` still shows earlier tool calls in the feed. To
-wipe the audit history and start from a clean slate, remove the volume
-too:
+Audit records and budget spend persist in the `helio-data` Docker volume
+across restarts. `docker compose down` stops the containers but keeps
+that volume, so a later `docker compose up` still shows earlier tool
+calls in the feed and replays the budget ledger into the pot. To wipe
+the audit history and budget spend and start from a clean slate, remove
+the volume too:
 
 ```bash
 docker compose down -v

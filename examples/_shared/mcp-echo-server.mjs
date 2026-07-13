@@ -75,6 +75,33 @@ const TOOLS = [
     },
     annotations: { readOnlyHint: false, destructiveHint: false },
   },
+  {
+    name: 'stripe_charge',
+    description: 'Charge a customer card via Stripe',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: 'Charge amount in dollars' },
+        currency: { type: 'string', description: 'Currency code (e.g. USD)' },
+        customer: { type: 'string', description: 'Customer identifier' },
+      },
+      required: ['amount'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: 'paypal_payout',
+    description: 'Send a PayPal payout to a recipient',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        total: { type: 'number', description: 'Payout total in dollars' },
+        recipient: { type: 'string', description: 'Payout recipient' },
+      },
+      required: ['total'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
 ]
 
 const TOOL_RESPONSES = {
@@ -85,6 +112,10 @@ const TOOL_RESPONSES = {
     `Payment of ${args?.amount ?? 0} ${args?.currency ?? 'USD'} sent to ${args?.recipient ?? 'unknown'}`,
   create_refund: (args) =>
     `Refund of ${args?.amount ?? 0} processed for order ${args?.order_id ?? 'unknown'}`,
+  stripe_charge: (args) =>
+    `Charged ${args?.amount ?? 0} ${args?.currency ?? 'USD'} to customer ${args?.customer ?? 'unknown'} via Stripe`,
+  paypal_payout: (args) =>
+    `PayPal payout of ${args?.total ?? 0} sent to ${args?.recipient ?? 'unknown'}`,
 }
 
 function handleJsonRpc(request) {

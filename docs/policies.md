@@ -436,11 +436,75 @@ budgets:
         field: '$.total'
 ```
 
-The ordering differs per door because only one of them can sequence gates in time. On the **MCP door** a call flows: policy decision → approval resolution (rule-level, if required) → budget gate → forward — a human can approve a call that the budget gate then checks with fresh numbers. The **sideband door** decides everything in one `/evaluate` round-trip, so budgets are checked at evaluate time: an `on_exceed: deny` breach is terminal there and preempts any approval ticket (the money gate forbids what the approver would have been asked to allow), while an allowed call's budget charges commit at `/audit` once the call actually executed. On both doors a deny rule denies before budgets are consulted, and dry-run peeks budgets without ever recording. The budget gate is all-or-nothing: every matching budget is peeked first, the call forwards only if all allow, and a denied call records nothing on any budget — including the rule-level rate/spend counters, which are only consumed when the call actually forwards. A denial returns structured feedback with `reason: budget_exceeded` and a `budgets` array listing every breached budget (name, `spent`, `remaining`, `reset_at`).
+The [configuration reference](./configuration.md#budgets) has the full schema and validation rules; a [runnable example](../examples/budgets/) walks the whole flow, break-glass included. This section is the semantics.
 
-**Break-glass overages** (`on_exceed: require_approval`): a breach raises one composite approval ticket per call listing every breached budget, and the call proceeds only on an explicit approval — the overage is then recorded as `approved_overage` on the ledger and the audit trail. A denial or timeout records nothing (on the MCP door unconditionally; on the sideband when the adapter honors it — an executed-anyway report commits plain `spend` with the denied status on the record), and budget tickets always fail closed on timeout, even under `approval.default_on_timeout: allow`. When one call breaches a mix of `deny` and `require_approval` budgets, deny wins and no ticket is raised. On the MCP door a rule-level approval and a budget breach are two sequential human decisions (rule ticket first); the sideband merges both gates into its single native ticket. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets) for the ticket mechanics.
+### How a budget depletes
 
-`window: session` makes the pot deplete for the lifetime of a session key and never replenish on a timer; idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal. See the [configuration reference](./configuration.md#budgets) for the full schema and validation rules.
+A call participates in a budget when any contributor's `tool` glob matches the tool name; the amount comes from the first matching contributor's `field` dot-path, in config order (first match wins, like rules). One call depletes **every** budget whose contributors match, so overlapping caps compose: a $50 session pot and a $500 daily pot both charge, and whichever runs out first stops the call.
+
+A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`, and nothing is consumed. This is the honest boundary of the feature: budgets govern tools that expose what they are spending in an argument field. Fixed-cost tools without an amount field are `rate_limit` territory, and costs metered downstream after the call are a stated gap.
+
+### Scope and windows
+
+`key` picks the pot structure: one shared pot (`global`, the default), one per MCP session (`session`), or one per adapter-supplied sender (`sender_id`, host-enforced path only — requires `sdk.enabled: true`). Calls that carry no session or sender id pool into a shared `unknown` pot — worth knowing when curl-testing a session-keyed budget.
+
+`window` is either a sliding duration (`1h`, `24h` — spend ages out continuously, like spend limits) or `session`: the pot depletes for the lifetime of a session key and never replenishes on a timer; idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal.
+
+### The budget gate
+
+Budgets gate **after** the policy decision, and only on calls that would actually forward. On both doors a deny rule denies before budgets are consulted, and dry-run peeks budgets without ever recording. The budget gate is all-or-nothing: every matching budget is peeked first, the call forwards only if all allow, and a denied call records nothing on any budget — including the rule-level rate/spend counters, which are only consumed when the call actually forwards.
+
+The ordering differs per door because only one of them can sequence gates in time. On the **MCP door** a call flows: policy decision → approval resolution (rule-level, if required) → budget gate → forward — a human can approve a call that the budget gate then checks with fresh numbers. The **sideband door** decides everything in one `/evaluate` round-trip, so budgets are checked at evaluate time: an `on_exceed: deny` breach is terminal there and preempts any approval ticket (the money gate forbids what the approver would have been asked to allow), while an allowed call's budget charges commit at `/audit` once the call actually executed.
+
+**The enforcement claim, precisely:** budget enforcement is deterministic at the MCP gate — on the proxy path the last-slot check and the charge happen synchronously in one step, so two concurrent calls cannot both squeeze through the same remaining headroom. The host-enforced adapter tier inherits the [documented TOCTOU caveat](./adapter-api.md#the-crash-ttl-and-toctou-caveats): because decision and execution are separate calls, two concurrent `/evaluate`s can both peek the last limit slot and both execute. Counters stay truthful after the fact (both `/audit`s record), but the host-enforced tier cannot close this window from the proxy side.
+
+### Denial feedback
+
+A denial returns structured feedback with `reason: budget_exceeded` and a `budgets` array listing every breached budget:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32001,
+    "message": "Budget exceeded: \"daily-cap\"",
+    "data": {
+      "blocked": true,
+      "reason": "budget_exceeded",
+      "rule": null,
+      "rule_index": null,
+      "ruleIndex": null,
+      "action": "budget",
+      "suggestion": "Budget \"daily-cap\" would be exceeded by this call. Wait for the window to reset or reduce the amount.",
+      "retry_allowed": true,
+      "budgets": [
+        {
+          "name": "daily-cap",
+          "limit": 50,
+          "spent": 40,
+          "remaining": 10,
+          "attempted_amount": 20,
+          "currency": "USD",
+          "window": "24h",
+          "on_exceed": "deny",
+          "reset_at": "2026-07-14T12:00:00.000Z"
+        }
+      ]
+    }
+  }
+}
+```
+
+`rule`/`rule_index` name the matched policy rule when one matched — a budget denial can shadow an `allow` rule, since budgets gate after the decision (`ruleIndex` is a deprecated alias of `rule_index`, emitted for this release only). `retry_allowed` is `true` only when every breached budget has a duration window (session pots never replenish, so retrying cannot help). `reset_at` is `null` for session windows; an invalid-amount failure carries `reason: "invalid_amount"` inside its block with `attempted_amount: null`. On the MCP door the reset field is ISO-8601 `reset_at`; the sideband's `limits.budgets` blocks and `GET /api/budgets` use epoch `reset_at_ms` instead — a deliberate per-surface idiom (each door keeps its existing reset-field convention), not drift.
+
+### Break-glass overages
+
+**Break-glass overages** (`on_exceed: require_approval`): a breach raises one composite approval ticket per call listing every breached budget, and the call proceeds only on an explicit approval — the overage is then recorded as `approved_overage` on the ledger and the audit trail. A denial or timeout records nothing (on the MCP door unconditionally; on the sideband when the adapter honors it — an executed-anyway report commits plain `spend` with the denied status on the record), and budget tickets always fail closed on timeout, even under `approval.default_on_timeout: allow`. When one call breaches a mix of `deny` and `require_approval` budgets, deny wins and no ticket is raised. On the MCP door a rule-level approval and a budget breach are two sequential human decisions (rule ticket first); the sideband merges both gates into its single native ticket. Budget approvals are scope-once: the approval covers exactly that call's overage, never a standing grant. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets) for the ticket mechanics.
+
+### Persistence and observability
+
+Unlike rule-level limits, budget spend **persists across restarts**: every charge is written to a durable ledger in the audit database and replayed at startup — see [budgets](./configuration.md#budgets) for the persistence and hot-reload identity rules (what survives a config edit, what resets the pot) and [Budget Ledger Tables](./audit.md#budget-ledger-tables) for the storage details. The dashboard's **Budgets** view shows every configured pot with live depletion and its spend ledger; `GET /api/budgets` and `GET /api/budgets/:name/events` serve the same state over the [sideband API](./sideband-api.md#budgets), and the SSE stream carries `budget_update`/`budget_breached` events.
 
 `action: spend_limit` keeps working as the per-rule quick path; budgets are the cross-tool layer on top.
 
@@ -576,6 +640,7 @@ In dry-run mode:
 - No requests are forwarded to the upstream server
 - Rate limit slots are not consumed (uses `peek` instead of `check`)
 - Spend limit budget is not consumed
+- [Named budgets](#named-budgets-cross-tool) are peeked but never charged — the dry-run payload reports their state in a `budgets` array, and no breach events fire
 - Tool calls are not recorded for dependency chain tracking
 - Audit records are created with `dry_run: true`
 

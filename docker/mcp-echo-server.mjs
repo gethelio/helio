@@ -2,8 +2,9 @@
  * Minimal MCP echo server for Docker Compose demo.
  *
  * Returns valid JSON-RPC responses for tools/list and tools/call
- * with a realistic mix of tool annotations (read-only and destructive)
- * so the Helio policy engine has something meaningful to evaluate.
+ * with a realistic mix of tool annotations (read-only, destructive,
+ * payment) so the Helio policy engine has something meaningful to
+ * evaluate.
  *
  * No dependencies — just node:http.
  */
@@ -47,12 +48,43 @@ const TOOLS = [
     },
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
+  {
+    name: 'stripe_charge',
+    description: 'Charge a customer card via Stripe',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: 'Charge amount in dollars' },
+        currency: { type: 'string', description: 'Currency code (e.g. USD)' },
+        customer: { type: 'string', description: 'Customer identifier' },
+      },
+      required: ['amount'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: 'paypal_payout',
+    description: 'Send a PayPal payout to a recipient',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        total: { type: 'number', description: 'Payout total in dollars' },
+        recipient: { type: 'string', description: 'Payout recipient' },
+      },
+      required: ['total'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
 ]
 
 const TOOL_RESPONSES = {
   get_weather: (args) => `Sunny, 22°C in ${args?.city ?? 'unknown'}`,
   send_email: (args) => `Email sent to ${args?.to ?? 'unknown'}`,
   delete_record: (args) => `Record ${args?.id ?? 'unknown'} deleted`,
+  stripe_charge: (args) =>
+    `Charged ${args?.amount ?? 0} ${args?.currency ?? 'USD'} to customer ${args?.customer ?? 'unknown'} via Stripe`,
+  paypal_payout: (args) =>
+    `PayPal payout of ${args?.total ?? 0} sent to ${args?.recipient ?? 'unknown'}`,
 }
 
 function handleJsonRpc(request) {

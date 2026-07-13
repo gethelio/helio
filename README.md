@@ -191,6 +191,26 @@ rules:
     action: require_approval
 ```
 
+### Named Budgets
+
+Cumulative cross-tool spend enforcement: one depleting pot aggregates spend across every tool that feeds it — Stripe and PayPal into one cap, each exposing the amount under its own argument field. Deterministic at the MCP gate, persistent across restarts via a durable spend ledger, with break-glass approvals for overages and a live dashboard view.
+
+```yaml
+budgets:
+  - name: daily-cap
+    limit: 50
+    currency: USD
+    window: 24h
+    on_exceed: require_approval # a breach becomes a human decision
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
+```
+
+Budgets govern tools that expose what they are spending in an argument field. Watch the full flow — live depletion, breach, break-glass approval, the approved overage landing in the ledger — in the [Docker quickstart demo](./docker/README.md#break-the-budget) or the runnable [budgets example](./examples/budgets/).
+
 ### Evidence Grounding
 
 Require proof before high-stakes actions. A refund requires a prior order lookup. A deployment requires a passing test run. The optional SDK marks tool outputs as evidence; the proxy enforces evidence requirements.
@@ -262,21 +282,21 @@ Every tool call recorded: timestamp, agent identity, tool name, inputs, policy d
 
 ## How Helio Compares
 
-|                                              | Helio                                  | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
-| -------------------------------------------- | -------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |
-| **What it governs**                          | Per-call actions with cross-call state | Which tools/MCPs are reachable | App-level authorization decisions | Agent permissions inside one platform | Agent behavior inside one framework |
-| **Architecture**                             | Out-of-process MCP proxy               | Out-of-process MCP gateway     | Sidecar / library                 | In-platform                           | In-framework                        |
-| **Open source**                              | ✅ Apache 2.0                          | ✅ Apache 2.0                  | ✅ Apache 2.0                     | ❌                                    | Varies                              |
-| **Time to value**                            | 5 minutes                              | Setup-dependent                | Hours                             | Built-in                              | Built-in                            |
-| **No agent code changes**                    | ✅                                     | ✅                             | ❌                                | ✅ (within platform)                  | ❌                                  |
-| **Governs agents you didn't build**          | ✅ Any MCP agent                       | ✅ Any MCP agent               | ✅ (any app)                      | ❌ One platform only                  | ❌ One framework only               |
-| **Evidence grounding**                       | ✅ Cumulative across calls             | ❌                             | ❌                                | ❌                                    | Limited                             |
-| **Self-repair feedback**                     | ✅ Structured retry hints              | ❌                             | ❌                                | ❌                                    | Limited                             |
-| **Stateful spend / rate limits**             | ✅ Per-tool, per-session¹              | Basic                          | ❌                                | ❌                                    | Limited                             |
-| **Approval workflows**                       | ✅ Slack, webhook, dashboard           | ✅                             | ❌                                | Limited                               | Limited                             |
-| **Audit trail (incl. downstream responses)** | ✅ Captures upstream MCP responses     | Decision logs                  | Decision logs                     | Platform telemetry                    | Framework logs                      |
+|                                              | Helio                                    | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
+| -------------------------------------------- | ---------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |
+| **What it governs**                          | Per-call actions with cross-call state   | Which tools/MCPs are reachable | App-level authorization decisions | Agent permissions inside one platform | Agent behavior inside one framework |
+| **Architecture**                             | Out-of-process MCP proxy                 | Out-of-process MCP gateway     | Sidecar / library                 | In-platform                           | In-framework                        |
+| **Open source**                              | ✅ Apache 2.0                            | ✅ Apache 2.0                  | ✅ Apache 2.0                     | ❌                                    | Varies                              |
+| **Time to value**                            | 5 minutes                                | Setup-dependent                | Hours                             | Built-in                              | Built-in                            |
+| **No agent code changes**                    | ✅                                       | ✅                             | ❌                                | ✅ (within platform)                  | ❌                                  |
+| **Governs agents you didn't build**          | ✅ Any MCP agent                         | ✅ Any MCP agent               | ✅ (any app)                      | ❌ One platform only                  | ❌ One framework only               |
+| **Evidence grounding**                       | ✅ Cumulative across calls               | ❌                             | ❌                                | ❌                                    | Limited                             |
+| **Self-repair feedback**                     | ✅ Structured retry hints                | ❌                             | ❌                                | ❌                                    | Limited                             |
+| **Stateful spend / rate limits**             | ✅ Cross-tool budgets + per-rule limits¹ | Basic                          | ❌                                | ❌                                    | Limited                             |
+| **Approval workflows**                       | ✅ Slack, webhook, dashboard             | ✅                             | ❌                                | Limited                               | Limited                             |
+| **Audit trail (incl. downstream responses)** | ✅ Captures upstream MCP responses       | Decision logs                  | Decision logs                     | Platform telemetry                    | Framework logs                      |
 
-\* Per-tool and per-session spend limits ship in v0.1. Cross-tool spend aggregation is planned for v0.2.
+¹ Per-rule rate and spend limits, plus named cross-tool budgets: persistent depleting pots with break-glass approvals for overages.
 
 ## Works With
 
@@ -304,6 +324,7 @@ Ready-made configurations for common patterns:
 - **[Basic](./examples/basic/)**: Deny destructive operations, allow everything else
 - **[Slack Approvals](./examples/slack-approvals/)**: Route destructive actions to Slack
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
+- **[Budgets](./examples/budgets/)**: One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
 
 ## Contributing
 

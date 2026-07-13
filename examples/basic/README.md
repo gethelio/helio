@@ -29,7 +29,7 @@ pnpm start
 
 This starts:
 
-1. A local MCP echo server on port 8080 (5 demo tools)
+1. A local MCP echo server on port 8080 (7 demo tools)
 2. The Helio proxy on port 3000
 3. The dashboard on port 3100
 
@@ -85,6 +85,7 @@ Navigate to [http://localhost:3100](http://localhost:3100) to see (no login prom
 - **Audit**: Searchable log of every action with full details
 - **Approvals**: Pending approval queue (empty in this example)
 - **Limits**: Rate and spend limit status (none configured in this example)
+- **Budgets**: Named cross-tool spend pots (none configured in this example)
 - **Analytics**: Charts showing action volume, decision breakdown, and top tools
 
 ## Configuration Walkthrough
@@ -176,3 +177,4 @@ Every tool call is recorded to a local SQLite database. `include_responses: true
 
 - [Slack Approvals](../slack-approvals/) — Route sensitive actions to Slack for human approval
 - [Spend Limits](../spend-limits/) — Cap monetary spend across payment tools
+- [Budgets](../budgets/) — One cross-tool budget with break-glass overage approvals

@@ -3,14 +3,17 @@
 # This config is used by docker-compose.yml. It demonstrates governance
 # with a mix of policies: read-only tools are allowed, destructive tools
 # are denied, sending email requires approval, and everything else falls
-# through to the default (allow).
+# through to the default (allow). A named budget caps what the Stripe and
+# PayPal demo tools spend together, with break-glass approvals past the
+# limit — see the "Break the budget" section in README.md.
 #
-# The `send_email` rule routes to the dashboard approval channel, so calling
-# that tool makes the approvals page populate at http://localhost:3100.
+# The `send_email` rule and the budget's break-glass tickets route to the
+# dashboard approval channel, so the approvals page populates at
+# http://localhost:3100.
 #
 # Sections follow the canonical request-lifecycle order from
-# docs/configuration.md: upstream, listen, policies, approval, audit,
-# dashboard.
+# docs/configuration.md: upstream, listen, policies, budgets, approval,
+# audit, dashboard.
 
 version: '1'
 
@@ -48,6 +51,23 @@ policies:
           readOnlyHint: true
       action: allow
 
+budgets:
+  # One $50/hour pot shared by the Stripe and PayPal demo tools — each
+  # contributor names the argument field that carries the amount. A breach
+  # raises a break-glass approval in the dashboard instead of a denial.
+  - name: demo-payments
+    limit: 50
+    currency: USD
+    window: 1h
+    on_exceed: require_approval
+    approval:
+      channel: dashboard
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
+
 approval:
   timeout: 120s
   default_on_timeout: deny
@@ -64,7 +84,8 @@ dashboard:
   enabled: true
   port: 3100
   host: '0.0.0.0'
-  # Required whenever `flag_destructive: require_approval` or any
-  # `require_approval` rule is used. Plumbed in through docker-compose via
-  # the HELIO_DASHBOARD_SECRET env var. Generate with: openssl rand -hex 32
+  # Required whenever `flag_destructive: require_approval`, any
+  # `require_approval` rule, or any `on_exceed: require_approval` budget is
+  # used. Plumbed in through docker-compose via the HELIO_DASHBOARD_SECRET
+  # env var. Generate with: openssl rand -hex 32
   api_secret: '${HELIO_DASHBOARD_SECRET}'

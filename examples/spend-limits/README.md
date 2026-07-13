@@ -29,7 +29,7 @@ pnpm start
 
 This starts:
 
-1. A local MCP echo server on port 8080 (5 demo tools including `create_payment` and `create_refund`)
+1. A local MCP echo server on port 8080 (7 demo tools including `create_payment` and `create_refund`)
 2. The Helio proxy on port 3000
 3. The dashboard on port 3100
 
@@ -108,7 +108,7 @@ If a payment is blocked by the spend limit, the amount is not deducted. Any call
 
 ### In-memory state
 
-Spend tracking is stored in memory. Restarting the proxy resets all spend counters. This is sufficient for the MVP — persistent spend tracking is planned for a future release.
+Spend-limit rule tracking is stored in memory. Restarting the proxy resets rule-level spend counters. [Named budgets](../budgets/) — the cross-tool layer — persist their spend across restarts via a durable ledger.
 
 ## Configuration Walkthrough
 
@@ -142,4 +142,5 @@ Spend tracking is stored in memory. Restarting the proxy resets all spend counte
 
 - [Basic](../basic/) — Start with a simpler configuration
 - [Slack Approvals](../slack-approvals/) — Route sensitive actions to Slack for human approval
+- [Budgets](../budgets/) — One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
 - Try combining spend limits with approval workflows: require Slack approval for any payment over $100 using `input` matching
