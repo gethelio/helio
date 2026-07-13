@@ -361,7 +361,7 @@ policies:
     // Start the config watcher
     watcher = new ConfigWatcher({
       configPath,
-      onPolicyReload: (newPolicy) => {
+      onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
       onError: () => {},

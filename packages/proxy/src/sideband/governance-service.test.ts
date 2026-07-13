@@ -1858,14 +1858,14 @@ describe('GovernanceService — budget gate (issue #14)', () => {
   })
 
   it('counts the plans list into pending-entry byte accounting', () => {
-    // The cap (250) sits between each call's BASE size (~110–160, which
+    // The cap (450) sits between each call's BASE size (~110–160, which
     // passes the early admission check) and the long-sender call's base +
-    // plans (~304) — only the post-planning re-check can refuse it. The
-    // short-sender call (~204 with plans) fits end to end THROUGH THE SAME
-    // SERVICE, which with maxSenderKeys: 1 also proves the refused call
-    // released its sender reservation.
+    // plans + frozen budget snapshot (~503) — only the post-planning
+    // re-check can refuse it. The short-sender call (~403 all-in) fits end
+    // to end THROUGH THE SAME SERVICE, which with maxSenderKeys: 1 also
+    // proves the refused call released its sender reservation.
     const budgets = [stripeBudget({ name: 'cap-for-senders', key: 'sender_id' })]
-    const { service } = makeService({ budgets, maxSenderKeys: 1, maxPendingBytes: 250 })
+    const { service } = makeService({ budgets, maxSenderKeys: 1, maxPendingBytes: 450 })
 
     const refused = service.evaluate(
       stripeEval(10, {
@@ -1893,7 +1893,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
       withApprovals: true,
       budgets,
       maxSenderKeys: 1,
-      maxPendingBytes: 250,
+      maxPendingBytes: 450,
     })
 
     const refused = service.evaluate(
@@ -2133,5 +2133,574 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     const res = service.audit(auditInput(id), 'h')
     expect(res.status).toBe(201)
     expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(5)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// budget break-glass (issue #14, PR 3)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — budget break-glass (issue #14)', () => {
+  const bgBudget = (overrides: Partial<BudgetConfig> = {}): BudgetConfig => ({
+    name: 'cap',
+    limit: 10,
+    currency: 'USD',
+    window: '24h',
+    key: 'global',
+    on_exceed: 'require_approval',
+    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    ...overrides,
+  })
+  const stripeEval = (amount: unknown) =>
+    evalInput({ tool: { name: 'stripe_charge' }, arguments: { amount } })
+
+  function breachTicket(harness: ReturnType<typeof makeService>, amount = 50) {
+    const res = harness.service.evaluate(stripeEval(amount))
+    expect(res.body['decision']).toBe('require_approval')
+    const approval = res.body['approval'] as { id: string; timeout_ms: number }
+    const id = res.body['evaluation_id'] as string
+    return { res, approval, id }
+  }
+
+  it('raises ONE merged native ticket in the standard approval block (budget-only)', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { res, approval } = breachTicket(harness)
+
+    // The single standard approval block — never a second budget block.
+    expect(JSON.stringify(res.body)).not.toContain('budget_approval')
+    expect(Object.keys(approval).sort()).toEqual(['id', 'resolve_path', 'timeout_ms'])
+
+    const ticket = harness.approvalRouter?.getTicket(approval.id)
+    expect(ticket?.channel_name).toBe('native:openclaw')
+    expect(ticket?.breached_budgets).toEqual([
+      { name: 'cap', limit: 10, spent: 0, attempted_amount: 50, currency: 'USD', window: '24h' },
+    ])
+    // Only one ticket exists for the call.
+    expect(harness.queue?.list()).toHaveLength(1)
+  })
+
+  it('attaches budget-specific feedback on a budget-triggered approval', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { res } = breachTicket(harness)
+    const feedback = res.body['feedback'] as { message: string } | undefined
+    expect(feedback?.message).toContain('cap')
+    // The breach numbers still ride limits.budgets.
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['allowed']).toBe(false)
+  })
+
+  it('budget-only tickets take the budget approval timeout, first-breached-wins', () => {
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [
+        bgBudget({ name: 'first', approval: { channel: 'dashboard', timeout: '120s' } }),
+        bgBudget({ name: 'second', approval: { channel: 'dashboard', timeout: '999s' } }),
+      ],
+    })
+    const { approval } = breachTicket(harness)
+    expect(approval.timeout_ms).toBe(120_000)
+    expect(harness.queue?.list()).toHaveLength(1)
+  })
+
+  it('a merged rule+budget ticket takes the RULE approval config', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'gate',
+          match: { tool: 'stripe_*' },
+          action: 'require_approval',
+          approval: { channel: 'dashboard', timeout: '60s' },
+        },
+      ],
+    })
+    const harness = makeService({
+      policy,
+      withApprovals: true,
+      budgets: [bgBudget({ approval: { channel: 'dashboard', timeout: '999s' } })],
+    })
+    const { res, approval } = breachTicket(harness)
+
+    expect(approval.timeout_ms).toBe(60_000)
+    expect(harness.queue?.list()).toHaveLength(1)
+    const ticket = harness.approvalRouter?.getTicket(approval.id)
+    expect(ticket?.matched_rule).toBe('gate')
+    expect(ticket?.breached_budgets?.[0]?.name).toBe('cap')
+    expect(JSON.stringify(res.body)).not.toContain('budget_approval')
+  })
+
+  it('a simultaneous deny-breach wins: terminal budget_exceeded, no ticket', () => {
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [bgBudget(), bgBudget({ name: 'hard', limit: 20, on_exceed: 'deny' })],
+    })
+    const res = harness.service.evaluate(stripeEval(50))
+    expect(res.body['decision']).toBe('budget_exceeded')
+    expect(res.body['approval']).toBeUndefined()
+    expect(harness.queue?.list() ?? []).toHaveLength(0)
+    expect(harness.budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+  })
+
+  it('blocks /audit with 409 until the break-glass ticket resolves', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+
+    expect(harness.service.audit(auditInput(id), 'h').status).toBe(409)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    expect(harness.service.audit(auditInput(id), 'h').status).toBe(201)
+  })
+
+  it('approved + success commits the breach as approved_overage, the rest as spend', () => {
+    const rows: Array<Record<string, unknown>> = []
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [bgBudget(), bgBudget({ name: 'wide', limit: 1000 })],
+      budgetLedger: {
+        commitAll: (batch) => rows.push(...(batch as unknown as Array<Record<string, unknown>>)),
+      },
+    })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    const res = harness.service.audit(auditInput(id), 'h')
+
+    expect(res.status).toBe(201)
+    expect(rows.map((row) => [row['budget_name'], row['kind']])).toEqual([
+      ['cap', 'approved_overage'],
+      ['wide', 'spend'],
+    ])
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('approved')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets.find((b) => b['name'] === 'cap')?.['kind']).toBe('approved_overage')
+    expect(budgets.find((b) => b['name'] === 'wide')?.['kind']).toBe('spend')
+    // The pot really went over.
+    const spent = harness.budgetEngine?.listStates().find((s) => s.name === 'cap')?.buckets[0]
+    expect(spent?.spent).toBe(50)
+  })
+
+  it('actual_amount overrides the committed overage amount', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    harness.service.audit(auditInput(id, { actual_amount: 42 }), 'h')
+    expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(42)
+  })
+
+  it('approved + a reported error still commits the overage (the call ran)', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    const res = harness.service.audit(auditInput(id, { status: 'error', error: 'boom' }), 'h')
+
+    expect(res.status).toBe(201)
+    // status error means the tool EXECUTED and failed — money moved.
+    expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(50)
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('approved')
+    expect(record?.upstream_error).toBe('boom')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['kind']).toBe(
+      'approved_overage',
+    )
+  })
+
+  it('approved + not_executed commits nothing', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+    expect(res.status).toBe(201)
+    expect(harness.budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+  })
+
+  it('denied + success commits as plain spend with the denied approval_status', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'bob',
+      reason: 'no',
+    })
+    const res = harness.service.audit(auditInput(id), 'h')
+
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('denied')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    // Truthful counters: the host executed anyway, so the money is spent —
+    // but it was never an APPROVED overage.
+    expect(budgets[0]?.['kind']).toBe('spend')
+    expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(50)
+  })
+
+  it('ticket timeout honored by the adapter commits nothing', () => {
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [bgBudget({ approval: { channel: 'dashboard', timeout: '10s' } })],
+    })
+    const { id } = breachTicket(harness)
+    harness.advance(10_001)
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+    expect(res.status).toBe(201)
+    expect(res.body['ok']).toBe(true)
+    expect(harness.budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+  })
+
+  it('ticket timeout + reported success commits as spend (truthful counters)', () => {
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [bgBudget({ approval: { channel: 'dashboard', timeout: '10s' } })],
+    })
+    const { id } = breachTicket(harness)
+    harness.advance(10_001)
+    const res = harness.service.audit(auditInput(id), 'h')
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('timeout')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['kind']).toBe('spend')
+  })
+
+  it('denied + not_executed keeps the budget context and blocks as budget_exceeded', () => {
+    // The COMPLIANT path: the adapter honored the denial. The audit record
+    // must still show WHICH budget was breached (money-gate evidence), and a
+    // blocked budget-only denial must be findable as a budget block —
+    // cross-door parity with the MCP door's block_reason.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'bob',
+      reason: 'no',
+    })
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    expect(res.status).toBe(201)
+    expect(harness.budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('denied')
+    expect(record?.block_reason).toBe('budget_exceeded')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['name']).toBe('cap')
+    expect(budgets[0]?.['attempted_amount']).toBe(50)
+    expect(budgets[0]?.['allowed']).toBe(false)
+    // Nothing committed: the context blocks carry no kind.
+    expect(budgets[0]?.['kind']).toBeUndefined()
+  })
+
+  it('not_executed audits the evaluate-time snapshot, not the mutated pot', () => {
+    // Between /evaluate and the denial's /audit, OTHER calls may spend on
+    // the same pot. The record must show what the approver decided on — the
+    // evaluate-time numbers — not whatever the pot looks like later.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget({ limit: 100 })] })
+
+    // Breach: 150 > 100 → ticket. Evaluate-time snapshot: spent 0.
+    const res = harness.service.evaluate(stripeEval(150))
+    const approval = res.body['approval'] as { id: string }
+    const id = res.body['evaluation_id'] as string
+
+    // A concurrent allowed call commits 40 onto the same pot.
+    const other = harness.service.evaluate(stripeEval(40))
+    harness.service.audit(auditInput(other.body['evaluation_id'] as string), 'other')
+    expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(40)
+
+    harness.service.resolveApproval(approval.id, { resolution: 'denied', resolved_by: 'bob' })
+    harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    const record = harness.records.at(-1)?.record
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    // The frozen evaluate-time view: nothing spent yet, 150 attempted.
+    expect(budgets[0]?.['spent']).toBe(0)
+    expect(budgets[0]?.['remaining']).toBe(100)
+    expect(budgets[0]?.['attempted_amount']).toBe(150)
+    expect(budgets[0]?.['allowed']).toBe(false)
+  })
+
+  it('ticket timeout + not_executed blocks as budget_exceeded with the context', () => {
+    const harness = makeService({
+      withApprovals: true,
+      budgets: [bgBudget({ approval: { channel: 'dashboard', timeout: '10s' } })],
+    })
+    const { id } = breachTicket(harness)
+    harness.advance(10_001)
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('timeout')
+    expect(record?.block_reason).toBe('budget_exceeded')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('cap')
+  })
+
+  it('a denied MERGED ticket blocks as approval_denied, still with budget context', () => {
+    // Merged tickets resolve the rule gate first in the settled order, so
+    // the rule-gate reason wins the block_reason; the money context rides
+    // along in evidence_chain.budgets.
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+    })
+    const harness = makeService({ policy, withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'denied', resolved_by: 'bob' })
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    expect(record?.block_reason).toBe('approval_denied')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('cap')
+  })
+
+  it('a merged ticket approval resolves BOTH gates: overage committed at /audit', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'gate', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+    })
+    const rows: Array<Record<string, unknown>> = []
+    const harness = makeService({
+      policy,
+      withApprovals: true,
+      budgets: [bgBudget()],
+      budgetLedger: {
+        commitAll: (batch) => rows.push(...(batch as unknown as Array<Record<string, unknown>>)),
+      },
+    })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    const res = harness.service.audit(auditInput(id), 'h')
+
+    expect(res.status).toBe(201)
+    // One human decision covered the rule gate AND the money gate.
+    expect(rows.map((row) => [row['budget_name'], row['kind']])).toEqual([
+      ['cap', 'approved_overage'],
+    ])
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('approved')
+    expect(record?.block_reason).toBeNull()
+  })
+
+  it('a cancelled dialog + not_executed commits nothing and blocks as cancelled', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'cancelled' })
+    const res = harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    expect(res.status).toBe(201)
+    expect(harness.budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('cancelled')
+    // A dismissed dialog is not a budget verdict: the cancellation reason
+    // stands, with the frozen budget context still on the record.
+    expect(record?.block_reason).toBe('cancelled')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('cap')
+  })
+
+  it('caller mutation of the request or response cannot falsify stored evidence', () => {
+    // Direct embedders share object references with the service: mutating
+    // the arguments object or the returned limits.budgets blocks after
+    // /evaluate must not rewrite the pending entry's audit evidence.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const args: Record<string, unknown> = { amount: 50 }
+    const res = harness.service.evaluate(
+      evalInput({ tool: { name: 'stripe_charge' }, arguments: args }),
+    )
+    expect(res.body['decision']).toBe('require_approval')
+    const approval = res.body['approval'] as { id: string }
+    const id = res.body['evaluation_id'] as string
+
+    // Hostile/buggy embedder: rewrite everything it can reach.
+    args['amount'] = 1
+    const limits = res.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    const block = limits.budgets[0] as Record<string, unknown>
+    block['spent'] = 999_999
+    block['allowed'] = true
+
+    harness.service.resolveApproval(approval.id, { resolution: 'denied', resolved_by: 'bob' })
+    harness.service.audit(auditInput(id, { status: 'not_executed' }), 'h')
+
+    const record = harness.records.at(-1)?.record
+    expect(record?.tool_input).toEqual({ amount: 50 })
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['spent']).toBe(0)
+    expect(budgets[0]?.['allowed']).toBe(false)
+  })
+
+  it('caller mutation cannot rewrite what the APPROVER sees on the ticket', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const args: Record<string, unknown> = { amount: 50 }
+    const res = harness.service.evaluate(
+      evalInput({ tool: { name: 'stripe_charge' }, arguments: args }),
+    )
+    const approval = res.body['approval'] as { id: string }
+
+    args['amount'] = 1
+
+    // The ticket the dashboard/REST surface shows the approver must carry
+    // the evaluate-time payload, not the embedder's later rewrite.
+    const ticket = harness.approvalRouter?.getTicket(approval.id)
+    expect(ticket?.tool_input).toEqual({ amount: 50 })
+  })
+
+  it('/audit still sees the resolution after queue cleanup (evaluation_ttl > retention)', () => {
+    // evaluation_ttl (here 2h) can exceed the queue's 1h resolved-ticket
+    // retention: once cleanup drops the ticket, the resolution must live on
+    // the pending entry, or /audit 409s forever and expiry loses the outcome.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()], ttlMs: 7_200_000 })
+    const { approval, id } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+
+    harness.advance(3_700_000) // past the 1h resolved-ticket retention
+    harness.queue?.cleanup()
+    expect(harness.queue?.get(approval.id)).toBeUndefined()
+
+    const res = harness.service.audit(auditInput(id), 'h')
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    expect(record?.approval_status).toBe('approved')
+    expect(record?.approved_by).toBe('alice')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['kind']).toBe('approved_overage')
+  })
+
+  it('expiry after queue cleanup still preserves the resolution', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()], ttlMs: 7_200_000 })
+    const { approval } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'bob',
+      reason: 'no',
+    })
+
+    harness.advance(3_700_000)
+    harness.queue?.cleanup()
+    harness.advance(3_500_001) // cross the 2h evaluation TTL
+    harness.service.sweep()
+
+    const record = harness.records.at(-1)?.record
+    expect(record?.record_kind).toBe('evaluation_expired')
+    expect(record?.approval_status).toBe('denied')
+    expect(record?.approved_by).toBe('bob')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['approval'] as Record<string, unknown>)['denial_reason']).toBe('no')
+  })
+
+  it('a tuple reload between evaluate and audit keeps the evaluate-time evidence', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const { approval, id } = breachTicket(harness)
+
+    // Hot-reload raises the limit to 500: the frozen charge goes stale.
+    harness.budgetEngine?.reconcile(compileBudgets([bgBudget({ limit: 500 })]))
+
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    const res = harness.service.audit(auditInput(id), 'h')
+
+    expect(res.status).toBe(201)
+    const record = harness.records.at(-1)?.record
+    const chain = record?.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    // The approver saw a limit-10 breach; the record must say so — with the
+    // commit markers added — not describe the reset limit-500 pot.
+    expect(budgets[0]).toMatchObject({
+      name: 'cap',
+      limit: 10,
+      allowed: false,
+      attempted_amount: 50,
+      kind: 'approved_overage',
+      stale: true,
+    })
+    // The reset pot itself is untouched by the stale commit.
+    expect(harness.budgetEngine?.listStates()[0]?.buckets).toEqual([])
+  })
+
+  it('evaluation expiry preserves the resolved ticket outcome and frozen context', () => {
+    // The adapter resolved the ticket but never audited: the expired record
+    // must not erase the human decision or the money-gate evidence.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()], ttlMs: 60_000 })
+    const { approval } = breachTicket(harness)
+    harness.service.resolveApproval(approval.id, {
+      resolution: 'denied',
+      resolved_by: 'bob',
+      reason: 'no',
+    })
+
+    harness.advance(60_001)
+    harness.service.sweep()
+
+    const record = harness.records.at(-1)?.record
+    expect(record?.record_kind).toBe('evaluation_expired')
+    expect(record?.approval_status).toBe('denied')
+    expect(record?.approved_by).toBe('bob')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['approval'] as Record<string, unknown>)['denial_reason']).toBe('no')
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['name']).toBe('cap')
+    expect(budgets[0]?.['attempted_amount']).toBe(50)
+    // Expiry is a reporting failure, not an enforcement block.
+    expect(record?.block_reason).toBeNull()
+    expect(harness.budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
+  })
+
+  it('evaluation expiry of an unresolved ticket records the timeout it forces', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()], ttlMs: 60_000 })
+    breachTicket(harness)
+
+    harness.advance(60_001)
+    harness.service.sweep()
+
+    const record = harness.records.at(-1)?.record
+    expect(record?.record_kind).toBe('evaluation_expired')
+    expect(record?.approval_status).toBe('timeout')
+    const chain = record?.evidence_chain as Record<string, unknown>
+    expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('cap')
+    expect(chain['sideband']).toEqual({ unreported: true })
+  })
+
+  it('scope: "always" on a budget ticket is inert — the next call breaches again', () => {
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const first = breachTicket(harness)
+    harness.service.resolveApproval(first.approval.id, {
+      resolution: 'approved',
+      resolved_by: 'alice',
+      scope: 'always',
+    })
+    expect(harness.service.audit(auditInput(first.id), 'h').status).toBe(201)
+
+    // Identical call: the standing "always" grant must not exist (#127).
+    const second = harness.service.evaluate(stripeEval(50))
+    expect(second.body['decision']).toBe('require_approval')
+    expect(second.body['approval']).toBeTruthy()
+  })
+
+  it('0.1.0-shaped client flow passes end to end: evaluate → resolve → audit', () => {
+    // Mimic what the fielded adapter does with the response: read decision,
+    // read approval.resolve_path, resolve, then audit — nothing else.
+    const harness = makeService({ withApprovals: true, budgets: [bgBudget()] })
+    const res = harness.service.evaluate(stripeEval(50))
+    const body = res.body as {
+      decision: string
+      evaluation_id: string
+      approval?: { id: string; resolve_path: string }
+    }
+    expect(body.decision).toBe('require_approval')
+    expect(body.approval?.resolve_path).toBe(`/approval/${body.approval?.id ?? ''}/resolve`)
+
+    const resolve = harness.service.resolveApproval(body.approval?.id ?? '', {
+      resolution: 'approved',
+      resolved_by: 'operator',
+    })
+    expect(resolve.status).toBe(200)
+    const audit = harness.service.audit(auditInput(body.evaluation_id), 'h')
+    expect(audit.status).toBe(201)
+    expect(harness.budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(50)
   })
 })

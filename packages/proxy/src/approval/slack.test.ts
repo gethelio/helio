@@ -209,6 +209,116 @@ describe('buildApprovalBlocks', () => {
 
     expect(section.text.text).not.toContain('Rule')
   })
+
+  it('renders every breached budget on break-glass tickets (issue #14)', () => {
+    const blocks = buildApprovalBlocks(
+      makeTicket({
+        breached_budgets: [
+          {
+            name: 'daily-cap',
+            limit: 50,
+            spent: 49.1,
+            attempted_amount: 5,
+            currency: 'USD',
+            window: '24h',
+          },
+          {
+            name: 'session-pot',
+            limit: 20,
+            spent: 18,
+            attempted_amount: 5,
+            currency: 'USD',
+            window: 'session',
+          },
+        ],
+      }),
+    )
+    const sections = blocks.filter((b) => b.type === 'section') as Array<{
+      text: { text: string }
+    }>
+    const budgetSection = sections.find((s) => s.text.text.includes('daily-cap'))
+    expect(budgetSection).toBeDefined()
+    const text = budgetSection?.text.text ?? ''
+    expect(text).toContain('daily-cap')
+    expect(text).toContain('session-pot')
+    expect(text).toContain('49.1')
+    expect(text).toContain('50')
+    expect(text).toContain('USD')
+    expect(text).toContain('5')
+  })
+
+  it('omits the budget section on plain rule tickets', () => {
+    const blocks = buildApprovalBlocks(makeTicket())
+    expect(blocks.filter((b) => b.type === 'section')).toHaveLength(1)
+  })
+
+  // Max-length VALID budget names: 64 chars from the config charset.
+  const longName = (i: number) => `budget-${String(i)}-`.padEnd(64, 'x')
+  const bigBreach = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      name: longName(i),
+      limit: 1_000_000.55,
+      spent: 999_999.99,
+      attempted_amount: 123_456.78,
+      currency: 'USDC-LONG',
+      window: 'session',
+    }))
+  const sectionTexts = (blocks: ReturnType<typeof buildApprovalBlocks>) =>
+    blocks
+      .filter((b) => b.type === 'section')
+      .map((b) => (b as { text: { text: string } }).text.text)
+
+  it('renders EVERY breach for large valid configs, within Slack limits', () => {
+    // Slack rejects section text over 3,000 chars and messages over 50
+    // blocks. A large-but-valid config must render every budget identity
+    // and amount — chunked, not summarized away.
+    const breached = bigBreach(120)
+    const blocks = buildApprovalBlocks(makeTicket({ breached_budgets: breached }))
+
+    expect(blocks.length).toBeLessThanOrEqual(50)
+    for (const text of sectionTexts(blocks)) {
+      expect(text.length).toBeLessThanOrEqual(3000)
+    }
+    const all = sectionTexts(blocks).join('\n')
+    for (const b of breached) {
+      expect(all).toContain(b.name)
+    }
+    expect(JSON.stringify(blocks)).not.toMatch(/more breached budget/)
+  })
+
+  it('a pathological breach count discloses the exact omission', () => {
+    const count = 900
+    const blocks = buildApprovalBlocks(makeTicket({ breached_budgets: bigBreach(count) }))
+
+    expect(blocks.length).toBeLessThanOrEqual(50)
+    const rendered = sectionTexts(blocks)
+      .join('\n')
+      .split('\n')
+      .filter((line) => line.startsWith('\u2022 ')).length
+    const context = JSON.stringify(blocks).match(/and (\d+) more breached budgets/)
+    expect(context).not.toBeNull()
+    // Nothing silently dropped: rendered + disclosed === total.
+    expect(rendered + Number(context?.[1])).toBe(count)
+  })
+
+  it('sanitizes budget currency against mrkdwn injection', () => {
+    const blocks = buildApprovalBlocks(
+      makeTicket({
+        breached_budgets: [
+          {
+            name: 'cap',
+            limit: 50,
+            spent: 49,
+            attempted_amount: 5,
+            currency: '<!channel>',
+            window: '24h',
+          },
+        ],
+      }),
+    )
+    const text = JSON.stringify(blocks)
+    expect(text).not.toContain('<!channel>')
+  })
 })
 
 describe('truncate', () => {

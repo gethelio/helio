@@ -98,6 +98,37 @@ describe('ApprovalQueue', () => {
       expect(mustGet(queue, t1.id).tool_name).toBe('tool_a')
       expect(mustGet(queue, t2.id).tool_name).toBe('tool_b')
     })
+
+    it('stores breached budget context on break-glass tickets (issue #14)', () => {
+      const { queue } = createQueue()
+      const breached = [
+        {
+          name: 'daily-cap',
+          limit: 50,
+          spent: 49,
+          attempted_amount: 5,
+          currency: 'USD',
+          window: '24h',
+        },
+        {
+          name: 'weekly',
+          limit: 500,
+          spent: 498,
+          attempted_amount: 5,
+          currency: 'USD',
+          window: '7d',
+        },
+      ]
+      const ticket = queue.add(ticketParams({ breached_budgets: breached }))
+
+      expect(mustGet(queue, ticket.id).breached_budgets).toEqual(breached)
+    })
+
+    it('leaves breached_budgets absent on plain rule tickets', () => {
+      const { queue } = createQueue()
+      const ticket = queue.add(ticketParams())
+      expect('breached_budgets' in mustGet(queue, ticket.id)).toBe(false)
+    })
   })
 
   // -----------------------------------------------------------------------

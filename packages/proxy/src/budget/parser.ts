@@ -1,6 +1,7 @@
 import picomatch from 'picomatch'
 import { parseDuration } from '../config/schema.js'
 import type { BudgetsConfig } from '../config/schema.js'
+import { compileApproval } from '../policy/parser.js'
 import type { CompiledBudget, CompiledBudgetContributor } from './types.js'
 
 /** Default idle TTL for `window: session` pots when `idle_ttl` is omitted. */
@@ -40,6 +41,7 @@ export function compileBudgets(budgets: BudgetsConfig): CompiledBudget[] {
     windowRaw: budget.window,
     key: budget.key,
     onExceed: budget.on_exceed,
+    ...(budget.approval !== undefined && { approval: compileApproval(budget.approval) }),
     contributors: budget.contributors.map((contributor) =>
       compileContributor(contributor, budget.name),
     ),

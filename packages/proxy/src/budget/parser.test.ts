@@ -81,4 +81,36 @@ describe('compileBudgets', () => {
   it('compiles an empty list to an empty list', () => {
     expect(compileBudgets([])).toEqual([])
   })
+
+  describe('break-glass approval (on_exceed: require_approval)', () => {
+    it('carries on_exceed: require_approval through', () => {
+      const [budget] = compileBudgets([budgetConfig({ on_exceed: 'require_approval' })])
+      expect(budget?.onExceed).toBe('require_approval')
+    })
+
+    it('compiles the approval block with durations as milliseconds', () => {
+      const [budget] = compileBudgets([
+        budgetConfig({
+          on_exceed: 'require_approval',
+          approval: {
+            channel: 'oncall',
+            timeout: '120s',
+            delegates: ['dashboard'],
+            escalation_after: '60s',
+          },
+        }),
+      ])
+      expect(budget?.approval).toEqual({
+        channel: 'oncall',
+        timeoutMs: 120_000,
+        delegates: ['dashboard'],
+        escalationAfterMs: 60_000,
+      })
+    })
+
+    it('leaves approval undefined when the config omits it', () => {
+      const [budget] = compileBudgets([budgetConfig({ on_exceed: 'require_approval' })])
+      expect(budget?.approval).toBeUndefined()
+    })
+  })
 })

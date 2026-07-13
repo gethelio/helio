@@ -124,6 +124,94 @@ describe('ApprovalsPage', () => {
     })
   })
 
+  it('renders breached budget context on a pending break-glass ticket (issue #14)', async () => {
+    const breakGlassTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-bg',
+      tool_name: 'stripe_charge',
+      breached_budgets: [
+        {
+          name: 'daily-cap',
+          limit: 50,
+          spent: 49.1,
+          attempted_amount: 5,
+          currency: 'USD',
+          window: '24h',
+        },
+      ],
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [breakGlassTicket], total: 1, limit: 1000, offset: 0 }
+          : { data: [], total: 0, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('stripe_charge')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('stripe_charge'))
+
+    await waitFor(() => {
+      // The approver must see WHAT they are approving past its limit.
+      expect(screen.getByText('Breached Budgets')).toBeTruthy()
+      expect(screen.getByText(/daily-cap/)).toBeTruthy()
+      expect(document.body.textContent).toContain('49.1')
+      expect(document.body.textContent).toContain('50')
+      expect(document.body.textContent).toContain('USD')
+      expect(document.body.textContent).toContain('+5')
+    })
+  })
+
+  it('renders breached budget context on a resolved break-glass ticket (issue #14)', async () => {
+    const resolvedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-bg-resolved',
+      tool_name: 'stripe_charge',
+      status: 'approved',
+      resolved_at: new Date().toISOString(),
+      resolved_by: 'alice',
+      breached_budgets: [
+        {
+          name: 'weekly-cap',
+          limit: 500,
+          spent: 498,
+          attempted_amount: 12,
+          currency: 'EUR',
+          window: '7d',
+        },
+      ],
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [], total: 0, limit: 1000, offset: 0 }
+          : { data: [resolvedTicket], total: 1, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+
+    // The resolved list is lazy-loaded behind its tab.
+    await waitFor(() => {
+      expect(screen.getByText(/Resolved/)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Resolved/))
+
+    await waitFor(() => {
+      expect(screen.getByText('stripe_charge')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('stripe_charge'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Breached Budgets')).toBeTruthy()
+      expect(screen.getByText(/weekly-cap/)).toBeTruthy()
+      expect(document.body.textContent).toContain('498')
+      expect(document.body.textContent).toContain('EUR')
+    })
+  })
+
   it('shows error state on fetch failure', async () => {
     mockFetchApprovals.mockRejectedValue(new Error('Server down'))
     renderPage()

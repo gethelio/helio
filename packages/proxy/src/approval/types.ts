@@ -24,6 +24,22 @@ export type ApprovalStatus =
    */
   | 'cancelled'
 
+/**
+ * One breached budget's context on a break-glass approval ticket (issue #14).
+ *
+ * DTO: snake_case because it rides {@link ApprovalTicket}, which is emitted
+ * verbatim over REST and webhooks. `spent` is the accrued spend BEFORE the
+ * attempted charge; `window` is the raw config string ("1h" | "session").
+ */
+export interface BudgetBreachContext {
+  readonly name: string
+  readonly limit: number
+  readonly spent: number
+  readonly attempted_amount: number
+  readonly currency: string
+  readonly window: string
+}
+
 /** A failed attempt to deliver an approval notification. */
 export interface ApprovalNotificationFailure {
   readonly channel: string
@@ -52,6 +68,14 @@ export interface ApprovalTicket {
   readonly requested_at: string
   readonly timeout_at: string
   readonly timeout_ms: number
+  /**
+   * Every budget the call breached, when this is a break-glass (budget) or
+   * merged rule+budget ticket (issue #14). Its presence marks the ticket as
+   * budget-context: one approval covers every listed overage, the approval is
+   * scope-once by definition (issue #127 interlock — a `scope: "always"`
+   * resolution grants nothing beyond this call), and timeout fails closed.
+   */
+  readonly breached_budgets?: readonly BudgetBreachContext[]
   status: ApprovalStatus
   resolved_at?: string
   resolved_by?: string

@@ -29,15 +29,22 @@ import {
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
   buildBudgetExceededFeedback,
+  buildBudgetApprovalDeniedFeedback,
+  buildBudgetApprovalTimeoutFeedback,
   ruleInfo,
 } from '../feedback/self-repair.js'
 import type { ApprovalRouter } from '../approval/router.js'
-import type { ApprovalAuditContext, ApprovalOutcome } from '../approval/types.js'
+import type {
+  ApprovalAuditContext,
+  ApprovalOutcome,
+  BudgetBreachContext,
+} from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
 import { spendBucketKey } from './spend-limiter.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
+import type { CompiledApproval } from './types.js'
 
 /** Custom JSON-RPC error code for policy denials. */
 const POLICY_DENIED = -32001
@@ -86,7 +93,7 @@ function blocked(result: ForwardResult): ActionGateResult {
 /** Phase-2 outcome: the budget gate's verdict plus its audit chain blocks. */
 type BudgetGateResult =
   | {
-      proceed: true
+      kind: 'proceed'
       result?: undefined
       /** Wire-ready per-budget blocks for the audit record's evidence_chain. */
       chain?: Array<Record<string, unknown>>
@@ -94,11 +101,44 @@ type BudgetGateResult =
       commit?: (auditRecordId: string) => Array<Record<string, unknown>>
     }
   | {
-      proceed: false
+      kind: 'blocked'
       result: ForwardResult
       chain: Array<Record<string, unknown>>
       commit?: undefined
     }
+  | {
+      /**
+       * Every breach is `on_exceed: require_approval` (issue #14): the caller
+       * awaits one composite break-glass ticket, then either commits (breached
+       * budgets as `approved_overage`, the rest as `spend`) and forwards, or
+       * blocks with nothing recorded.
+       */
+      kind: 'approval'
+      result?: undefined
+      chain: Array<Record<string, unknown>>
+      /** Records all charges with break-glass kinds; returns chain blocks. */
+      commit: (auditRecordId: string) => Array<Record<string, unknown>>
+      /** The breached entries the ticket lists (config order). */
+      breaches: BudgetPeekEntry[]
+      /** Ticket context for `ApprovalTicket.breached_budgets`. */
+      breachContexts: BudgetBreachContext[]
+      /**
+       * Routing for the composite ticket: the FIRST breached budget's
+       * approval config (deterministic config-order tie-break), with the
+       * dashboard channel as the explicit fallback so the matched rule's
+       * approval config can never leak into a budget ticket.
+       */
+      approval: CompiledApproval
+    }
+
+/** The break-glass outcome the audit record attributes (issue #14). */
+interface BudgetApprovalAudit {
+  outcome: ApprovalOutcome
+  /** Snapshotted at resolution time — the queue may clean the ticket later. */
+  denialReason?: string
+  escalatedAt?: string
+  escalatedTo?: string[]
+}
 
 /** Wire-ready evidence_chain block for one budget's view of a call. */
 function budgetChainBlock(
@@ -360,9 +400,31 @@ export class GovernedForwarder implements McpForwarder {
     })
   }
 
-  private async handleToolsCall(request: McpRequest): Promise<ForwardResult> {
+  private async handleToolsCall(original: McpRequest): Promise<ForwardResult> {
     const startTime = performance.now()
     const timestamp = new Date().toISOString()
+
+    // Freeze the governed payload. The caller shares `params` by reference,
+    // and the approval paths await between the decision and the forward: a
+    // mutation during that wait could otherwise forward (and audit) a
+    // different call than the one that was evaluated, approved, and charged.
+    // JSON-parsed params always clone; a non-cloneable payload is a direct
+    // embedder passing something that could never serialize upstream
+    // faithfully — fail closed. (Signal and ids carry over untouched.)
+    let request: McpRequest
+    try {
+      request =
+        original.params === undefined
+          ? original
+          : { ...original, params: structuredClone(original.params) }
+    } catch {
+      return makeErrorResult(
+        original,
+        INVALID_PARAMS,
+        'tools/call params must be JSON-serializable',
+        { blocked: true, reason: 'invalid_params' },
+      )
+    }
     const params = request.params as Record<string, unknown> | undefined
     const toolName = typeof params?.['name'] === 'string' ? params['name'] : undefined
 
@@ -418,6 +480,7 @@ export class GovernedForwarder implements McpForwarder {
      * the single forward site, not derived after the fact. */
     let forwarded = false
     let budgetsChain: Array<Record<string, unknown>> | undefined
+    let budgetApproval: BudgetApprovalAudit | undefined
     try {
       if (isDryRun) {
         result = this.handleDryRun(request, decision, toolName, toolArguments, evidenceBlocked)
@@ -452,18 +515,40 @@ export class GovernedForwarder implements McpForwarder {
           // Phase 2 — budget gate: peek every matching budget, all-or-nothing.
           const budgetGate = this.gateBudgets(request, decision, toolName, toolArguments)
           budgetsChain = budgetGate.chain
-          if (!budgetGate.proceed) {
+          // Break-glass (issue #14): every breach is require_approval, so one
+          // composite ticket is awaited here. This is the only await between
+          // the budget peek and the commit; after approval the commit runs
+          // WITHOUT re-peeking (the human decision is authoritative — a
+          // re-peek could deny an approved call), same authority argument as
+          // post-approval rule-limit recording.
+          let budgetBlock: ForwardResult | undefined
+          if (budgetGate.kind === 'approval') {
+            const held = await this.handleBudgetApproval(
+              request,
+              decision,
+              toolName,
+              toolArguments,
+              budgetGate,
+            )
+            budgetApproval = held.audit
+            approvalWaitMs += held.waitMs
+            if (!held.proceed) budgetBlock = held.result
+          }
+          if (budgetGate.kind === 'blocked') {
             result = budgetGate.result
+          } else if (budgetBlock) {
+            result = budgetBlock
           } else {
-            // Phase 3 — commit, then the single forward site. No await sits
-            // between the gates' peeks and these commits, so two concurrent
-            // calls cannot double-spend the last slot. The fallible budget
-            // ledger commits FIRST: a durable-write failure must block the
-            // call WITHOUT having consumed the rule counters, and it reports
-            // its own failure class instead of masquerading as an upstream
-            // error. INVARIANT: commitRuleLimit below must not throw (it
-            // records with config-validated params) — a throw there would
-            // block the call with the budget spend already durably counted.
+            // Phase 3 — commit, then the single forward site. On the
+            // no-approval path no await sits between the gates' peeks and
+            // these commits, so two concurrent calls cannot double-spend the
+            // last slot. The fallible budget ledger commits FIRST: a
+            // durable-write failure must block the call WITHOUT having
+            // consumed the rule counters, and it reports its own failure
+            // class instead of masquerading as an upstream error.
+            // INVARIANT: commitRuleLimit below must not throw (it records
+            // with config-validated params) — a throw there would block the
+            // call with the budget spend already durably counted.
             let ledgerBlock: ForwardResult | undefined
             try {
               budgetsChain = budgetGate.commit?.(auditRecordId) ?? budgetsChain
@@ -536,12 +621,128 @@ export class GovernedForwarder implements McpForwarder {
       rateLimitResult,
       spendLimitResult,
       budgetsChain,
+      budgetApproval,
       isDryRun,
       forwardingError,
       driftEvent ? { event: driftEvent, mode: driftMode } : undefined,
     )
 
     return result
+  }
+
+  /**
+   * Await the composite break-glass ticket for a budget overage (issue #14).
+   *
+   * The ticket is routed by the BUDGET's approval config (first breached
+   * budget in config order), never the matched rule's. Deviation from rule
+   * approvals, by design: timeout ALWAYS fails closed — `default_on_timeout:
+   * allow` would forward an unapproved overage, and recording it as
+   * `approved_overage` would be a lie while not recording it would corrupt
+   * the pot. Money gates do not fail open.
+   */
+  private async handleBudgetApproval(
+    request: McpRequest,
+    decision: PolicyDecision,
+    toolName: string,
+    toolArguments: Record<string, unknown> | undefined,
+    gate: Extract<BudgetGateResult, { kind: 'approval' }>,
+  ): Promise<{
+    proceed: boolean
+    result?: ForwardResult
+    audit: BudgetApprovalAudit
+    waitMs: number
+  }> {
+    // gateBudgets only yields the approval variant when a router exists.
+    const router = this.approvalRouter as ApprovalRouter
+
+    const approvalStart = performance.now()
+    const outcome = await router.submit(
+      {
+        tool_name: toolName,
+        tool_input: toolArguments ?? {},
+        matched_rule: decision.matchedRule,
+        session_id: request.sessionId ?? null,
+        breached_budgets: gate.breachContexts,
+        approval: gate.approval,
+      },
+      request.signal,
+    )
+    const waitMs = performance.now() - approvalStart
+
+    // Snapshot resolution context now — the queue's resolved-ticket retention
+    // may outlive a long upstream call.
+    const ticket = outcome.ticketId ? router.getTicket(outcome.ticketId) : undefined
+    const denialReason = outcome.status === 'denied' && outcome.reason ? outcome.reason : undefined
+    const audit: BudgetApprovalAudit = {
+      outcome,
+      ...(denialReason ? { denialReason } : {}),
+      ...(ticket?.escalated_at
+        ? { escalatedAt: ticket.escalated_at, escalatedTo: [...(ticket.escalated_to ?? [])] }
+        : {}),
+    }
+
+    if (outcome.status === 'approved' || outcome.status === 'break_glass') {
+      if (request.signal?.aborted) {
+        return {
+          proceed: false,
+          result: this.makeClientDisconnectedBlockResult(request, decision),
+          audit,
+          waitMs,
+        }
+      }
+      return { proceed: true, audit, waitMs }
+    }
+    if (outcome.status === 'denied') {
+      const feedback = buildBudgetApprovalDeniedFeedback(
+        decision,
+        gate.breaches,
+        outcome.resolvedBy,
+        outcome.reason,
+      )
+      return {
+        proceed: false,
+        result: makeErrorResult(
+          request,
+          POLICY_DENIED,
+          `Budget overage denied by ${outcome.resolvedBy}`,
+          { ...feedback },
+        ),
+        audit,
+        waitMs,
+      }
+    }
+    if (outcome.status === 'client_disconnected' || request.signal?.aborted) {
+      return {
+        proceed: false,
+        result: this.makeClientDisconnectedBlockResult(request, decision),
+        audit,
+        waitMs,
+      }
+    }
+    if (outcome.status === 'shutdown_cancelled') {
+      const feedback = buildShutdownCancelledFeedback(decision)
+      return {
+        proceed: false,
+        result: makeErrorResult(
+          request,
+          POLICY_DENIED,
+          'Budget approval cancelled by proxy shutdown',
+          { ...feedback },
+        ),
+        audit,
+        waitMs,
+      }
+    }
+    // timeout — fail closed unconditionally; defaultOnTimeout never applies.
+    const feedback = buildBudgetApprovalTimeoutFeedback(decision, gate.breaches, outcome.timeoutMs)
+    return {
+      proceed: false,
+      result: makeErrorResult(request, POLICY_DENIED, 'Budget approval timed out', {
+        ...feedback,
+      }),
+      audit,
+      waitMs,
+    }
   }
 
   /** writeAuditRecord, isolated: an audit-writer bug must not reject the response. */
@@ -620,10 +821,13 @@ export class GovernedForwarder implements McpForwarder {
   /**
    * Phase 2: check every budget the call feeds, all-or-nothing (issue #14).
    *
-   * Any breach denies (this release only ships `on_exceed: deny`) and records
-   * NOTHING on any budget — rejected calls never consume budget anywhere. On
-   * proceed, the returned `commit` records every charge together (ledger rows
-   * first, atomically, referencing the pre-generated audit id).
+   * Any `on_exceed: deny` breach (or invalid amount) denies and records
+   * NOTHING on any budget — rejected calls never consume budget anywhere.
+   * Breaches that are all `on_exceed: require_approval` yield the `approval`
+   * variant: one composite break-glass ticket per call, and only an explicit
+   * approval commits (breached budgets as `approved_overage`). On proceed,
+   * the returned `commit` records every charge together (ledger rows first,
+   * atomically, referencing the pre-generated audit id).
    */
   private gateBudgets(
     request: McpRequest,
@@ -632,7 +836,7 @@ export class GovernedForwarder implements McpForwarder {
     toolArguments: Record<string, unknown> | undefined,
   ): BudgetGateResult {
     const engine = this.budgetEngine
-    if (!engine) return { proceed: true }
+    if (!engine) return { kind: 'proceed' }
 
     const { charges, failures } = engine.resolveCharges({
       toolName,
@@ -641,15 +845,20 @@ export class GovernedForwarder implements McpForwarder {
       senderId: null, // adapter context; absent on the MCP path
     })
 
-    if (charges.length === 0 && failures.length === 0) return { proceed: true }
+    if (charges.length === 0 && failures.length === 0) return { kind: 'proceed' }
 
     // Peek the valid charges even when failures deny the call — the feedback
     // must show every failure AND every simultaneous breach, with real
     // bucket snapshots throughout.
     const peek = charges.length > 0 ? engine.peekAll(charges) : { allowed: true, entries: [] }
     const breaches = peek.entries.filter((entry) => !entry.allowed)
+    // A single deny-breach (or invalid amount) denies the call outright —
+    // the money gate forbids what a break-glass approver would be asked to
+    // allow, so no ticket is raised for the require_approval breaches either.
+    const anyHardDeny =
+      failures.length > 0 || breaches.some((entry) => entry.budget.onExceed === 'deny')
 
-    if (failures.length > 0 || !peek.allowed) {
+    if (anyHardDeny) {
       if (failures.length > 0) {
         // eslint-disable-next-line no-console -- Intentional operational warning
         console.error(
@@ -665,7 +874,7 @@ export class GovernedForwarder implements McpForwarder {
           ? `Budget denied: invalid amount for ${failures.map((f) => `"${f.budget.name}"`).join(', ')}`
           : `Budget exceeded: ${breaches.map((entry) => `"${entry.budget.name}"`).join(', ')}`
       return {
-        proceed: false,
+        kind: 'blocked',
         result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
         chain: [
           ...peek.entries.map((entry) => budgetChainBlock(entry)),
@@ -683,19 +892,81 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
+    // Evidence for STALE commits (a tuple reload landed mid-flight) keeps
+    // the evaluate-time block the gate — and any approver — actually saw,
+    // with only the commit markers added; the post-record snapshot would
+    // describe the RESET pot (new limit, allowed: true) and make an approved
+    // overage read as an ordinary allowed call.
+    const peekBlockByName = new Map(
+      peek.entries.map((entry) => [entry.budget.name, budgetChainBlock(entry)]),
+    )
+    const commit = (
+      auditRecordId: string,
+      kinds?: ReadonlyMap<string, 'spend' | 'approved_overage'>,
+    ) =>
+      engine
+        .recordAll(charges, {
+          kind: 'spend',
+          ...(kinds ? { kinds } : {}),
+          auditRecordId,
+          origin: 'mcp',
+          toolName,
+          timestampIso: new Date().toISOString(),
+        })
+        .map((entry) => {
+          const kind = kinds?.get(entry.budget.name) ?? 'spend'
+          const frozen = peekBlockByName.get(entry.budget.name)
+          return entry.stale && frozen
+            ? { ...frozen, kind, stale: true }
+            : budgetChainBlock(entry, kind)
+        })
+
+    if (breaches.length > 0) {
+      // Every breach is require_approval. Without a router the money gate
+      // cannot ask anyone — fail closed exactly like a deny breach. (Config
+      // validation demands approval capability for break-glass budgets, so
+      // this guards direct embedders, not `helio start`.)
+      if (!this.approvalRouter) {
+        // eslint-disable-next-line no-console -- Intentional operational warning
+        console.error(
+          `[helio] Budget ${breaches.map((b) => `"${b.budget.name}"`).join(', ')} requires break-glass approval but no approval router is configured; denying request`,
+        )
+        const feedback = buildBudgetExceededFeedback(decision, breaches, [])
+        return {
+          kind: 'blocked',
+          result: makeErrorResult(
+            request,
+            POLICY_DENIED,
+            `Budget exceeded: ${breaches.map((entry) => `"${entry.budget.name}"`).join(', ')}`,
+            { ...feedback },
+          ),
+          chain: peek.entries.map((entry) => budgetChainBlock(entry)),
+        }
+      }
+      const kinds = new Map<string, 'spend' | 'approved_overage'>(
+        breaches.map((entry) => [entry.budget.name, 'approved_overage' as const]),
+      )
+      return {
+        kind: 'approval',
+        chain: peek.entries.map((entry) => budgetChainBlock(entry)),
+        commit: (auditRecordId) => commit(auditRecordId, kinds),
+        breaches,
+        breachContexts: breaches.map((entry) => ({
+          name: entry.budget.name,
+          limit: entry.budget.limit,
+          spent: entry.spent,
+          attempted_amount: entry.amount,
+          currency: entry.budget.currency,
+          window: entry.budget.windowRaw,
+        })),
+        approval: breaches[0]?.budget.approval ?? { channel: 'dashboard' },
+      }
+    }
+
     return {
-      proceed: true,
+      kind: 'proceed',
       chain: peek.entries.map((entry) => budgetChainBlock(entry)),
-      commit: (auditRecordId) =>
-        engine
-          .recordAll(charges, {
-            kind: 'spend',
-            auditRecordId,
-            origin: 'mcp',
-            toolName,
-            timestampIso: new Date().toISOString(),
-          })
-          .map((entry) => budgetChainBlock(entry, 'spend')),
+      commit: (auditRecordId) => commit(auditRecordId),
     }
   }
 
@@ -1214,6 +1485,7 @@ export class GovernedForwarder implements McpForwarder {
     rateLimitResult?: RateLimitResult,
     spendLimitResult?: SpendLimitResult,
     budgetsChain?: Array<Record<string, unknown>>,
+    budgetApproval?: BudgetApprovalAudit,
     isDryRun?: boolean,
     forwardingError?: Error,
     drift?: { event: ToolDriftEvent; mode: 'block' | 'require_approval' | 'log' },
@@ -1245,12 +1517,21 @@ export class GovernedForwarder implements McpForwarder {
 
     // Build evidence chain, augmenting with break-glass metadata if applicable
     let evidenceChain = buildEvidenceChain(evidenceResult, dependencyResult, evidenceBlocked)
-    if (approvalOutcome?.status === 'break_glass' && 'reason' in approvalOutcome) {
+    // The prominent break-glass flag comes from whichever gate was
+    // force-approved; when both were, the rule gate wins the block and the
+    // budget resolution stays fully described in `budget_approval` below.
+    const breakGlassOutcome =
+      approvalOutcome?.status === 'break_glass'
+        ? approvalOutcome
+        : budgetApproval?.outcome.status === 'break_glass'
+          ? budgetApproval.outcome
+          : undefined
+    if (breakGlassOutcome && 'reason' in breakGlassOutcome) {
       evidenceChain = {
         ...(evidenceChain ?? {}),
         break_glass: {
-          reason: approvalOutcome.reason,
-          invoked_by: approvalOutcome.resolvedBy,
+          reason: breakGlassOutcome.reason,
+          invoked_by: breakGlassOutcome.resolvedBy,
         },
       }
     }
@@ -1258,6 +1539,29 @@ export class GovernedForwarder implements McpForwarder {
       evidenceChain = {
         ...(evidenceChain ?? {}),
         approval: { ...approvalContext },
+      }
+    }
+    // Budget break-glass attribution (issue #14): unlike the rule-approval
+    // block (emitted only with content), this is UNCONDITIONAL whenever a
+    // composite ticket was raised — the approval_status column can only hold
+    // one outcome, and on a two-decision call it keeps its rule-gate meaning,
+    // so this block is where the money decision lives.
+    if (budgetApproval && budgetApproval.outcome.ticketId) {
+      const outcome = budgetApproval.outcome
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        budget_approval: {
+          ticket_id: outcome.ticketId,
+          status: outcome.status,
+          ...('resolvedBy' in outcome ? { resolved_by: outcome.resolvedBy } : {}),
+          ...(budgetApproval.denialReason ? { denial_reason: budgetApproval.denialReason } : {}),
+          ...(budgetApproval.escalatedAt
+            ? {
+                escalated_at: budgetApproval.escalatedAt,
+                escalated_to: budgetApproval.escalatedTo ?? [],
+              }
+            : {}),
+        },
       }
     }
     if (rateLimitResult) {
@@ -1317,9 +1621,11 @@ export class GovernedForwarder implements McpForwarder {
       matched_rule: decision.matchedRule?.name ?? null,
       matched_rule_index: decision.matchedRule?.index ?? null,
       evidence_chain: evidenceChain,
-      approval_status: approvalOutcome?.status ?? null,
-      approved_by:
-        approvalOutcome && 'resolvedBy' in approvalOutcome ? approvalOutcome.resolvedBy : null,
+      // The approval columns describe the rule gate when one ran; on a
+      // budget-only ticket (no rule approval) they carry the break-glass
+      // outcome so a human-denied overage reads as denied here too.
+      approval_status: (approvalOutcome ?? budgetApproval?.outcome)?.status ?? null,
+      approved_by: approvedByOf(approvalOutcome ?? budgetApproval?.outcome),
       upstream_response: actuallyForwarded && !hadForwardingError ? result.response.body : null,
       upstream_error: upstreamError,
       upstream_http_status: upstreamHttpStatus,
@@ -1339,7 +1645,8 @@ export class GovernedForwarder implements McpForwarder {
     // flush queue. Ordinary allows stay buffered to reduce write churn.
     // Crash durability is preserved by the process-level crash-drain hook,
     // which synchronously flushes the writer before exit.
-    const isEnforcementDecision = !isDryRun && (!forwarded || approvalOutcome !== undefined)
+    const isEnforcementDecision =
+      !isDryRun && (!forwarded || approvalOutcome !== undefined || budgetApproval !== undefined)
     if (isEnforcementDecision) {
       this.auditWriter.pushImmediate(record, auditRecordId)
     } else {
@@ -1516,6 +1823,11 @@ function makeErrorResult(
     body,
   }
   return { response, durationMs: 0 }
+}
+
+/** The resolver identity of an outcome, when it carries one. */
+function approvedByOf(outcome: ApprovalOutcome | undefined): string | null {
+  return outcome && 'resolvedBy' in outcome ? outcome.resolvedBy : null
 }
 
 /** Check if a ForwardResult contains a JSON-RPC error response. */

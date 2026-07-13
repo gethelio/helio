@@ -1031,6 +1031,96 @@ describe('helioConfigSchema', () => {
     })
   })
 
+  describe('approval channel registry hygiene (issue #14 riders)', () => {
+    const slackChannel = (overrides: Record<string, unknown> = {}) => ({
+      type: 'slack',
+      bot_token: 'xoxb-123',
+      signing_secret: 'abc123',
+      channel: '#approvals',
+      ...overrides,
+    })
+
+    it('rejects a non-dashboard channel that takes the reserved dashboard key', () => {
+      // createChannels seeds the built-in dashboard fallback first; a slack
+      // channel named "dashboard" would silently replace it.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: { channels: [slackChannel({ name: 'dashboard' })] },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const paths = result.error.issues.map((i) => i.path.join('.'))
+      expect(paths).toContain('approval.channels.0.name')
+    })
+
+    it('accepts a dashboard-type channel named dashboard (harmless re-registration)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: { channels: [{ type: 'dashboard', name: 'dashboard' }] },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects duplicate effective channel keys (last-write-wins is silent)', () => {
+      const named = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: {
+            channels: [
+              slackChannel({ name: 'oncall' }),
+              { type: 'webhook', name: 'oncall', url: 'https://example.com/hook' },
+            ],
+          },
+          dashboard: { enabled: true, api_secret: 'unit-test-secret' },
+        }),
+      )
+      expect(named.success).toBe(false)
+
+      const unnamedPair = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: { channels: [slackChannel(), slackChannel({ channel: '#other' })] },
+        }),
+      )
+      expect(unnamedPair.success).toBe(false)
+    })
+
+    it('rejects empty channel names and empty approval references', () => {
+      const emptyName = helioConfigSchema.safeParse(
+        minimalConfig({ approval: { channels: [slackChannel({ name: '' })] } }),
+      )
+      expect(emptyName.success).toBe(false)
+
+      const emptyReference = helioConfigSchema.safeParse(
+        minimalConfig({
+          dashboard: { enabled: true, api_secret: 'unit-test-secret' },
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'require_approval', approval: { channel: '' } },
+            ],
+          },
+        }),
+      )
+      expect(emptyReference.success).toBe(false)
+
+      const emptyDelegate = helioConfigSchema.safeParse(
+        minimalConfig({
+          dashboard: { enabled: true, api_secret: 'unit-test-secret' },
+          policies: {
+            rules: [
+              {
+                match: { tool: '*' },
+                action: 'require_approval',
+                approval: { channel: 'dashboard', delegates: [''], escalation_after: '60s' },
+              },
+            ],
+          },
+        }),
+      )
+      expect(emptyDelegate.success).toBe(false)
+    })
+  })
+
   describe('budgets (issue #14)', () => {
     const validBudget = {
       name: 'daily-cap',
@@ -1140,13 +1230,6 @@ describe('helioConfigSchema', () => {
       expect(result.success).toBe(false)
     })
 
-    it('rejects on_exceed: require_approval (ships in a later change)', () => {
-      const result = helioConfigSchema.safeParse(
-        withBudgets([{ ...validBudget, on_exceed: 'require_approval' }]),
-      )
-      expect(result.success).toBe(false)
-    })
-
     it('accepts on_exceed: deny explicitly', () => {
       const result = helioConfigSchema.safeParse(
         withBudgets([{ ...validBudget, on_exceed: 'deny' }]),
@@ -1159,6 +1242,353 @@ describe('helioConfigSchema', () => {
         withBudgets([{ ...validBudget, approval: { channel: 'dashboard' } }]),
       )
       expect(result.success).toBe(false)
+      if (result.success) return
+      const paths = result.error.issues.map((i) => i.path.join('.'))
+      expect(paths).toContain('budgets.0.approval')
+    })
+
+    describe('break-glass (on_exceed: require_approval)', () => {
+      // Dashboard-routed budget tickets need the dashboard SERVER, not just
+      // the secret — its approvals API is the only resolution surface.
+      const secured = { dashboard: { enabled: true, api_secret: 'unit-test-secret' } }
+      const breakGlassBudget = { ...validBudget, on_exceed: 'require_approval' }
+
+      it('accepts require_approval with dashboard.api_secret set', () => {
+        const result = helioConfigSchema.safeParse(withBudgets([breakGlassBudget], secured))
+        expect(result.success).toBe(true)
+      })
+
+      it('rejects require_approval without dashboard.api_secret (requiresSecret join)', () => {
+        const result = helioConfigSchema.safeParse(withBudgets([breakGlassBudget]))
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const paths = result.error.issues.map((i) => i.path.join('.'))
+        expect(paths).toContain('dashboard.api_secret')
+      })
+
+      it('accepts require_approval without an approval block (dashboard fallback)', () => {
+        const result = helioConfigSchema.safeParse(withBudgets([breakGlassBudget], secured))
+        expect(result.success).toBe(true)
+        if (!result.success) return
+        expect(result.data.budgets[0]?.approval).toBeUndefined()
+      })
+
+      it('accepts an approval block referencing the built-in dashboard channel', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets(
+            [{ ...breakGlassBudget, approval: { channel: 'dashboard', timeout: '120s' } }],
+            secured,
+          ),
+        )
+        expect(result.success).toBe(true)
+      })
+
+      it('accepts an approval block referencing a configured named channel', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'oncall' } }], {
+            ...secured,
+            approval: {
+              channels: [
+                {
+                  type: 'slack',
+                  name: 'oncall',
+                  bot_token: 'xoxb-123',
+                  signing_secret: 'abc123',
+                  channel: '#approvals',
+                },
+              ],
+            },
+          }),
+        )
+        expect(result.success).toBe(true)
+      })
+
+      it('rejects an approval channel that references no configured channel', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'nowhere' } }], secured),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const paths = result.error.issues.map((i) => i.path.join('.'))
+        expect(paths).toContain('budgets.0.approval.channel')
+      })
+
+      it('rejects a delegate that references no configured channel', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets(
+            [
+              {
+                ...breakGlassBudget,
+                approval: {
+                  channel: 'dashboard',
+                  delegates: ['nowhere'],
+                  escalation_after: '60s',
+                },
+              },
+            ],
+            secured,
+          ),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const paths = result.error.issues.map((i) => i.path.join('.'))
+        expect(paths).toContain('budgets.0.approval.delegates.0')
+      })
+
+      it('rejects unknown approval fields (strict, same schema as rules)', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets(
+            [{ ...breakGlassBudget, approval: { channel: 'dashboard', surprise: true } }],
+            secured,
+          ),
+        )
+        expect(result.success).toBe(false)
+      })
+
+      it('rejects a bare-type reference to a NAMED channel (runtime registers name only)', () => {
+        // createChannels keys slack/webhook channels by `name ?? type`: a
+        // named Slack channel is NOT reachable as "slack", so validating the
+        // type would accept a channel that never gets a notification.
+        const namedSlack = {
+          approval: {
+            channels: [
+              {
+                type: 'slack',
+                name: 'oncall',
+                bot_token: 'xoxb-123',
+                signing_secret: 'abc123',
+                channel: '#approvals',
+              },
+            ],
+          },
+        }
+        const budget = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'slack' } }], {
+            ...secured,
+            ...namedSlack,
+          }),
+        )
+        expect(budget.success).toBe(false)
+        if (budget.success) return
+        expect(budget.error.issues.map((i) => i.path.join('.'))).toContain(
+          'budgets.0.approval.channel',
+        )
+
+        const rule = helioConfigSchema.safeParse(
+          minimalConfig({
+            ...secured,
+            ...namedSlack,
+            policies: {
+              rules: [
+                {
+                  match: { tool: '*' },
+                  action: 'require_approval',
+                  approval: { channel: 'slack' },
+                },
+              ],
+            },
+          }),
+        )
+        expect(rule.success).toBe(false)
+        if (rule.success) return
+        expect(rule.error.issues.map((i) => i.path.join('.'))).toContain(
+          'policies.rules.0.approval.channel',
+        )
+      })
+
+      it('still accepts a bare-type reference to an UNNAMED channel', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'slack' } }], {
+            dashboard: { enabled: false, api_secret: 'unit-test-secret' },
+            approval: {
+              channels: [
+                {
+                  type: 'slack',
+                  bot_token: 'xoxb-123',
+                  signing_secret: 'abc123',
+                  channel: '#approvals',
+                },
+              ],
+            },
+          }),
+        )
+        expect(result.success).toBe(true)
+      })
+
+      it('a named dashboard-type channel stays reachable under both keys', () => {
+        const result = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'ops' } }], {
+            ...secured,
+            approval: { channels: [{ type: 'dashboard', name: 'ops' }] },
+          }),
+        )
+        expect(result.success).toBe(true)
+      })
+
+      it('rejects the dashboard fallback when the dashboard server is disabled', () => {
+        // No approval block → channel defaults to dashboard; with the
+        // dashboard disabled the ticket would have no resolution surface and
+        // always time out (fail closed — dead config).
+        const result = helioConfigSchema.safeParse(
+          withBudgets([breakGlassBudget], {
+            dashboard: { enabled: false, api_secret: 'unit-test-secret' },
+          }),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const paths = result.error.issues.map((i) => i.path.join('.'))
+        expect(paths).toContain('budgets.0.on_exceed')
+      })
+
+      it('rejects an explicit dashboard channel or delegate when the dashboard is disabled', () => {
+        const noDashboard = { dashboard: { enabled: false, api_secret: 'unit-test-secret' } }
+        const explicit = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'dashboard' } }], noDashboard),
+        )
+        expect(explicit.success).toBe(false)
+
+        const viaDelegate = helioConfigSchema.safeParse(
+          withBudgets(
+            [
+              {
+                ...breakGlassBudget,
+                approval: {
+                  channel: 'slack',
+                  delegates: ['dashboard'],
+                  escalation_after: '60s',
+                },
+              },
+            ],
+            {
+              ...noDashboard,
+              approval: {
+                channels: [
+                  {
+                    type: 'slack',
+                    bot_token: 'xoxb-123',
+                    signing_secret: 'abc123',
+                    channel: '#approvals',
+                  },
+                ],
+              },
+            },
+          ),
+        )
+        expect(viaDelegate.success).toBe(false)
+      })
+
+      it('a dashboard delegate with no escalation timer is inert, not rejected', () => {
+        // Without escalation_after the delegate list never fires at runtime,
+        // so the dashboard-availability guard must not reject it.
+        const result = helioConfigSchema.safeParse(
+          withBudgets(
+            [{ ...breakGlassBudget, approval: { channel: 'slack', delegates: ['dashboard'] } }],
+            {
+              dashboard: { enabled: false, api_secret: 'unit-test-secret' },
+              approval: {
+                channels: [
+                  {
+                    type: 'slack',
+                    bot_token: 'xoxb-123',
+                    signing_secret: 'abc123',
+                    channel: '#approvals',
+                  },
+                ],
+              },
+            },
+          ),
+        )
+        expect(result.success).toBe(true)
+      })
+
+      it('non-viable escalation timers make dashboard delegates inert (router parity)', () => {
+        // The router escalates only when 0 < escalation_after < the
+        // effective timeout; a timer that can never fire must not trip the
+        // dashboard-availability guard.
+        const base = {
+          dashboard: { enabled: false, api_secret: 'unit-test-secret' },
+          approval: {
+            timeout: '300s',
+            channels: [
+              {
+                type: 'slack',
+                bot_token: 'xoxb-123',
+                signing_secret: 'abc123',
+                channel: '#approvals',
+              },
+            ],
+          },
+        }
+        const zero = helioConfigSchema.safeParse(
+          withBudgets(
+            [
+              {
+                ...breakGlassBudget,
+                approval: { channel: 'slack', delegates: ['dashboard'], escalation_after: '0s' },
+              },
+            ],
+            base,
+          ),
+        )
+        expect(zero.success).toBe(true)
+
+        const tooLate = helioConfigSchema.safeParse(
+          withBudgets(
+            [
+              {
+                ...breakGlassBudget,
+                approval: {
+                  channel: 'slack',
+                  timeout: '60s',
+                  delegates: ['dashboard'],
+                  escalation_after: '60s',
+                },
+              },
+            ],
+            base,
+          ),
+        )
+        expect(tooLate.success).toBe(true)
+
+        // Past the GLOBAL default timeout when the budget sets none.
+        const pastGlobal = helioConfigSchema.safeParse(
+          withBudgets(
+            [
+              {
+                ...breakGlassBudget,
+                approval: {
+                  channel: 'slack',
+                  delegates: ['dashboard'],
+                  escalation_after: '600s',
+                },
+              },
+            ],
+            base,
+          ),
+        )
+        expect(pastGlobal.success).toBe(true)
+      })
+
+      it('accepts a slack-routed budget with the dashboard disabled', () => {
+        // Slack tickets resolve through the Slack action callbacks on the
+        // main proxy server; no dashboard needed.
+        const result = helioConfigSchema.safeParse(
+          withBudgets([{ ...breakGlassBudget, approval: { channel: 'slack' } }], {
+            dashboard: { enabled: false, api_secret: 'unit-test-secret' },
+            approval: {
+              channels: [
+                {
+                  type: 'slack',
+                  bot_token: 'xoxb-123',
+                  signing_secret: 'abc123',
+                  channel: '#approvals',
+                },
+              ],
+            },
+          }),
+        )
+        expect(result.success).toBe(true)
+      })
     })
 
     it('rejects a non-positive limit', () => {

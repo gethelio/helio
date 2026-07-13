@@ -12,6 +12,8 @@ import {
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
   buildBudgetExceededFeedback,
+  buildBudgetApprovalDeniedFeedback,
+  buildBudgetApprovalTimeoutFeedback,
 } from './self-repair.js'
 import type { PolicyDecision } from '../policy/engine.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/index.js'
@@ -894,5 +896,76 @@ describe('rule_index dual-key window (issue #109)', () => {
     const feedback = buildToolDriftFeedback(drift, 'deny')
     expect(feedback).toHaveProperty('rule_index', null)
     expect(feedback).toHaveProperty('ruleIndex', null)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Budget break-glass builders (issue #14, PR 3)
+// ---------------------------------------------------------------------------
+
+describe('budget break-glass feedback builders', () => {
+  const breachedEntry = {
+    budget: {
+      name: 'daily-cap',
+      limit: 50,
+      currency: 'USD',
+      window: { kind: 'duration' as const, windowMs: 3_600_000 },
+      windowRaw: '1h',
+      key: 'global' as const,
+      onExceed: 'require_approval' as const,
+      contributors: [],
+    },
+    bucketKey: 'budget:daily-cap:global',
+    amount: 5,
+    allowed: false,
+    spent: 49,
+    remaining: 1,
+    resetAtMs: 4_600_000,
+  }
+
+  it('denied: carries approver identity plus every breached budget', () => {
+    const feedback = buildBudgetApprovalDeniedFeedback(
+      denyDecision({ action: 'allow' }),
+      [breachedEntry],
+      'alice',
+      'Not this quarter',
+    )
+    expect(feedback.blocked).toBe(true)
+    expect(feedback.reason).toBe('budget_exceeded')
+    expect(feedback.action).toBe('budget')
+    expect(feedback.denied_by).toBe('alice')
+    expect(feedback.denial_reason).toBe('Not this quarter')
+    expect(feedback.budgets).toHaveLength(1)
+    expect(feedback.budgets[0]).toMatchObject({
+      name: 'daily-cap',
+      limit: 50,
+      spent: 49,
+      attempted_amount: 5,
+      currency: 'USD',
+      window: '1h',
+      on_exceed: 'require_approval',
+    })
+    expect(feedback.retry_allowed).toBe(false)
+    expect(feedback).toHaveProperty('rule_index', 0)
+    expect(feedback).toHaveProperty('ruleIndex', 0)
+  })
+
+  it('denied: null denial_reason when the approver gave none', () => {
+    const feedback = buildBudgetApprovalDeniedFeedback(denyDecision(), [breachedEntry], 'bob')
+    expect(feedback.denial_reason).toBeNull()
+    expect(feedback.suggestion).toContain('bob')
+  })
+
+  it('timeout: fails closed and says so, but the agent may retry later', () => {
+    const feedback = buildBudgetApprovalTimeoutFeedback(
+      denyDecision({ action: 'allow' }),
+      [breachedEntry],
+      120_000,
+    )
+    expect(feedback.reason).toBe('budget_exceeded')
+    expect(feedback.action).toBe('budget')
+    expect(feedback.timeout_seconds).toBe(120)
+    expect(feedback.budgets).toHaveLength(1)
+    expect(feedback.retry_allowed).toBe(true)
   })
 })

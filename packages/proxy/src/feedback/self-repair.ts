@@ -159,6 +159,27 @@ export interface BudgetExceededFeedback extends SelfRepairFeedbackBase {
   readonly budgets: readonly BudgetBreachBlock[]
 }
 
+/** A human denied the break-glass ticket for a budget overage (issue #14). */
+export interface BudgetApprovalDeniedFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'budget_exceeded'
+  readonly action: 'budget'
+  readonly denied_by: string
+  readonly denial_reason: string | null
+  readonly budgets: readonly BudgetBreachBlock[]
+}
+
+/**
+ * The break-glass ticket for a budget overage timed out (issue #14). Budget
+ * tickets fail closed on timeout regardless of `approval.default_on_timeout`
+ * — money gates do not fail open.
+ */
+export interface BudgetApprovalTimeoutFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'budget_exceeded'
+  readonly action: 'budget'
+  readonly timeout_seconds: number
+  readonly budgets: readonly BudgetBreachBlock[]
+}
+
 /** Discriminated union of all self-repair feedback types. */
 export type SelfRepairFeedback =
   | PolicyDeniedFeedback
@@ -173,6 +194,8 @@ export type SelfRepairFeedback =
   | SpendLimitedFeedback
   | ToolDriftFeedback
   | BudgetExceededFeedback
+  | BudgetApprovalDeniedFeedback
+  | BudgetApprovalTimeoutFeedback
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -516,6 +539,21 @@ export function buildSpendLimitedFeedback(
  * contributor. Born snake_case with `rule_index` only where the alias story
  * applies via ruleInfo.
  */
+/** Map a breached peek entry to its wire block (shared by every budget builder). */
+function breachBlock(entry: BudgetPeekEntry): BudgetBreachBlock {
+  return {
+    name: entry.budget.name,
+    limit: entry.budget.limit,
+    spent: entry.spent,
+    remaining: entry.remaining,
+    attempted_amount: entry.amount,
+    currency: entry.budget.currency,
+    window: entry.budget.windowRaw,
+    on_exceed: entry.budget.onExceed,
+    reset_at: entry.resetAtMs === null ? null : new Date(entry.resetAtMs).toISOString(),
+  }
+}
+
 export function buildBudgetExceededFeedback(
   decision: PolicyDecision,
   breaches: readonly BudgetPeekEntry[],
@@ -524,17 +562,7 @@ export function buildBudgetExceededFeedback(
   const info = ruleInfo(decision.matchedRule)
 
   const budgets: BudgetBreachBlock[] = [
-    ...breaches.map((entry) => ({
-      name: entry.budget.name,
-      limit: entry.budget.limit,
-      spent: entry.spent,
-      remaining: entry.remaining,
-      attempted_amount: entry.amount,
-      currency: entry.budget.currency,
-      window: entry.budget.windowRaw,
-      on_exceed: entry.budget.onExceed,
-      reset_at: entry.resetAtMs === null ? null : new Date(entry.resetAtMs).toISOString(),
-    })),
+    ...breaches.map(breachBlock),
     ...failures.map((failure) => ({
       name: failure.budget.name,
       limit: failure.budget.limit,
@@ -569,5 +597,62 @@ export function buildBudgetExceededFeedback(
     budgets,
     suggestion,
     retry_allowed: retryAllowed,
+  }
+}
+
+/**
+ * Build feedback when a human denied the composite break-glass ticket for a
+ * budget overage (issue #14). Lists every breach the ticket covered.
+ */
+export function buildBudgetApprovalDeniedFeedback(
+  decision: PolicyDecision,
+  breaches: readonly BudgetPeekEntry[],
+  deniedBy: string,
+  denialReason?: string,
+): BudgetApprovalDeniedFeedback {
+  const info = ruleInfo(decision.matchedRule)
+  const names = breaches.map((b) => `"${b.budget.name}"`).join(', ')
+
+  return {
+    blocked: true,
+    reason: 'budget_exceeded',
+    ...info,
+    action: 'budget',
+    denied_by: deniedBy,
+    denial_reason: denialReason ?? null,
+    budgets: breaches.map(breachBlock),
+    suggestion:
+      `The budget overage on ${names} was denied by ${deniedBy}.` +
+      `${denialReason ? ` Reason: ${denialReason}.` : ''} ` +
+      'Wait for the window to reset, reduce the amount, or contact them for details.',
+    retry_allowed: false,
+  }
+}
+
+/**
+ * Build feedback when the composite break-glass ticket timed out (issue #14).
+ * Budget tickets always fail closed on timeout — `default_on_timeout: allow`
+ * never applies to money gates — but a retry re-raises a fresh ticket.
+ */
+export function buildBudgetApprovalTimeoutFeedback(
+  decision: PolicyDecision,
+  breaches: readonly BudgetPeekEntry[],
+  timeoutMs: number,
+): BudgetApprovalTimeoutFeedback {
+  const info = ruleInfo(decision.matchedRule)
+  const timeoutSeconds = Math.round(timeoutMs / 1_000)
+  const names = breaches.map((b) => `"${b.budget.name}"`).join(', ')
+
+  return {
+    blocked: true,
+    reason: 'budget_exceeded',
+    ...info,
+    action: 'budget',
+    timeout_seconds: timeoutSeconds,
+    budgets: breaches.map(breachBlock),
+    suggestion:
+      `The break-glass request for ${names} timed out after ${String(timeoutSeconds)}s ` +
+      '(budget approvals never fail open). Try again or contact an approver directly.',
+    retry_allowed: true,
   }
 }

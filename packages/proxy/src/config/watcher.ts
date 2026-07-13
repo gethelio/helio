@@ -17,7 +17,7 @@ export interface ConfigWatcherOptions {
   /** Absolute or relative path to helio.yaml. */
   readonly configPath: string
   /** Called with the new compiled policy and budgets on successful reload. */
-  readonly onPolicyReload: (
+  readonly onReload: (
     policy: CompiledPolicy,
     warnings: readonly PolicyParseWarning[],
     restartRequiredPaths: readonly string[],
@@ -36,12 +36,12 @@ export interface ConfigWatcherOptions {
 /**
  * Watches a helio.yaml config file for changes and recompiles the policy
  * rule set when the file is modified. On successful reload, calls
- * `onPolicyReload` with the new compiled policy. On failure, calls
+ * `onReload` with the new compiled policy and budgets. On failure, calls
  * `onError` and retains the current policy.
  */
 export class ConfigWatcher {
   private readonly configPath: string
-  private readonly onPolicyReload: ConfigWatcherOptions['onPolicyReload']
+  private readonly onReload: ConfigWatcherOptions['onReload']
   private readonly onError: ConfigWatcherOptions['onError']
   private readonly initialConfig: HelioConfig | undefined
   private readonly env: Record<string, string | undefined> | undefined
@@ -52,7 +52,7 @@ export class ConfigWatcher {
 
   constructor(options: ConfigWatcherOptions) {
     this.configPath = options.configPath
-    this.onPolicyReload = options.onPolicyReload
+    this.onReload = options.onReload
     this.onError = options.onError
     this.initialConfig = options.initialConfig
     this.env = options.env
@@ -106,7 +106,7 @@ export class ConfigWatcher {
         this.initialConfig !== undefined
           ? diffReloadBoundary(this.initialConfig, config).restartRequiredPaths
           : []
-      this.onPolicyReload(policy, warnings, restartRequiredPaths, budgets)
+      this.onReload(policy, warnings, restartRequiredPaths, budgets)
     } catch (err) {
       if (err instanceof Error) {
         this.onError(err)
