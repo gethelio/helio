@@ -504,7 +504,9 @@ dashboard:
     it('watches the config file for policy changes by default', async () => {
       const { dir, configPath } = writeStartConfig()
       try {
-        const stderr = await startAndCaptureStderr(['-c', configPath])
+        const stderr = await startAndCaptureStderr(['-c', configPath], {
+          readyMarker: /for policy changes/,
+        })
         expect(stderr).toContain(`Watching ${configPath} for policy changes`)
         expect(stderr).not.toContain('Hot-reload disabled')
       } finally {
@@ -515,7 +517,9 @@ dashboard:
     it('disables the config watcher when --no-hot-reload is set', async () => {
       const { dir, configPath } = writeStartConfig()
       try {
-        const stderr = await startAndCaptureStderr(['-c', configPath, '--no-hot-reload'])
+        const stderr = await startAndCaptureStderr(['-c', configPath, '--no-hot-reload'], {
+          readyMarker: /Hot-reload disabled/,
+        })
         expect(stderr).toContain('Hot-reload disabled')
         expect(stderr).not.toContain(`Watching ${configPath} for policy changes`)
       } finally {
