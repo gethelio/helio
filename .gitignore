@@ -83,3 +83,7 @@ pip-delete-this-directory.txt
 
 
 .gstack/
+
+# Page snapshots written by the Playwright MCP browser tool. Untracked and
+# unformatted, so without this they break `prettier --check .` in the format gate.
+.playwright-mcp/
