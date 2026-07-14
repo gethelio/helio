@@ -74,7 +74,7 @@ The demo runs Helio's policy engine in front of the echo server, so you
 can watch governance act. The config (`helio.docker.yaml`) allows
 read-only tools, denies destructive ones, requires approval before
 sending email, and caps what the payment tools spend together with a
-named budget (next section). Send a couple of calls through the proxy
+budget (next section). Send a couple of calls through the proxy
 on port 3000:
 
 ```bash
@@ -116,7 +116,7 @@ transport: Streamable HTTP) and call the tools from its UI.
 
 ## Break the budget
 
-The config also defines a [named budget](../docs/policies.md#named-budgets-cross-tool):
+The config also defines a [budget](../docs/policies.md#cross-tool-spend-budgets):
 one `demo-payments` pot of $50 per hour, shared by the `stripe_charge`
 and `paypal_payout` demo tools. Open the dashboard's **Budgets** tab —
 the pot is already there at full headroom — and keep it visible while

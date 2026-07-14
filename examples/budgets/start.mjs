@@ -1,5 +1,5 @@
 /**
- * Start script for the named budgets example.
+ * Start script for the cross-tool spend budgets example.
  *
  * Spawns the shared MCP echo server, waits for it to be ready,
  * then starts the Helio proxy with the local helio.yaml config.
@@ -84,7 +84,7 @@ try {
 
 console.log(`
 ─────────────────────────────────────────
-  Helio Named Budgets Example
+  Helio Cross-Tool Spend Budgets Example
 ─────────────────────────────────────────
 
   Dashboard:  http://localhost:3100  (log in with HELIO_DASHBOARD_SECRET)

@@ -1,4 +1,4 @@
-# Named Budgets configuration
+# Cross-tool spend budgets configuration
 #
 # One cross-tool budget pot ($50 per session) shared by the Stripe and
 # PayPal demo tools, with break-glass approvals for overages. See

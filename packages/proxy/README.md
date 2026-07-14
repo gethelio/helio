@@ -166,15 +166,35 @@ That's it. Every tool call now passes through Helio. This includes full audit tr
 
 ### Policy Engine
 
-Declarative YAML rules that match on tool name, annotations, input parameters, environment, and cumulative state. Policies hot-reload without restart.
+Declarative YAML rules that match on tool name, annotations, input parameters, environment, and cumulative state. Irreversible actions are flagged, and dry-run mode runs the full pipeline without forwarding to the MCP server. Policies hot-reload without restart.
 
 ```yaml
-rules:
-  - match:
-      tool: 'create_payment'
-      input:
-        '$.amount': { gt: 1000 }
-    action: require_approval
+policies:
+  rules:
+    - match:
+        tool: 'create_payment'
+        input:
+          '$.amount': { gt: 1000 }
+      action: require_approval
+```
+
+### Cross-Tool Spend Budgets
+
+Cumulative cross-tool spend enforcement: one depleting pot aggregates spend across every tool that feeds it — Stripe and PayPal into one cap, each exposing the amount under its own argument field. Deterministic at the MCP gate, persistent across restarts via a durable spend ledger, with break-glass approvals for overages and a live dashboard view.
+
+```yaml
+budgets:
+  - name: agent-payments
+    limit: 50
+    currency: USD
+    window: session
+    key: session
+    on_exceed: require_approval # or: deny
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
 ```
 
 ### Evidence Grounding
@@ -182,12 +202,13 @@ rules:
 Require proof before high-stakes actions. A refund requires a prior order lookup. A deployment requires a passing test run. The optional SDK marks tool outputs as evidence; the proxy enforces evidence requirements.
 
 ```yaml
-rules:
-  - match:
-      tool: 'process_refund'
-    action: deny
-    evidence:
-      requires: ['orders.lookup']
+policies:
+  rules:
+    - match:
+        tool: 'process_refund'
+      action: deny
+      evidence:
+        requires: ['orders.lookup']
 ```
 
 ```python
@@ -228,10 +249,12 @@ When Helio blocks an action, it returns structured feedback explaining what fail
 Declare prerequisite actions in policy. The proxy tracks completed actions per session and blocks anything where prerequisites aren't met.
 
 ```yaml
-rules:
-  - match:
-      tool: 'process_refund'
-    requires: ['orders.lookup', 'customer.verify']
+policies:
+  rules:
+    - match:
+        tool: 'process_refund'
+      action: allow
+      requires: ['orders.lookup', 'customer.verify']
 ```
 
 ### Approval Workflows
@@ -239,9 +262,9 @@ rules:
 Route sensitive actions to Slack, webhook, or the Helio dashboard. Configurable timeout and escalation, plus a dashboard-only break-glass override (REST API and dashboard UI; not exposed as a Slack button).
 If a channel delivery fails, Helio logs an operational warning and emits an `approval_notification_failed` dashboard event so operators can investigate without losing the underlying pending ticket.
 
-### Transaction Controls
+### Rate & Spend Limits
 
-Rate limits per tool and per session. Spend limits with cumulative tracking. Irreversible action detection. Dry-run mode that executes the full pipeline without forwarding to the MCP server.
+Rate limits per tool and per session. Per-rule spend limits that block a matched tool at its own cap - for a cumulative cap that spans tools, see [Cross-Tool Spend Budgets](#cross-tool-spend-budgets).
 
 ### Audit Trail
 

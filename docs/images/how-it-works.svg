@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="348" viewBox="0 0 960 348" font-family="'Inter', 'Helvetica Neue', Arial, sans-serif" role="img" aria-labelledby="hiw-title hiw-desc">
   <title id="hiw-title">How Helio works</title>
-  <desc id="hiw-desc">An MCP client sends tool calls through Helio, which applies a policy engine, evidence grounding, approval workflows, rate and spend limits, an audit trail, and self-repair feedback before forwarding them to the MCP server. An optional thin Python SDK connects to Helio over a sideband.</desc>
+  <desc id="hiw-desc">An MCP client sends tool calls through Helio, which applies a policy engine, evidence grounding, approval workflows, cross-tool spend budgets, rate and spend limits, an audit trail, and self-repair feedback before forwarding them to the MCP server. An optional thin Python SDK connects to Helio over a sideband.</desc>
 
   <defs>
     <marker id="hiw-arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
@@ -34,11 +34,12 @@
   <!-- capabilities -->
   <g font-size="13.5" font-weight="500" fill="#334155">
     <circle cx="332" cy="120" r="2.6" fill="#94a3b8"/><text x="346" y="124.5">Policy engine</text>
-    <circle cx="332" cy="153" r="2.6" fill="#94a3b8"/><text x="346" y="157.5">Evidence grounding</text>
-    <circle cx="332" cy="186" r="2.6" fill="#94a3b8"/><text x="346" y="190.5">Approval workflows</text>
-    <circle cx="332" cy="219" r="2.6" fill="#94a3b8"/><text x="346" y="223.5">Rate &amp; spend limits</text>
-    <circle cx="332" cy="252" r="2.6" fill="#94a3b8"/><text x="346" y="256.5">Audit trail</text>
-    <circle cx="332" cy="285" r="2.6" fill="#94a3b8"/><text x="346" y="289.5">Self-repair feedback</text>
+    <circle cx="332" cy="148" r="2.6" fill="#94a3b8"/><text x="346" y="152.5">Evidence grounding</text>
+    <circle cx="332" cy="176" r="2.6" fill="#94a3b8"/><text x="346" y="180.5">Approval workflows</text>
+    <circle cx="332" cy="204" r="2.6" fill="#94a3b8"/><text x="346" y="208.5">Cross-tool spend budgets</text>
+    <circle cx="332" cy="232" r="2.6" fill="#94a3b8"/><text x="346" y="236.5">Rate &amp; spend limits</text>
+    <circle cx="332" cy="260" r="2.6" fill="#94a3b8"/><text x="346" y="264.5">Audit trail</text>
+    <circle cx="332" cy="288" r="2.6" fill="#94a3b8"/><text x="346" y="292.5">Self-repair feedback</text>
   </g>
 
   <!-- ============ MCP Client ============ -->

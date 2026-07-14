@@ -34,7 +34,7 @@ Helio governs what agents **do to the rest of the world** across any MCP-compati
 ## How It Works
 
 <p align="center">
-  <img src="docs/images/how-it-works.svg" alt="MCP clients send tool calls through Helio — which applies its policy engine, evidence grounding, approval workflows, rate and spend limits, audit trail, and self-repair feedback — before forwarding them to MCP servers. An optional thin Python SDK connects to Helio over a sideband." width="900" />
+  <img src="docs/images/how-it-works.svg" alt="MCP clients send tool calls through Helio — which applies its policy engine, evidence grounding, approval workflows, cross-tool spend budgets, rate and spend limits, audit trail, and self-repair feedback — before forwarding them to MCP servers. An optional thin Python SDK connects to Helio over a sideband." width="900" />
 </p>
 
 Two integration paths:
@@ -180,18 +180,19 @@ Want human-in-the-loop approvals for write operations? See [docs/approvals.md](.
 
 ### Policy Engine
 
-Declarative YAML rules that match on tool name, annotations, input parameters, environment, and cumulative state. Policies hot-reload without restart.
+Declarative YAML rules that match on tool name, annotations, input parameters, environment, and cumulative state. Irreversible actions are flagged, and dry-run mode runs the full pipeline without forwarding to the MCP server. Policies hot-reload without restart.
 
 ```yaml
-rules:
-  - match:
-      tool: 'create_payment'
-      input:
-        '$.amount': { gt: 1000 }
-    action: require_approval
+policies:
+  rules:
+    - match:
+        tool: 'create_payment'
+        input:
+          '$.amount': { gt: 1000 }
+      action: require_approval
 ```
 
-### Named Budgets
+### Cross-Tool Spend Budgets
 
 Cumulative cross-tool spend enforcement: one depleting pot aggregates spend across every tool that feeds it — Stripe and PayPal into one cap, each exposing the amount under its own argument field. Deterministic at the MCP gate, persistent across restarts via a durable spend ledger, with break-glass approvals for overages and a live dashboard view.
 
@@ -216,12 +217,13 @@ Budgets govern tools that expose what they are spending in an argument field. Wa
 Require proof before high-stakes actions. A refund requires a prior order lookup. A deployment requires a passing test run. The optional SDK marks tool outputs as evidence; the proxy enforces evidence requirements.
 
 ```yaml
-rules:
-  - match:
-      tool: 'process_refund'
-    action: deny
-    evidence:
-      requires: ['orders.lookup']
+policies:
+  rules:
+    - match:
+        tool: 'process_refund'
+      action: deny
+      evidence:
+        requires: ['orders.lookup']
 ```
 
 ```python
@@ -262,19 +264,21 @@ When Helio blocks an action, it returns structured feedback explaining what fail
 Declare prerequisite actions in policy. The proxy tracks completed actions per session and blocks anything where prerequisites aren't met.
 
 ```yaml
-rules:
-  - match:
-      tool: 'process_refund'
-    requires: ['orders.lookup', 'customer.verify']
+policies:
+  rules:
+    - match:
+        tool: 'process_refund'
+      action: allow
+      requires: ['orders.lookup', 'customer.verify']
 ```
 
 ### Approval Workflows
 
 Route sensitive actions to Slack, webhook, or the Helio dashboard. Configurable timeout and escalation, plus a dashboard-only break-glass override (REST API and dashboard UI; not exposed as a Slack button).
 
-### Transaction Controls
+### Rate & Spend Limits
 
-Rate limits per tool and per session. Per-rule spend limits that block a matched tool at its own cap - for a cumulative cap that spans tools, see [Named Budgets](#named-budgets). Irreversible action detection. Dry-run mode that executes the full pipeline without forwarding to the MCP server.
+Rate limits per tool and per session. Per-rule spend limits that block a matched tool at its own cap - for a cumulative cap that spans tools, see [Cross-Tool Spend Budgets](#cross-tool-spend-budgets).
 
 ### Audit Trail
 

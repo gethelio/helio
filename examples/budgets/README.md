@@ -1,6 +1,6 @@
-# Named Budgets Example
+# Cross-Tool Spend Budgets Example
 
-One cross-tool budget pot shared by Stripe and PayPal demo tools: $50 per session, depleting with every charge, with a break-glass approval when a call would push past the limit. This is the [named budgets](../../docs/policies.md#named-budgets-cross-tool) feature end to end — live depletion in the dashboard, a human approving an overage, and the approved overage landing in the spend ledger.
+One cross-tool budget pot shared by Stripe and PayPal demo tools: $50 per session, depleting with every charge, with a break-glass approval when a call would push past the limit. This is the [cross-tool spend budgets](../../docs/policies.md#cross-tool-spend-budgets) feature end to end — live depletion in the dashboard, a human approving an overage, and the approved overage landing in the spend ledger.
 
 ## What This Demonstrates
 
@@ -122,7 +122,7 @@ The Budgets tab shows the pot exactly where it left off — $60 spent, zero rema
 - **`window: session` pots never replenish on a timer.** Idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal. The curl walkthrough sends no MCP session id, so its calls pool into the budget's shared `unknown` session pot — real MCP clients with sessions each get their own pot.
 - **Break-glass is scope-once and fails closed.** Approving covers exactly the one call's overage; timeouts never fail open for money gates.
 
-See the [Policy Guide](../../docs/policies.md#named-budgets-cross-tool) for full budget semantics and the [configuration reference](../../docs/configuration.md#budgets) for every field and validation rule.
+See the [Policy Guide](../../docs/policies.md#cross-tool-spend-budgets) for full budget semantics and the [configuration reference](../../docs/configuration.md#budgets) for every field and validation rule.
 
 ## Routing Break-Glass Tickets to Slack
 

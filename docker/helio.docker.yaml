@@ -3,7 +3,7 @@
 # This config is used by docker-compose.yml. It demonstrates governance
 # with a mix of policies: read-only tools are allowed, destructive tools
 # are denied, sending email requires approval, and everything else falls
-# through to the default (allow). A named budget caps what the Stripe and
+# through to the default (allow). A budget caps what the Stripe and
 # PayPal demo tools spend together, with break-glass approvals past the
 # limit — see the "Break the budget" section in README.md.
 #
