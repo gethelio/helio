@@ -69,7 +69,7 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
   "matched_rule_index": 2,
   "feedback": { "message": "…" },        // always on blocking decisions; on require_approval / dry_run when the gating rule configures feedback
   "approval": { "id": "…", "timeout_ms": 300000, "resolve_path": "/approval/…/resolve" }, // require_approval only
-  "limits": { "rate": { } },             // present when a limit rule or a named budget matched (rate | spend | budgets)
+  "limits": { "rate": { } },             // present when a limit rule or a budget matched (rate | spend | budgets)
   "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only
   "tool_drift": { "changes": [ ] }       // present when the drift gate fired
 }
@@ -81,9 +81,9 @@ The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limi
 
 `match.metadata.*` rules and `sender_id`-scoped limits read the `metadata` object you supply here (well-known keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`; the virtual `agent_id` comes from the top-level field). See the [Policy Guide](./policies.md#metadata).
 
-### Named budgets on this API
+### Cross-tool spend budgets on this API
 
-When the call's tool matches a configured [budget](./policies.md#named-budgets-cross-tool)'s contributors, the response carries a `limits.budgets` array — one block per matching budget:
+When the call's tool matches a configured [budget](./policies.md#cross-tool-spend-budgets)'s contributors, the response carries a `limits.budgets` array — one block per matching budget:
 
 ```jsonc
 "limits": {

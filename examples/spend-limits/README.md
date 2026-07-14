@@ -108,7 +108,7 @@ If a payment is blocked by the spend limit, the amount is not deducted. Any call
 
 ### In-memory state
 
-Spend-limit rule tracking is stored in memory. Restarting the proxy resets rule-level spend counters. [Named budgets](../budgets/) — the cross-tool layer — persist their spend across restarts via a durable ledger.
+Spend-limit rule tracking is stored in memory. Restarting the proxy resets rule-level spend counters. [Cross-tool spend budgets](../budgets/) persist their spend across restarts via a durable ledger.
 
 ## Configuration Walkthrough
 

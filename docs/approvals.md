@@ -298,7 +298,7 @@ This is a defensible default for early deployments, but it does have real cost d
 
 ## Budget Break-Glass Tickets
 
-A [named budget](./policies.md#named-budgets-cross-tool) with `on_exceed: require_approval` turns a breach into an approval instead of a denial. (This is a different mechanism from the break-glass _override_ above, which force-approves an existing ticket; a budget break-glass ticket is an ordinary ticket that happens to gate money.)
+A [budget](./policies.md#cross-tool-spend-budgets) with `on_exceed: require_approval` turns a breach into an approval instead of a denial. (This is a different mechanism from the break-glass _override_ above, which force-approves an existing ticket; a budget break-glass ticket is an ordinary ticket that happens to gate money.)
 
 One call raises **one composite ticket** no matter how many budgets it breached. The ticket carries a `breached_budgets` array — one entry per breached budget with `name`, `limit`, `spent`, `attempted_amount`, `currency`, and `window` — which every surface shows: the dashboard and webhook payloads serialize it verbatim, and Slack messages render a "Breached budgets" section. Approving the ticket approves every listed overage at once; there is never a per-budget decision.
 

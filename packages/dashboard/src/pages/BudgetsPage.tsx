@@ -365,7 +365,7 @@ export function BudgetsPage() {
         <div className="mb-4">
           <h1 className="text-lg font-semibold text-gray-900">Budgets</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Cumulative cross-tool spend against named budgets
+            Cumulative cross-tool spend across your budgets
           </p>
         </div>
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-gray-500">
@@ -397,7 +397,7 @@ export function BudgetsPage() {
       <div>
         <h1 className="text-lg font-semibold text-gray-900">Budgets</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Cumulative cross-tool spend against named budgets
+          Cumulative cross-tool spend across your budgets
         </p>
       </div>
 

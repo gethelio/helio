@@ -462,7 +462,7 @@ Rate and spend limit buckets survive a hot-reload as long as their underlying ru
 
 Spend bucket keys carry a `:rule:<index>` suffix (for example `session:abc:rule:2`), so two `spend_limit` rules that share a scope — say, two session-keyed rules — track their spend in separate buckets instead of silently sharing one with last-write-wins config. The suffixed keys are what you see in `GET /api/limits`, `limit_warning` events, and denial messages. Rate bucket keys are unchanged. For suffixed keys, reconciliation matches the tuple at the bucket's own rule index: an edit that shifts a spend rule's position (inserting or removing a rule above it, or reordering) evicts its bucket and the rule starts a fresh window — accrued spend does not follow a rule to its new position. Two caveats: swapping two spend rules with identical `limit`/`currency`/`window` keeps each bucket at its position, so the rules exchange accrued spend; and a sideband call evaluated before a reload commits its spend (at `/audit`) into the bucket keyed at evaluation time, which may be a just-evicted label.
 
-> **Note:** Rule-level limit state is reconciled, not persisted — restarting the proxy clears rate/spend rule buckets. Named budgets are different: their spend persists across restarts via the budget ledger (see [budgets](#budgets)).
+> **Note:** Rule-level limit state is reconciled, not persisted — restarting the proxy clears rate/spend rule buckets. Budgets are different: their spend persists across restarts via the budget ledger (see [budgets](#budgets)).
 
 ### Disabling hot reload
 
@@ -487,7 +487,7 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 
 ### Reload boundary
 
-Compiled policy behavior and named budgets are hot-reloadable. Startup-bound sections still require restart.
+Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.
 
 | Config path                 | Reloads on save? | Notes                                                                                     |
 | --------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |

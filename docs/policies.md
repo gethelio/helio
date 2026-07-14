@@ -419,9 +419,9 @@ Spend limits track cumulative monetary amounts extracted from tool call argument
     suggestion: 'Wait for the current window to reset or escalate to a human.'
 ```
 
-## Named Budgets (cross-tool)
+## Cross-Tool Spend Budgets
 
-`spend_limit` rules cap what one rule's matched tools spend. **Named budgets** are the cross-tool layer: a first-class `budgets:` section, independent of rules, where one depleting pot aggregates spend across every tool its contributors match — Stripe and PayPal into one cap, each exposing the amount under its own field name.
+`spend_limit` rules cap what one rule's matched tools spend. **Budgets** are the cross-tool layer: a first-class `budgets:` section, independent of rules, where one depleting pot aggregates spend across every tool its contributors match — Stripe and PayPal into one cap, each exposing the amount under its own field name.
 
 ```yaml
 budgets:
@@ -640,7 +640,7 @@ In dry-run mode:
 - No requests are forwarded to the upstream server
 - Rate limit slots are not consumed (uses `peek` instead of `check`)
 - Spend limit budget is not consumed
-- [Named budgets](#named-budgets-cross-tool) are peeked but never charged — the dry-run payload reports their state in a `budgets` array, and no breach events fire
+- [Budgets](#cross-tool-spend-budgets) are peeked but never charged — the dry-run payload reports their state in a `budgets` array, and no breach events fire
 - Tool calls are not recorded for dependency chain tracking
 - Audit records are created with `dry_run: true`
 

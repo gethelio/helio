@@ -203,7 +203,6 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 
 ```yaml
 version: '1'
-environment: 'production' # optional label, recorded on every audit record
 upstream:
   url: 'http://localhost:8080/mcp' # required
   transport: 'streamable-http' # streamable-http | sse | stdio
@@ -215,13 +214,7 @@ upstream:
 listen:
   port: 3000
   host: '127.0.0.1'
-dashboard:
-  enabled: true
-  port: 3100
-  host: '127.0.0.1'
-  api_secret: '${HELIO_DASHBOARD_SECRET}' # required when any rule uses require_approval or dashboard is enabled, unless allow_open_mode
-  allow_open_mode: false # run the dashboard unauthenticated (loopback host only)
-  sse_heartbeat_interval: '30s'
+environment: 'production' # optional label, recorded on every audit record
 policies:
   default: allow # allow | deny  (use deny in production)
   flag_destructive: require_approval # optional: log | require_approval — applies to tools with destructiveHint
@@ -257,12 +250,30 @@ policies:
       feedback: # overrides the default self-repair message when this rule blocks
         message: 'Blocked by policy.'
         suggestion: 'Request approval via #sec-team.'
+budgets: # cross-tool spend pots, independent of rules; gate after the policy decision
+  - name: 'agent-payments' # identity: spend follows the name across reloads and restarts
+    limit: 50
+    currency: 'USD'
+    window: session # duration ('24h') = sliding window | session = never replenishes on a timer
+    key: session # global | session | sender_id  (window: session requires session or sender_id)
+    idle_ttl: '24h' # session windows only: collect a pot after this long with no activity
+    on_exceed: require_approval # deny | require_approval (break-glass; requires dashboard.api_secret)
+    approval: # only with on_exceed: require_approval; omit it entirely for deny
+      channel: 'dashboard'
+      timeout: '300s'
+    contributors: # every matching tool draws down the SAME pot
+      - tool: 'stripe_*' # picomatch glob, same engine as match.tool
+        field: '$.amount' # path to the amount in the call's arguments
+      - tool: 'paypal_*'
+        field: '$.total'
 approval:
   timeout: '300s'
   default_on_timeout: deny # deny | allow
   channels:
     - type: dashboard # dashboard | webhook | slack
-      name: 'optional-name' # optional — allows multiple channels of same type
+      name: 'sec-team' # optional — allows multiple channels of same type; a named channel is referenced by NAME, not by type
+    - type: dashboard
+      name: 'oncall' # referenced above as a delegate
     # - { type: webhook, url: 'https://…', secret: '…' }
     # - { type: slack, bot_token: '…', signing_secret: '…', channel: '#approvals' }
 audit:
@@ -270,6 +281,13 @@ audit:
   path: './helio-audit.db'
   retention: '90d'
   include_responses: true # false → store a response summary instead of full upstream bodies
+dashboard:
+  enabled: true
+  port: 3100
+  host: '127.0.0.1'
+  api_secret: '${HELIO_DASHBOARD_SECRET}' # required when any rule uses require_approval, any budget uses on_exceed: require_approval, or the dashboard is enabled — unless allow_open_mode
+  allow_open_mode: false # run the dashboard unauthenticated (loopback host only)
+  sse_heartbeat_interval: '30s'
 sdk:
   enabled: false
   port: 3200
