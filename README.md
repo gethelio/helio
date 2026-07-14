@@ -15,7 +15,7 @@
 
 ---
 
-Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, tracks spend, and records everything - **without changing your agent code or your MCP servers.**
+Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, caps cumulative spend, and records everything - **without changing your agent code or your MCP servers.**
 
 ```bash
 npx @gethelio/proxy init
@@ -274,7 +274,7 @@ Route sensitive actions to Slack, webhook, or the Helio dashboard. Configurable 
 
 ### Transaction Controls
 
-Rate limits per tool and per session. Spend limits with cumulative tracking. Irreversible action detection. Dry-run mode that executes the full pipeline without forwarding to the MCP server.
+Rate limits per tool and per session. Per-rule spend limits that block a matched tool at its own cap - for a cumulative cap that spans tools, see [Named Budgets](#named-budgets). Irreversible action detection. Dry-run mode that executes the full pipeline without forwarding to the MCP server.
 
 ### Audit Trail
 
