@@ -221,7 +221,7 @@ When `default_on_timeout: deny`, the agent receives self-repair feedback:
 }
 ```
 
-The `data` object also carries `blocked`, `rule`, `rule_index`, and `action`; the fields above are the ones agents typically act on. (`ruleIndex` is still emitted as a deprecated alias of `rule_index` for this release and will be removed in the next.)
+The `data` object also carries `blocked`, `rule`, `rule_index`, and `action`; the fields above are the ones agents typically act on.
 
 If the downstream client disconnects while a request is pending approval, Helio resolves the ticket as `client_disconnected` and does not forward the request upstream.
 
@@ -239,7 +239,7 @@ If the proxy receives SIGTERM while requests are still waiting for approval, Hel
 }
 ```
 
-As with the timeout example, the `data` object also carries `blocked`, `rule`, `rule_index` (plus its deprecated alias `ruleIndex`), and `action`.
+As with the timeout example, the `data` object also carries `blocked`, `rule`, `rule_index`, and `action`.
 
 This shutdown path is intentionally fail-closed and does not use `default_on_timeout`.
 
