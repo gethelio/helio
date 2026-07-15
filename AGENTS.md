@@ -32,7 +32,7 @@ Supporting directories: `examples/`, `docs/`, `docker/`, `scripts/`, `.github/`
 
 ## Tech Stack
 
-- **Runtime:** Node.js 22+, TypeScript 5.x (strict mode), pnpm 10 workspaces
+- **Runtime:** Node.js 22+, TypeScript 5.x (strict mode), pnpm 11 workspaces
 - **HTTP:** Hono (`@hono/node-server`)
 - **Validation:** Zod v4 (single source of truth for helio.yaml schema)
 - **YAML:** js-yaml
@@ -303,7 +303,7 @@ sdk:
 
 ## Useful Context
 
-- `better-sqlite3` (and `esbuild`) native builds are approved via `onlyBuiltDependencies` in `pnpm-workspace.yaml` — no manual rebuild needed. `pnpm-workspace.yaml` also pins a few transitive `overrides`.
+- `better-sqlite3` (and `esbuild`) native builds are approved via `allowBuilds` in `pnpm-workspace.yaml` — no manual rebuild needed. `pnpm-workspace.yaml` also pins a few transitive `overrides` and the audit ignore list (`auditConfig.ignoreGhsas`).
 - CI runs on the Node version in `.nvmrc` and Python 3.12; the E2E Python SDK test does `pip install ./packages/python-sdk`.
 - The proxy depends on the official `@modelcontextprotocol/sdk` pinned to an exact version (`devDependencies` in `packages/proxy`) — monitor it for breaking changes.
 - MCP session tracking via `Mcp-Session-Id` header — pass through transparently and use as the key for evidence/dependency state.

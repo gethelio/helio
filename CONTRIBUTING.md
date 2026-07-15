@@ -13,7 +13,7 @@ This project follows the [Contributor Covenant Code of Conduct](./CODE_OF_CONDUC
 ### Prerequisites
 
 - **Node.js** 22 or later
-- **pnpm** 10 or later (`npm install -g pnpm`)
+- **pnpm** 11 or later (`corepack enable` picks up the pinned version automatically, or `npm install -g pnpm`)
 - **Python** 3.10 or later (`python3 --version`)
 - **Git**
 - **gitleaks** (recommended) or **Docker** (used as fallback by secret scan scripts)
@@ -201,7 +201,7 @@ Our audit posture reflects that:
   immediately (upgrade, or remove), do not ignore.
 - A **benign vulnerability with no exploit path in our usage** (e.g. a dev-server
   SSRF or ReDoS in a build tool we only invoke on trusted input) may be **time-boxed
-  ignored** via `pnpm.auditConfig.ignoreGhsas`, but **only** with a tracking issue to
+  ignored** via `auditConfig.ignoreGhsas` in `pnpm-workspace.yaml`, but **only** with a tracking issue to
   remove it. Prefer a real upgrade over an ignore.
 
 Current dev-only ignores (each tracked for removal):

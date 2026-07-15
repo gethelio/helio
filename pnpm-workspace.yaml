@@ -1,10 +1,6 @@
 packages:
   - 'packages/*'
 
-onlyBuiltDependencies:
-  - better-sqlite3
-  - esbuild
-
 overrides:
   path-to-regexp: 8.4.2
   axios: 1.17.0
@@ -13,3 +9,18 @@ overrides:
   brace-expansion@1.1.12: 1.1.13
   brace-expansion@5.0.4: 5.0.5
   postcss@8.5.8: 8.5.10
+  'form-data@>=4.0.0 <4.0.6': '>=4.0.6'
+
+# pnpm 11 reads settings from this file only; the package.json "pnpm" field
+# is ignored. The GHSAs below are triaged and tracked (esbuild/vite: #64).
+auditConfig:
+  ignoreGhsas:
+    - GHSA-gv7w-rqvm-qjhr
+    - GHSA-fx2h-pf6j-xcff
+    - GHSA-vmh5-mc38-953g
+
+# Native build scripts approved to run at install (pnpm 11 renamed
+# onlyBuiltDependencies to allowBuilds).
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true

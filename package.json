@@ -2,7 +2,7 @@
   "name": "helio",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.11.0",
+  "packageManager": "pnpm@11.13.0",
   "engines": {
     "node": ">=22"
   },
@@ -29,17 +29,5 @@
     "prettier": "3.8.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.57.1"
-  },
-  "pnpm": {
-    "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-gv7w-rqvm-qjhr",
-        "GHSA-fx2h-pf6j-xcff",
-        "GHSA-vmh5-mc38-953g"
-      ]
-    },
-    "overrides": {
-      "form-data@>=4.0.0 <4.0.6": ">=4.0.6"
-    }
   }
 }
