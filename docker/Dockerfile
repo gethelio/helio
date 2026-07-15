@@ -18,7 +18,7 @@
 FROM node:22-slim AS deps
 
 # Enable corepack for pnpm
-RUN corepack enable && corepack prepare pnpm@10.11.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
 
 # Install native build tools for better-sqlite3
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -64,7 +64,7 @@ RUN pnpm install --frozen-lockfile --prod
 FROM node:22-slim AS runtime
 
 # Enable corepack for pnpm workspace resolution
-RUN corepack enable && corepack prepare pnpm@10.11.0 --activate
+RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
 
 # Install tini for proper PID 1 signal handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
