@@ -234,7 +234,7 @@ The request is blocked immediately. No upstream request is made. The response is
 }
 ```
 
-The `data` object also carries `rule_index` and `policy_reason`; the fields shown above are the ones an agent typically acts on. (`ruleIndex` is still emitted as a deprecated alias of `rule_index` for this release and will be removed in the next.)
+The `data` object also carries `rule_index` and `policy_reason`; the fields shown above are the ones an agent typically acts on.
 
 ### require_approval
 
@@ -474,7 +474,6 @@ A denial returns structured feedback with `reason: budget_exceeded` and a `budge
       "reason": "budget_exceeded",
       "rule": null,
       "rule_index": null,
-      "ruleIndex": null,
       "action": "budget",
       "suggestion": "Budget \"daily-cap\" would be exceeded by this call. Wait for the window to reset or reduce the amount.",
       "retry_allowed": true,
@@ -496,7 +495,7 @@ A denial returns structured feedback with `reason: budget_exceeded` and a `budge
 }
 ```
 
-`rule`/`rule_index` name the matched policy rule when one matched — a budget denial can shadow an `allow` rule, since budgets gate after the decision (`ruleIndex` is a deprecated alias of `rule_index`, emitted for this release only). `retry_allowed` is `true` only when every breached budget has a duration window (session pots never replenish, so retrying cannot help). `reset_at` is `null` for session windows; an invalid-amount failure carries `reason: "invalid_amount"` inside its block with `attempted_amount: null`. On the MCP door the reset field is ISO-8601 `reset_at`; the sideband's `limits.budgets` blocks and `GET /api/budgets` use epoch `reset_at_ms` instead — a deliberate per-surface idiom (each door keeps its existing reset-field convention), not drift.
+`rule`/`rule_index` name the matched policy rule when one matched — a budget denial can shadow an `allow` rule, since budgets gate after the decision. `retry_allowed` is `true` only when every breached budget has a duration window (session pots never replenish, so retrying cannot help). `reset_at` is `null` for session windows; an invalid-amount failure carries `reason: "invalid_amount"` inside its block with `attempted_amount: null`. On the MCP door the reset field is ISO-8601 `reset_at`; the sideband's `limits.budgets` blocks and `GET /api/budgets` use epoch `reset_at_ms` instead — a deliberate per-surface idiom (each door keeps its existing reset-field convention), not drift.
 
 ### Break-glass overages
 
@@ -540,7 +539,7 @@ When evidence is missing, the proxy returns self-repair feedback telling the age
 }
 ```
 
-The `data` object also carries `rule`, `rule_index` (plus its deprecated alias `ruleIndex`), `action`, `expired_evidence`, and `missing_dependencies`.
+The `data` object also carries `rule`, `rule_index`, `action`, `expired_evidence`, and `missing_dependencies`.
 
 Evidence entries have a configurable TTL (default: 300 seconds). If evidence has expired, the response includes `"reason": "evidence_expired"` with a suggestion to refresh it.
 

@@ -189,7 +189,8 @@ describe('GovernedForwarder', () => {
       const result = await governed.forward(toolsCallRequest('delete_record'))
       const error = errorFromResult(result)
       expect(error.data['rule']).toBeNull()
-      expect(error.data['ruleIndex']).toBe(0)
+      expect(error.data['rule_index']).toBe(0)
+      expect(error.data).not.toHaveProperty('ruleIndex')
     })
 
     it('uses feedback message when rule has one', async () => {
@@ -650,7 +651,7 @@ describe('GovernedForwarder', () => {
       },
     )
 
-    it('emits rule_index beside ruleIndex on the unsupported error (issue #109)', async () => {
+    it('emits rule_index and no ruleIndex alias on the unsupported error (issue #144)', async () => {
       const inner = mockForwarder()
       const policy = compile({
         default: 'allow',
@@ -661,8 +662,8 @@ describe('GovernedForwarder', () => {
       const result = await governed.forward(toolsCallRequest('test_tool'))
 
       const error = errorFromResult(result)
-      expect(error.data['ruleIndex']).toBe(0)
       expect(error.data['rule_index']).toBe(0)
+      expect(error.data).not.toHaveProperty('ruleIndex')
     })
   })
 

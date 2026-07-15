@@ -731,10 +731,10 @@ describe('buildToolDriftFeedback', () => {
 })
 
 // ---------------------------------------------------------------------------
-// rule_index dual-key window (issue #109)
+// rule_index emission (issue #109 rename; issue #144 removed the alias)
 // ---------------------------------------------------------------------------
 
-describe('rule_index dual-key window (issue #109)', () => {
+describe('rule_index emission (issue #144 removed the ruleIndex alias)', () => {
   const drift: ToolDriftEvent = {
     toolName: 'send_email',
     changes: [
@@ -744,6 +744,31 @@ describe('rule_index dual-key window (issue #109)', () => {
         current: { destructiveHint: true },
       },
     ],
+  }
+
+  const breached = {
+    budget: {
+      name: 'cap',
+      limit: 100,
+      currency: 'USD',
+      window: { kind: 'duration' as const, windowMs: 60_000 },
+      windowRaw: '1m',
+      key: 'global' as const,
+      onExceed: 'deny' as const,
+      contributors: [],
+    },
+    bucketKey: 'budget:cap:global',
+    amount: 5,
+    allowed: false,
+    spent: 100,
+    remaining: 0,
+    resetAtMs: 60_000,
+  }
+
+  // Break-glass builders only ever see budgets that raised a ticket.
+  const breachedRequireApproval = {
+    ...breached,
+    budget: { ...breached.budget, onExceed: 'require_approval' as const },
   }
 
   const matchedRuleBuilders: ReadonlyArray<[name: string, build: () => Record<string, unknown>]> = [
@@ -815,15 +840,31 @@ describe('rule_index dual-key window (issue #109)', () => {
         ),
       }),
     ],
+    [
+      'buildBudgetExceededFeedback',
+      () => ({ ...buildBudgetExceededFeedback(denyDecision(), [breached], []) }),
+    ],
+    [
+      'buildBudgetApprovalDeniedFeedback',
+      () => ({
+        ...buildBudgetApprovalDeniedFeedback(denyDecision(), [breachedRequireApproval], 'alice'),
+      }),
+    ],
+    [
+      'buildBudgetApprovalTimeoutFeedback',
+      () => ({
+        ...buildBudgetApprovalTimeoutFeedback(denyDecision(), [breachedRequireApproval], 120_000),
+      }),
+    ],
   ]
 
-  it.each(matchedRuleBuilders)('%s emits rule_index beside ruleIndex', (_name, build) => {
+  it.each(matchedRuleBuilders)('%s emits rule_index and no ruleIndex alias', (_name, build) => {
     const feedback = build()
     expect(feedback).toHaveProperty('rule_index', 0)
-    expect(feedback).toHaveProperty('ruleIndex', 0)
+    expect(feedback).not.toHaveProperty('ruleIndex')
   })
 
-  it('buildSpendLimitedFeedback invalid-amount variant emits both keys', () => {
+  it('buildSpendLimitedFeedback invalid-amount variant emits rule_index only', () => {
     const feedback = buildSpendLimitedFeedback(
       denyDecision({ action: 'spend_limit' }),
       {
@@ -837,13 +878,13 @@ describe('rule_index dual-key window (issue #109)', () => {
       'USD',
     )
     expect(feedback).toHaveProperty('rule_index', 0)
-    expect(feedback).toHaveProperty('ruleIndex', 0)
+    expect(feedback).not.toHaveProperty('ruleIndex')
   })
 
-  it('emits null under both keys when no rule matched', () => {
+  it('emits null rule_index and no alias when no rule matched', () => {
     const feedback = buildPolicyDeniedFeedback(defaultDenyDecision())
     expect(feedback).toHaveProperty('rule_index', null)
-    expect(feedback).toHaveProperty('ruleIndex', null)
+    expect(feedback).not.toHaveProperty('ruleIndex')
   })
 
   it('budget_exceeded is not retryable when a session breach rides with an invalid amount', () => {
@@ -892,10 +933,10 @@ describe('rule_index dual-key window (issue #109)', () => {
     expect(feedback.retry_allowed).toBe(false)
   })
 
-  it('buildToolDriftFeedback emits null under both keys', () => {
+  it('buildToolDriftFeedback emits null rule_index and no alias', () => {
     const feedback = buildToolDriftFeedback(drift, 'deny')
     expect(feedback).toHaveProperty('rule_index', null)
-    expect(feedback).toHaveProperty('ruleIndex', null)
+    expect(feedback).not.toHaveProperty('ruleIndex')
   })
 })
 
@@ -947,7 +988,7 @@ describe('budget break-glass feedback builders', () => {
     })
     expect(feedback.retry_allowed).toBe(false)
     expect(feedback).toHaveProperty('rule_index', 0)
-    expect(feedback).toHaveProperty('ruleIndex', 0)
+    expect(feedback).not.toHaveProperty('ruleIndex')
   })
 
   it('denied: null denial_reason when the approver gave none', () => {

@@ -19,6 +19,17 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Removed
+
+- **MCP self-repair feedback no longer emits `ruleIndex` (#144).** v0.10.0
+  renamed the field to `rule_index` (#109) and kept `ruleIndex` as a
+  deprecated alias carrying the same value for that one release. The window
+  is closed: `error.data` on blocked calls now carries `rule_index` only.
+  Agent self-repair handlers still reading `ruleIndex` must switch to
+  `rule_index`. No other wire surface changes — audit records and
+  `/evaluate` keep `matched_rule_index`, approval tickets keep `rule_index`,
+  neither ever carried the alias.
+
 ## [0.10.0] - 2026-07-14
 
 ### Added

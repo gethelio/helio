@@ -34,12 +34,6 @@ interface SelfRepairFeedbackBase {
   readonly blocked: true
   readonly reason: BlockReason
   readonly rule: string | null
-  /**
-   * @deprecated Emitted for one release as a compatibility alias of
-   * `rule_index` (issue #109) and removed in the next release. The camelCase
-   * name was the lone outlier in this otherwise snake_case wire family.
-   */
-  readonly ruleIndex: number | null
   /** Index of the matched rule in `policies.rules`, or null (issue #109). */
   readonly rule_index: number | null
   readonly suggestion: string
@@ -204,20 +198,18 @@ export type SelfRepairFeedback =
 /**
  * Extract rule name and index from a compiled rule.
  *
- * Emits the index under BOTH keys for the issue #109 dual-key window: this
- * helper is the single alias site, so next release's removal of the
- * deprecated `ruleIndex` touches only this return and the base interface.
+ * Every builder spreads this return, so the base `rule`/`rule_index` fields
+ * have exactly one emission site. The deprecated `ruleIndex` alias from the
+ * issue #109 rename lived here for its one-release window and was removed in
+ * issue #144.
  */
 export function ruleInfo(rule?: CompiledPolicyRule): {
   rule: string | null
-  ruleIndex: number | null
   rule_index: number | null
 } {
-  const index = rule?.index ?? null
   return {
     rule: rule?.name ?? null,
-    ruleIndex: index,
-    rule_index: index,
+    rule_index: rule?.index ?? null,
   }
 }
 
@@ -536,8 +528,7 @@ export function buildSpendLimitedFeedback(
  *
  * Lists every breached budget (all-or-nothing gate: one breach denies the
  * call and nothing is recorded anywhere) and every fail-closed invalid-amount
- * contributor. Born snake_case with `rule_index` only where the alias story
- * applies via ruleInfo.
+ * contributor. The rule fields come from the shared `ruleInfo` helper.
  */
 /** Map a breached peek entry to its wire block (shared by every budget builder). */
 function breachBlock(entry: BudgetPeekEntry): BudgetBreachBlock {
