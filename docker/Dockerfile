@@ -55,8 +55,13 @@ RUN pnpm --filter @gethelio/proxy build
 # ===========================================================================
 FROM deps AS prod-deps
 
-# Reinstall with production-only deps (no devDependencies)
-RUN pnpm install --frozen-lockfile --prod
+# Reinstall with production-only deps (no devDependencies). CI=true because
+# pnpm 11 prompts before purging the modules dir inherited from the deps
+# stage, and docker build has no TTY to answer it. --ignore-scripts because
+# pnpm 11 runs the root prepare script (husky) even on --prod installs, and
+# husky is pruned with the dev deps; nothing new installs in this stage, so
+# no build scripts are needed (better-sqlite3 is already built in deps).
+RUN CI=true pnpm install --frozen-lockfile --prod --ignore-scripts
 
 # ===========================================================================
 # Stage 4: Slim runtime image
