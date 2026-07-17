@@ -458,23 +458,39 @@ const sdkSchema = z.object({
 // Root config
 // ---------------------------------------------------------------------------
 
-const helioConfigBaseSchema = z.object({
-  version: z.literal('1'),
-  upstream: upstreamSchema,
-  listen: listenSchema.prefault({}),
-  dashboard: dashboardSchema.prefault({}),
-  environment: z.string().optional(),
-  policies: policiesSchema.prefault({}),
-  // Budgets sit beside policies deliberately: they are the second half of the
-  // governance declaration (policy decision → budget gate), not plumbing.
-  budgets: z.array(budgetSchema).default([]),
-  approval: approvalSchema.prefault({}),
-  audit: auditSchema.prefault({}),
-  sdk: sdkSchema.prefault({}),
-})
+const helioConfigBaseSchema = z
+  .object({
+    version: z.literal('1'),
+    upstream: upstreamSchema,
+    listen: listenSchema.prefault({}),
+    dashboard: dashboardSchema.prefault({}),
+    environment: z.string().optional(),
+    policies: policiesSchema.prefault({}),
+    // Budgets sit beside policies deliberately: they are the second half of the
+    // governance declaration (policy decision → budget gate), not plumbing.
+    budgets: z.array(budgetSchema).default([]),
+    approval: approvalSchema.prefault({}),
+    audit: auditSchema.prefault({}),
+    sdk: sdkSchema.prefault({}),
+  })
+  .strict()
 
-/** Zod schema for the complete `helio.yaml` configuration file. */
-export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) => {
+/**
+ * Top-level keys matching `^x-` are extension keys: schema-ignored holders
+ * for YAML anchors (docker-compose precedent). js-yaml has already resolved
+ * the anchors by the time zod sees the document, so the holders' job is done
+ * and they are dropped before the strict parse. Root level only — the strip
+ * never descends into sections, whose own schemas decide how unknown keys
+ * are handled.
+ */
+function stripRootExtensionKeys(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([key]) => !key.startsWith('x-')),
+  )
+}
+
+const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) => {
   const hasConfiguredEnvironment =
     typeof cfg.environment === 'string' && cfg.environment.trim().length > 0
 
@@ -765,6 +781,9 @@ export const helioConfigSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
     }
   }
 })
+
+/** Zod schema for the complete `helio.yaml` configuration file. */
+export const helioConfigSchema = z.preprocess(stripRootExtensionKeys, helioConfigRefinedSchema)
 
 // ---------------------------------------------------------------------------
 // Inferred types

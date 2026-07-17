@@ -1618,4 +1618,78 @@ describe('helioConfigSchema', () => {
       expect(result.success).toBe(false)
     })
   })
+
+  describe('unknown top-level keys (issue #167)', () => {
+    it('rejects a top-level rules: key, naming it', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ rules: [{ match: { tool: 'delete_*' }, action: 'deny' }] }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
+      expect(result.error.issues[0]?.path).toEqual([])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "rules"')
+    })
+
+    it('rejects policy: (singular typo for policies:)', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ policy: { default: 'allow' } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "policy"')
+    })
+
+    it('rejects budget: (singular typo for budgets:)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          budget: [
+            {
+              name: 'openai-daily',
+              limit: 25,
+              currency: 'USD',
+              window: '1d',
+              contributors: [{ tool: 'openai_*', field: '$.usage.total_cost' }],
+            },
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "budget"')
+    })
+
+    it('names every unknown key in a single issue', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ rules: [], budget: [] }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.message).toBe('Unrecognized keys: "rules", "budget"')
+    })
+
+    it('allows top-level x- extension keys as anchor holders and drops them', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ 'x-defaults': { window: '1h' } }))
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect('x-defaults' in result.data).toBe(false)
+    })
+
+    it('does not strip x- keys inside sections (root-only escape hatch)', () => {
+      // policies is a strict subtree, so the un-stripped key is rejected
+      // there. Non-strict sections handle unknown keys their own way — the
+      // pin here is only that the strip never descends past the root.
+      const result = helioConfigSchema.safeParse(minimalConfig({ policies: { 'x-shared': true } }))
+      expect(result.success).toBe(false)
+    })
+
+    it('still rejects unknown keys one level down with the section path', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { default_action: 'allow' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
+      expect(result.error.issues[0]?.path).toEqual(['policies'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "default_action"')
+    })
+  })
 })

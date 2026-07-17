@@ -100,7 +100,12 @@ export async function loadConfig(
   // 4. Validate with Zod
   const result = helioConfigSchema.safeParse(interpolated)
   if (!result.success) {
-    const details = formatZodErrors(result.error)
+    // A root-level issue (e.g. an unrecognized top-level key) has an empty
+    // zod path, which would render as a bare ": message" line. Label it here
+    // rather than in formatZodErrors, which also shapes API error responses.
+    const details = formatZodErrors(result.error).map((d) =>
+      d.path === '' ? { ...d, path: '(top level)' } : d,
+    )
     const count = details.length
     throw new ConfigError(
       `Invalid configuration (${String(count)} error${count === 1 ? '' : 's'})`,

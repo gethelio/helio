@@ -446,6 +446,79 @@ dashboard:
       expect(stderr.length).toBeGreaterThan(0)
     })
 
+    it('rejects an unknown top-level key, naming it (issue #167)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      // The shape a user naturally writes: rules: at the top level instead
+      // of nested under policies:.
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+rules:
+  - match:
+      tool: "delete_*"
+    action: deny
+`,
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(stderr).toContain('(top level): Unrecognized key: "rules"')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('reports the budgets count alongside the policy rule count', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  rules:
+    - name: block-delete
+      match:
+        tool: "delete_*"
+      action: deny
+    - name: block-drop
+      match:
+        tool: "drop_*"
+      action: deny
+budgets:
+  - name: openai-daily
+    limit: 25
+    currency: USD
+    window: 1d
+    contributors:
+      - tool: "openai_*"
+        field: "$.usage.total_cost"
+`,
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain('(2 policy rules, 1 budget)')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('fails fast when a ${VAR} secret reference is unset', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')
@@ -490,6 +563,7 @@ dashboard:
       const validate = await runCli(['validate', '-c', configPath])
       expect(validate.code).toBe(0)
       expect(validate.stderr).toContain('Config is valid')
+      expect(validate.stderr).toContain('(0 policy rules, 0 budgets)')
 
       const contents = readFileSync(configPath, 'utf-8')
       expect(contents).toMatch(/dashboard:[\s\S]*?api_secret:\s*"[a-f0-9]{64}"/)
@@ -522,6 +596,21 @@ dashboard:
         })
         expect(stderr).toContain('Hot-reload disabled')
         expect(stderr).not.toContain(`Watching ${configPath} for policy changes`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses to boot when the config has an unknown top-level key (issue #167)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        // The money-gate scenario: a typo'd budget: key. The proxy must exit
+        // before listening, not boot with the budget silently dropped.
+        const original = readFileSync(configPath, 'utf-8')
+        writeFileSync(configPath, original + 'budget:\n  - name: openai-daily\n')
+        await expect(startAndCaptureStderr(['-c', configPath])).rejects.toThrow(
+          /Unrecognized key: "budget"/,
+        )
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -1348,6 +1437,32 @@ audit:
 
       return { dir, configPath }
     }
+
+    it('names the offending key when the config is invalid (issue #167)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+budget:
+  - name: openai-daily
+`,
+      )
+
+      try {
+        const { code, stderr } = await runCli(['export', '-c', configPath, '-f', 'json'])
+        expect(code).toBe(1)
+        expect(stderr).toContain('(top level): Unrecognized key: "budget"')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
 
     it('exports records as JSON', async () => {
       const { dir, configPath } = setupExport([

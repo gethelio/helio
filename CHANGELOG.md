@@ -19,6 +19,24 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **Unknown top-level keys in `helio.yaml` are now hard errors (#167).** The
+  top level of the config silently dropped unknown keys: a misplaced or
+  misspelled section — `rules:` at the top level, `policy:`, `budget:` — was
+  discarded without a word, so the proxy started healthy while enforcing none
+  of it. A typo'd `budgets:` key silently disabled spend enforcement; that
+  fail-open is what this closes. Now `helio validate` fails with an error
+  naming the key, `helio start` refuses to boot, and a hot reload that
+  introduces such a key is rejected while the proxy keeps its current
+  configuration. If your proxy refuses to start after upgrading, read the
+  error: fix the named key's spelling or nesting (`rules:` belongs under
+  `policies:`), or delete it. Top-level keys beginning with `x-` remain
+  available as holders for YAML anchors. `helio validate` now also reports
+  the budgets count alongside the policy rule count, and config failures on
+  every CLI surface (start, validate, export, hot reload) name the offending
+  paths on schema errors.
+
 ### Removed
 
 - **MCP self-repair feedback no longer emits `ruleIndex` (#144).** v0.10.0
