@@ -430,7 +430,7 @@ helio validate -c production.yaml
 On success:
 
 ```
-Config is valid: helio.yaml (3 policy rules)
+Config is valid: helio.yaml (3 policy rules, 0 budgets)
 ```
 
 On failure, Helio reports the exact path and error:
@@ -439,6 +439,33 @@ On failure, Helio reports the exact path and error:
 Invalid config: Invalid configuration (1 error)
   upstream.url: Invalid input: expected string, received undefined
 ```
+
+The top level of the file is strict: an unknown or misplaced top-level key — a `rules:` block at the top level instead of nested under `policies:`, or a singular `policy:` or `budget:` typo — is a hard error naming the key, not a silently ignored no-op. `helio start` refuses to boot on such a config, and a hot reload that introduces one is rejected while the proxy keeps its current configuration (see [Hot Reload](#hot-reload)).
+
+```
+Invalid config: Invalid configuration (1 error)
+  (top level): Unrecognized key: "rules"
+```
+
+The one exception is top-level keys beginning with lowercase `x-`. They are reserved as extension keys — holders for reusable YAML anchors, in the docker-compose style — and are ignored by the schema:
+
+```yaml
+x-defaults: &deny-defaults
+  action: deny
+
+policies:
+  rules:
+    - <<: *deny-defaults
+      name: block-delete
+      match:
+        tool: 'delete_*'
+    - <<: *deny-defaults
+      name: block-drop
+      match:
+        tool: 'drop_*'
+```
+
+`${VAR}` references inside an `x-` block are interpolated like everywhere else, so the variables must be set even though the block itself is ignored.
 
 ## Hot Reload
 
@@ -457,6 +484,13 @@ If the new configuration is invalid — or its budget epoch changes cannot be du
 
 ```
 [helio] Config reload failed (keeping current configuration): YAML parse error in helio.yaml: ...
+```
+
+Schema errors also print the offending paths, one per line:
+
+```
+[helio] Config reload failed (keeping current configuration): Invalid configuration (1 error)
+[helio]   (top level): Unrecognized key: "rules"
 ```
 
 ### Limit reconciliation

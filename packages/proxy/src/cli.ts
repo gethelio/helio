@@ -163,6 +163,18 @@ dashboard:
 // Commands
 // ---------------------------------------------------------------------------
 
+/**
+ * Print a ConfigError's per-field detail lines. Every surface that reports a
+ * config failure (start, validate, export, hot reload) goes through this so
+ * the offending path is always named, in one format.
+ */
+function printConfigErrorDetails(error: ConfigError, prefix = ''): void {
+  if (!error.details) return
+  for (const detail of error.details) {
+    console.error(`${prefix}  ${detail.path}: ${detail.message}`)
+  }
+}
+
 interface StartOptions {
   config: string
   /** When true, do not start the config file watcher. Overrides the YAML. */
@@ -290,11 +302,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
-      if (err.details) {
-        for (const detail of err.details) {
-          console.error(`  ${detail.path}: ${detail.message}`)
-        }
-      }
+      printConfigErrorDetails(err)
       process.exit(1)
     }
     throw err
@@ -691,6 +699,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         console.error(
           `[helio] Config reload failed (keeping current configuration): ${error.message}`,
         )
+        if (error instanceof ConfigError) {
+          printConfigErrorDetails(error, '[helio] ')
+        }
       },
     })
     configWatcher.start()
@@ -761,17 +772,15 @@ async function validateCommand(configPath: string): Promise<void> {
     }
 
     const ruleCount = config.policies.rules.length
+    const budgetCount = config.budgets.length
     console.error(
-      `Config is valid: ${configPath} (${String(ruleCount)} policy rule${ruleCount !== 1 ? 's' : ''})`,
+      `Config is valid: ${configPath} (${String(ruleCount)} policy rule${ruleCount !== 1 ? 's' : ''}, ` +
+        `${String(budgetCount)} budget${budgetCount !== 1 ? 's' : ''})`,
     )
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Invalid config: ${err.message}`)
-      if (err.details) {
-        for (const detail of err.details) {
-          console.error(`  ${detail.path}: ${detail.message}`)
-        }
-      }
+      printConfigErrorDetails(err)
       process.exit(1)
     }
     if (err instanceof PolicyParseError) {
@@ -817,6 +826,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
+      printConfigErrorDetails(err)
       process.exit(1)
     }
     throw err

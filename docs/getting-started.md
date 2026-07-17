@@ -222,7 +222,7 @@ Save the file. The proxy detects the change and reloads:
 [helio] Policy reloaded: 3 rules (default: allow)
 ```
 
-Check the rule count. It should now read `3 rules`: the two rules from Step 2 plus the new one. If it still says `2 rules`, the new rule did not land inside `policies.rules`. A `rules:` key at the top level of the file is silently ignored.
+Check the rule count. It should now read `3 rules`: the two rules from Step 2 plus the new one. If the proxy instead prints `Config reload failed (keeping current configuration)` with `Unrecognized key: "rules"`, the rule did not land inside `policies.rules` — a `rules:` key at the top level of the file is rejected, and the proxy keeps enforcing the previous 2 rules until you fix the nesting.
 
 Now try calling the blocked tool:
 

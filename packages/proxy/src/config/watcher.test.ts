@@ -374,6 +374,34 @@ budgets:
     expect(errors[0]?.message).toBeTruthy()
   })
 
+  it('calls onError and keeps old policy when a reload introduces an unknown top-level key', async () => {
+    await writeFile(configPath, configWithDenyRule())
+
+    const reloads: CompiledPolicy[] = []
+    const errors: Error[] = []
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: (policy) => reloads.push(policy),
+      onError: (err) => errors.push(err),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    // The reload is rejected as a whole: the typo'd budget: key must not be
+    // dropped while the rest of the file applies.
+    await writeFile(configPath, configWithDenyRule() + 'budget:\n  - name: openai-daily\n')
+    await wait(500)
+
+    expect(reloads).toHaveLength(0)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ConfigError)
+    expect((errors[0] as ConfigError).details).toEqual([
+      { path: '(top level)', message: 'Unrecognized key: "budget"' },
+    ])
+  })
+
   it('calls onError when policy has invalid regex', async () => {
     await writeFile(configPath, validConfig())
 

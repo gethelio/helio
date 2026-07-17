@@ -151,6 +151,52 @@ upstream:
     await expect(loadConfig(filePath)).rejects.toThrow('YAML parse error')
   })
 
+  it('rejects an unknown top-level key with a (top level) detail naming it', async () => {
+    const yaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+budget:
+  - name: openai-daily
+`
+    const filePath = await writeTempYaml('top-level-typo.yaml', yaml)
+
+    try {
+      await loadConfig(filePath)
+      expect.fail('Should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError)
+      const configErr = err as ConfigError
+      expect(configErr.details).toEqual([
+        { path: '(top level)', message: 'Unrecognized key: "budget"' },
+      ])
+    }
+  })
+
+  it('loads a config that parks a YAML anchor in a top-level x- key', async () => {
+    const yaml = `
+x-shared: &tool-glob "delete_*"
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  rules:
+    - name: block-delete
+      match:
+        tool: *tool-glob
+      action: deny
+`
+    const filePath = await writeTempYaml('anchor-holder.yaml', yaml)
+
+    const config = await loadConfig(filePath)
+    expect(config.policies.rules[0]?.match.tool).toBe('delete_*')
+    expect('x-shared' in config).toBe(false)
+  })
+
   it('throws ConfigError with details for schema validation errors', async () => {
     const yaml = `
 version: "2"
