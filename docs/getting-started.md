@@ -17,7 +17,7 @@ curl -O https://raw.githubusercontent.com/gethelio/helio/main/examples/_shared/m
 node mcp-echo-server.mjs
 ```
 
-It prints `MCP echo server listening on http://127.0.0.1:8080/mcp` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`, `stripe_charge`, `paypal_payout`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
+It prints `MCP echo server listening on http://127.0.0.1:8080` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`, `stripe_charge`, `paypal_payout`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
 
 ## Step 1: Install
 
@@ -114,6 +114,7 @@ Dashboard API listening on http://127.0.0.1:3100
 Approvals: timeout 300s, default on timeout: deny, 0 channels configured
 Rate limits: enabled
 Spend limits: enabled
+Budgets: 0 configured
 Config: helio.yaml
 Watching helio.yaml for policy changes
 ```
@@ -197,27 +198,31 @@ The tool call passes through the policy engine, gets forwarded to the upstream s
 
 ## Step 7: Try a Policy Rule
 
-Add a rule to your config and watch hot-reload pick it up. With the proxy still running, edit `helio.yaml` and add a deny rule before the existing rules:
+Add a rule to your config and watch hot-reload pick it up. With the proxy still running, edit `helio.yaml` and add a deny rule at the top of `policies.rules`, before the existing rules:
 
 ```yaml
-rules:
-  - name: block-email
-    match:
-      tool: 'send_email'
-    action: deny
-    feedback:
-      message: 'Email sending is disabled.'
-      suggestion: 'Contact your admin to enable email.'
+policies:
+  default: allow
+  rules:
+    - name: block-email
+      match:
+        tool: 'send_email'
+      action: deny
+      feedback:
+        message: 'Email sending is disabled.'
+        suggestion: 'Contact your admin to enable email.'
 
-  - name: block-destructive
-    # ... existing rules
+    # ... your existing rules (block-destructive, allow-reads) continue here
 ```
 
 Save the file. The proxy detects the change and reloads:
 
 ```
+[helio] Budgets reloaded: 0 budgets
 [helio] Policy reloaded: 3 rules (default: allow)
 ```
+
+Check the rule count. It should now read `3 rules`: the two rules from Step 2 plus the new one. If it still says `2 rules`, the new rule did not land inside `policies.rules`. A `rules:` key at the top level of the file is silently ignored.
 
 Now try calling the blocked tool:
 
@@ -248,11 +253,11 @@ To run Helio in its own container **next to a coding agent or dev container** �
 
 The quickstart above is safe by default on a single-operator workstation. Before running Helio anywhere reachable from other people or machines, work through this checklist:
 
-- **Generate and store a strong `dashboard.api_secret`.** `helio init` writes a fresh 256-bit hex value into `helio.yaml`; if you authored the file by hand, run `openssl rand -hex 32` and paste it into `dashboard.api_secret`. This value is stable until you rotate it. Treat it like a password-manager secret: if you lose it, you must generate a new one, update `helio.yaml`, and restart/reload the proxy.
+- **Generate and store a strong `dashboard.api_secret`.** `helio init` writes a fresh 256-bit hex value into `helio.yaml`; if you authored the file by hand, run `openssl rand -hex 32` and paste it into `dashboard.api_secret`. This value is stable until you rotate it. Treat it like a password-manager secret: if you lose it, you must generate a new one, update `helio.yaml`, and restart the proxy.
 - **Understand browser login behavior.** The dashboard UI now uses a manual secret login screen: enter `dashboard.api_secret` once, then the browser uses a short-lived HttpOnly session cookie. The raw secret is not injected into frontend JS anymore.
 - **Keep `dashboard.host` on `127.0.0.1`.** The dashboard sideband assumes a single trust boundary and has no identity layer of its own. If you need to reach it remotely, put it behind a reverse proxy (nginx, Caddy, Cloudflare Access, Tailscale Serve) that terminates TLS and adds per-user authentication before forwarding to `127.0.0.1:3100`. Do not bind `dashboard.host` to `0.0.0.0` directly.
 - **Keep the audit database on local disk.** Helio's audit sqlite file is created with mode `0600` (owner read/write only) — if you move it to a shared filesystem or back it up into an unencrypted bucket, you lose that isolation. Audit records contain tool inputs and upstream responses, often including PII and credentials.
-- **Rotate secrets deliberately and expect session invalidation.** The proxy reads `dashboard.api_secret` from disk on startup and on config hot-reload. Change the value in `helio.yaml`, then restart/reload to rotate. Existing dashboard sessions are revoked and users must log in again with the new secret.
+- **Rotate secrets deliberately and expect session invalidation.** The proxy reads `dashboard.api_secret` from disk at startup only. If you change it while the proxy is running, Helio logs a restart-required warning and keeps using the startup value (see the [reload boundary](./configuration.md#reload-boundary)). Change the value in `helio.yaml`, then restart to rotate. Existing dashboard sessions are revoked and users must log in again with the new secret.
 - **Keep the main MCP port behind the same trust boundary as the dashboard.** `listen.host` defaults to `127.0.0.1`; if you need remote agents, use a reverse proxy or SSH tunnel rather than binding to `0.0.0.0`. The main port does not carry the dashboard secret — it accepts MCP traffic based on network reachability alone.
 
 ## Next Steps

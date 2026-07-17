@@ -116,6 +116,7 @@ Where the Helio proxy listens. Point your MCP client here instead of directly at
 dashboard:
   enabled: true
   port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
   allow_open_mode: true
 ```
 
@@ -125,33 +126,28 @@ The web dashboard for real-time visibility. Served on a separate port. This exam
 policies:
   default: allow
   flag_destructive: log
+  rules:
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive operations are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request manual action.'
+
+    - name: allow-reads
+      match:
+        annotations:
+          readOnlyHint: true
+      action: allow
 ```
 
 `default: allow` means any tool call that doesn't match a rule is permitted. `flag_destructive: log` adds an audit flag when tools have `destructiveHint: true` (even if they're explicitly denied by a rule).
 
-```yaml
-rules:
-  - name: block-destructive
-    match:
-      annotations:
-        destructiveHint: true
-    action: deny
-    feedback:
-      message: 'Destructive operations are blocked by policy.'
-      suggestion: 'Use a non-destructive alternative or request manual action.'
-```
+The `rules:` array is nested inside the `policies:` section. The first rule, `block-destructive`, denies any tool with `destructiveHint: true` in its MCP annotations; its `feedback` block provides structured self-repair information to the calling agent.
 
-First rule evaluated. Any tool with `destructiveHint: true` in its MCP annotations is denied. The `feedback` block provides structured self-repair information to the calling agent.
-
-```yaml
-- name: allow-reads
-  match:
-    annotations:
-      readOnlyHint: true
-  action: allow
-```
-
-Explicitly allows read-only tools. This is redundant with `default: allow` but demonstrates the pattern — in production you'd typically use `default: deny` and explicitly allow specific tools.
+The `allow-reads` rule explicitly allows read-only tools. This is redundant with `default: allow` but demonstrates the pattern — in production you'd typically use `default: deny` and explicitly allow specific tools.
 
 ```yaml
 approval:

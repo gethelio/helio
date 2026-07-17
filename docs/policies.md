@@ -17,29 +17,30 @@ Policy evaluation is synchronous and typically completes in under 1ms.
 Each rule in the `policies.rules` array has this structure:
 
 ```yaml
-rules:
-  - name: rule-name # Optional label for audit and error messages
-    match: # Conditions (all must be true)
-      tool: 'send_*' # Glob pattern on tool name
-      annotations: # MCP annotation hints
-        destructiveHint: true
-      input: # Conditions on tool arguments
-        '$.amount':
-          gt: 1000
-      environment: production # Match environment label
-    action: deny # What to do: allow | deny | require_approval | rate_limit | spend_limit | dry_run
-    approval: # Optional; if omitted, falls back to dashboard + global timeout
-      channel: slack
-      timeout: '600s'
-    evidence: # Require evidence before allowing
-      requires: ['order_lookup']
-    requires: ['verify_customer'] # Require prior tool calls
-    limits: # Rate or spend limit config
-      max_calls: 100
-      window: '1h'
-    feedback: # Custom message for blocked and gated actions
-      message: 'This action is blocked.'
-      suggestion: 'Try a different approach.'
+policies:
+  rules:
+    - name: rule-name # Optional label for audit and error messages
+      match: # Conditions (all must be true)
+        tool: 'send_*' # Glob pattern on tool name
+        annotations: # MCP annotation hints
+          destructiveHint: true
+        input: # Conditions on tool arguments
+          '$.amount':
+            gt: 1000
+        environment: production # Match environment label
+      action: deny # What to do: allow | deny | require_approval | rate_limit | spend_limit | dry_run
+      approval: # Optional; if omitted, falls back to dashboard + global timeout
+        channel: slack
+        timeout: '600s'
+      evidence: # Require evidence before allowing
+        requires: ['order_lookup']
+      requires: ['verify_customer'] # Require prior tool calls
+      limits: # Rate or spend limit config
+        max_calls: 100
+        window: '1h'
+      feedback: # Custom message for blocked and gated actions
+        message: 'This action is blocked.'
+        suggestion: 'Try a different approach.'
 ```
 
 ## Match Conditions
@@ -648,19 +649,20 @@ In dry-run mode:
 Since Helio uses first-match-wins, the order of rules determines behavior. Consider this example:
 
 ```yaml
-rules:
-  # Rule 1: Deny destructive tools
-  - name: block-destructive
-    match:
-      annotations:
-        destructiveHint: true
-    action: deny
+policies:
+  rules:
+    # Rule 1: Deny destructive tools
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
 
-  # Rule 2: Allow all tools
-  - name: allow-all
-    match:
-      tool: '*'
-    action: allow
+    # Rule 2: Allow all tools
+    - name: allow-all
+      match:
+        tool: '*'
+      action: allow
 ```
 
 A destructive tool like `delete_record` matches **Rule 1** first and is denied. A non-destructive tool like `send_email` does not match Rule 1, falls through to **Rule 2**, and is allowed.

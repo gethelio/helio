@@ -447,8 +447,11 @@ Helio watches your configuration file for changes and automatically reloads poli
 On successful reload:
 
 ```
+[helio] Budgets reloaded: 0 budgets
 [helio] Policy reloaded: 5 rules (default: allow)
 ```
+
+The budgets line always prints first, with the count from the reloaded file (`0 budgets` when no `budgets:` section is configured).
 
 If the new configuration is invalid — or its budget epoch changes cannot be durably recorded — Helio rejects the reload as a whole, keeps the complete current configuration (policy rules and budgets alike), and logs the error:
 
