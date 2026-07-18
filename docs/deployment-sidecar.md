@@ -55,6 +55,8 @@ the agent container is not attached to, and attach Helio to both networks.
 This composes three things on two networks: an `edge` network the agent shares
 with Helio, and an `internal` network only Helio and the MCP server share.
 
+<!-- helio-config-guard: skip -->
+
 ```yaml
 # compose.yaml
 services:

@@ -155,6 +155,29 @@ test(proxy): add rate limiter edge case coverage
 - Aim for meaningful coverage of behavior, not line-count metrics. Test the cases that matter: happy path, error cases, and edge cases around policy matching and transaction controls.
 - Integration tests that spin up the proxy and send real MCP requests go in `packages/proxy/src/__tests__/`.
 
+### Config samples in docs
+
+Every ` ```yaml ` fence in the docs, READMEs, and `AGENTS.md`, plus every shipped
+`examples/*/helio.yaml` and `docker/helio.docker.yaml`, is validated in CI against
+the real schema (`scripts/validate-config-samples.mjs`, part of the
+`Docs drift + config samples check` step). Treat a config sample as code: if it
+has never been executed, assume it is broken.
+
+- Full configs are validated byte for byte. Fragments (a bare `policies:` block,
+  a single rule, a rules list) are overlaid onto a standard harness config first.
+  The reported policy-rule and budget counts must match the sample, so a silently
+  dropped section fails even when `validate` exits 0.
+- Run it locally with `pnpm build && pnpm docs:check:samples` (the guard shells
+  out to the built CLI, so build first).
+- A fence the guard cannot classify is a hard error. If, and only if, the fence
+  is not Helio config YAML (say, a docker-compose file), put
+  `<!-- helio-config-guard: skip -->` on the line above it. Never use the marker
+  to silence a failing Helio sample; fix the sample instead.
+- Two additional checks are implemented but not yet enforced: canonical
+  section order (`--enforce-order`, arms with #163) and root-key completeness of
+  the `helio init` scaffold and `docs/configuration.md` (`--enforce-completeness`,
+  arms with #164). They report loudly in the meantime.
+
 ### Performance
 
 The proxy sits in the critical path of every agent tool call. Performance matters.
@@ -264,7 +287,7 @@ pnpm start
 **Checking your changes end-to-end:**
 
 ```bash
-pnpm secrets:scan && pnpm docs:check:ci && pnpm audit --audit-level=high && pnpm build && pnpm test && pnpm lint && pnpm format:check && pnpm typecheck
+pnpm secrets:scan && pnpm audit --audit-level=high && pnpm build && pnpm docs:check:ci && pnpm test && pnpm lint && pnpm format:check && pnpm typecheck
 ```
 
 If all checks pass, your PR is likely in good shape.
