@@ -18,7 +18,8 @@
     "format:check": "prettier --check .",
     "secrets:scan": "bash ./scripts/secret-scan-ci.sh",
     "secrets:scan:staged": "bash ./scripts/secret-scan-staged.sh",
-    "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh",
+    "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh && node ./scripts/validate-config-samples.mjs",
+    "docs:check:samples": "node ./scripts/validate-config-samples.mjs",
     "prepare": "husky"
   },
   "devDependencies": {
@@ -26,6 +27,7 @@
     "eslint": "9.39.4",
     "eslint-plugin-react-hooks": "7.0.1",
     "husky": "9.1.7",
+    "js-yaml": "4.1.1",
     "prettier": "3.8.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.57.1"

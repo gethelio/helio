@@ -59,9 +59,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Docs drift check
-        run: pnpm docs:check:ci
-
       # Supply-chain audit. Full-tree (dev + build + transitive) on every push to
       # main and on release (release.yml). On a pull_request it runs ONLY when the
       # PR changes a dependency manifest — so an unrelated feature PR is not blocked
@@ -117,6 +114,11 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # After Build on purpose: the config-samples half validates every shipped
+      # sample through the built CLI (dist/cli.js + bundled dashboard assets).
+      - name: Docs drift + config samples check
+        run: pnpm docs:check:ci
 
       - name: Lint
         run: pnpm lint
