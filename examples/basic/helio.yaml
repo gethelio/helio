@@ -13,12 +13,6 @@ listen:
   port: 3000
   host: '127.0.0.1'
 
-dashboard:
-  enabled: true
-  port: 3100
-  # Local demo mode: allow unauthenticated dashboard access on loopback only.
-  allow_open_mode: true
-
 policies:
   default: allow
   flag_destructive: log
@@ -49,3 +43,9 @@ audit:
   path: ./helio-audit.db
   retention: 90d
   include_responses: true
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
+  allow_open_mode: true

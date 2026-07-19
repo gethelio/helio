@@ -463,7 +463,6 @@ const helioConfigBaseSchema = z
     version: z.literal('1'),
     upstream: upstreamSchema,
     listen: listenSchema.prefault({}),
-    dashboard: dashboardSchema.prefault({}),
     environment: z.string().optional(),
     policies: policiesSchema.prefault({}),
     // Budgets sit beside policies deliberately: they are the second half of the
@@ -471,6 +470,9 @@ const helioConfigBaseSchema = z
     budgets: z.array(budgetSchema).default([]),
     approval: approvalSchema.prefault({}),
     audit: auditSchema.prefault({}),
+    // Dashboard follows audit deliberately: an operator surface, not part of
+    // the request path (canonical section order, #89/#163).
+    dashboard: dashboardSchema.prefault({}),
     sdk: sdkSchema.prefault({}),
   })
   .strict()

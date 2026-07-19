@@ -14,17 +14,6 @@ listen:
   port: 3000
   host: '127.0.0.1'
 
-dashboard:
-  enabled: true
-  port: 3100
-  # Required whenever any rule uses `require_approval`. Generate a fresh
-  # secret with `openssl rand -hex 32` and put it in `.env` as
-  # HELIO_DASHBOARD_SECRET (see `.env.example`). The proxy refuses to
-  # start while this resolves to an empty string, so a forgotten or
-  # blank value can never be mistaken for a working install. Rotate by
-  # generating a new value and restarting the proxy.
-  api_secret: '${HELIO_DASHBOARD_SECRET}'
-
 policies:
   default: allow
   rules:
@@ -70,3 +59,14 @@ audit:
   path: ./helio-audit.db
   retention: 90d
   include_responses: true
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Required whenever any rule uses `require_approval`. Generate a fresh
+  # secret with `openssl rand -hex 32` and put it in `.env` as
+  # HELIO_DASHBOARD_SECRET (see `.env.example`). The proxy refuses to
+  # start while this resolves to an empty string, so a forgotten or
+  # blank value can never be mistaken for a working install. Rotate by
+  # generating a new value and restarting the proxy.
+  api_secret: '${HELIO_DASHBOARD_SECRET}'

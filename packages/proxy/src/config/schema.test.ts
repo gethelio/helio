@@ -154,6 +154,44 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Canonical key order
+  // -------------------------------------------------------------------------
+
+  describe('canonical key order', () => {
+    it('emits top-level keys in the canonical section order', () => {
+      // Input keys are deliberately reversed: the assertion holds only while
+      // zod emits output in shape-declaration order, so both a re-misplaced
+      // shape field and a zod that starts preserving input order fail loudly.
+      const result = helioConfigSchema.safeParse({
+        sdk: {},
+        dashboard: { enabled: false },
+        audit: {},
+        approval: {},
+        budgets: [],
+        policies: {},
+        environment: 'production',
+        listen: {},
+        upstream: { url: 'http://localhost:8080' },
+        version: '1',
+      })
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(Object.keys(result.data)).toEqual([
+        'version',
+        'upstream',
+        'listen',
+        'environment',
+        'policies',
+        'budgets',
+        'approval',
+        'audit',
+        'dashboard',
+        'sdk',
+      ])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Version
   // -------------------------------------------------------------------------
 
