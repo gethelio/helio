@@ -121,10 +121,26 @@ upstream:
 #   port: 3000
 #   host: 127.0.0.1
 
+# environment: production
+
 # policies:
 #   default: allow
 #   dry_run: false
 #   rules: []
+
+# budgets:
+#   # One depleting pot shared by every tool that spends.
+#   - name: agent-payments
+#     limit: 50
+#     currency: USD
+#     window: session
+#     key: session
+#     on_exceed: deny # or require_approval for a break-glass ticket
+#     contributors:
+#       - tool: 'stripe_*'
+#         field: '$.amount'
+#       - tool: 'paypal_*'
+#         field: '$.total'
 
 # approval:
 #   timeout: 300s
@@ -142,7 +158,7 @@ upstream:
 # front. dashboard.api_secret is the manual dashboard login secret and also
 # supports machine Bearer auth for sideband API clients. Store it safely; it
 # stays valid until you rotate it. Rotate by editing this file and restarting
-# (or hot-reloading) the proxy. Rotation invalidates active dashboard sessions.
+# the proxy. Rotation invalidates active dashboard sessions.
 dashboard:
   enabled: true
   port: 3100

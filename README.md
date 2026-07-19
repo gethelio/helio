@@ -66,7 +66,7 @@ This single package includes the built-in dashboard UI bundle.
 
 > **Heads up — Helio starts in audit-only mode.** `init` scaffolds the `policies` section **commented out**, so out of the box Helio runs with `default: allow` and **zero rules**: it records every tool call to the audit trail but **blocks nothing**. Uncomment and edit `policies` (or paste your own rules) to start enforcing. See the [Policy Guide](./docs/policies.md) for rule syntax.
 
-The block below is an **illustrative target** — not the file `init` writes — showing policies, audit, and a dashboard secret:
+The block below is an **illustrative target** — not the file `init` writes — showing policies, budgets, audit, and a dashboard secret:
 
 ```yaml
 version: '1'
@@ -109,6 +109,20 @@ policies:
           limit: 5000
           currency: 'GBP'
           window: 24h
+
+budgets:
+  # One depleting pot shared by every tool that spends.
+  - name: agent-payments
+    limit: 50
+    currency: USD
+    window: session
+    key: session
+    on_exceed: deny # or require_approval for a break-glass ticket
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
 
 audit:
   storage: sqlite

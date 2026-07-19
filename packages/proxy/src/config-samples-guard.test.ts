@@ -315,8 +315,8 @@ describe('config-samples guard', () => {
 
       const relaxed = await runGuard(root, scaffoldArgs)
       expect(relaxed.code).toBe(0)
-      expect(relaxed.output).toContain('NOT YET ENFORCED')
-      expect(relaxed.output).toContain('#164')
+      expect(relaxed.output).toContain('not enforced without --enforce-completeness')
+      expect(relaxed.output).toContain('missing a top-level `budgets:` stub')
 
       const enforced = await runGuard(root, [...scaffoldArgs, '--enforce-completeness'])
       expect(enforced.code).toBe(1)
