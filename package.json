@@ -18,8 +18,8 @@
     "format:check": "prettier --check .",
     "secrets:scan": "bash ./scripts/secret-scan-ci.sh",
     "secrets:scan:staged": "bash ./scripts/secret-scan-staged.sh",
-    "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh && node ./scripts/validate-config-samples.mjs --enforce-completeness",
-    "docs:check:samples": "node ./scripts/validate-config-samples.mjs --enforce-completeness",
+    "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh && node ./scripts/validate-config-samples.mjs --enforce-order --enforce-completeness",
+    "docs:check:samples": "node ./scripts/validate-config-samples.mjs --enforce-order --enforce-completeness",
     "prepare": "husky"
   },
   "devDependencies": {

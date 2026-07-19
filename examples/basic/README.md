@@ -113,16 +113,6 @@ listen:
 Where the Helio proxy listens. Point your MCP client here instead of directly at the upstream server.
 
 ```yaml
-dashboard:
-  enabled: true
-  port: 3100
-  # Local demo mode: allow unauthenticated dashboard access on loopback only.
-  allow_open_mode: true
-```
-
-The web dashboard for real-time visibility. Served on a separate port. This example intentionally uses local open mode (`allow_open_mode: true`) so `pnpm start` works without secret setup; keep this loopback-only.
-
-```yaml
 policies:
   default: allow
   flag_destructive: log
@@ -168,6 +158,16 @@ audit:
 ```
 
 Every tool call is recorded to a local SQLite database. `include_responses: true` captures the full upstream response (set to `false` for privacy-sensitive deployments). Records older than 90 days are automatically cleaned up.
+
+```yaml
+dashboard:
+  enabled: true
+  port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
+  allow_open_mode: true
+```
+
+The web dashboard for real-time visibility. Served on a separate port. This example intentionally uses local open mode (`allow_open_mode: true`) so `pnpm start` works without secret setup; keep this loopback-only.
 
 ## Next Steps
 

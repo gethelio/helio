@@ -12,12 +12,10 @@
  * candidate document, so a silently-dropped section can never pass.
  *
  * Enforced at merge: fence validation (check 1), shipped-config validation
- * (check 2), the examples/basic README mirror rule, extraction hygiene, and
- * root-key completeness of the init scaffold + configuration.md (check 4,
- * --enforce-completeness, passed by both package.json entry points).
- * Implemented but flag-gated until its fix lands: canonical section order
- * (check 3, --enforce-order, activates with #163). It reports loudly while
- * unenforced.
+ * (check 2), canonical section order (check 3, --enforce-order), root-key
+ * completeness of the init scaffold + configuration.md (check 4,
+ * --enforce-completeness), the examples/basic README mirror rule, and
+ * extraction hygiene. Both package.json entry points pass both flags.
  *
  * Usage: node scripts/validate-config-samples.mjs
  *   [--repo-root <dir>] [--cli <path>] [--scaffold-file <path>]
@@ -846,7 +844,7 @@ async function main() {
     if (orderViolations.length > 0) {
       const header = opts.enforceOrder
         ? 'canonical-order violations (enforced):'
-        : 'NOT YET ENFORCED (activates with #163) — canonical-order violations:'
+        : 'canonical-order violations (not enforced without --enforce-order):'
       console.log(header)
       for (const violation of orderViolations) console.log(`  ${violation}`)
       console.log('')

@@ -256,8 +256,8 @@ describe('config-samples guard', () => {
 
       const relaxed = await runGuard(root)
       expect(relaxed.code).toBe(0)
-      expect(relaxed.output).toContain('NOT YET ENFORCED')
-      expect(relaxed.output).toContain('#163')
+      expect(relaxed.output).toContain('not enforced without --enforce-order')
+      expect(relaxed.output).toContain('top-level keys not in canonical order')
 
       const enforced = await runGuard(root, ['--enforce-order'])
       expect(enforced.code).toBe(1)

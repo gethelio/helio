@@ -274,6 +274,8 @@ Budget spend **persists across restarts**: every charge is written to a ledger i
 
 Configuration for human-in-the-loop approval workflows. See [Approval Workflows](./approvals.md) for full documentation.
 
+In the canonical section order, `approval` follows `policies` and `budgets` because it is not a third gate: it is the shared channel and timeout configuration that policy rules (`require_approval`) and budget break-glass approvals both delegate to when they need a human. A strict lifecycle reading could argue for `approval` between `policies` and `budgets`, since on the MCP door a rule's approval resolves before the budget gate runs. That reading is rejected: the top-level `approval:` block is shared configuration, not the gate itself, and ordering the config around one door's implementation detail would separate the two enforcement layers a reader most needs to compare.
+
 | Field                | Type     | Required | Default | Description                                    |
 | -------------------- | -------- | -------- | ------- | ---------------------------------------------- |
 | `timeout`            | duration | No       | `300s`  | Maximum time to wait for an approval decision. |
