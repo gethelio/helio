@@ -367,6 +367,43 @@ describe('CLI', () => {
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it('scaffolds every top-level section in canonical order', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const outPath = join(dir, 'helio.yaml')
+
+      try {
+        const { code } = await runCli(['init', '-o', outPath])
+        expect(code).toBe(0)
+
+        const contents = readFileSync(outPath, 'utf-8')
+        expect(contents).toContain('\n# environment: production\n')
+        expect(contents).toContain('\n# budgets:\n')
+
+        const canonicalOrder = [
+          'version',
+          'upstream',
+          'listen',
+          'environment',
+          'policies',
+          'budgets',
+          'approval',
+          'audit',
+          'dashboard',
+          'sdk',
+        ]
+        let cursor = -1
+        for (const key of canonicalOrder) {
+          const match = new RegExp(`^(?:#\\s*)?${key}:`, 'm').exec(contents)
+          expect(match, `top-level \`${key}:\` stub missing from the scaffold`).not.toBeNull()
+          const index = match?.index ?? -1
+          expect(index, `\`${key}:\` is out of canonical order`).toBeGreaterThan(cursor)
+          cursor = index
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 
   // --- helio validate ---
@@ -567,6 +604,34 @@ dashboard:
 
       const contents = readFileSync(configPath, 'utf-8')
       expect(contents).toMatch(/dashboard:[\s\S]*?api_secret:\s*"[a-f0-9]{64}"/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('uncommenting only the budgets stub yields a config with one budget', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+    const configPath = join(dir, 'helio.yaml')
+
+    try {
+      const init = await runCli(['init', '-o', configPath])
+      expect(init.code).toBe(0)
+
+      const contents = readFileSync(configPath, 'utf-8')
+      const stub = /^# budgets:\n(?:#.*\n)*/m.exec(contents)?.[0] ?? ''
+      expect(stub, 'commented `# budgets:` stub missing from the scaffold').not.toBe('')
+      expect(stub, 'stub capture must stop at the end of the budgets block').toMatch(
+        /field: '\$\.total'\n$/,
+      )
+      writeFileSync(
+        configPath,
+        contents.replace(stub, () => stub.replace(/^# ?/gm, '')),
+      )
+
+      const validate = await runCli(['validate', '-c', configPath])
+      expect(validate.code).toBe(0)
+      expect(validate.stderr).toContain('Config is valid')
+      expect(validate.stderr).toContain('(0 policy rules, 1 budget)')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

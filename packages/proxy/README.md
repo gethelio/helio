@@ -113,6 +113,20 @@ policies:
           currency: 'GBP'
           window: 24h
 
+budgets:
+  # One depleting pot shared by every tool that spends.
+  - name: agent-payments
+    limit: 50
+    currency: USD
+    window: session
+    key: session
+    on_exceed: deny # or require_approval for a break-glass ticket
+    contributors:
+      - tool: 'stripe_*'
+        field: '$.amount'
+      - tool: 'paypal_*'
+        field: '$.total'
+
 audit:
   storage: sqlite
   retention: 90d

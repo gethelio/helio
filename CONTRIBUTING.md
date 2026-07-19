@@ -173,10 +173,12 @@ has never been executed, assume it is broken.
   is not Helio config YAML (say, a docker-compose file), put
   `<!-- helio-config-guard: skip -->` on the line above it. Never use the marker
   to silence a failing Helio sample; fix the sample instead.
-- Two additional checks are implemented but not yet enforced: canonical
-  section order (`--enforce-order`, arms with #163) and root-key completeness of
-  the `helio init` scaffold and `docs/configuration.md` (`--enforce-completeness`,
-  arms with #164). They report loudly in the meantime.
+- Root-key completeness of the `helio init` scaffold and `docs/configuration.md`
+  (`--enforce-completeness`) is enforced: every top-level section must appear
+  (the scaffold may satisfy it with a commented stub; `docs/configuration.md`
+  needs the key live in a fence). One further check is implemented but not yet
+  enforced: canonical section order (`--enforce-order`, arms with #163). It
+  reports loudly in the meantime.
 
 ### Performance
 
