@@ -5824,6 +5824,46 @@ describe('GovernedForwarder', () => {
 
         consoleSpy.mockRestore()
       })
+
+      it('dry-run with a missing amount field reports limits_ok false and logs a warning', async () => {
+        const inner = mockForwarder()
+        const { limiter } = createSpendLimiter()
+        const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const policy = compile({
+          dry_run: true,
+          default: 'allow',
+          rules: [
+            {
+              name: 'spend-limit-payments',
+              match: { tool: 'create_payment' },
+              action: 'spend_limit',
+              limits: {
+                max_spend: { field: '$.amount', limit: 1000, currency: 'GBP', window: '24h' },
+              },
+            },
+          ],
+        })
+        const governed = new GovernedForwarder(inner, policy, { spendLimiter: limiter })
+
+        const result = await governed.forward(toolsCallRequest('create_payment', {}))
+        expect(inner.forward).not.toHaveBeenCalled()
+        expect(consoleSpy).toHaveBeenCalledWith(
+          expect.stringContaining('did not resolve to a number'),
+        )
+
+        const body = result.response.body as Record<string, unknown>
+        const mcpResult = body['result'] as Record<string, unknown>
+        const content = mcpResult['content'] as Array<{ type: string; text: string }>
+        const first = content[0]
+        if (!first) throw new Error('expected content item')
+        const payload = JSON.parse(first.text) as Record<string, unknown>
+        expect(payload['dry_run']).toBe(true)
+        expect(payload['would_forward']).toBe(false)
+        expect(payload['limits_ok']).toBe(false)
+
+        expect(limiter.listKeyStates()).toEqual([])
+        consoleSpy.mockRestore()
+      })
     })
   })
 

@@ -724,6 +724,7 @@ In dry-run mode:
 - No requests are forwarded to the upstream server
 - Rate limit slots are not consumed (uses `peek` instead of `check`)
 - Spend buckets are not charged
+- The matched rule's rate or spend limit is still simulated on both doors (evidence permitting — an evidence-blocked call is a simulated deny and peeks nothing): the non-consuming peek decides `would_forward`/`limits_ok` together with budgets, and the sideband dry-run response reports the snapshot in `limits.rate` / `limits.spend`. An unreadable spend amount simulates as a block — with `reason: invalid_amount` on the sideband; the MCP door reports it via `limits_ok: false` and an operator warning
 - [Budgets](#cross-tool-spend-budgets) are peeked but never charged — the dry-run payload reports their state in a `budgets` array, and no breach events fire
 - Tool calls are not recorded for dependency chain tracking
 - Audit records are created with `dry_run: true`
