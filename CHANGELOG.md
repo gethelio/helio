@@ -48,6 +48,22 @@ Maintainer notes:
   `/evaluate` keep `matched_rule_index`, approval tickets keep `rule_index`,
   neither ever carried the alias.
 
+### Security
+
+- **js-yaml `4.1.1` → `4.3.0`** (GHSA-52cp-r559-cp3m — YAML merge-key chains
+  can force quadratic CPU consumption). js-yaml parses `helio.yaml`, which is
+  operator-authored, so there is no remote input path; the parser of a
+  governance proxy is upgraded regardless. The patch ships on the maintained
+  v4 line, so no API changes.
+- **axios `1.17.0` → `1.18.1`** (GHSA-gcfj-64vw-6mp9 — the Node HTTP adapter
+  can use an inherited proxy after interceptor config cloning), transitive
+  under `@slack/web-api` (Slack approvals); the workspace override pinning
+  axios moved to the patched version.
+- **brace-expansion `1.1.13`/`5.0.5` → `1.1.16`/`5.0.7`**
+  (GHSA-3jxr-9vmj-r5cp — exponential-time expansion DoS), dev/build-tooling
+  transitives; the workspace overrides now map the advisories' full
+  vulnerable ranges to the patched versions.
+
 ## [0.10.0] - 2026-07-14
 
 ### Added

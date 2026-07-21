@@ -62,7 +62,7 @@
     "chokidar": "5.0.0",
     "commander": "14.0.3",
     "hono": "4.12.26",
-    "js-yaml": "4.1.1",
+    "js-yaml": "4.3.0",
     "picomatch": "4.0.4",
     "safe-regex2": "5.0.0",
     "zod": "4.3.6"
