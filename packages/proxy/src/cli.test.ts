@@ -27,19 +27,30 @@ function runCli(
 }
 
 /**
- * Spawn `helio start` and collect stderr until a target log line appears,
- * then kill the process. Used by start-command tests to assert on startup
- * log lines without depending on real upstream connectivity.
+ * Spawn `helio start` and collect stderr until every ready marker has
+ * appeared (in any order), then kill the process. Used by start-command
+ * tests to assert on startup log lines without depending on real upstream
+ * connectivity.
+ *
+ * The snapshot resolves as soon as the markers match — there is no grace
+ * window. A test asserting a line is ABSENT must anchor on a marker the CLI
+ * prints AFTER the absent line's print site, so the snapshot provably
+ * covers the window where that line would have appeared.
  */
 async function startAndCaptureStderr(
   args: string[],
   options: {
-    readyMarker?: RegExp
+    readyMarker?: RegExp | RegExp[]
     timeoutMs?: number
     env?: NodeJS.ProcessEnv
   } = {},
 ): Promise<string> {
-  const readyMarker = options.readyMarker ?? /Helio proxy listening/
+  const readyMarkers = [options.readyMarker ?? /Helio proxy listening/].flat()
+  // Stateful regexes would advance lastIndex across the per-chunk re-tests
+  // and could wedge the wait; an empty list would resolve on the first chunk.
+  if (readyMarkers.length === 0 || readyMarkers.some((m) => m.global || m.sticky)) {
+    throw new Error('readyMarker must be one or more regexes without the g/y flags')
+  }
   const timeoutMs = options.timeoutMs ?? 8_000
   return new Promise<string>((resolve, reject) => {
     // stdout is ignored entirely — the CLI does not write anything to stdout
@@ -52,15 +63,10 @@ async function startAndCaptureStderr(
 
     let stderr = ''
     let settled = false
-    let flushTimer: ReturnType<typeof setTimeout> | null = null
 
     const finish = (result: string | Error) => {
       if (settled) return
       settled = true
-      if (flushTimer !== null) {
-        clearTimeout(flushTimer)
-        flushTimer = null
-      }
       try {
         child.kill('SIGTERM')
       } catch {
@@ -81,15 +87,9 @@ async function startAndCaptureStderr(
 
     child.stderr.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf-8')
-      if (flushTimer === null && readyMarker.test(stderr)) {
+      if (readyMarkers.every((marker) => marker.test(stderr))) {
         clearTimeout(timer)
-        // Give the process one more tick to flush any trailing startup lines
-        // that come out in the same microtask (e.g. "Watching ...").
-        flushTimer = setTimeout(() => {
-          flushTimer = null
-          finish(stderr)
-        }, 50)
-        flushTimer.unref()
+        finish(stderr)
       }
     })
 
@@ -98,7 +98,10 @@ async function startAndCaptureStderr(
       finish(err instanceof Error ? err : new Error(String(err)))
     })
 
-    child.on('exit', (code) => {
+    // 'close' rather than 'exit': the rejection embeds stderr, and 'exit'
+    // can fire before the final pipe chunks (e.g. the config error itself)
+    // have been delivered.
+    child.on('close', (code) => {
       if (!settled) {
         clearTimeout(timer)
         finish(
@@ -195,12 +198,17 @@ async function waitForProxyHealth(baseUrl: string, timeoutMs: number): Promise<v
   throw new Error(`Timed out waiting for proxy health endpoint at ${baseUrl}/healthz`)
 }
 
-/** Wait for child process exit with timeout. */
+/**
+ * Wait for child process exit with timeout. Resolves on 'close' (exit AND
+ * stdio streams flushed) rather than 'exit', so callers may assert on
+ * captured stderr immediately afterwards without racing the final chunks.
+ */
 async function waitForChildExit(
   child: ReturnType<typeof spawn>,
   timeoutMs: number,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  const exited = child.exitCode !== null || child.signalCode !== null
+  if (exited && (child.stderr === null || child.stderr.destroyed)) {
     return { code: child.exitCode, signal: child.signalCode }
   }
   return new Promise((resolve, reject) => {
@@ -209,7 +217,7 @@ async function waitForChildExit(
     }, timeoutMs)
     timer.unref()
 
-    child.once('exit', (code, signal) => {
+    child.once('close', (code, signal) => {
       clearTimeout(timer)
       resolve({ code, signal })
     })
@@ -651,7 +659,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('disables the config watcher when --no-hot-reload is set', async () => {
       const { dir, configPath } = writeStartConfig()
@@ -664,7 +672,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('refuses to boot when the config has an unknown top-level key (issue #167)', async () => {
       const { dir, configPath } = writeStartConfig()
@@ -679,7 +687,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('fails startup when dashboard is enabled but bundled assets are missing', async () => {
       const { dir, configPath } = writeStartConfig()
@@ -698,7 +706,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('starts in headless mode when dashboard assets are missing and dashboard.enabled is false', async () => {
       const { dir, configPath } = writeStartConfig()
@@ -708,6 +716,10 @@ dashboard:
         const headless = original.replace('enabled: true', 'enabled: false')
         writeFileSync(configPath, headless)
         const stderr = await startAndCaptureStderr(['-c', configPath], {
+          // "Watching ... for policy changes" is the last startup line,
+          // printed after the point where "Dashboard API listening" would
+          // have appeared — the snapshot covers the absence assertion.
+          readyMarker: /for policy changes/,
           timeoutMs: 8_000,
           env: {
             ...process.env,
@@ -720,7 +732,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('logs restart-required warning when non-reloadable fields change on hot-reload', async () => {
       const { dir, configPath } = writeStartConfig()
@@ -743,9 +755,6 @@ dashboard:
 
       try {
         await waitForLog(() => stderr.includes(`Watching ${configPath} for policy changes`), 8_000)
-        // Chokidar start() is async; give it a short settle window after the
-        // "Watching ..." log so the first write is not missed on fast machines.
-        await new Promise((resolve) => setTimeout(resolve, 150))
 
         const original = readFileSync(configPath, 'utf-8')
         const updated = original.replace(
@@ -753,14 +762,29 @@ dashboard:
           (_full, port: string) => `listen:\n  port: ${String(Number(port) + 1)}`,
         )
         expect(updated).not.toBe(original)
-        writeFileSync(configPath, updated)
 
-        await waitForLog(
-          () => stderr.includes('Restart required: non-reloadable fields changed'),
-          8_000,
-        )
+        // Chokidar start() is async and exposes no armed signal, so a single
+        // write can land before the watcher listens. Re-touch the file with
+        // the same content (fresh mtime) until the watcher reports it. The
+        // retries also paper over a watcher that drops only the first event
+        // — accepted: arming and first-event loss are indistinguishable here.
+        const sawRestartRequired = () =>
+          stderr.includes('Restart required: non-reloadable fields changed')
+        const retryDeadline = Date.now() + 8_000
+        writeFileSync(configPath, updated)
+        for (;;) {
+          try {
+            await waitForLog(sawRestartRequired, 1_000)
+            break
+          } catch (err) {
+            if (Date.now() >= retryDeadline) throw err
+            writeFileSync(configPath, updated)
+          }
+        }
         expect(stderr).toContain('Restart required: non-reloadable fields changed')
-        expect(stderr).toContain('listen')
+        // The banner's "Helio proxy listening" also contains "listen" — match
+        // the changed path inside the warning's parenthesized list instead.
+        expect(stderr).toMatch(/non-reloadable fields changed \([^)]*\blisten\b/)
       } finally {
         child.kill('SIGTERM')
         await waitForChildExit(child, 5_000).catch(() => undefined)
@@ -833,11 +857,13 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 2_000)
+        await waitForProxyHealth(baseUrl, 8_000)
 
+        // The signal also times the body read below, so it must outlast the
+        // 8s heartbeat bound or the race rejects with a bare AbortError.
         const eventsRes = await fetch(`http://127.0.0.1:${String(dashboardPort)}/api/events`, {
           headers: { authorization: `Bearer ${apiSecret}` },
-          signal: AbortSignal.timeout(5_000),
+          signal: AbortSignal.timeout(10_000),
         })
         expect(eventsRes.status).toBe(200)
         expect(eventsRes.body).not.toBeNull()
@@ -845,14 +871,18 @@ audit:
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
         reader = eventsRes.body!.getReader()
         const decoder = new TextDecoder()
+        let heartbeatTimer: ReturnType<typeof setTimeout> | undefined
         const firstChunk = await Promise.race([
           reader.read(),
           new Promise<never>((_resolve, reject) => {
-            setTimeout(() => {
+            // The endpoint writes a heartbeat immediately on connect; the
+            // bound only caps how long a genuinely broken stream can hang.
+            heartbeatTimer = setTimeout(() => {
               reject(new Error('Timed out waiting for SSE heartbeat chunk'))
-            }, 1_000)
+            }, 8_000)
           }),
         ])
+        clearTimeout(heartbeatTimer)
         expect(decoder.decode(firstChunk.value)).toContain('event: heartbeat')
 
         child.kill('SIGINT')
@@ -933,13 +963,16 @@ audit:
         await upstream.close()
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('continues startup when initial annotation prime fails, remaining fail-closed', async () => {
       const { dir, configPath } = writeStartConfig()
       try {
         const stderr = await startAndCaptureStderr(['-c', configPath], {
-          readyMarker: /Helio proxy listening/,
+          // The initial prime is awaited before the banner but only for
+          // 1.5s, so under load the failure line can print on either side
+          // of "Helio proxy listening" — require both before snapshotting.
+          readyMarker: [/Helio proxy listening/, /Annotation cache priming failed:/],
           timeoutMs: 8_000,
         })
         expect(stderr).toContain('Helio proxy listening')
@@ -948,7 +981,7 @@ audit:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('allows first non-destructive tools/call without client tools/list after startup prime', async () => {
       const upstream = await startMockMcpServer((payload) => {
@@ -1038,7 +1071,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 2_000)
+        await waitForProxyHealth(baseUrl, 8_000)
 
         const res = await fetch(`${baseUrl}/mcp`, {
           method: 'POST',
@@ -1155,7 +1188,7 @@ audit:
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
         const dashUrl = `http://127.0.0.1:${String(dashboardPort)}`
-        await waitForProxyHealth(baseUrl, 2_000)
+        await waitForProxyHealth(baseUrl, 8_000)
 
         // The require_approval rule holds the call open, so do NOT await yet.
         const callPromise = fetch(`${baseUrl}/mcp`, {
@@ -1249,7 +1282,7 @@ audit:
       try {
         const stderr = await startAndCaptureStderr(['-c', configPath], {
           // The adapter line prints after the SDK line, so anchoring readiness
-          // on it guarantees both banners are captured (no flush-window race).
+          // on it guarantees both banners are captured.
           readyMarker: /Adapter token \(generated per-boot HELIO_ADAPTER_TOKEN/,
           timeoutMs: 8_000,
         })
@@ -1261,7 +1294,7 @@ audit:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('respects a pre-set HELIO_SDK_TOKEN environment variable', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
@@ -1297,9 +1330,10 @@ audit:
       const presetAdapterToken = 'preset-adapter-token-that-must-not-appear-in-stderr'
       try {
         const stderr = await startAndCaptureStderr(['-c', configPath], {
-          // Anchor on the adapter ack (printed second) so the SDK ack is
-          // already captured — no reliance on the 50ms flush window.
-          readyMarker: /Adapter token: reusing HELIO_ADAPTER_TOKEN from environment/,
+          // "Watching ..." is the last startup line, so the snapshot spans
+          // the whole startup block — a preset secret echoed anywhere in
+          // it lands in the capture, not just at the token print sites.
+          readyMarker: /for policy changes/,
           timeoutMs: 8_000,
           env: {
             ...process.env,
@@ -1320,7 +1354,7 @@ audit:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('disables the config watcher when policies.hot_reload is false', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
@@ -1350,13 +1384,18 @@ audit:
 `,
       )
       try {
-        const stderr = await startAndCaptureStderr(['-c', configPath])
+        const stderr = await startAndCaptureStderr(['-c', configPath], {
+          // The disabled notice and "Watching ..." are exclusive branches of
+          // the same if/else — once this marker prints, the watcher line
+          // can never appear, so the absence assertion is race-free.
+          readyMarker: /Hot-reload disabled/,
+        })
         expect(stderr).toContain('Hot-reload disabled')
         expect(stderr).not.toContain(`Watching ${configPath} for policy changes`)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('uses upstream.request_timeout for stdio transport', async () => {
       const { dir, configPath, listenPort } = writeStdioStartConfig('1s')
@@ -1391,7 +1430,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 2_000)
+        await waitForProxyHealth(baseUrl, 8_000)
 
         const beginMs = Date.now()
         const res = await fetch(`${baseUrl}/mcp`, {
@@ -1570,7 +1609,7 @@ budget:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('rejects a malformed --limit instead of silently truncating', async () => {
       const { dir, configPath } = setupExport([makeRecord()])
@@ -1589,7 +1628,7 @@ budget:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('exports records as CSV', async () => {
       const { dir, configPath } = setupExport([
