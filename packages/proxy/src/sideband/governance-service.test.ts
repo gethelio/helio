@@ -2973,3 +2973,347 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Dry-run rule-limit simulation (issue #146)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
+  const rateRule = compile({
+    default: 'allow',
+    dry_run: true,
+    rules: [
+      {
+        name: 'email-rate',
+        match: { tool: 'send_email' },
+        action: 'rate_limit',
+        limits: { max_calls: 2, window: '1m', key: 'session' },
+      },
+    ],
+  })
+  const spendRule = compile({
+    default: 'allow',
+    dry_run: true,
+    rules: [
+      {
+        name: 'payment-spend',
+        match: { tool: 'charge_customer' },
+        action: 'spend_limit',
+        limits: {
+          max_spend: {
+            field: '$.amount',
+            limit: 100,
+            currency: 'USD',
+            window: '1h',
+            key: 'session',
+          },
+        },
+      },
+    ],
+  })
+
+  it('simulates an under-limit rate rule: would_forward true with a limits.rate snapshot', () => {
+    const { service, records } = makeService({ policy: rateRule, withLimiters: true })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
+    expect(res.status).toBe(200)
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body['dry_run']).toEqual({
+      would_forward: true,
+      evidence_satisfied: true,
+      limits_ok: true,
+    })
+    const limits = res.body['limits'] as Record<string, unknown>
+    // peek() reports the count AS-IF-EXECUTED (fresh key -> current: 1), the
+    // same snapshot enforcement emits through the identical planner.
+    expect(limits['rate']).toMatchObject({ current: 1, limit: 2, window_ms: 60_000 })
+    // Terminal-at-evaluate audit row carries the simulated snapshot.
+    expect(records).toHaveLength(1)
+    expect(records[0]?.record.dry_run).toBe(true)
+    expect((records[0]?.record.evidence_chain as Record<string, unknown>)['rate']).toMatchObject({
+      limit: 2,
+    })
+  })
+
+  it('reports an exhausted rate rule: would_forward false, limits_ok false, snapshot present', () => {
+    const { service, rateLimiter } = makeService({ policy: rateRule, withLimiters: true })
+    rateLimiter?.record({ key: 'session:s1', maxCalls: 2, windowMs: 60_000 })
+    rateLimiter?.record({ key: 'session:s1', maxCalls: 2, windowMs: 60_000 })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
+    expect(res.body['decision']).toBe('dry_run') // never rate_limited under dry-run
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['would_forward']).toBe(false)
+    expect(dryRun['limits_ok']).toBe(false)
+    expect((res.body['limits'] as Record<string, unknown>)['rate']).toMatchObject({
+      current: 2,
+      limit: 2,
+    })
+  })
+
+  it('simulates an under-limit spend rule: would_forward true with a limits.spend snapshot', () => {
+    const { service } = makeService({ policy: spendRule, withLimiters: true })
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'charge_customer' }, session_id: 's1', arguments: { amount: 10 } }),
+    )
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body['dry_run']).toEqual({
+      would_forward: true,
+      evidence_satisfied: true,
+      limits_ok: true,
+    })
+    // As-if-executed: allowed peek on a fresh bucket reports currentSpend = amount.
+    expect((res.body['limits'] as Record<string, unknown>)['spend']).toMatchObject({
+      current_spend: 10,
+      limit: 100,
+      currency: 'USD',
+    })
+  })
+
+  it('reports an exceeded spend rule: would_forward false, limits_ok false', () => {
+    const { service, spendLimiter } = makeService({ policy: spendRule, withLimiters: true })
+    // Spend bucket keys are rule-discriminated: `<scope>:rule:<index>` (#143).
+    spendLimiter?.record({ key: 'session:s1:rule:0', amount: 95, limit: 100, windowMs: 3_600_000 })
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'charge_customer' }, session_id: 's1', arguments: { amount: 10 } }),
+    )
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['would_forward']).toBe(false)
+    expect(dryRun['limits_ok']).toBe(false)
+    expect((res.body['limits'] as Record<string, unknown>)['spend']).toMatchObject({
+      current_spend: 95,
+      limit: 100,
+    })
+  })
+
+  it.each([
+    ['missing', {}],
+    ['non-numeric', { amount: 'ten' }],
+    ['negative', { amount: -5 }],
+    ['non-finite', { amount: Number.POSITIVE_INFINITY }],
+  ])(
+    'simulates an invalid spend amount (%s) as a block with reason invalid_amount',
+    (_label, args) => {
+      const { service } = makeService({ policy: spendRule, withLimiters: true })
+      const res = service.evaluate(
+        evalInput({ tool: { name: 'charge_customer' }, session_id: 's1', arguments: args }),
+      )
+      expect(res.body['decision']).toBe('dry_run')
+      const dryRun = res.body['dry_run'] as Record<string, unknown>
+      expect(dryRun['would_forward']).toBe(false)
+      expect(dryRun['limits_ok']).toBe(false)
+      expect((res.body['limits'] as Record<string, unknown>)['spend']).toMatchObject({
+        reason: 'invalid_amount',
+        limit: 100,
+      })
+    },
+  )
+
+  it('combines rule-limit and budget results with AND (rate ok, budget breached)', () => {
+    const { service } = makeService({
+      policy: rateRule,
+      withLimiters: true,
+      budgets: [
+        {
+          name: 'ops',
+          limit: 5,
+          currency: 'USD',
+          window: '1h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ tool: 'send_email', field: '$.cost' }],
+        },
+      ],
+    })
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'send_email' }, session_id: 's1', arguments: { cost: 10 } }),
+    )
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['would_forward']).toBe(false)
+    expect(dryRun['limits_ok']).toBe(false)
+    const limits = res.body['limits'] as Record<string, unknown>
+    expect(limits['rate']).toMatchObject({ current: 1, limit: 2 }) // rule side healthy (as-if-executed count)
+    expect(limits['budgets']).toBeDefined() // budget side breached — both reported
+  })
+
+  it('dry-run mutates nothing: no buckets, no sender-key reservations, no pending entries', () => {
+    // sender_id-keyed on purpose: reserveSenderKey() only gates `sender:*`
+    // keys, so a session-keyed rule would wave any reservation through and
+    // this test could not see one return.
+    const senderRule = compile({
+      default: 'allow',
+      dry_run: true,
+      rules: [
+        {
+          name: 'email-rate',
+          match: { tool: 'send_email' },
+          action: 'rate_limit',
+          limits: { max_calls: 2, window: '1m', key: 'sender_id' },
+        },
+      ],
+    })
+    const { service, rateLimiter } = makeService({
+      policy: senderRule,
+      withLimiters: true,
+      maxSenderKeys: 1,
+    })
+    // U9 gets a LIVE bucket so a slot it reserved could not be pruned away:
+    // the registry drops any key with neither a pending plan nor a bucket,
+    // and dry-run peeks materialize neither, so without this the cap could
+    // never fill and the assertions below would prove nothing.
+    rateLimiter?.record({ key: 'sender:U9', maxCalls: 2, windowMs: 60_000 })
+    // Three DISTINCT sender keys under a capacity of 1: were dry-run to
+    // reserve, U9 would hold the only slot and U1 would 503 with
+    // limit_capacity_exhausted.
+    for (const sender of ['U9', 'U1', 'U2']) {
+      const res = service.evaluate(
+        evalInput({ tool: { name: 'send_email' }, metadata: { sender_id: sender } }),
+      )
+      expect(res.status).toBe(200)
+      expect(res.body['decision']).toBe('dry_run')
+    }
+    // Pure peeks never materialize buckets.
+    expect(rateLimiter?.getKeyState('sender:U1')).toBeUndefined()
+    // Terminal at /evaluate: a follow-up /audit reports finalized_by evaluate,
+    // proving no pending entry was stored.
+    const evalId = (
+      service.evaluate(evalInput({ tool: { name: 'send_email' }, metadata: { sender_id: 'U1' } }))
+        .body as {
+        evaluation_id: string
+      }
+    ).evaluation_id
+    const audit = service.audit(auditInput(evalId), 'h') // audit(req, payloadHash) — both required
+    expect(audit.body['finalized_by']).toBe('evaluate')
+  })
+
+  it('repeated dry-run evaluations return identical snapshots (nothing consumed)', () => {
+    const { service } = makeService({ policy: spendRule, withLimiters: true })
+    const call = () =>
+      service.evaluate(
+        evalInput({
+          tool: { name: 'charge_customer' },
+          session_id: 's1',
+          arguments: { amount: 10 },
+        }),
+      ).body['limits'] as Record<string, unknown>
+    const first = call()
+    const third = (call(), call())
+    expect(third['spend']).toEqual(first['spend'])
+  })
+
+  it('a per-rule action: dry_run rule keeps would_forward false with no limits block (D2)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'shadow', match: { tool: 'send_email' }, action: 'dry_run' }],
+    })
+    const { service } = makeService({ policy, withLimiters: true })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' } }))
+    expect(res.body['decision']).toBe('dry_run')
+    expect(res.body['dry_run']).toEqual({
+      would_forward: false,
+      evidence_satisfied: true,
+      limits_ok: true,
+    })
+    expect(res.body['limits']).toBeUndefined()
+  })
+
+  it('dry-run never creates approval tickets, even for a break-glass budget breach (AC6)', () => {
+    const { service, queue } = makeService({
+      policy: rateRule,
+      withLimiters: true,
+      withApprovals: true,
+      budgets: [
+        {
+          name: 'ops',
+          limit: 5,
+          currency: 'USD',
+          window: '1h',
+          key: 'global',
+          on_exceed: 'require_approval',
+          contributors: [{ tool: 'send_email', field: '$.cost' }],
+        },
+      ],
+    })
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'send_email' }, session_id: 's1', arguments: { cost: 10 } }),
+    )
+    expect(res.body['decision']).toBe('dry_run') // never require_approval under dry-run
+    expect(res.body['approval']).toBeUndefined()
+    expect(queue?.list()).toEqual([]) // no ticket raised
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['limits_ok']).toBe(false) // the breach still reports honestly
+  })
+
+  it('an evidence-blocked limit rule skips limit simulation, limits_ok stays true (D3)', () => {
+    const policy = compile({
+      default: 'allow',
+      dry_run: true,
+      rules: [
+        {
+          name: 'email-rate',
+          match: { tool: 'send_email' },
+          action: 'rate_limit',
+          limits: { max_calls: 2, window: '1m', key: 'session' },
+          evidence: { requires: ['recipient_check'] },
+        },
+      ],
+    })
+    const { service } = makeService({ policy, withLimiters: true, withEvidence: true })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
+    const dryRun = res.body['dry_run'] as Record<string, unknown>
+    expect(dryRun['evidence_satisfied']).toBe(false)
+    expect(dryRun['would_forward']).toBe(false)
+    expect(dryRun['limits_ok']).toBe(true) // limits were not the problem — MCP parity
+    expect(res.body['limits']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Terminal audit rows are immune to response mutation
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — terminal audit rows are immune to response mutation', () => {
+  const rateRule = (dryRun: boolean, maxCalls: number) =>
+    compile({
+      default: 'allow',
+      dry_run: dryRun,
+      rules: [
+        {
+          name: 'email-rate',
+          match: { tool: 'send_email' },
+          action: 'rate_limit',
+          limits: { max_calls: maxCalls, window: '1m', key: 'session' },
+        },
+      ],
+    })
+
+  it('mutating a dry-run response limits block cannot rewrite the audit evidence', () => {
+    const { service, records } = makeService({ policy: rateRule(true, 2), withLimiters: true })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
+
+    // A direct embedder holding the returned body edits it after the fact.
+    const limits = res.body['limits'] as { rate: Record<string, unknown> }
+    limits.rate['current'] = 9999
+    limits.rate['forged'] = true
+
+    // The audit writer buffers records by reference and serializes at flush,
+    // so an aliased snapshot would persist the forgery.
+    const chain = records[0]?.record.evidence_chain as { rate: Record<string, unknown> }
+    expect(chain.rate['current']).toBe(1)
+    expect(chain.rate['forged']).toBeUndefined()
+  })
+
+  it('mutating a rate_limited response limits block cannot rewrite the audit evidence', () => {
+    const { service, records, rateLimiter } = makeService({
+      policy: rateRule(false, 1),
+      withLimiters: true,
+    })
+    rateLimiter?.record({ key: 'session:s1', maxCalls: 1, windowMs: 60_000 })
+    const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
+    expect(res.body['decision']).toBe('rate_limited') // terminal at /evaluate
+
+    const limits = res.body['limits'] as { rate: Record<string, unknown> }
+    limits.rate['current'] = 4242
+
+    const chain = records[0]?.record.evidence_chain as { rate: Record<string, unknown> }
+    expect(chain.rate['current']).toBe(1)
+  })
+})

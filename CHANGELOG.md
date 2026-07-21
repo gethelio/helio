@@ -48,6 +48,21 @@ Maintainer notes:
   `/evaluate` keep `matched_rule_index`, approval tickets keep `rule_index`,
   neither ever carried the alias.
 
+### Fixed
+
+- **Sideband dry-run now simulates rule rate and spend limits (#146).** Global
+  dry-run on `POST /evaluate` skipped the matched rule's `rate_limit` /
+  `spend_limit` entirely: `would_forward` came back `false` even with
+  headroom, `limits_ok` reflected budgets only, and the response carried no
+  `limits.rate` / `limits.spend` snapshot, so adapters could not distinguish
+  a would-block from a would-pass. The sideband now peeks the same limiter
+  path enforcement uses — consuming nothing and reserving nothing — and an
+  unreadable spend amount simulates as a block with `reason: invalid_amount`.
+  The MCP door's dry-run gains the matching alignment: a spend field that
+  does not resolve to a number now reports `limits_ok: false` with the same
+  operator warning enforcement logs (enforcement already denied that case as
+  `invalid_amount`).
+
 ### Security
 
 - **js-yaml `4.1.1` → `4.3.0`** (GHSA-52cp-r559-cp3m — YAML merge-key chains

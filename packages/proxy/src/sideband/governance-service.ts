@@ -454,6 +454,9 @@ export class GovernanceService {
     let wire: WireDecision
     const plans: Plan[] = []
     let limitsBlock: Record<string, unknown> | undefined
+    // Rule-limit result for the dry-run simulation: true unless a matched
+    // rate/spend rule's peek (or an unreadable spend amount) would block.
+    let ruleLimitOk = true
     // Sender-key slots inserted by THIS call, released if a later gate 503s.
     const reservedThisCall: string[] = []
     const reserve = (key: string): boolean => {
@@ -471,6 +474,21 @@ export class GovernanceService {
 
     if (pipeline.isDryRun) {
       wire = 'dry_run'
+      // Simulate the matched rule limit with the same planners enforcement
+      // uses — pure peeks — but never reserve sender keys or stage plans:
+      // dry_run is terminal at /evaluate and must mutate nothing. Under
+      // GLOBAL dry-run decision.action still carries the underlying rule
+      // action; a per-rule `action: dry_run` has no limits, and an
+      // evidence-blocked call arrives here already flipped to 'deny'.
+      if (decision.action === 'rate_limit') {
+        const planned = this.planRate(decision, toolName, req.session_id, senderId)
+        if (planned?.block) limitsBlock = { rate: planned.block }
+        ruleLimitOk = planned?.allowed ?? true
+      } else if (decision.action === 'spend_limit') {
+        const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
+        if (planned?.block) limitsBlock = { spend: planned.block }
+        ruleLimitOk = planned?.allowed ?? true
+      }
     } else if (decision.action === 'deny') {
       wire = 'deny'
     } else if (decision.action === 'require_approval') {
@@ -647,9 +665,14 @@ export class GovernanceService {
     if (limitsBlock) responseBody['limits'] = limitsBlock
     if (wire === 'dry_run') {
       responseBody['dry_run'] = {
-        would_forward: decision.action === 'allow' && !pipeline.evidenceBlocked && budgetDryRunOk,
+        would_forward:
+          (decision.action === 'allow' ||
+            ((decision.action === 'rate_limit' || decision.action === 'spend_limit') &&
+              ruleLimitOk)) &&
+          !pipeline.evidenceBlocked &&
+          budgetDryRunOk,
         evidence_satisfied: !pipeline.evidenceBlocked,
-        limits_ok: budgetDryRunOk,
+        limits_ok: ruleLimitOk && budgetDryRunOk,
       }
     }
     if (pipeline.driftEvent) {
@@ -673,7 +696,11 @@ export class GovernanceService {
         flaggedDestructive: pipeline.flaggedDestructive,
         dryRun: wire === 'dry_run',
         recordKind: 'tool_call',
-        limitsChain: limitsBlock,
+        // A CLONE, for the same reason budgetsAtEvaluate is one below:
+        // limitsBlock is also the response's `limits`, and the audit writer
+        // buffers records by reference until flush — a direct embedder
+        // editing the returned body must not be able to rewrite evidence.
+        limitsChain: limitsBlock ? structuredClone(limitsBlock) : undefined,
       })
       this.tombstones.set(evaluationId, {
         auditRecordId: auditId,

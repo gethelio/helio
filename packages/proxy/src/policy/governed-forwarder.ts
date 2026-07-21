@@ -1349,30 +1349,35 @@ export class GovernedForwarder implements McpForwarder {
           if (this.spendLimiter && decision.matchedRule?.limits?.maxSpend) {
             const maxSpend = decision.matchedRule.limits.maxSpend
             const rawAmount = resolvePath(maxSpend.field, toolArguments ?? {})
-            if (typeof rawAmount === 'number') {
-              if (!Number.isFinite(rawAmount) || rawAmount < 0) {
-                // eslint-disable-next-line no-console -- Intentional operational warning
-                console.error(
-                  `[helio] Warning: spend limit field "${maxSpend.field}" resolved to invalid amount (${String(rawAmount)}) for tool "${toolName}" in dry-run, denying`,
-                )
-                wouldForward = false
-                limitsOk = false
-              } else {
-                const key = this.buildSpendLimitKey(
-                  maxSpend.key,
-                  toolName,
-                  request,
-                  decision.matchedRule.index,
-                )
-                const peekResult = this.spendLimiter.peek({
-                  key,
-                  amount: rawAmount,
-                  limit: maxSpend.limit,
-                  windowMs: maxSpend.windowMs,
-                })
-                wouldForward = peekResult.allowed
-                limitsOk = peekResult.allowed
-              }
+            if (typeof rawAmount !== 'number') {
+              // eslint-disable-next-line no-console -- Intentional operational warning
+              console.error(
+                `[helio] Warning: spend limit field "${maxSpend.field}" did not resolve to a number for tool "${toolName}" (got ${typeof rawAmount}) in dry-run, denying`,
+              )
+              wouldForward = false
+              limitsOk = false
+            } else if (!Number.isFinite(rawAmount) || rawAmount < 0) {
+              // eslint-disable-next-line no-console -- Intentional operational warning
+              console.error(
+                `[helio] Warning: spend limit field "${maxSpend.field}" resolved to invalid amount (${String(rawAmount)}) for tool "${toolName}" in dry-run, denying`,
+              )
+              wouldForward = false
+              limitsOk = false
+            } else {
+              const key = this.buildSpendLimitKey(
+                maxSpend.key,
+                toolName,
+                request,
+                decision.matchedRule.index,
+              )
+              const peekResult = this.spendLimiter.peek({
+                key,
+                amount: rawAmount,
+                limit: maxSpend.limit,
+                windowMs: maxSpend.windowMs,
+              })
+              wouldForward = peekResult.allowed
+              limitsOk = peekResult.allowed
             }
           }
           break

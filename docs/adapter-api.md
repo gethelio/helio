@@ -69,13 +69,13 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
   "matched_rule_index": 2,
   "feedback": { "message": "…" },        // always on blocking decisions; on require_approval / dry_run when the gating rule configures feedback
   "approval": { "id": "…", "timeout_ms": 300000, "resolve_path": "/approval/…/resolve" }, // require_approval only
-  "limits": { "rate": { } },             // present when a limit rule or a budget matched (rate | spend | budgets)
-  "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only
+  "limits": { "rate": { } },             // present when a limiter-backed limit rule or a budget matched (rate | spend | budgets)
+  "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only — limits_ok covers the matched rule limit AND budgets
   "tool_drift": { "changes": [ ] }       // present when the drift gate fired
 }
 ```
 
-The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limit` rule that still has headroom returns `"allow"` with a `limits.rate` block; only when the bucket is exhausted does it return `"rate_limited"`. There is no `modify` decision — argument rewriting has no engine support today.
+The `decision` is an **outcome**, not Helio's internal rule action: a `rate_limit` rule that still has headroom returns `"allow"` with a `limits.rate` block; only when the bucket is exhausted does it return `"rate_limited"`. There is no `modify` decision — argument rewriting has no engine support today. Under dry-run the same resolution happens as a pure simulation: a matched `rate_limit`/`spend_limit` rule that clears evidence is peeked — never consumed, never reserving sender-key capacity — its snapshot appears in `limits.rate` / `limits.spend`, and `dry_run.would_forward` / `limits_ok` combine the rule limit with the budget peeks (an unreadable spend amount simulates as `limits.spend.reason: "invalid_amount"`). Both paths report `limits` only when the proxy's rate and spend limiters are wired: `helio start` always wires them, so the qualification bites only a direct embedder that constructs `GovernanceService` without one — there, a matched limit rule resolves as an allow (or a would-forward simulation) carrying no snapshot.
 
 **Errors:** `400` validation / invalid JSON, `401` wrong-or-missing adapter token, `403` Origin header, `413` oversized `metadata`/`tool_input`/body, `400 reserved_metadata_key` (a reserved column key — currently `agent_id` — was passed inside `metadata`; use the top-level field), `400 origin_limit_exceeded` / `400 tool_baseline_limit` / `503 evaluation_backlog_full` / `503 limit_capacity_exhausted` (memory/cardinality budgets — see below), `503 governance_unavailable` (sideband running without the service). Unhandled server faults return `500 { "error": "Internal server error" }`; adapters must fail closed on any 5xx.
 
