@@ -6,7 +6,7 @@ Cap monetary spend across payment and refund tools using sliding window tracking
 
 - Spend limit policies with `action: spend_limit`
 - Field extraction from tool arguments via JSONPath-style dot paths (`$.amount`)
-- Two scoping strategies: `key: tool` (global budget) vs `key: session` (per-session budget)
+- Two scoping strategies: `key: tool` (one shared spend bucket per tool) vs `key: session` (per-session spend buckets)
 - Structured self-repair feedback when limits are exceeded
 - Dashboard Limits page showing real-time spend utilization
 
@@ -51,7 +51,7 @@ curl -s -X POST http://localhost:3000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_payment","arguments":{"amount":200,"currency":"USD","recipient":"Alice"}}}' | jq
 ```
 
-Succeeds. Helio extracts `amount: 200` from the tool arguments and records it against the payment budget.
+Succeeds. Helio extracts `amount: 200` from the tool arguments and records it against the payment rule's spend bucket.
 
 ### Payment 2: $200 (400/500 used)
 
@@ -77,7 +77,7 @@ Blocked. This would bring the total to $600, exceeding the $500/hour limit. The 
 
 Open [http://localhost:3100](http://localhost:3100) and navigate to the **Limits** page to see current spend utilization with progress bars and countdown timers.
 
-### Refund (separate budget)
+### Refund (separate spend bucket)
 
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
@@ -85,13 +85,13 @@ curl -s -X POST http://localhost:3000/mcp \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_refund","arguments":{"amount":150,"order_id":"ORD-001"}}}' | jq
 ```
 
-Succeeds. Refunds have their own $200/hour budget tracked per session, independent of the payment budget.
+Succeeds. Refunds have their own $200/hour spend bucket tracked per session, independent of the payment bucket.
 
 ## How Spend Tracking Works
 
 ### Sliding window
 
-Spend limits use a sliding window algorithm, not calendar-based resets. A `window: 1h` limit means "no more than $500 in any rolling 1-hour period." As older transactions age out of the window, budget frees up.
+Spend limits use a sliding window algorithm, not calendar-based resets. A `window: 1h` limit means "no more than $500 in any rolling 1-hour period." As older transactions age out of the window, headroom in the spend bucket frees up.
 
 ### Field extraction
 
@@ -99,12 +99,12 @@ The `field: '$.amount'` setting tells Helio which tool argument contains the mon
 
 ### Scoping
 
-- **`key: tool`** — All sessions share a single budget per tool. If one agent spends $400, only $100 remains for any other agent using the same tool.
-- **`key: session`** — Each MCP session gets its own independent budget. One session hitting its limit doesn't affect others.
+- **`key: tool`** — All sessions share a single spend bucket per tool. If one agent spends $400, only $100 remains for any other agent using the same tool.
+- **`key: session`** — Each MCP session gets its own independent spend bucket. One session hitting its limit doesn't affect others.
 
-### Rejected calls don't consume budget
+### Blocked calls don't count against the spend bucket
 
-If a payment is blocked by the spend limit, the amount is not deducted. Any call that passes the limiter check and is forwarded consumes budget, even if the later upstream call fails.
+If a payment is blocked by the spend limit, the amount is not deducted. Any call that passes the limiter check and is forwarded counts against the bucket, even if the later upstream call fails.
 
 ### In-memory state
 

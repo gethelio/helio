@@ -199,14 +199,14 @@ All metadata conditions are AND-combined with each other and with the rest of th
 
 ## Actions
 
-| Action             | Description                                                                                          |
-| ------------------ | ---------------------------------------------------------------------------------------------------- |
-| `allow`            | Forward the request to the upstream MCP server and record in audit.                                  |
-| `deny`             | Block the request and return structured feedback. No upstream request is made.                       |
-| `require_approval` | Hold the request and wait for human approval. See [Approval Workflows](./approvals.md).              |
-| `rate_limit`       | Allow until the call limit is exceeded, then block. Requires `limits.max_calls` and `limits.window`. |
-| `spend_limit`      | Track cumulative monetary spend and block when the budget is exceeded. Requires `limits.max_spend`.  |
-| `dry_run`          | Simulate the full pipeline without forwarding to upstream. Returns what _would_ have happened.       |
+| Action             | Description                                                                                                     |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `allow`            | Forward the request to the upstream MCP server and record in audit.                                             |
+| `deny`             | Block the request and return structured feedback. No upstream request is made.                                  |
+| `require_approval` | Hold the request and wait for human approval. See [Approval Workflows](./approvals.md).                         |
+| `rate_limit`       | Allow until the call limit is exceeded, then block. Requires `limits.max_calls` and `limits.window`.            |
+| `spend_limit`      | Track cumulative monetary spend and block when the rule's spend limit is exceeded. Requires `limits.max_spend`. |
+| `dry_run`          | Simulate the full pipeline without forwarding to upstream. Returns what _would_ have happened.                  |
 
 ### allow
 
@@ -277,10 +277,10 @@ See [Rate Limits](#rate-limits) below.
 
 ### spend_limit
 
-Tracks cumulative monetary amounts extracted from tool arguments and blocks when the budget is exceeded:
+Tracks cumulative monetary amounts extracted from tool arguments and blocks when the rule's spend limit is exceeded:
 
 ```yaml
-- name: payment-budget
+- name: payment-spend-cap
   match:
     tool: 'create_payment'
   action: spend_limit
@@ -299,7 +299,7 @@ See [Spend Limits](#spend-limits) below.
 
 ### dry_run
 
-Runs the full policy evaluation pipeline — including evidence checks, rate limit checks, and spend limit checks — but does not forward the request to the upstream server and does not consume any rate or spend limit budget.
+Runs the full policy evaluation pipeline — including evidence checks, rate limit checks, and spend limit checks — but does not forward the request to the upstream server and does not consume rate limit slots or charge spend buckets.
 
 Returns a synthetic response showing what would have happened:
 
@@ -383,6 +383,34 @@ Rate limits use a **sliding window** algorithm to track calls per key. Configure
     suggestion: 'Wait a moment before retrying.'
 ```
 
+When the limit is hit, the denied call returns structured self-repair feedback. This is the eleventh call against the rule above, captured live:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "error": {
+    "code": -32001,
+    "message": "Query rate limit exceeded.",
+    "data": {
+      "blocked": true,
+      "reason": "rate_limited",
+      "rule": "rate-limit-expensive-tool",
+      "rule_index": 0,
+      "action": "rate_limit",
+      "current_calls": 10,
+      "max_calls": 10,
+      "window_seconds": 60,
+      "reset_at": "2026-07-21T08:44:50.970Z",
+      "suggestion": "Wait a moment before retrying.",
+      "retry_allowed": true
+    }
+  }
+}
+```
+
+`reset_at` (ISO 8601) is when the oldest call ages out of the sliding window, freeing the next slot.
+
 ## Spend Limits
 
 Spend limits track cumulative monetary amounts extracted from tool call arguments. Configure them with `limits.max_spend`:
@@ -395,16 +423,16 @@ Spend limits track cumulative monetary amounts extracted from tool call argument
 | `window`   | duration | Yes      | Sliding window size.                                                                                                |
 | `key`      | string   | No       | Aggregation scope: `tool` (default), `session`, `sender_id`, or `agent` (unsupported on MCP; falls back to `tool`). |
 
-`key: sender_id` keys the budget per adapter-supplied sender (host-enforced path) and, like rate limits, requires `sdk.enabled: true` or the config is rejected.
+`key: sender_id` keys the spend bucket per adapter-supplied sender (host-enforced path) and, like rate limits, requires `sdk.enabled: true` or the config is rejected.
 
 **Important behaviors:**
 
-- Rejected calls **do not consume** budget. Any call that passes the limiter check and is forwarded consumes budget, even if the later upstream call fails.
-- If the configured amount field is missing or non-numeric, the call is denied with structured feedback (`reason: spend_limited`) and no budget is consumed.
+- Blocked calls **do not count against** the spend bucket. Any call that passes the limiter check and is forwarded counts against the bucket, even if the later upstream call fails.
+- If the configured amount field is missing or non-numeric, the call is denied with structured feedback (`reason: spend_limited`) and nothing is counted against the bucket.
 - Spend limit state is **in-memory** and resets when the proxy restarts.
 
 ```yaml
-- name: refund-budget
+- name: refund-spend-cap
   match:
     tool: 'create_refund'
   action: spend_limit
@@ -416,9 +444,38 @@ Spend limits track cumulative monetary amounts extracted from tool call argument
       window: '1h'
       key: session
   feedback:
-    message: 'Refund budget exceeded for this session.'
+    message: 'Refund spend limit exceeded for this session.'
     suggestion: 'Wait for the current window to reset or escalate to a human.'
 ```
+
+A denied call returns structured self-repair feedback. This is the third $200 payment against the `limit-payments` rule ($500/1h, `key: tool`) in the [runnable spend-limits example](../examples/spend-limits/), captured live:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32001,
+    "message": "Payment spend limit exceeded.",
+    "data": {
+      "blocked": true,
+      "reason": "spend_limited",
+      "rule": "limit-payments",
+      "rule_index": 1,
+      "action": "spend_limit",
+      "current_spend": 400,
+      "max_spend": 500,
+      "currency": "USD",
+      "window_seconds": 3600,
+      "reset_at": "2026-07-21T09:41:55.786Z",
+      "suggestion": "Wait for the current window to reset or reduce the payment amount.",
+      "retry_allowed": true
+    }
+  }
+}
+```
+
+The rule's configured `feedback.message` surfaces as the JSON-RPC `error.message`, while `suggestion` travels inside `error.data` — see [Feedback Messages](#feedback-messages). On a limit-exceeded denial, `reset_at` (ISO 8601) is when the oldest recorded spend ages out of the sliding window. An invalid-amount denial instead sets `reset_at` to the current time and uses a fixed `error.message` naming the bad field: the retry needs a corrected amount, not an expired window.
 
 ## Cross-Tool Spend Budgets
 
@@ -575,6 +632,33 @@ If you explicitly want the legacy "any attempted call satisfies the dependency" 
   requires_success: false # attempted calls count even if upstream errored
 ```
 
+A gated call made before its dependencies have succeeded is denied with `reason: dependency_missing`. The `data` object carries the same field set as `evidence_missing` (see [Evidence Requirements](#evidence-requirements)); only the `reason`, the populated arrays, and the generated message and suggestion differ. This denial was captured live against the `verify-before-delete` rule above:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "Evidence grounding failed: Required tool calls not completed: verify_customer, get_account_details",
+    "data": {
+      "blocked": true,
+      "reason": "dependency_missing",
+      "rule": "verify-before-delete",
+      "rule_index": 0,
+      "action": "deny",
+      "missing_evidence": [],
+      "expired_evidence": [],
+      "missing_dependencies": ["verify_customer", "get_account_details"],
+      "suggestion": "Call the following tools first: verify_customer, get_account_details. Then retry this action.",
+      "retry_allowed": true
+    }
+  }
+}
+```
+
+`action` reports the effective decision: the dependency gate denies the call before the rule's `allow` applies.
+
 ## Feedback Messages
 
 When a tool call is blocked, the proxy returns structured feedback as a JSON-RPC error. You can customize the message and suggestion per rule:
@@ -611,7 +695,7 @@ policies:
 
 ## Dry-Run Mode
 
-Dry-run mode lets you test policy rules without affecting the upstream server or consuming rate/spend budgets.
+Dry-run mode lets you test policy rules without affecting the upstream server, consuming rate limit slots, or charging spend buckets.
 
 **Global dry-run** — all rules simulate:
 
@@ -639,7 +723,7 @@ In dry-run mode:
 
 - No requests are forwarded to the upstream server
 - Rate limit slots are not consumed (uses `peek` instead of `check`)
-- Spend limit budget is not consumed
+- Spend buckets are not charged
 - [Budgets](#cross-tool-spend-budgets) are peeked but never charged — the dry-run payload reports their state in a `budgets` array, and no breach events fire
 - Tool calls are not recorded for dependency chain tracking
 - Audit records are created with `dry_run: true`
@@ -745,7 +829,7 @@ policies:
 ### Spend limit payment tools
 
 ```yaml
-- name: payment-budget
+- name: payment-spend-cap
   match:
     tool: 'create_payment'
   action: spend_limit
@@ -757,7 +841,7 @@ policies:
       window: '1h'
       key: tool
 
-- name: refund-budget
+- name: refund-spend-cap
   match:
     tool: 'create_refund'
   action: spend_limit
@@ -826,6 +910,31 @@ policies:
   snapshotted when the call is gated, so it reflects the mode that was active
   at gate time even if the policy is hot-reloaded before the audit record is
   written.
+
+With `block` (the default), a call to a drifted tool is denied with structured self-repair feedback — captured live after an upstream changed a tool's description mid-session:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+    "code": -32001,
+    "message": "Tool definition drift: \"get_weather\" changed after baseline",
+    "data": {
+      "blocked": true,
+      "reason": "tool_definition_drift",
+      "rule": null,
+      "rule_index": null,
+      "action": "deny",
+      "drifted_aspects": ["description"],
+      "suggestion": "The definition of \"get_weather\" changed upstream (description) after Helio baselined it. An operator must review the change; restarting the proxy re-baselines, or the upstream can revert the change.",
+      "retry_allowed": false
+    }
+  }
+}
+```
+
+`rule` and `rule_index` are `null` because drift gating is a pipeline guard, not a policy rule. `drifted_aspects` names each part of the definition that changed: `annotations`, `inputSchema`, `outputSchema`, `description`, `title`, `duplicate` (repeated tool name), or `other` (non-standard fields).
 
 Policy rules always see the baseline annotations for non-drifted tools.
 Reverting the upstream definition to its baseline clears the drift state
