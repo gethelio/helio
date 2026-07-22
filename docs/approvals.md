@@ -67,6 +67,23 @@ approval:
 
 **HMAC signing:** When `secret` is configured, the request includes an `x-helio-signature` header with the format `sha256=<hex_digest>`. The signature is computed as HMAC-SHA256 over the JSON request body using the configured secret.
 
+**Verifying the signature (receiver side):**
+
+```ts
+import { createHmac, timingSafeEqual } from 'node:crypto'
+
+function verifyHelioSignature(rawBody: string, secret: string, signatureHeader: string): boolean {
+  const expected = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`
+  const trusted = Buffer.from(expected)
+  const received = Buffer.from(signatureHeader)
+  if (trusted.length !== received.length) return false
+  return timingSafeEqual(trusted, received)
+}
+```
+
+> **Important:** Always use a timing-safe comparison (like `timingSafeEqual`)
+> rather than `===` to prevent timing attacks.
+
 **Callback:** The external system resolves the ticket by calling the proxy's REST API on the dashboard sideband port (default `127.0.0.1:3100`), with an `Authorization: Bearer <api_secret>` header:
 
 - `POST /api/approvals/:id/approve` with `{ "approved_by": "alice" }`
