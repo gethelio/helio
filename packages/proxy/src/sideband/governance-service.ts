@@ -1383,9 +1383,14 @@ export class GovernanceService {
         this.snapshotTicketResolution(entry)
       }
       // The expired record must not erase what IS known: a ticket the
-      // adapter resolved but never audited keeps its human decision, and
+      // adapter resolved but never audited keeps its human decision;
       // entries that never committed keep the frozen evaluate-time budget
-      // context. A committed entry's chain is #149's problem — untouched.
+      // context; and a COMMITTED entry — /audit consumed the plans, then
+      // died post-commit and was never retried — finalizes under the
+      // latched audit id its ledger rows already reference, carrying the
+      // committed chain: the record a successful retry would have written,
+      // minus the outcome the adapter never delivered (issue #149).
+      const committed = entry.commitState
       const resolution = entry.ticketResolution
       const approvalContext: ApprovalAuditContext | undefined =
         entry.approvalTicketId && resolution && (resolution.denialReason || resolution.escalatedAt)
@@ -1401,6 +1406,7 @@ export class GovernanceService {
             }
           : undefined
       const auditId = this.writeAudit({
+        ...(committed ? { id: committed.auditId } : {}),
         timestampIso: entry.timestampIso,
         origin: entry.origin,
         agentId: entry.agentId,
@@ -1418,11 +1424,13 @@ export class GovernanceService {
         approvalStatus: resolution?.status ?? null,
         approvedBy: resolution?.resolvedBy ?? null,
         approvalContext,
-        limitsChain:
-          !entry.commitState && entry.budgetsAtEvaluate
+        limitsChain: committed
+          ? committed.limitsChain
+          : entry.budgetsAtEvaluate
             ? { budgets: entry.budgetsAtEvaluate }
             : undefined,
         sidebandUnreported: true,
+        sidebandCommitted: committed !== undefined,
       })
       this.discardPending(entry)
       this.tombstones.set(entry.evaluationId, {
@@ -1433,8 +1441,12 @@ export class GovernanceService {
       })
       // eslint-disable-next-line no-console -- Operational bypass/tamper signal
       console.error(
-        `[helio] Sideband evaluation ${entry.evaluationId} expired without /audit ` +
-          `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
+        committed
+          ? `[helio] Sideband evaluation ${entry.evaluationId} expired after a failed ` +
+              `/audit finalization (origin=${entry.origin}, tool=${entry.toolName}) — ` +
+              `recorded as evaluation_expired under the committed audit id`
+          : `[helio] Sideband evaluation ${entry.evaluationId} expired without /audit ` +
+              `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
       )
       return 'expired'
     }
@@ -1685,7 +1697,13 @@ export class GovernanceService {
     const blockReason = deriveBlockReason(args)
     let evidenceChain: Record<string, unknown> | null = args.limitsChain ?? null
     if (args.sidebandUnreported) {
-      evidenceChain = { ...(evidenceChain ?? {}), sideband: { unreported: true } }
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        sideband: {
+          unreported: true,
+          ...(args.sidebandCommitted ? { committed: true } : {}),
+        },
+      }
     }
     if (args.approvalContext) {
       evidenceChain = { ...(evidenceChain ?? {}), approval: { ...args.approvalContext } }
@@ -1769,6 +1787,10 @@ interface WriteAuditArgs {
   upstreamResponse?: unknown
   upstreamLatencyMs?: number | null
   sidebandUnreported?: boolean
+  /** The entry's plans committed before finalization was lost (issue #149):
+   * the record lands under the latched id with the committed chain, and the
+   * sideband block marks `committed: true`. */
+  sidebandCommitted?: boolean
   /** A budget-only break-glass denial/timeout the adapter honored (issue #14). */
   budgetBreachBlocked?: boolean
 }

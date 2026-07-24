@@ -2167,6 +2167,106 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
   })
 
+  it('expiry after a post-commit failure finalizes under the latched id with the committed chain (issue #149)', () => {
+    // /audit committed the plans (ledger row written, counters consumed),
+    // then died post-commit; the adapter never retried. The expired record
+    // must be the record a successful retry would have written, minus the
+    // outcome: latched id (so the ledger row resolves), committed chain,
+    // and the sideband block marking the commit.
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    const { service, records, advance, budgetEngine, evidenceStore } = makeService({
+      withEvidence: true,
+      budgets: [stripeBudget()],
+      budgetLedger: ledger,
+    })
+    vi.spyOn(evidenceStore as EvidenceStore, 'recordToolCall').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+
+    const id = service.evaluate(stripeEval(30, { session_id: 's1' })).body[
+      'evaluation_id'
+    ] as string
+    expect(() => service.audit(auditInput(id), 'h')).toThrow('disk full')
+
+    // Committed exactly once before the failure; the row holds the latched id.
+    const row = db.prepare('SELECT * FROM budget_events').get() as Record<string, unknown>
+    expect(row['kind']).toBe('spend')
+
+    advance(600_001)
+    service.sweep()
+
+    const expired = records.at(-1)
+    expect(expired?.record.record_kind).toBe('evaluation_expired')
+    // The record lands under the id the ledger row references — no dangle.
+    expect(expired?.id).toBe(row['audit_record_id'])
+    const chain = expired?.record.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]).toMatchObject({ name: 'cap', kind: 'spend' })
+    expect(chain['sideband']).toEqual({ unreported: true, committed: true })
+    // Still a reporting failure, not an enforcement block.
+    expect(expired?.record.block_reason).toBeNull()
+
+    // Exactly-once held across the expiry: one row, spent unchanged.
+    const count = db.prepare('SELECT COUNT(*) AS count FROM budget_events').get()
+    expect(count).toEqual({ count: 1 })
+    expect(budgetEngine?.listStates()[0]?.buckets[0]?.spent).toBe(30)
+
+    // Post-expiry posture unchanged: a late /audit is still refused.
+    const late = service.audit(auditInput(id), 'h')
+    expect(late.status).toBe(404)
+    expect(late.body['error']).toBe('evaluation_expired')
+  })
+
+  it('a buffered-then-thrown audit write and the expiry present the same record id (issue #149)', () => {
+    let time = 1_000_000
+    const pushes: Array<{ id: string | undefined; kind: string }> = []
+    let throwNext = true
+    const busWriter = {
+      // A plain-allow audit record rides the buffered path (push); the
+      // expiry record is enforcement (pushImmediate). Both capture; only
+      // the first buffered write throws, AFTER buffering — the shape of
+      // an embedder-registered onPush hook (the stock proxy's SSE bus
+      // rides onPersist inside the flush try/catch and cannot throw here).
+      push: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) => {
+        pushes.push({ id, kind: record.record_kind })
+        if (throwNext) {
+          throwNext = false
+          throw new Error('embedder onPush hook failed')
+        }
+      },
+      pushImmediate: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) => {
+        pushes.push({ id, kind: record.record_kind })
+      },
+    } as unknown as AuditWriter
+    const budgetEngine = new BudgetEngine({
+      budgets: compileBudgets([stripeBudget()]),
+      now: () => time,
+      cleanupIntervalMs: 0,
+    })
+    const service = new GovernanceService({
+      policy: compile({ default: 'allow', rules: [] }),
+      auditWriter: busWriter,
+      budgetEngine,
+      ttlMs: 600_000,
+      now: () => time,
+      sweepIntervalMs: 0,
+    })
+
+    const id = service.evaluate(stripeEval(30)).body['evaluation_id'] as string
+    expect(() => service.audit(auditInput(id), 'h')).toThrow('embedder onPush hook failed')
+
+    time += 600_001
+    service.sweep()
+
+    expect(pushes).toHaveLength(2)
+    expect(pushes[0]?.kind).toBe('tool_call')
+    expect(pushes[1]?.kind).toBe('evaluation_expired')
+    expect(pushes[1]?.id).toBe(pushes[0]?.id)
+
+    budgetEngine.close()
+  })
+
   it('documents the sideband TOCTOU: two concurrent evaluates can both peek the last slot', () => {
     // Decision and execution are separate calls on this door: both evaluates
     // see headroom, both calls run, both audits commit — the pot ends over
@@ -2723,6 +2823,53 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     const chain = record?.evidence_chain as Record<string, unknown>
     expect((chain['budgets'] as Array<Record<string, unknown>>)[0]?.['name']).toBe('cap')
     expect(chain['sideband']).toEqual({ unreported: true })
+  })
+
+  it('a committed break-glass entry expires under the latched id with the approved overage (issue #149)', () => {
+    // approved → committed (approved_overage) → post-commit failure → no
+    // retry → expiry. The human decision, the sanctioned overage, and the
+    // ledger linkage must all survive on the expired record.
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    const harness = makeService({
+      withApprovals: true,
+      withEvidence: true,
+      budgets: [bgBudget()],
+      budgetLedger: ledger,
+      ttlMs: 60_000,
+    })
+    vi.spyOn(harness.evidenceStore as EvidenceStore, 'recordToolCall').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+
+    const res = harness.service.evaluate(
+      evalInput({ tool: { name: 'stripe_charge' }, arguments: { amount: 50 }, session_id: 's1' }),
+    )
+    expect(res.body['decision']).toBe('require_approval')
+    const approval = res.body['approval'] as { id: string }
+    const id = res.body['evaluation_id'] as string
+    harness.service.resolveApproval(approval.id, {
+      resolution: 'approved',
+      resolved_by: 'alice',
+    })
+
+    expect(() => harness.service.audit(auditInput(id), 'h')).toThrow('disk full')
+
+    harness.advance(60_001)
+    harness.service.sweep()
+
+    const expired = harness.records.at(-1)
+    expect(expired?.record.record_kind).toBe('evaluation_expired')
+    const row = db.prepare('SELECT * FROM budget_events').get() as Record<string, unknown>
+    expect(row['kind']).toBe('approved_overage')
+    expect(expired?.id).toBe(row['audit_record_id'])
+    expect(expired?.record.approval_status).toBe('approved')
+    expect(expired?.record.approved_by).toBe('alice')
+    const chain = expired?.record.evidence_chain as Record<string, unknown>
+    const budgets = chain['budgets'] as Array<Record<string, unknown>>
+    expect(budgets[0]?.['kind']).toBe('approved_overage')
+    expect(chain['sideband']).toEqual({ unreported: true, committed: true })
+    expect(expired?.record.block_reason).toBeNull()
   })
 
   it('scope: "always" on a budget ticket is inert — the next call breaches again', () => {

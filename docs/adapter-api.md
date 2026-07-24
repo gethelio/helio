@@ -155,7 +155,7 @@ Rules:
 
 ### The crash-TTL and TOCTOU caveats
 
-- An evaluation that is never audited expires after `sdk.evaluation_ttl` (default `10m`) into an audit record with `record_kind: "evaluation_expired"`. This is a **bypass/tamper signal**, not a normal block — surface it in monitoring.
+- An evaluation that is never audited expires after `sdk.evaluation_ttl` (default `10m`) into an audit record with `record_kind: "evaluation_expired"`. This is a **bypass/tamper signal**, not a normal block — surface it in monitoring. If your `/audit` returned a 500 after the commit landed (a post-commit failure), retry it — the retry is idempotent and finalizes the same record. If you never retry, the expired record finalizes under the same `audit_record_id` the committed charges' ledger rows reference, carrying the committed budget evidence and `evidence_chain.sideband.committed: true`; the call's outcome (`status`, `result`, `duration_ms`) is lost.
 - Because decision and execution are separate calls, two concurrent `/evaluate`s can both peek the last limit slot and both execute. Counters stay truthful after the fact (both `/audit`s record), but the host-enforced tier cannot close this window from the proxy side.
 
 ### Memory and cardinality budgets
