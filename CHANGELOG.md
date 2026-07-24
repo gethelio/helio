@@ -62,6 +62,22 @@ Maintainer notes:
 
 ### Fixed
 
+- **Dashboard-routed rule approvals now require the dashboard server
+  (#152).** A rule with `action: require_approval` routed to the dashboard
+  channel (explicitly, via a viable escalation delegate, or by the
+  no-`approval`-block default) validated and started with
+  `dashboard.enabled: false`, even though the dashboard approvals API is
+  the only surface that can resolve such tickets — every one could only
+  time out, or forward ungoverned under `default_on_timeout: allow`. The
+  hot-reload guard already rejected these routes, so a config could boot
+  into a state every reload refused. Startup validation now rejects the
+  shape the same way it rejects dashboard-routed budget break-glass, and
+  also covers `policies.flag_destructive: require_approval` and
+  `policies.on_tool_drift: require_approval`, whose escalation tickets
+  always use the dashboard channel. Previously-accepted configs in this
+  shape fail validation until the dashboard is enabled or the approval is
+  routed to a Slack channel; rules matching only on sideband
+  `match.metadata` are exempt (their tickets are adapter-resolved).
 - **Sideband dry-run now simulates rule rate and spend limits (#146).** Global
   dry-run on `POST /evaluate` skipped the matched rule's `rate_limit` /
   `spend_limit` entirely: `would_forward` came back `false` even with

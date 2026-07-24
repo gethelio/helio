@@ -2574,6 +2574,48 @@ describe('GovernedForwarder', () => {
         vi.useRealTimers()
       }
     })
+
+    it('payload mutation during the approval wait cannot change what the approver saw or what forwards (issue #153)', async () => {
+      // The rule-approval twin of the budget break-glass freeze pin
+      // ("payload mutation during the approval wait cannot change what
+      // forwards", budget gate describe): the caller shares params by
+      // reference, and the entry clone must keep the ticket, the forward,
+      // and the audit record on the payload that was evaluated and approved.
+      const inner = mockForwarder()
+      const { auditStore, auditWriter } = createAudit()
+      const { queue, approvalRouter } = createApproval()
+      const governed = new GovernedForwarder(inner, approvalPolicy(), {
+        approvalRouter,
+        auditWriter,
+      })
+
+      const args: Record<string, unknown> = { env: 'prod', replicas: 2 }
+      const request = toolsCallRequest('deploy_production', args)
+      const pending = governed.forward(request)
+      const ticketId = queue.listPending()[0]?.id as string
+
+      // Hostile/buggy embedder: rewrite the payload mid-wait, both through
+      // the shared arguments object and by swapping params.arguments.
+      args['replicas'] = 500
+      ;(request.params as Record<string, unknown>)['arguments'] = { env: 'prod', replicas: 500 }
+
+      approvalRouter.approve(ticketId, 'alice')
+      const result = await pending
+      expect(result.response.status).toBe(200)
+
+      const frozen = { env: 'prod', replicas: 2 }
+      // What the approver saw: the ticket held the frozen payload.
+      expect(queue.get(ticketId)?.tool_input).toEqual(frozen)
+      // What forwarded upstream.
+      const forwarded = inner.forward.mock.calls[0]?.[0] as McpRequest
+      expect((forwarded.params as Record<string, unknown>)['arguments']).toEqual(frozen)
+      // What the audit trail preserved.
+      auditWriter.flush()
+      expect(auditStore.list().records[0]?.tool_input).toEqual(frozen)
+
+      auditWriter.close()
+      approvalRouter.close()
+    })
   })
 
   // -----------------------------------------------------------------------

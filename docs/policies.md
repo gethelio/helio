@@ -694,6 +694,9 @@ policies:
 - **`require_approval`** — The call is automatically escalated to the approval workflow, even though no explicit rule matched.
 
 > **Note:** Remember that the MCP spec defaults `destructiveHint` to `true` for tools that don't set it. With `flag_destructive: require_approval`, any tool that hasn't explicitly set `destructiveHint: false` will trigger an approval request.
+> Because the escalation ticket always routes to the dashboard channel,
+> `flag_destructive: require_approval` requires `dashboard.enabled: true`
+> (startup-checked).
 
 ## Dry-Run Mode
 
@@ -913,6 +916,10 @@ policies:
   snapshotted when the call is gated, so it reflects the mode that was active
   at gate time even if the policy is hot-reloaded before the audit record is
   written.
+
+Because the escalation ticket always routes to the dashboard channel,
+`on_tool_drift: require_approval` requires `dashboard.enabled: true`
+(startup-checked).
 
 With `block` (the default), a call to a drifted tool is denied with structured self-repair feedback — captured live after an upstream changed a tool's description mid-session:
 

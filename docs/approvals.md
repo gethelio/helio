@@ -13,6 +13,14 @@ Rule-level `approval` config is optional. If a `require_approval` rule omits it,
 5. A human approves, denies, the timeout fires, the client disconnects, or the proxy shuts down.
 6. The proxy either forwards the request upstream (approved, break-glass, or timed out with `default_on_timeout: allow`) or returns a structured error (`denied`, `timeout` with `default_on_timeout: deny`, `client_disconnected`, or `shutdown_cancelled`).
 
+The payload on the ticket is the payload that runs. The proxy freezes
+`tools/call` params with a deep copy at entry, so a caller that rewrites
+its arguments while a ticket is pending changes nothing: the call the
+approver sees is the call that was evaluated, the call that forwards on
+approval, and the call the audit record preserves. Params that cannot be
+deep-copied are rejected outright with an invalid-params error whose
+message reads `tools/call params must be JSON-serializable`.
+
 The resolution is recorded in the [audit trail](./audit.md) on the tool call's audit record (`approval_status`, `approved_by`, `approval_wait_ms`, and — when there is a denial reason or an escalation — an `evidence_chain.approval` block with those details). The ticket itself is held in memory only — it stays queryable through the approvals REST API and dashboard for an hour after resolution, then it is cleaned up.
 
 ## Channels
@@ -30,6 +38,18 @@ approval:
 ```
 
 The dashboard channel is always available as a fallback, even if other channels are configured.
+
+Because the dashboard's approvals API is the only surface that can resolve
+dashboard-routed tickets, dashboard-routed approvals require the dashboard
+server. Startup validation rejects `dashboard.enabled: false` combined with
+any dashboard-routed rule or budget approval — explicit
+`approval.channel`, a viable escalation delegate, or the
+no-`approval`-block fallback — and with
+`policies.flag_destructive: require_approval` or
+`policies.on_tool_drift: require_approval`, whose escalation tickets always
+use the dashboard channel. Route the approval to a Slack channel to run
+without the dashboard. Rules matching only on sideband `match.metadata` are
+exempt: their tickets are adapter-resolved and never notify a channel.
 
 ### Webhook
 

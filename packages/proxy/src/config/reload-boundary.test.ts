@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { helioConfigSchema, type HelioConfig } from './schema.js'
+import { helioConfigSchema, parseDuration, type HelioConfig } from './schema.js'
 import { diffReloadBoundary } from './reload-boundary.js'
 
 // ---------------------------------------------------------------------------
@@ -322,5 +322,192 @@ describe('findUnroutableApprovalReferences', () => {
     const policy = compileRules([{ match: { tool: '*' }, action: 'allow' }])
     const budgets = compileBudgets([bgBudget({ on_exceed: 'deny', approval: undefined })])
     expect(findUnroutableApprovalReferences(policy, budgets, runtime([], false))).toEqual([])
+  })
+})
+
+describe('startup validation and the reload guard agree (issue #152)', () => {
+  // Same file, two judges: the schema's startup check, and the reload guard
+  // run against the surface THIS file would boot. A verdict mismatch means
+  // one side's routing semantics drifted from the other — exactly the
+  // asymmetry issue #152 closed. (Direction is pinned too, so the matrix
+  // cannot "agree" by both being wrong.)
+  const slackChannel = {
+    type: 'slack',
+    bot_token: 'xoxb-123',
+    signing_secret: 'abc123',
+    channel: '#approvals',
+  }
+
+  interface AgreementCase {
+    name: string
+    accepted: boolean
+    policies?: Partial<PoliciesConfig>
+    budgets?: unknown[]
+    approval?: Record<string, unknown>
+    dashboard?: Record<string, unknown>
+  }
+
+  const cases: AgreementCase[] = [
+    {
+      name: 'bare require_approval rule (dashboard fallback)',
+      accepted: false,
+      policies: { rules: [{ match: { tool: '*' }, action: 'require_approval' }] },
+    },
+    {
+      name: 'explicit dashboard channel',
+      accepted: false,
+      policies: {
+        rules: [
+          { match: { tool: '*' }, action: 'require_approval', approval: { channel: 'dashboard' } },
+        ],
+      },
+    },
+    {
+      name: 'named dashboard-type channel',
+      accepted: false,
+      policies: {
+        rules: [{ match: { tool: '*' }, action: 'require_approval', approval: { channel: 'ops' } }],
+      },
+      approval: { channels: [{ type: 'dashboard', name: 'ops' }] },
+    },
+    {
+      name: 'slack-routed rule',
+      accepted: true,
+      policies: {
+        rules: [
+          { match: { tool: '*' }, action: 'require_approval', approval: { channel: 'slack' } },
+        ],
+      },
+      approval: { channels: [slackChannel] },
+    },
+    {
+      name: 'viable dashboard delegate behind slack',
+      accepted: false,
+      policies: {
+        rules: [
+          {
+            match: { tool: '*' },
+            action: 'require_approval',
+            approval: { channel: 'slack', delegates: ['dashboard'], escalation_after: '60s' },
+          },
+        ],
+      },
+      approval: { channels: [slackChannel] },
+    },
+    {
+      // Pins the timeout-RESOLUTION clause across both judges: 600s is
+      // inert against the 300s global default but viable under the
+      // rule-level 900s ticket. A one-sided bug in
+      // `rule.approval?.timeout ?? cfg.approval.timeout` vs the guard's
+      // compiled timeoutMs fails exactly here.
+      name: 'viable dashboard delegate under a rule-level timeout',
+      accepted: false,
+      policies: {
+        rules: [
+          {
+            match: { tool: '*' },
+            action: 'require_approval',
+            approval: {
+              channel: 'slack',
+              delegates: ['dashboard'],
+              escalation_after: '600s',
+              timeout: '900s',
+            },
+          },
+        ],
+      },
+      approval: { channels: [slackChannel] },
+    },
+    {
+      name: 'inert dashboard delegate (no escalation timer)',
+      accepted: true,
+      policies: {
+        rules: [
+          {
+            match: { tool: '*' },
+            action: 'require_approval',
+            approval: { channel: 'slack', delegates: ['dashboard'] },
+          },
+        ],
+      },
+      approval: { channels: [slackChannel] },
+    },
+    {
+      name: 'metadata-gated (sideband-only) rule',
+      accepted: true,
+      policies: {
+        rules: [{ match: { metadata: { channel_id: 'C123' } }, action: 'require_approval' }],
+      },
+    },
+    {
+      name: 'flag_destructive escalation',
+      accepted: false,
+      policies: { flag_destructive: 'require_approval', rules: [] },
+    },
+    {
+      name: 'on_tool_drift escalation',
+      accepted: false,
+      policies: { on_tool_drift: 'require_approval', rules: [] },
+    },
+    {
+      name: 'budget break-glass dashboard fallback (existing check, same matrix)',
+      accepted: false,
+      budgets: [
+        {
+          name: 'cap',
+          limit: 10,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'require_approval',
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+        },
+      ],
+    },
+    {
+      name: 'everything accepted with the dashboard enabled',
+      accepted: true,
+      policies: {
+        flag_destructive: 'require_approval',
+        on_tool_drift: 'require_approval',
+        rules: [{ match: { tool: '*' }, action: 'require_approval' }],
+      },
+      dashboard: { enabled: true, api_secret: 'unit-test-secret' },
+    },
+  ]
+
+  it.each(cases)('$name', (c) => {
+    const raw = {
+      version: '1',
+      upstream: { url: 'http://localhost:8080/mcp' },
+      dashboard: c.dashboard ?? { enabled: false, api_secret: 'unit-test-secret' },
+      policies: c.policies ?? {},
+      budgets: c.budgets ?? [],
+      approval: c.approval ?? {},
+    }
+    const startupAccepted = helioConfigSchema.safeParse(raw).success
+
+    const compiled = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      ...(c.policies ?? {}),
+      rules: c.policies?.rules ?? [],
+    }).policy
+    const budgets = compileBudgets((c.budgets ?? []) as BudgetConfig[])
+    const channelTypes = new Map<string, string>([['dashboard', 'dashboard']])
+    for (const ch of (c.approval?.['channels'] as
+      | Array<{ type: string; name?: string }>
+      | undefined) ?? []) {
+      channelTypes.set(ch.name ?? ch.type, ch.type)
+    }
+    const guardAccepted =
+      findUnroutableApprovalReferences(compiled, budgets, {
+        channelTypes,
+        dashboardEnabled: (raw.dashboard as { enabled?: boolean }).enabled ?? true,
+        defaultApprovalTimeoutMs: parseDuration('300s'),
+      }).length === 0
+
+    expect(startupAccepted).toBe(c.accepted)
+    expect(guardAccepted).toBe(c.accepted)
   })
 })

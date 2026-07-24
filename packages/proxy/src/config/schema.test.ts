@@ -1159,6 +1159,159 @@ describe('helioConfigSchema', () => {
     })
   })
 
+  describe('rule approval routing needs the dashboard server (issue #152)', () => {
+    // Dashboard-routed rule tickets resolve ONLY through the dashboard
+    // approvals API — mirror of the break-glass suite above, rule side.
+    const noDashboard = { enabled: false, api_secret: 'unit-test-secret' }
+    const slackChannel = {
+      type: 'slack',
+      bot_token: 'xoxb-123',
+      signing_secret: 'abc123',
+      channel: '#approvals',
+    }
+    const approveRule = (approval?: Record<string, unknown>) => ({
+      match: { tool: 'transfer_*' },
+      action: 'require_approval',
+      ...(approval !== undefined && { approval }),
+    })
+    const parse = (policies: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      helioConfigSchema.safeParse(minimalConfig({ dashboard: noDashboard, policies, ...extra }))
+    const issuePaths = (result: ReturnType<typeof helioConfigSchema.safeParse>) =>
+      result.success ? [] : result.error.issues.map((i) => i.path.join('.'))
+
+    it('rejects the dashboard fallback when the dashboard server is disabled', () => {
+      const result = parse({ rules: [approveRule()] })
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.rules.0.action')
+    })
+
+    it('rejects an explicit dashboard channel when the dashboard is disabled', () => {
+      const result = parse({ rules: [approveRule({ channel: 'dashboard' })] })
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.rules.0.approval.channel')
+    })
+
+    it('rejects a named dashboard-type channel when the dashboard is disabled', () => {
+      const result = parse(
+        { rules: [approveRule({ channel: 'ops' })] },
+        { approval: { channels: [{ type: 'dashboard', name: 'ops' }] } },
+      )
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.rules.0.approval.channel')
+    })
+
+    it('accepts a slack-routed rule with the dashboard disabled', () => {
+      const result = parse(
+        { rules: [approveRule({ channel: 'slack' })] },
+        { approval: { channels: [slackChannel] } },
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a viable dashboard escalation delegate', () => {
+      const result = parse(
+        {
+          rules: [
+            approveRule({ channel: 'slack', delegates: ['dashboard'], escalation_after: '60s' }),
+          ],
+        },
+        { approval: { channels: [slackChannel] } },
+      )
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.rules.0.approval.delegates.0')
+    })
+
+    it('a dashboard delegate with no escalation timer is inert, not rejected', () => {
+      const result = parse(
+        { rules: [approveRule({ channel: 'slack', delegates: ['dashboard'] })] },
+        { approval: { channels: [slackChannel] } },
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('non-viable escalation timers make dashboard delegates inert (router parity)', () => {
+      const channels = { approval: { channels: [slackChannel] } }
+      // 0s never fires.
+      const zero = parse(
+        {
+          rules: [
+            approveRule({ channel: 'slack', delegates: ['dashboard'], escalation_after: '0s' }),
+          ],
+        },
+        channels,
+      )
+      expect(zero.success).toBe(true)
+      // 600s ≥ the 300s default approval.timeout never fires.
+      const tooLate = parse(
+        {
+          rules: [
+            approveRule({ channel: 'slack', delegates: ['dashboard'], escalation_after: '600s' }),
+          ],
+        },
+        channels,
+      )
+      expect(tooLate.success).toBe(true)
+      // A rule-level timeout raises the bound: the same 600s escalation fires
+      // under a 900s ticket, so the dashboard delegate is live again — reject.
+      const ruleTimeout = parse(
+        {
+          rules: [
+            approveRule({
+              channel: 'slack',
+              delegates: ['dashboard'],
+              escalation_after: '600s',
+              timeout: '900s',
+            }),
+          ],
+        },
+        channels,
+      )
+      expect(ruleTimeout.success).toBe(false)
+      expect(issuePaths(ruleTimeout)).toContain('policies.rules.0.approval.delegates.0')
+    })
+
+    it('skips metadata-gated (sideband-only) rules', () => {
+      // match.metadata never matches on the MCP path and sideband tickets are
+      // native (adapter-resolved) — no channel-routed ticket can exist.
+      const result = parse({
+        rules: [{ match: { metadata: { channel_id: 'C123' } }, action: 'require_approval' }],
+      })
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects flag_destructive: require_approval when the dashboard is disabled', () => {
+      const result = parse({ flag_destructive: 'require_approval', rules: [] })
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.flag_destructive')
+
+      const log = parse({ flag_destructive: 'log', rules: [] })
+      expect(log.success).toBe(true)
+    })
+
+    it('rejects on_tool_drift: require_approval when the dashboard is disabled', () => {
+      const result = parse({ on_tool_drift: 'require_approval', rules: [] })
+      expect(result.success).toBe(false)
+      expect(issuePaths(result)).toContain('policies.on_tool_drift')
+
+      const block = parse({ on_tool_drift: 'block', rules: [] })
+      expect(block.success).toBe(true)
+    })
+
+    it('accepts every rejected shape once the dashboard is enabled', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          dashboard: { enabled: true, api_secret: 'unit-test-secret' },
+          policies: {
+            flag_destructive: 'require_approval',
+            on_tool_drift: 'require_approval',
+            rules: [approveRule(), approveRule({ channel: 'dashboard' })],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
   describe('budgets (issue #14)', () => {
     const validBudget = {
       name: 'daily-cap',
