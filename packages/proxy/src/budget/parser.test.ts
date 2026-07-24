@@ -115,4 +115,95 @@ describe('compileBudgets', () => {
       expect(budget?.approval).toBeUndefined()
     })
   })
+
+  describe('contributor input conditions (issue #177)', () => {
+    it('compiles input conditions through the shared flatten path', () => {
+      const [budget] = compileBudgets([
+        budgetConfig({
+          contributors: [
+            {
+              match: {
+                tool: 'stripe_*',
+                input: { '$.category': { eq: 'content_distribution' }, '$.amount': { lte: 100 } },
+              },
+              field: '$.amount',
+            },
+          ],
+        }),
+      ])
+      const input = budget?.contributors[0]?.match.input
+      expect(input).toHaveLength(2)
+      expect(input).toContainEqual({
+        path: '$.category',
+        operator: 'eq',
+        value: 'content_distribution',
+      })
+      expect(input).toContainEqual({ path: '$.amount', operator: 'lte', value: 100 })
+    })
+
+    it('leaves input absent on unconditioned contributors', () => {
+      const [budget] = compileBudgets([budgetConfig()])
+      expect(budget?.contributors[0]?.match.input).toBeUndefined()
+    })
+
+    it('pre-compiles regex conditions', () => {
+      const [budget] = compileBudgets([
+        budgetConfig({
+          contributors: [
+            { match: { tool: 'stripe_*', input: { '$.memo': { regex: '^inv-' } } }, field: '$.a' },
+          ],
+        }),
+      ])
+      expect(budget?.contributors[0]?.match.input?.[0]?.regex).toBeInstanceOf(RegExp)
+    })
+
+    it('rejects a catastrophic contributor regex with a budget-labeled error', () => {
+      expect(() =>
+        compileBudgets([
+          budgetConfig({
+            contributors: [
+              {
+                match: { tool: 'stripe_*', input: { '$.memo': { regex: '(a+)+$' } } },
+                field: '$.a',
+              },
+            ],
+          }),
+        ]),
+      ).toThrow(BudgetParseError)
+      expect(() =>
+        compileBudgets([
+          budgetConfig({
+            contributors: [
+              {
+                match: { tool: 'stripe_*', input: { '$.memo': { regex: '(a+)+$' } } },
+                field: '$.a',
+              },
+            ],
+          }),
+        ]),
+      ).toThrow(/daily-cap.*contributor 0.*catastrophic regex/s)
+    })
+
+    it('rejects a malformed contributor regex with a budget-labeled error', () => {
+      // 'a{2,1}' passes the safe-regex2 analyzer (safe = true, verified on
+      // the installed package) and throws at RegExp construction ("numbers
+      // out of order in {} quantifier") — the invalid-regex branch, distinct
+      // from the ReDoS branch the '(a+)+$' test covers. Do NOT copy the
+      // policy suite's '[invalid(' probe here: safe-regex2 rejects it
+      // (safe = false), so it hits the catastrophic branch despite those
+      // tests' "invalid regex" titles.
+      expect(() =>
+        compileBudgets([
+          budgetConfig({
+            contributors: [
+              {
+                match: { tool: 'stripe_*', input: { '$.memo': { regex: 'a{2,1}' } } },
+                field: '$.a',
+              },
+            ],
+          }),
+        ]),
+      ).toThrow(/Budget "daily-cap": contributor 0: invalid regex/)
+    })
+  })
 })
