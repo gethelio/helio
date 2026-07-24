@@ -156,6 +156,111 @@ describe('BudgetEngine.resolveCharges', () => {
     })
     expect(charges[0]?.bucketKey).toBe('budget:sb:sender:U7')
   })
+
+  describe('contributor input conditions (issue #177)', () => {
+    const categoryBudget = () =>
+      budgetConfig({
+        contributors: [
+          {
+            match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+            field: '$.amount',
+          },
+        ],
+      })
+
+    it('charges when the tool glob matches and every input condition holds', () => {
+      const { engine } = createEngine([categoryBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25, category: 'content_distribution' }),
+      )
+      expect(failures).toEqual([])
+      expect(charges[0]?.amount).toBe(25)
+    })
+
+    it('does not participate when the input value differs (fail-open by design)', () => {
+      const { engine } = createEngine([categoryBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25, category: 'ads' }),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toEqual([])
+    })
+
+    it('does not participate when the input field is absent (fail-open by design)', () => {
+      const { engine } = createEngine([categoryBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25 }),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toEqual([])
+    })
+
+    it('does not participate when the call has no arguments at all', () => {
+      const { engine } = createEngine([categoryBudget()])
+      const { charges, failures } = engine.resolveCharges({
+        toolName: 'stripe_charge',
+        toolArguments: undefined,
+        sessionId: null,
+        senderId: null,
+      })
+      expect(charges).toEqual([])
+      expect(failures).toEqual([])
+    })
+
+    it('first-match-wins over the combined predicate (specific-then-general ladder)', () => {
+      const { engine } = createEngine([
+        budgetConfig({
+          contributors: [
+            {
+              match: { tool: 'stripe_*', input: { '$.category': { eq: 'ads' } } },
+              field: '$.amount',
+            },
+            { match: { tool: 'stripe_*' }, field: '$.total' },
+          ],
+        }),
+      ])
+      const labeled = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 5, total: 99, category: 'ads' }),
+      )
+      expect(labeled.charges[0]?.amount).toBe(5)
+
+      const unlabeled = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 5, total: 99 }))
+      expect(unlabeled.charges[0]?.amount).toBe(99)
+    })
+
+    it('a participating contributor with an unusable amount still fails closed', () => {
+      const { engine } = createEngine([categoryBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { category: 'content_distribution', amount: 'a lot' }),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toHaveLength(1)
+      expect(failures[0]?.reason).toBe('invalid_amount')
+    })
+
+    it('a participating contributor with a missing amount does NOT fall through to a later contributor', () => {
+      // Selection is settled by the predicate alone; amount resolution comes
+      // after. A wrong implementation that treats an unusable amount as
+      // "keep looking" would charge 99 here instead of failing closed.
+      const { engine } = createEngine([
+        budgetConfig({
+          contributors: [
+            {
+              match: { tool: 'stripe_*', input: { '$.category': { eq: 'ads' } } },
+              field: '$.missing',
+            },
+            { match: { tool: 'stripe_*' }, field: '$.total' },
+          ],
+        }),
+      ])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { category: 'ads', total: 99 }),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toHaveLength(1)
+      expect(failures[0]?.reason).toBe('invalid_amount')
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
