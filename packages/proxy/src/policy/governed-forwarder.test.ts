@@ -3316,7 +3316,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'deny' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
 
     it('forwards and records on every matching budget when all allow', async () => {
@@ -3995,7 +3995,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'require_approval' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
     const bigDeny = {
       ...smallBreakGlass,
@@ -4803,7 +4803,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'deny' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
 
     it('a deny breach emits budget_breached for the breached budget only', async () => {
@@ -4986,7 +4986,7 @@ describe('GovernedForwarder', () => {
           {
             ...smallDeny,
             name: 'unreadable',
-            contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+            contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
           },
         ],
         { onBreach },

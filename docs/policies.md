@@ -488,9 +488,11 @@ budgets:
     currency: USD
     window: 24h
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 ```
 

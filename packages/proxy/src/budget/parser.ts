@@ -1,6 +1,6 @@
 import picomatch from 'picomatch'
 import { parseDuration } from '../config/schema.js'
-import type { BudgetsConfig } from '../config/schema.js'
+import type { BudgetConfig, BudgetsConfig } from '../config/schema.js'
 import { compileApproval } from '../policy/parser.js'
 import type { CompiledBudget, CompiledBudgetContributor } from './types.js'
 
@@ -49,16 +49,19 @@ export function compileBudgets(budgets: BudgetsConfig): CompiledBudget[] {
 }
 
 function compileContributor(
-  contributor: { tool: string; field: string },
+  contributor: BudgetConfig['contributors'][number],
   budgetName: string,
 ): CompiledBudgetContributor {
   try {
-    const test = picomatch(contributor.tool, { dot: true })
-    return { tool: { pattern: contributor.tool, test }, field: contributor.field }
+    const test = picomatch(contributor.match.tool, { dot: true })
+    return {
+      match: { tool: { pattern: contributor.match.tool, test } },
+      field: contributor.field,
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new BudgetParseError(
-      `invalid contributor glob "${contributor.tool}": ${message}`,
+      `invalid contributor glob "${contributor.match.tool}": ${message}`,
       budgetName,
     )
   }

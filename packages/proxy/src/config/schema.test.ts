@@ -1165,7 +1165,7 @@ describe('helioConfigSchema', () => {
       limit: 50,
       currency: 'USD',
       window: '24h',
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
 
     function withBudgets(budgets: unknown[], extra: Record<string, unknown> = {}) {
@@ -1262,10 +1262,95 @@ describe('helioConfigSchema', () => {
     it('rejects unknown contributor fields (strict)', () => {
       const result = helioConfigSchema.safeParse(
         withBudgets([
-          { ...validBudget, contributors: [{ tool: 'a_*', field: '$.x', currency: 'USD' }] },
+          {
+            ...validBudget,
+            contributors: [{ match: { tool: 'a_*' }, field: '$.x', currency: 'USD' }],
+          },
         ]),
       )
       expect(result.success).toBe(false)
+    })
+
+    it('accepts the match-nested contributor shape', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          { ...validBudget, contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }] },
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts contributor input conditions with the rule operator set', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          {
+            ...validBudget,
+            contributors: [
+              {
+                match: {
+                  tool: 'stripe_*',
+                  input: { '$.category': { eq: 'content_distribution' } },
+                },
+                field: '$.amount',
+              },
+            ],
+          },
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a contributor input condition with no operators', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          {
+            ...validBudget,
+            contributors: [
+              { match: { tool: 'stripe_*', input: { '$.category': {} } }, field: '$.a' },
+            ],
+          },
+        ]),
+      )
+      expect(result.success).toBe(false)
+      const messages = result.success ? [] : result.error.issues.map((issue) => issue.message)
+      expect(messages).toContain('At least one condition operator is required')
+    })
+
+    it('rejects unknown keys under contributor match (strict)', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          {
+            ...validBudget,
+            contributors: [{ match: { tool: 'stripe_*', environment: 'prod' }, field: '$.a' }],
+          },
+        ]),
+      )
+      expect(result.success).toBe(false)
+      const messages = result.success ? [] : result.error.issues.map((issue) => issue.message)
+      expect(messages.some((m) => m.includes('environment'))).toBe(true)
+    })
+
+    it('rejects the legacy flat contributor shape with a migration message', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([{ ...validBudget, contributors: [{ tool: 'stripe_*', field: '$.amount' }] }]),
+      )
+      expect(result.success).toBe(false)
+      const messages = result.success ? [] : result.error.issues.map((issue) => issue.message)
+      expect(messages.some((m) => m.includes('moved under "match"'))).toBe(true)
+    })
+
+    it('rejects a half-migrated contributor (tool alongside match) with the migration message', () => {
+      const result = helioConfigSchema.safeParse(
+        withBudgets([
+          {
+            ...validBudget,
+            contributors: [{ tool: 'stripe_*', match: { tool: 'stripe_*' }, field: '$.amount' }],
+          },
+        ]),
+      )
+      expect(result.success).toBe(false)
+      const messages = result.success ? [] : result.error.issues.map((issue) => issue.message)
+      expect(messages.some((m) => m.includes('moved under "match"'))).toBe(true)
     })
 
     it('accepts on_exceed: deny explicitly', () => {
@@ -1686,7 +1771,7 @@ describe('helioConfigSchema', () => {
               limit: 25,
               currency: 'USD',
               window: '1d',
-              contributors: [{ tool: 'openai_*', field: '$.usage.total_cost' }],
+              contributors: [{ match: { tool: 'openai_*' }, field: '$.usage.total_cost' }],
             },
           ],
         }),

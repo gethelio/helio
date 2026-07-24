@@ -341,7 +341,7 @@ export class BudgetEngine {
     const failures: BudgetChargeFailure[] = []
 
     for (const budget of this.budgets.values()) {
-      const contributor = budget.contributors.find((c) => c.tool.test(ctx.toolName))
+      const contributor = budget.contributors.find((c) => c.match.tool.test(ctx.toolName))
       if (!contributor) continue
 
       const raw = resolvePath(contributor.field, ctx.toolArguments ?? {})

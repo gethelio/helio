@@ -23,7 +23,7 @@ function budgetConfig(overrides: Partial<BudgetConfig> = {}): BudgetConfig {
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   }
 }
@@ -92,7 +92,10 @@ describe('BudgetEngine.resolveCharges', () => {
   it('resolves every matching budget for one call', () => {
     const { engine } = createEngine([
       budgetConfig({ name: 'cap-a' }),
-      budgetConfig({ name: 'cap-b', contributors: [{ tool: 'stripe_*', field: '$.amount' }] }),
+      budgetConfig({
+        name: 'cap-b',
+        contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+      }),
     ])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }))
     expect(charges.map((c) => c.budget.name)).toEqual(['cap-a', 'cap-b'])
@@ -102,8 +105,8 @@ describe('BudgetEngine.resolveCharges', () => {
     const { engine } = createEngine([
       budgetConfig({
         contributors: [
-          { tool: 'stripe_*', field: '$.amount' },
-          { tool: 'stripe_charge', field: '$.total' },
+          { match: { tool: 'stripe_*' }, field: '$.amount' },
+          { match: { tool: 'stripe_charge' }, field: '$.total' },
         ],
       }),
     ])
@@ -494,8 +497,8 @@ describe('BudgetEngine commit robustness (review round)', () => {
       compileBudgets([
         budgetConfig({
           contributors: [
-            { tool: 'stripe_*', field: '$.amount' },
-            { tool: 'paypal_*', field: '$.total' },
+            { match: { tool: 'stripe_*' }, field: '$.amount' },
+            { match: { tool: 'paypal_*' }, field: '$.total' },
           ],
         }),
       ]),
@@ -570,8 +573,8 @@ describe('BudgetEngine.reconcile', () => {
       compileBudgets([
         budgetConfig({
           contributors: [
-            { tool: 'stripe_*', field: '$.amount' },
-            { tool: 'paypal_*', field: '$.total' },
+            { match: { tool: 'stripe_*' }, field: '$.amount' },
+            { match: { tool: 'paypal_*' }, field: '$.total' },
           ],
         }),
       ]),

@@ -550,7 +550,8 @@ budgets:
     currency: USD
     window: 1d
     contributors:
-      - tool: "openai_*"
+      - match:
+          tool: "openai_*"
         field: "$.usage.total_cost"
 `,
       )

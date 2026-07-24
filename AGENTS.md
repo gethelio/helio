@@ -262,9 +262,11 @@ budgets: # cross-tool spend pots, independent of rules; gate after the policy de
       channel: 'dashboard'
       timeout: '300s'
     contributors: # every matching tool draws down the SAME pot
-      - tool: 'stripe_*' # picomatch glob, same engine as match.tool
+      - match:
+          tool: 'stripe_*' # picomatch glob, same engine as match.tool
         field: '$.amount' # path to the amount in the call's arguments
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 approval:
   timeout: '300s'

@@ -1736,7 +1736,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
@@ -1952,7 +1952,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
         stripeBudget({ name: 'valid-but-breached', limit: 10 }),
         stripeBudget({
           name: 'invalid-field',
-          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
         }),
       ],
     })
@@ -2152,7 +2152,7 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     window: '24h',
     key: 'global',
     on_exceed: 'require_approval',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown) =>
@@ -2721,7 +2721,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
@@ -2769,7 +2769,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
         evBudget(),
         evBudget({
           name: 'unreadable',
-          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
         }),
       ],
       onBudgetBreach,
@@ -3119,7 +3119,7 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
           window: '1h',
           key: 'global',
           on_exceed: 'deny',
-          contributors: [{ tool: 'send_email', field: '$.cost' }],
+          contributors: [{ match: { tool: 'send_email' }, field: '$.cost' }],
         },
       ],
     })
@@ -3228,7 +3228,7 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
           window: '1h',
           key: 'global',
           on_exceed: 'require_approval',
-          contributors: [{ tool: 'send_email', field: '$.cost' }],
+          contributors: [{ match: { tool: 'send_email' }, field: '$.cost' }],
         },
       ],
     })

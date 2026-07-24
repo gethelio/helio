@@ -779,7 +779,8 @@ describe('config-samples guard', () => {
           "  currency: 'USD'",
           "  window: '24h'",
           '  contributors:',
-          "    - tool: 'create_payment'",
+          '    - match:',
+          "        tool: 'create_payment'",
           "      field: '$.amount'",
         ].join('\n'),
         // Anchor-holder fragment (the ^x- classifier rule).

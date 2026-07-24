@@ -5,11 +5,15 @@
 // pre-parsed millisecond durations for zero-overhead evaluation.
 // ---------------------------------------------------------------------------
 
-import type { CompiledApproval, ToolMatcher } from '../policy/types.js'
+import type { CompiledApproval, InputCondition, ToolMatcher } from '../policy/types.js'
 
-/** One compiled contributor: which tools feed the budget, and from which field. */
+/** One compiled contributor: which calls feed the budget, and from which field. */
 export interface CompiledBudgetContributor {
-  readonly tool: ToolMatcher
+  readonly match: {
+    readonly tool: ToolMatcher
+    /** Flattened conditions (one per path+operator); absent when unconditioned. */
+    readonly input?: readonly InputCondition[]
+  }
   /** Dot-path into the tool arguments (e.g. "$.amount"), resolved per call. */
   readonly field: string
 }

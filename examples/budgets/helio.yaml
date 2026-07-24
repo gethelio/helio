@@ -53,9 +53,11 @@ budgets:
       # channel under approval.channels below and switch this to:
       # channel: slack
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 
 approval:

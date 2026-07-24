@@ -312,12 +312,41 @@ const policiesSchema = z
 // Budgets (issue #14) — named cross-tool spend budgets, independent of rules
 // ---------------------------------------------------------------------------
 
-const budgetContributorSchema = z
+const budgetContributorMatchSchema = z
   .object({
     tool: z.string().min(1), // picomatch glob, same engine as match.tool
+    // Same operators and AND-combination as rule `match.input`. Other rule
+    // matchers (annotations, environment, metadata) stay strict-rejected
+    // until the budget charge context can actually evaluate them.
+    input: z.record(z.string(), inputConditionSchema).optional(),
+  })
+  .strict()
+
+const modernBudgetContributorSchema = z
+  .object({
+    match: budgetContributorMatchSchema,
     field: z.string().min(1), // dot-path into tool arguments, e.g. "$.amount"
   })
   .strict()
+
+// The 0.10.0 shape was { tool, field }. A strict-parse failure alone would
+// surface as unrecognized-key noise, so detect the legacy shape BEFORE the
+// strict schema runs and emit a migration pointer instead. ANY top-level
+// `tool` triggers it — including a half-migrated { tool, match, field } —
+// because no valid new-shape contributor has one.
+const budgetContributorSchema = z
+  .unknown()
+  .superRefine((raw, ctx) => {
+    if (raw !== null && typeof raw === 'object' && 'tool' in raw) {
+      ctx.addIssue({
+        code: 'custom',
+        message:
+          'contributor "tool" moved under "match" in v0.11.0 — write ' +
+          '{ match: { tool: "<glob>" }, field: "<path>" }',
+      })
+    }
+  })
+  .pipe(modernBudgetContributorSchema)
 
 const budgetSchema = z
   .object({

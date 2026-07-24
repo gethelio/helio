@@ -14,7 +14,7 @@ function budgetConfig(overrides: Partial<BudgetConfig> = {}): BudgetConfig {
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   }
 }
@@ -55,21 +55,23 @@ describe('compileBudgets', () => {
     const [budget] = compileBudgets([
       budgetConfig({
         contributors: [
-          { tool: 'stripe_*', field: '$.amount' },
-          { tool: 'paypal_*', field: '$.total' },
+          { match: { tool: 'stripe_*' }, field: '$.amount' },
+          { match: { tool: 'paypal_*' }, field: '$.total' },
         ],
       }),
     ])
     expect(budget?.contributors).toHaveLength(2)
-    expect(budget?.contributors[0]?.tool.test('stripe_charge')).toBe(true)
-    expect(budget?.contributors[0]?.tool.test('paypal_send')).toBe(false)
+    expect(budget?.contributors[0]?.match.tool.test('stripe_charge')).toBe(true)
+    expect(budget?.contributors[0]?.match.tool.test('paypal_send')).toBe(false)
     expect(budget?.contributors[0]?.field).toBe('$.amount')
-    expect(budget?.contributors[1]?.tool.pattern).toBe('paypal_*')
+    expect(budget?.contributors[1]?.match.tool.pattern).toBe('paypal_*')
   })
 
   it('compiles exotic patterns to matchers rather than throwing (picomatch is total)', () => {
-    const [budget] = compileBudgets([budgetConfig({ contributors: [{ tool: '[', field: '$.x' }] })])
-    expect(budget?.contributors[0]?.tool.test('anything')).toBe(false)
+    const [budget] = compileBudgets([
+      budgetConfig({ contributors: [{ match: { tool: '[' }, field: '$.x' }] }),
+    ])
+    expect(budget?.contributors[0]?.match.tool.test('anything')).toBe(false)
   })
 
   it('BudgetParseError names the offending budget', () => {

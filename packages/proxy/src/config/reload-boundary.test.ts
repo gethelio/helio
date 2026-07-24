@@ -33,7 +33,7 @@ describe('diffReloadBoundary', () => {
           limit: 50,
           currency: 'USD',
           window: '24h',
-          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
         },
       ],
     })
@@ -157,7 +157,7 @@ describe('findUnroutableApprovalReferences', () => {
     window: '24h',
     key: 'global',
     on_exceed: 'require_approval',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
 

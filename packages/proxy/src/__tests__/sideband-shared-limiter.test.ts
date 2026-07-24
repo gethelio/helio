@@ -134,7 +134,7 @@ describe('sideband ↔ MCP shared budget engine (issue #14)', () => {
           window: '24h',
           key: 'global',
           on_exceed: 'deny',
-          contributors: [{ tool: 'send', field: '$.amount' }],
+          contributors: [{ match: { tool: 'send' }, field: '$.amount' }],
         },
       ]),
       cleanupIntervalMs: 0,

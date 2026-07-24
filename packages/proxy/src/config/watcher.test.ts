@@ -141,7 +141,8 @@ budgets:
     currency: USD
     window: 24h
     contributors:
-      - tool: "stripe_*"
+      - match:
+          tool: "stripe_*"
         field: "$.amount"
 `,
     )
@@ -169,7 +170,8 @@ budgets:
     currency: USD
     window: 24h
     contributors:
-      - tool: "stripe_*"
+      - match:
+          tool: "stripe_*"
         field: "$.amount"
 ${extraContributor}
 `
@@ -184,7 +186,7 @@ ${extraContributor}
           window: '24h',
           key: 'global',
           on_exceed: 'deny',
-          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
         },
       ]),
       cleanupIntervalMs: 0,
@@ -219,7 +221,7 @@ ${extraContributor}
     // Contributor-only edit — accrued spend must survive.
     await writeFile(
       configPath,
-      budgetYaml(100, '      - tool: "paypal_*"\n        field: "$.total"'),
+      budgetYaml(100, '      - match:\n          tool: "paypal_*"\n        field: "$.total"'),
     )
     await wait(500)
     expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
@@ -248,7 +250,8 @@ budgets:
     currency: USD
     window: 24h
     contributors:
-      - tool: "stripe_*"
+      - match:
+          tool: "stripe_*"
         field: "$.amount"
 `
     // Duplicate budget names fail the schema refinement at load time.
@@ -260,7 +263,8 @@ budgets:
     currency: USD
     window: 1h
     contributors:
-      - tool: "other_*"
+      - match:
+          tool: "other_*"
         field: "$.x"`,
     )
     await writeFile(configPath, validYaml)
@@ -274,7 +278,7 @@ budgets:
           window: '24h',
           key: 'global',
           on_exceed: 'deny',
-          contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
         },
       ]),
       cleanupIntervalMs: 0,

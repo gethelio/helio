@@ -253,7 +253,7 @@ beforeAll(async () => {
         window: '24h',
         key: 'global',
         on_exceed: 'deny',
-        contributors: [{ tool: 'budgeted_*', field: '$.amount' }],
+        contributors: [{ match: { tool: 'budgeted_*' }, field: '$.amount' }],
       },
       {
         name: 'e2e-glass',
@@ -262,7 +262,7 @@ beforeAll(async () => {
         window: '24h',
         key: 'global',
         on_exceed: 'require_approval',
-        contributors: [{ tool: 'glass_*', field: '$.amount' }],
+        contributors: [{ match: { tool: 'glass_*' }, field: '$.amount' }],
       },
     ]),
     cleanupIntervalMs: 0,

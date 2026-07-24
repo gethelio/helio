@@ -143,10 +143,15 @@ function compileToolMatcher(pattern: string, ruleIndex: number, ruleName?: strin
   }
 }
 
-function flattenInputConditions(
+/**
+ * Flatten a `match.input`-shaped record into InputCondition entries, with
+ * regex values type-checked, ReDoS-rejected (safe-regex2), and pre-compiled.
+ * Shared by policy rules and budget contributors (issue #177); `makeError`
+ * lets each caller label failures with its own error type.
+ */
+export function flattenInputConditionsWith(
   input: Record<string, Record<string, unknown>>,
-  ruleIndex: number,
-  ruleName?: string,
+  makeError: (message: string) => Error,
 ): InputCondition[] {
   const conditions: InputCondition[] = []
 
@@ -157,11 +162,7 @@ function flattenInputConditions(
 
       if (op === 'regex') {
         if (typeof value !== 'string') {
-          throw new PolicyParseError(
-            `regex value for input path "${path}" must be a string`,
-            ruleIndex,
-            ruleName,
-          )
+          throw makeError(`regex value for input path "${path}" must be a string`)
         }
         // Reject catastrophic-backtracking patterns at compile time so a
         // fat-fingered operator regex cannot hang the policy hot path on a
@@ -170,12 +171,10 @@ function flattenInputConditions(
         // overlapping-alternation patterns that ret's AST walker flags as
         // exponential.
         if (!safeRegex(value)) {
-          throw new PolicyParseError(
+          throw makeError(
             `catastrophic regex "${value}" for input path "${path}": ` +
               `pattern is vulnerable to ReDoS and has been rejected. ` +
               `Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.`,
-            ruleIndex,
-            ruleName,
           )
         }
         let compiledRegex: RegExp
@@ -183,11 +182,7 @@ function flattenInputConditions(
           compiledRegex = new RegExp(value)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          throw new PolicyParseError(
-            `invalid regex "${value}" for input path "${path}": ${msg}`,
-            ruleIndex,
-            ruleName,
-          )
+          throw makeError(`invalid regex "${value}" for input path "${path}": ${msg}`)
         }
         conditions.push({ path, operator: op, value, regex: compiledRegex })
       } else {
@@ -197,6 +192,17 @@ function flattenInputConditions(
   }
 
   return conditions
+}
+
+function flattenInputConditions(
+  input: Record<string, Record<string, unknown>>,
+  ruleIndex: number,
+  ruleName?: string,
+): InputCondition[] {
+  return flattenInputConditionsWith(
+    input,
+    (message) => new PolicyParseError(message, ruleIndex, ruleName),
+  )
 }
 
 function flattenMetadataConditions(

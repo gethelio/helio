@@ -60,7 +60,8 @@ budgets:
     window: 24h # Sliding duration, or "session"
     on_exceed: deny # deny | require_approval (break-glass)
     contributors:
-      - tool: 'stripe_*' # Tool glob feeding this budget
+      - match:
+          tool: 'stripe_*' # Tool glob feeding this budget
         field: '$.amount' # Argument field carrying the amount
 
 approval:
@@ -246,9 +247,11 @@ budgets:
     #   channel: oncall # shape as rule-level approval; defaults to the
     #   timeout: 120s # dashboard channel and the global approval.timeout
     contributors:
-      - tool: 'stripe_*' # picomatch glob, same engine as match.tool
+      - match:
+          tool: 'stripe_*' # picomatch glob, same engine as match.tool
         field: '$.amount' # dot-path into the tool arguments
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 ```
 
