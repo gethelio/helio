@@ -725,6 +725,33 @@ const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
     })
   }
 
+  // The destructive / drift escalations submit with no matched rule, which
+  // always routes to the dashboard default channel (issue #152).
+  if (!cfg.dashboard.enabled) {
+    if (cfg.policies.flag_destructive === 'require_approval') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'flag_destructive'],
+        message:
+          'policies.flag_destructive: require_approval routes its escalation ' +
+          'tickets to the dashboard channel, but dashboard.enabled is false — ' +
+          'the tickets could never be resolved and would always time out. ' +
+          'Enable the dashboard or use "log".',
+      })
+    }
+    if (cfg.policies.on_tool_drift === 'require_approval') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'on_tool_drift'],
+        message:
+          'policies.on_tool_drift: require_approval routes its escalation ' +
+          'tickets to the dashboard channel, but dashboard.enabled is false — ' +
+          'the tickets could never be resolved and would always time out. ' +
+          'Enable the dashboard or use "block" or "log".',
+      })
+    }
+  }
+
   for (const [ruleIndex, rule] of cfg.policies.rules.entries()) {
     if (rule.match.environment !== undefined && !hasConfiguredEnvironment) {
       ctx.addIssue({
@@ -795,6 +822,60 @@ const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
           `Unknown approval channel "${channel}". ` +
           'Add it to approval.channels (type or name), or use "dashboard".',
       })
+    }
+
+    // Dashboard-routed rule tickets resolve ONLY through the dashboard
+    // approvals API — same dead-config shape the budget check above rejects
+    // (issue #152). Metadata-gated rules are exempt: they can only match on
+    // the sideband, whose tickets are native (adapter-resolved, no channel
+    // notified). findUnroutableApprovalReferences applies the same semantics
+    // at the hot-reload boundary; the agreement test keeps the two in step.
+    if (
+      rule.action === 'require_approval' &&
+      !cfg.dashboard.enabled &&
+      rule.match.metadata === undefined
+    ) {
+      const effectiveChannel = rule.approval?.channel ?? 'dashboard'
+      if (resolvesToDashboard(effectiveChannel)) {
+        ctx.addIssue({
+          code: 'custom',
+          path:
+            rule.approval?.channel !== undefined
+              ? ['policies', 'rules', ruleIndex, 'approval', 'channel']
+              : ['policies', 'rules', ruleIndex, 'action'],
+          message:
+            'This rule routes approvals to the dashboard channel, but ' +
+            'dashboard.enabled is false — the ticket could never be resolved and ' +
+            'would always time out. Enable the dashboard or route ' +
+            'approval.channel to a Slack channel.',
+        })
+      }
+      // Delegates only matter when the escalation timer can actually fire:
+      // the router escalates only when 0 < escalation_after < the effective
+      // timeout (rule timeout, else the global approval.timeout). An inert
+      // timer's delegates are config the router never consults, so the
+      // dashboard-availability guard must not reject them.
+      const escalationAfterMs =
+        rule.approval?.escalation_after !== undefined
+          ? parseDuration(rule.approval.escalation_after)
+          : undefined
+      const effectiveTimeoutMs = parseDuration(rule.approval?.timeout ?? cfg.approval.timeout)
+      const escalationCanFire =
+        escalationAfterMs !== undefined &&
+        escalationAfterMs > 0 &&
+        escalationAfterMs < effectiveTimeoutMs
+      for (const [delegateIndex, delegate] of (rule.approval?.delegates ?? []).entries()) {
+        if (escalationCanFire && knownChannelKeys.has(delegate) && resolvesToDashboard(delegate)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['policies', 'rules', ruleIndex, 'approval', 'delegates', delegateIndex],
+            message:
+              'This rule escalates approvals to a dashboard channel, but ' +
+              'dashboard.enabled is false — the delegate could never resolve the ' +
+              'ticket. Enable the dashboard or delegate to a Slack channel.',
+          })
+        }
+      }
     }
 
     const delegates = rule.approval?.delegates

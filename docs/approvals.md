@@ -31,6 +31,18 @@ approval:
 
 The dashboard channel is always available as a fallback, even if other channels are configured.
 
+Because the dashboard's approvals API is the only surface that can resolve
+dashboard-routed tickets, dashboard-routed approvals require the dashboard
+server. Startup validation rejects `dashboard.enabled: false` combined with
+any dashboard-routed rule or budget approval — explicit
+`approval.channel`, a viable escalation delegate, or the
+no-`approval`-block fallback — and with
+`policies.flag_destructive: require_approval` or
+`policies.on_tool_drift: require_approval`, whose escalation tickets always
+use the dashboard channel. Route the approval to a Slack channel to run
+without the dashboard. Rules matching only on sideband `match.metadata` are
+exempt: their tickets are adapter-resolved and never notify a channel.
+
 ### Webhook
 
 The webhook channel sends an HTTP POST notification to an external URL when an approval is requested. The external system is expected to call back to the proxy's REST API to resolve the ticket.
