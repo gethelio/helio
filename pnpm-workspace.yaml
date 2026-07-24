@@ -1,15 +1,19 @@
 packages:
   - 'packages/*'
 
+# Transitive security pins, exact per the version-pinning policy in
+# DEPENDENCIES.md. A pinned version can itself age into a later advisory, so
+# every entry has to move when the audit gate names it (axios in #188,
+# fast-uri and postcss in #194).
 overrides:
   path-to-regexp: 8.4.2
   axios: 1.18.1
-  fast-uri: 3.1.2
+  fast-uri: 3.1.4 # GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx
   follow-redirects: 1.16.0
   'brace-expansion@<1.1.16': 1.1.16
   'brace-expansion@>=3.0.0 <5.0.7': 5.0.7
-  postcss@8.5.8: 8.5.10
-  'form-data@>=4.0.0 <4.0.6': '>=4.0.6'
+  postcss: 8.5.12 # GHSA-6g55-p6wh-862q
+  'form-data@>=4.0.0 <4.0.6': 4.0.6
 
 # pnpm 11 reads settings from this file only; the package.json "pnpm" field
 # is ignored. The GHSAs below are triaged and tracked (esbuild/vite: #64).
