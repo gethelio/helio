@@ -234,6 +234,99 @@ ${extraContributor}
     engine.close()
   })
 
+  it('preserves accrued spend when only a contributor input condition changes (issue #177)', async () => {
+    const budgetYaml = (category: string) => `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules: []
+budgets:
+  - name: daily-cap
+    limit: 100
+    currency: USD
+    window: 24h
+    contributors:
+      - match:
+          tool: "stripe_*"
+          input:
+            "$.category":
+              eq: "${category}"
+        field: "$.amount"
+`
+    await writeFile(configPath, budgetYaml('ads'))
+
+    const engine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'daily-cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [
+            {
+              match: { tool: 'stripe_*', input: { '$.category': { eq: 'ads' } } },
+              field: '$.amount',
+            },
+          ],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: (_policy, _warnings, _paths, budgets) => {
+        engine.reconcile(budgets)
+      },
+      onError: () => {},
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    // Accrue 60 of the 100 pot through the conditioned contributor.
+    const { charges } = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 60, category: 'ads' },
+      sessionId: null,
+      senderId: null,
+    })
+    engine.recordAll(charges, {
+      kind: 'spend',
+      auditRecordId: 'a1',
+      origin: 'mcp',
+      toolName: 'stripe_charge',
+      timestampIso: new Date().toISOString(),
+    })
+    expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+
+    // Re-scope the contributor to a different category. `input` is not part of
+    // the reset tuple, so this edit must not touch what was already spent.
+    await writeFile(configPath, budgetYaml('content_distribution'))
+    await wait(500)
+    expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(60)
+
+    // ...and the NEW condition is the one now in force — a call carrying the
+    // old category no longer participates. Without this the test would pass
+    // against a watcher that never reloaded at all.
+    const stale = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 5, category: 'ads' },
+      sessionId: null,
+      senderId: null,
+    })
+    expect(stale.charges).toEqual([])
+    expect(stale.failures).toEqual([])
+
+    engine.close()
+  })
+
   it('keeps budgets and accrued state when a reload fails budget validation', async () => {
     const validYaml = `
 version: "1"
