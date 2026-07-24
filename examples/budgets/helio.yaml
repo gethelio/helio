@@ -1,8 +1,9 @@
 # Cross-tool spend budgets configuration
 #
-# One cross-tool budget pot ($50 per session) shared by the Stripe and
-# PayPal demo tools, with break-glass approvals for overages. See
-# README.md for the full walkthrough.
+# Two pots: an umbrella budget ($50 per session) shared by the Stripe and
+# PayPal demo tools with break-glass approvals for overages, and a category
+# cap ($15 per session) that only Stripe payments labeled
+# content_distribution charge. See README.md for the full walkthrough.
 #
 # Sections follow the canonical order from docs/configuration.md:
 # upstream, listen, policies, budgets, approval, audit, dashboard.
@@ -53,10 +54,29 @@ budgets:
       # channel under approval.channels below and switch this to:
       # channel: slack
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
+
+  # Category cap: only Stripe payments labeled content_distribution charge
+  # this pot. Unlabeled payments skip it — and still land in the umbrella
+  # agent-payments pot above, which is the recommended pairing.
+  - name: content-distribution
+    limit: 15
+    currency: USD
+    window: session
+    key: session
+    on_exceed: deny # the category cap is a hard stop; the umbrella breaks glass
+    contributors:
+      - match:
+          tool: 'stripe_*'
+          input:
+            '$.category':
+              eq: 'content_distribution'
+        field: '$.amount'
 
 approval:
   timeout: 300s

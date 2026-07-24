@@ -60,7 +60,8 @@ budgets:
     window: 24h # Sliding duration, or "session"
     on_exceed: deny # deny | require_approval (break-glass)
     contributors:
-      - tool: 'stripe_*' # Tool glob feeding this budget
+      - match:
+          tool: 'stripe_*' # Tool glob feeding this budget
         field: '$.amount' # Argument field carrying the amount
 
 approval:
@@ -246,9 +247,11 @@ budgets:
     #   channel: oncall # shape as rule-level approval; defaults to the
     #   timeout: 120s # dashboard channel and the global approval.timeout
     contributors:
-      - tool: 'stripe_*' # picomatch glob, same engine as match.tool
+      - match:
+          tool: 'stripe_*' # picomatch glob, same engine as match.tool
         field: '$.amount' # dot-path into the tool arguments
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 ```
 
@@ -266,9 +269,37 @@ budgets:
 
 Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true`; `approval` is only valid with `on_exceed: require_approval`, and its `channel`/`delegates` must reference configured approval channels. Any budget with `on_exceed: require_approval` requires `dashboard.api_secret`, exactly like a `require_approval` rule. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`.
 
-Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors` preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure).
+Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors`, including their `input` conditions, preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure).
 
 Budget spend **persists across restarts**: every charge is written to a ledger in the audit database (see [Budget Ledger Tables](./audit.md#budget-ledger-tables)) synchronously at record time, and startup replays it — duration windows resume mid-window exactly where they left off, and `session` pots whose last activity is within `idle_ttl` come back with their full accrued spend. The reset rules above extend across restarts: if the `limit`/`currency`/`window`/`key` tuple in the config differs from what the ledger last saw, the pot starts fresh instead of replaying, and a removal the proxy observes — live via hot-reload, or discovered at a startup without the budget — retires the accrued spend, so re-adding the budget later starts fresh even with an identical tuple. Ledger rows follow `audit.retention` on the audit store's sweep schedule; configuring a budget window (or session `idle_ttl`) longer than the retention draws a startup warning, because the sweep would forget in-window spend across restarts. Unlike budgets, rule-level rate/spend limit buckets remain in-memory and reset on restart.
+
+#### Scoping contributors by argument values
+
+A contributor's `match` block accepts the same `input` conditions as a rule's `match.input` (see [policies](./policies.md#input)): dot-paths into the tool arguments with `eq`/`neq`/`gt`/`gte`/`lt`/`lte`/`contains`/`regex` operators, AND-combined. A contributor participates when its `tool` glob matches **and** every input condition holds; contributor selection stays first-match-wins in config order over the combined predicate, so a category-scoped contributor can sit above a general fallback for the same tool:
+
+```yaml
+budgets:
+  - name: content-distribution
+    limit: 50
+    currency: USD
+    window: 7d
+    on_exceed: require_approval
+    contributors:
+      - match:
+          tool: 'stripe_create_payment'
+          input:
+            '$.category':
+              eq: 'content_distribution'
+        field: '$.amount'
+      - match:
+          tool: 'ads_*'
+        field: '$.budget'
+```
+
+**Input scoping trusts the field.** A call whose `$.category` is absent or set to something else simply does not feed this budget — that is not a breach, not a denial, just non-participation. The cap is therefore only as trustworthy as the field's causal link to the spend (the same class of assertion as `currency`). Two compositions harden it:
+
+- **Umbrella budget.** One call feeds every budget whose contributors match, so put a coarse total cap (bare `tool` glob, no input conditions) alongside the category pot. An unlabeled call escapes the category pot but still charges the total.
+- **Category allow-list.** Rules decide before budgets deplete. `allow` rules matching the known category values above a `deny` on the bare tool force every call to declare a valid category. Constraining the field itself is the access-control layer's job; budgets stay a money gate.
 
 ### approval
 

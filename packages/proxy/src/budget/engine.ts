@@ -12,7 +12,7 @@
 // Mirrors the SpendLimiter pattern: injectable clock, cleanup timer, close().
 // ---------------------------------------------------------------------------
 
-import { resolvePath } from '../policy/matchers.js'
+import { matchInput, resolvePath } from '../policy/matchers.js'
 import type { CompiledBudget } from './types.js'
 
 /** Everything the engine needs about one tool call to resolve its charges. */
@@ -328,10 +328,14 @@ export class BudgetEngine {
   /**
    * Resolve which budgets a call feeds and how much it charges each.
    *
-   * A budget participates when any contributor glob matches the tool name;
-   * the FIRST matching contributor (config order) supplies the amount field.
-   * A missing, non-numeric, negative, or non-finite amount fails closed as a
-   * `failures` entry — the caller must deny the call.
+   * A contributor participates when its tool glob matches the tool name AND
+   * every `match.input` condition holds (absent conditions means the glob
+   * alone decides); the FIRST participating contributor (config order, over
+   * that combined predicate) supplies the amount field. A call that matches
+   * the glob but not the conditions simply does not feed the budget — no
+   * charge, no failure. Once a contributor is selected, a missing,
+   * non-numeric, negative, or non-finite amount fails closed as a `failures`
+   * entry — the caller must deny the call.
    */
   resolveCharges(ctx: BudgetChargeContext): {
     charges: BudgetCharge[]
@@ -340,8 +344,21 @@ export class BudgetEngine {
     const charges: BudgetCharge[] = []
     const failures: BudgetChargeFailure[] = []
 
+    // One context for every contributor predicate of this call. Only
+    // toolName/toolArguments exist here — the charge context has no
+    // annotations, environment, or metadata, which is why the contributor
+    // match schema admits only tool + input.
+    const matchCtx = {
+      toolName: ctx.toolName,
+      ...(ctx.toolArguments !== undefined && { toolArguments: ctx.toolArguments }),
+    }
+
     for (const budget of this.budgets.values()) {
-      const contributor = budget.contributors.find((c) => c.tool.test(ctx.toolName))
+      const contributor = budget.contributors.find(
+        (c) =>
+          c.match.tool.test(ctx.toolName) &&
+          (c.match.input === undefined || matchInput(c.match.input, matchCtx)),
+      )
       if (!contributor) continue
 
       const raw = resolvePath(contributor.field, ctx.toolArguments ?? {})

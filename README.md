@@ -119,9 +119,11 @@ budgets:
     key: session
     on_exceed: deny # or require_approval for a break-glass ticket
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 
 audit:
@@ -218,9 +220,11 @@ budgets:
     window: 24h
     on_exceed: require_approval # a breach becomes a human decision
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 ```
 
@@ -342,7 +346,7 @@ Ready-made configurations for common patterns:
 - **[Basic](./examples/basic/)**: Deny destructive operations, allow everything else
 - **[Slack Approvals](./examples/slack-approvals/)**: Route destructive actions to Slack
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
-- **[Budgets](./examples/budgets/)**: One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
+- **[Budgets](./examples/budgets/)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
 
 ## Contributing
 

@@ -3316,7 +3316,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'deny' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
 
     it('forwards and records on every matching budget when all allow', async () => {
@@ -3335,6 +3335,35 @@ describe('GovernedForwarder', () => {
       expect(result.response.status).toBe(200)
       const spent = engine.listStates().map((s) => s.buckets[0]?.spent)
       expect(spent).toEqual([30, 30])
+    })
+
+    it('input-scoped contributors charge only matching calls (issue #177)', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([
+        {
+          ...stripeBudget,
+          contributors: [
+            {
+              match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+              field: '$.amount',
+            },
+          ],
+        },
+      ])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      // Unlabeled call: forwards, charges nothing (non-participation).
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+      // Labeled call: forwards and charges the pot.
+      await governed.forward(
+        toolsCallRequest('stripe_charge', { amount: 30, category: 'content_distribution' }),
+      )
+      expect(inner.forward).toHaveBeenCalledTimes(2)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(30)
     })
 
     it('denies and records NOTHING when one budget breaches while another allows', async () => {
@@ -3995,7 +4024,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'require_approval' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
     const bigDeny = {
       ...smallBreakGlass,
@@ -4803,7 +4832,7 @@ describe('GovernedForwarder', () => {
       window: '24h',
       key: 'global' as const,
       on_exceed: 'deny' as const,
-      contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     }
 
     it('a deny breach emits budget_breached for the breached budget only', async () => {
@@ -4986,7 +5015,7 @@ describe('GovernedForwarder', () => {
           {
             ...smallDeny,
             name: 'unreadable',
-            contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+            contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
           },
         ],
         { onBreach },

@@ -868,7 +868,7 @@ const stripeBudgetConfig = {
   window: '24h',
   key: 'global' as const,
   on_exceed: 'deny' as const,
-  contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+  contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
 }
 
 describe('GET /api/budgets', () => {

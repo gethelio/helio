@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { compilePolicies } from './parser.js'
+import { compilePolicies, flattenInputConditionsWith } from './parser.js'
 import { PolicyParseError } from './errors.js'
 import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicyRule } from './types.js'
@@ -419,7 +419,7 @@ describe('input condition flattening', () => {
         minimalPolicies({
           rules: [
             {
-              match: { input: { '$.name': { regex: '[invalid(' } } },
+              match: { input: { '$.name': { regex: 'a{2,1}' } } },
               action: 'deny',
             },
           ],
@@ -435,7 +435,7 @@ describe('input condition flattening', () => {
           rules: [
             {
               name: 'bad-regex-rule',
-              match: { input: { '$.field': { regex: '[invalid(' } } },
+              match: { input: { '$.field': { regex: 'a{2,1}' } } },
               action: 'deny',
             },
           ],
@@ -448,7 +448,7 @@ describe('input condition flattening', () => {
       expect(parseErr.ruleIndex).toBe(0)
       expect(parseErr.ruleName).toBe('bad-regex-rule')
       expect(parseErr.message).toContain('$.field')
-      expect(parseErr.message).toContain('[invalid(')
+      expect(parseErr.message).toContain('a{2,1}')
     }
   })
 
@@ -577,6 +577,20 @@ describe('input condition flattening', () => {
     const cond = rule.match.input?.[0]
     expect(cond?.operator).toBe('neq')
     expect(cond?.value).toBe('deleted')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shared flatten core (issue #177)
+// ---------------------------------------------------------------------------
+
+describe('flattenInputConditionsWith', () => {
+  it('routes non-string regex values through makeError', () => {
+    expect(() =>
+      flattenInputConditionsWith({ '$.memo': { regex: 42 } }, (message) => {
+        return new Error(`wrapped: ${message}`)
+      }),
+    ).toThrow('wrapped: regex value for input path "$.memo" must be a string')
   })
 })
 

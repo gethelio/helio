@@ -1736,7 +1736,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
@@ -1933,6 +1933,62 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
   })
 
+  it('dry-run respects contributor input conditions (issue #177)', () => {
+    const policy = compile({ default: 'allow', dry_run: true, rules: [] })
+    const budgets = [
+      {
+        ...stripeBudget({ limit: 10 }),
+        contributors: [
+          {
+            match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+            field: '$.amount',
+          },
+        ],
+      },
+    ]
+    const { service, budgetEngine } = makeService({ policy, budgets })
+
+    // Unlabeled over-limit call: no budget participation to simulate.
+    const unlabeled = service.evaluate(stripeEval(50))
+    expect(unlabeled.body['decision']).toBe('dry_run')
+    expect((unlabeled.body['dry_run'] as Record<string, unknown>)['limits_ok']).toBe(true)
+
+    // Labeled over-limit call: simulation reports the would-be breach.
+    const labeled = service.evaluate(
+      stripeEval(50, { arguments: { amount: 50, category: 'content_distribution' } }),
+    )
+    expect((labeled.body['dry_run'] as Record<string, unknown>)['limits_ok']).toBe(false)
+    expect(budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+  })
+
+  it('input-scoped contributors gate the sideband door too (issue #177)', () => {
+    const budgets = [
+      {
+        ...stripeBudget({ limit: 10 }),
+        contributors: [
+          {
+            match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+            field: '$.amount',
+          },
+        ],
+      },
+    ]
+    const { service, budgetEngine } = makeService({ budgets })
+
+    // Over-limit but unlabeled: allowed, nothing charged (non-participation).
+    const unlabeled = service.evaluate(stripeEval(50))
+    expect(unlabeled.body['decision']).toBe('allow')
+    expect(budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+    // Labeled and over-limit: denied by the budget gate.
+    const labeled = service.evaluate(
+      stripeEval(50, { arguments: { amount: 50, category: 'content_distribution' } }),
+    )
+    expect(labeled.body['decision']).toBe('budget_exceeded')
+    const limits = labeled.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['name']).toBe('cap')
+  })
+
   it('budget_exceeded feedback names the budget, not the policy decision', () => {
     // The matched decision here is the default allow — its reason ("No
     // matching rule; applied default policy: allow") must never surface as
@@ -1952,7 +2008,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
         stripeBudget({ name: 'valid-but-breached', limit: 10 }),
         stripeBudget({
           name: 'invalid-field',
-          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
         }),
       ],
     })
@@ -2152,7 +2208,7 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     window: '24h',
     key: 'global',
     on_exceed: 'require_approval',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown) =>
@@ -2721,7 +2777,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
     window: '24h',
     key: 'global',
     on_exceed: 'deny',
-    contributors: [{ tool: 'stripe_*', field: '$.amount' }],
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
     ...overrides,
   })
   const stripeEval = (amount: unknown, extra: Partial<Parameters<typeof evalInput>[0]> = {}) =>
@@ -2769,7 +2825,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
         evBudget(),
         evBudget({
           name: 'unreadable',
-          contributors: [{ tool: 'stripe_*', field: '$.missing' }],
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.missing' }],
         }),
       ],
       onBudgetBreach,
@@ -3119,7 +3175,7 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
           window: '1h',
           key: 'global',
           on_exceed: 'deny',
-          contributors: [{ tool: 'send_email', field: '$.cost' }],
+          contributors: [{ match: { tool: 'send_email' }, field: '$.cost' }],
         },
       ],
     })
@@ -3228,7 +3284,7 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
           window: '1h',
           key: 'global',
           on_exceed: 'require_approval',
-          contributors: [{ tool: 'send_email', field: '$.cost' }],
+          contributors: [{ match: { tool: 'send_email' }, field: '$.cost' }],
         },
       ],
     })

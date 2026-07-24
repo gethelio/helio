@@ -122,9 +122,11 @@ budgets:
     key: session
     on_exceed: deny # or require_approval for a break-glass ticket
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 
 audit:
@@ -205,9 +207,11 @@ budgets:
     key: session
     on_exceed: require_approval # or: deny
     contributors:
-      - tool: 'stripe_*'
+      - match:
+          tool: 'stripe_*'
         field: '$.amount'
-      - tool: 'paypal_*'
+      - match:
+          tool: 'paypal_*'
         field: '$.total'
 ```
 
