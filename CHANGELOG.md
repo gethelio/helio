@@ -62,6 +62,18 @@ Maintainer notes:
 
 ### Fixed
 
+- **Sideband expiry no longer discards the committed limits chain
+  (#149).** When a sideband `/audit` committed its counters and budget
+  ledger rows but failed post-commit (a 500 the adapter may retry), an
+  evaluation that then expired unretried was finalized under a fresh
+  random audit id with no limits chain: the `budget_events.audit_record_id`
+  written at commit pointed at a record that never landed, and the
+  committed rate/spend/budget evidence was missing from the trail even
+  though the money state was correct. The `evaluation_expired` record now
+  reuses the pre-allocated audit id (ledger rows always resolve), carries
+  the committed `evidence_chain.budgets` blocks, and marks
+  `evidence_chain.sideband.committed: true` to distinguish a lost
+  finalization from a call that was never reported.
 - **Dashboard-routed rule approvals now require the dashboard server
   (#152).** A rule with `action: require_approval` routed to the dashboard
   channel (explicitly, via a viable escalation delegate, or by the

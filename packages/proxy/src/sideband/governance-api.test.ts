@@ -10,6 +10,8 @@ import { compileBudgets } from '../budget/parser.js'
 import { compilePolicies } from '../policy/parser.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
+import type { AuditRecord } from '../audit/types.js'
+import type { AuditWriter } from '../audit/writer.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -558,6 +560,87 @@ describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
     const retry = await post('/audit', { evaluation_id: evaluationId, status: 'success' })
     expect(retry.status).toBe(201)
     expect(countRows()).toBe(1)
+
+    budgetEngine.close()
+    governance.close()
+    store.close()
+  })
+
+  it('a post-commit fault maps to a 500; the unretried expiry lands under the committed id (issue #149)', async () => {
+    const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
+    let time = 1_000_000
+    const db = new Database(':memory:')
+    const ledger = new BudgetLedger({ database: db })
+    const budgetEngine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ match: { tool: 'send' }, field: '$.amount' }],
+        },
+      ]),
+      now: () => time,
+      cleanupIntervalMs: 0,
+      ledger,
+    })
+    const store = new EvidenceStore({ cleanupIntervalMs: 0 })
+    let failNext = true
+    const originalRecord = store.recordToolCall.bind(store)
+    store.recordToolCall = (...args: Parameters<EvidenceStore['recordToolCall']>) => {
+      if (failNext) {
+        failNext = false
+        throw new Error('disk full')
+      }
+      originalRecord(...args)
+    }
+    const captured: Array<{ id: string | undefined; kind: string }> = []
+    const capturingWriter = {
+      push: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) =>
+        captured.push({ id, kind: record.record_kind }),
+      pushImmediate: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) =>
+        captured.push({ id, kind: record.record_kind }),
+    } as unknown as AuditWriter
+    const governance = new GovernanceService({
+      policy,
+      budgetEngine,
+      evidenceStore: store,
+      auditWriter: capturingWriter,
+      now: () => time,
+      ttlMs: 600_000,
+      sweepIntervalMs: 0,
+    })
+    const app = createSidebandApp(store, { governance })
+    const post = (path: string, body: unknown) =>
+      app.request(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+    const evalRes = await post('/evaluate', {
+      origin: 'openclaw',
+      session_id: 's1',
+      tool: { name: 'send' },
+      arguments: { amount: 30 },
+    })
+    const evaluationId = ((await evalRes.json()) as Record<string, unknown>)['evaluation_id']
+
+    // Commit lands, finalization dies → 500 the adapter could retry.
+    const failed = await post('/audit', { evaluation_id: evaluationId, status: 'success' })
+    expect(failed.status).toBe(500)
+    const row = db.prepare('SELECT * FROM budget_events').get() as Record<string, unknown>
+    expect(row['audit_record_id']).toBeTruthy()
+
+    // No retry: the evaluation ages out.
+    time += 600_001
+    governance.sweep()
+
+    const expired = captured.find((c) => c.kind === 'evaluation_expired')
+    expect(expired?.id).toBe(row['audit_record_id'])
 
     budgetEngine.close()
     governance.close()
