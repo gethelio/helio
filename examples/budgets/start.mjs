@@ -90,25 +90,39 @@ console.log(`
   Dashboard:  http://localhost:3100  (log in with HELIO_DASHBOARD_SECRET)
   Proxy:      http://localhost:3000/mcp
 
-  Open the dashboard Budgets tab, then deplete the pot:
+  Open the dashboard Budgets tab, then deplete the pots:
 
-  # Stripe charge: $20 (20/50 used)
+  # Labeled Stripe charge: $10 into BOTH pots
+  # (content-distribution 10/15, agent-payments 10/50)
   curl -s -X POST http://localhost:3000/mcp \\
     -H 'Content-Type: application/json' \\
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}' | jq
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":10,"category":"content_distribution","currency":"USD","customer":"cus_123"}}}' | jq
 
-  # PayPal payout: $20 into the SAME pot (40/50 used)
+  # Same call again: the $15 category cap denies outright, and the
+  # umbrella pot stays at 10/50 (a denied call charges nothing anywhere)
   curl -s -X POST http://localhost:3000/mcp \\
     -H 'Content-Type: application/json' \\
-    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"paypal_payout","arguments":{"total":20,"recipient":"ops@example.com"}}}' | jq
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":10,"category":"content_distribution","currency":"USD","customer":"cus_123"}}}' | jq
 
-  # Stripe charge: $20 (would exceed $50 — waits for break-glass approval)
+  # Unlabeled Stripe charge: $20 — no category, so it skips the category
+  # pot entirely and only the umbrella charges (agent-payments 30/50)
   curl -s -X POST http://localhost:3000/mcp \\
     -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}' | jq
 
+  # PayPal payout: $20 into the SAME umbrella pot (agent-payments 50/50)
+  curl -s -X POST http://localhost:3000/mcp \\
+    -H 'Content-Type: application/json' \\
+    -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"paypal_payout","arguments":{"total":20,"recipient":"ops@example.com"}}}' | jq
+
+  # Stripe charge: $20 (would exceed $50 — waits for break-glass approval)
+  curl -s -X POST http://localhost:3000/mcp \\
+    -H 'Content-Type: application/json' \\
+    -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}' | jq
+
   # Approve the ticket in the dashboard Approvals tab, then check the
-  # Budgets tab: the pot shows the approved overage in its ledger.
+  # Budgets tab: the umbrella pot shows the approved overage in its
+  # ledger, and the category pot is still sitting at 10/15.
 
 ─────────────────────────────────────────
 `)

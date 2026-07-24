@@ -3337,6 +3337,35 @@ describe('GovernedForwarder', () => {
       expect(spent).toEqual([30, 30])
     })
 
+    it('input-scoped contributors charge only matching calls (issue #177)', async () => {
+      const inner = mockForwarder()
+      const { engine } = createBudgetEngine([
+        {
+          ...stripeBudget,
+          contributors: [
+            {
+              match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+              field: '$.amount',
+            },
+          ],
+        },
+      ])
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      // Unlabeled call: forwards, charges nothing (non-participation).
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+      expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+      // Labeled call: forwards and charges the pot.
+      await governed.forward(
+        toolsCallRequest('stripe_charge', { amount: 30, category: 'content_distribution' }),
+      )
+      expect(inner.forward).toHaveBeenCalledTimes(2)
+      expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(30)
+    })
+
     it('denies and records NOTHING when one budget breaches while another allows', async () => {
       const inner = mockForwarder()
       const { engine } = createBudgetEngine([

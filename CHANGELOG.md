@@ -21,6 +21,18 @@ Maintainer notes:
 
 ### Changed
 
+- **BREAKING: budget contributors are now `{ match: { tool, input? }, field }`
+  (#177).** The 0.10.0 flat shape `{ tool, field }` fails validation with a
+  migration message. Everything under `match:` decides participation —
+  `tool` (unchanged glob) plus optional `input` conditions with the same
+  operators as rule `match.input`, so one tool's spend can be split into
+  category pots ("$50/week on content distribution"). A call that matches
+  the glob but not the conditions does not feed the budget; see the
+  configuration guide for the trust caveat and hardening patterns.
+  Migration: a contributor whose `tool` key sat beside `field` now nests that
+  `tool` key inside a `match` block, with `field` left where it is.
+  Contributor edits, including input conditions, still preserve accrued spend
+  on hot reload.
 - **Unknown top-level keys in `helio.yaml` are now hard errors (#167).** The
   top level of the config silently dropped unknown keys: a misplaced or
   misspelled section — `rules:` at the top level, `policy:`, `budget:` — was

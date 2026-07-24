@@ -346,7 +346,7 @@ Ready-made configurations for common patterns:
 - **[Basic](./examples/basic/)**: Deny destructive operations, allow everything else
 - **[Slack Approvals](./examples/slack-approvals/)**: Route destructive actions to Slack
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
-- **[Budgets](./examples/budgets/)**: One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
+- **[Budgets](./examples/budgets/)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
 
 ## Contributing
 

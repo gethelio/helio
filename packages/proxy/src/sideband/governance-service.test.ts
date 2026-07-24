@@ -1933,6 +1933,62 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     expect(budgetEngine?.listStates().flatMap((s2) => s2.buckets)).toEqual([])
   })
 
+  it('dry-run respects contributor input conditions (issue #177)', () => {
+    const policy = compile({ default: 'allow', dry_run: true, rules: [] })
+    const budgets = [
+      {
+        ...stripeBudget({ limit: 10 }),
+        contributors: [
+          {
+            match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+            field: '$.amount',
+          },
+        ],
+      },
+    ]
+    const { service, budgetEngine } = makeService({ policy, budgets })
+
+    // Unlabeled over-limit call: no budget participation to simulate.
+    const unlabeled = service.evaluate(stripeEval(50))
+    expect(unlabeled.body['decision']).toBe('dry_run')
+    expect((unlabeled.body['dry_run'] as Record<string, unknown>)['limits_ok']).toBe(true)
+
+    // Labeled over-limit call: simulation reports the would-be breach.
+    const labeled = service.evaluate(
+      stripeEval(50, { arguments: { amount: 50, category: 'content_distribution' } }),
+    )
+    expect((labeled.body['dry_run'] as Record<string, unknown>)['limits_ok']).toBe(false)
+    expect(budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+  })
+
+  it('input-scoped contributors gate the sideband door too (issue #177)', () => {
+    const budgets = [
+      {
+        ...stripeBudget({ limit: 10 }),
+        contributors: [
+          {
+            match: { tool: 'stripe_*', input: { '$.category': { eq: 'content_distribution' } } },
+            field: '$.amount',
+          },
+        ],
+      },
+    ]
+    const { service, budgetEngine } = makeService({ budgets })
+
+    // Over-limit but unlabeled: allowed, nothing charged (non-participation).
+    const unlabeled = service.evaluate(stripeEval(50))
+    expect(unlabeled.body['decision']).toBe('allow')
+    expect(budgetEngine?.listStates().flatMap((s) => s.buckets)).toEqual([])
+
+    // Labeled and over-limit: denied by the budget gate.
+    const labeled = service.evaluate(
+      stripeEval(50, { arguments: { amount: 50, category: 'content_distribution' } }),
+    )
+    expect(labeled.body['decision']).toBe('budget_exceeded')
+    const limits = labeled.body['limits'] as { budgets: Array<Record<string, unknown>> }
+    expect(limits.budgets[0]?.['name']).toBe('cap')
+  })
+
   it('budget_exceeded feedback names the budget, not the policy decision', () => {
     // The matched decision here is the default allow — its reason ("No
     // matching rule; applied default policy: allow") must never surface as
