@@ -67,6 +67,11 @@ Maintainer notes:
   rejected like any other unknown key (inside these nine sections it was
   silently dropped before). The policies and budgets subtrees were
   already strict and are unchanged.
+- The `Watching <config> for policy changes` startup line now prints
+  once the config watcher is actually armed (chokidar's `ready`), not
+  merely after watching was requested — a script that waits for the
+  line can trust a subsequent config edit to be observed. Same text,
+  same position, still within milliseconds on startup.
 
 ### Removed
 

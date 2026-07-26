@@ -507,7 +507,7 @@ policies:
 
 ## Hot Reload
 
-Helio watches your configuration file for changes and automatically reloads policy rules without restarting the proxy. The file watcher uses a 200ms debounce to batch rapid saves.
+Helio watches your configuration file for changes and automatically reloads policy rules without restarting the proxy. The file watcher uses a 200ms debounce to batch rapid saves. At startup, the `Watching <config> for policy changes` line prints once the watcher is armed (the initial file scan is complete), not merely when watching was requested, so a script that waits for that line before editing the config can trust the edit to be observed.
 
 On successful reload:
 

@@ -119,6 +119,8 @@ Config: helio.yaml
 Watching helio.yaml for policy changes
 ```
 
+The final `Watching` line prints once the config watcher is armed — an edit to `helio.yaml` made after it appears will be picked up (see [Hot Reload](./configuration.md#hot-reload)).
+
 > **Note:** Use `-c` to specify a different config file: `npx @gethelio/proxy start -c production.yaml`
 >
 > On startup, Helio also sends a synthetic upstream `tools/list` to warm the tool-annotation cache before first traffic. If the prime attempt cannot complete quickly, Helio continues startup and retries in the background. During that window, annotation matching remains fail-closed using MCP defaults.

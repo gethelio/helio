@@ -666,6 +666,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     configWatcher = new ConfigWatcher({
       configPath,
       initialConfig: config,
+      onReady: () => {
+        console.error(`Watching ${configPath} for policy changes`)
+      },
       onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
         // The RUNNING approval surface is startup-bound: a reload whose
         // policy or budgets reference channels (or a dashboard) that only
@@ -723,7 +726,6 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       },
     })
     configWatcher.start()
-    console.error(`Watching ${configPath} for policy changes`)
   } else {
     console.error(
       `[helio] Hot-reload disabled — config changes to ${configPath} will require a restart`,
