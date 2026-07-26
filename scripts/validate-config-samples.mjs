@@ -87,16 +87,6 @@ const BUDGET_KEYS = new Set([
 /** A budget-shaped item must carry at least one of these discriminators. */
 const BUDGET_MARKERS = ['limit', 'currency', 'contributors', 'window']
 
-/**
- * Keys of the ROOT approval section (approvalSchema). `approval` is also rule
- * vocabulary, and until #182 the root schema silently drops unknown keys — so
- * a rule-level approval excerpt shown as a top-level `approval:` block would
- * validate against the wrong schema and false-PASS. Any candidate whose root
- * `approval:` carries keys outside this set is rejected here instead.
- * Redundant (and removable) once #182 makes the nested schemas strict.
- */
-const ROOT_APPROVAL_KEYS = new Set(['timeout', 'default_on_timeout', 'channels'])
-
 const SKIP_MARKER = 'helio-config-guard: skip'
 const DUMMY_ENV_VALUE = 'docs-guard-dummy'
 const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
@@ -478,14 +468,11 @@ function classifyFence(text) {
 
   if (isPlainObject(node)) {
     const keys = Object.keys(node)
-    const approvalViolation = rootApprovalViolation(node)
     if (keys.includes('version') && keys.includes('upstream')) {
-      if (approvalViolation) return { kind: 'full-config', reason: approvalViolation }
       // Full config: validate the fence text as-is, byte for byte.
       return { kind: 'full-config', candidateText: text, doc: node, ownKeys: keys }
     }
     if (keys.length > 0 && keys.every((key) => ROOT_KEYS.has(key) || key.startsWith('x-'))) {
-      if (approvalViolation) return { kind: 'fragment', reason: approvalViolation }
       const merged = { ...HARNESS, ...node }
       return {
         kind: 'fragment',
@@ -544,23 +531,6 @@ function expectedCounts(doc) {
       : 0
   const budgets = isPlainObject(doc) && Array.isArray(doc.budgets) ? doc.budgets.length : 0
   return { rules, budgets }
-}
-
-/**
- * Reject a root `approval:` section carrying rule/budget-level approval keys
- * (see ROOT_APPROVAL_KEYS — the false-pass path this closes).
- */
-function rootApprovalViolation(doc) {
-  if (!isPlainObject(doc) || !isPlainObject(doc.approval)) return null
-  const unknown = Object.keys(doc.approval).filter((key) => !ROOT_APPROVAL_KEYS.has(key))
-  if (unknown.length === 0) return null
-  return (
-    `top-level approval: carries ${unknown.map((key) => `"${key}"`).join(', ')} — ` +
-    'rule/budget-level approval keys. The root approval section takes only timeout, ' +
-    'default_on_timeout, and channels, and silently drops unknown keys until #182 lands ' +
-    '(a false pass). Nest the block under policies.rules[].approval (or budgets[].approval) ' +
-    'instead.'
-  )
 }
 
 /** Canonical-order subsequence check over a document's own top-level keys. */
@@ -771,8 +741,6 @@ async function main() {
       const candidate = { label: file, kind: 'shipped-config', failures: [] }
       try {
         const doc = yaml.load(text)
-        const approvalViolation = rootApprovalViolation(doc)
-        if (approvalViolation) candidate.failures.push(approvalViolation)
         candidate.validatePath = join(opts.repoRoot, file)
         candidate.candidateText = text
         candidate.expected = expectedCounts(doc)

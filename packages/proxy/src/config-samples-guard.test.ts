@@ -699,7 +699,7 @@ describe('config-samples guard', () => {
   )
 
   it(
-    'fails a rule-level approval: fragment instead of validating it as the root section',
+    'fails a rule-level approval: fragment via the strict root schema',
     { timeout: 60_000 },
     async () => {
       const root = makeTree({
@@ -709,7 +709,10 @@ describe('config-samples guard', () => {
       expect(code).toBe(1)
       expect(output).toContain('docs/test.md:3')
       expect(output).toContain('FAIL')
-      expect(output).toContain('policies.rules')
+      // Pre-#182 a classification-time workaround caught this shape
+      // (the lax approval schema would have false-PASSed it); the strict
+      // schema now rejects it by naming the unknown key.
+      expect(output).toContain('Unrecognized key: "channel"')
     },
   )
 
