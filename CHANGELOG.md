@@ -48,6 +48,25 @@ Maintainer notes:
   the budgets count alongside the policy rule count, and config failures on
   every CLI surface (start, validate, export, hot reload) name the offending
   paths on schema errors.
+- **Unknown keys inside `helio.yaml` sections are now hard errors
+  (#182).** #167 made the top level strict; the nine section schemas it
+  left lenient (`upstream`, `listen`, `dashboard`, the approval channel
+  entries, `approval`, `audit`, `sdk`) still dropped unknown keys
+  silently and applied defaults in their place: `upstream.request_timout`
+  silently kept the 30-second default, a typo'd `approval.channel:`
+  silently dropped every approval channel, a webhook channel with a
+  misspelled `secret:` silently shipped unsigned, and
+  `dashboard.api_secrett` with `allow_open_mode: true` silently ran the
+  dashboard open. Now every section rejects unknown keys with an error
+  naming the key and its path (`upstream: Unrecognized key: "request_timout"`)
+  on every CLI surface — validate, start, export, and
+  hot reload (which keeps the running configuration). If your config
+  refuses to load after upgrading, read the error and fix or delete the
+  named key. Keys beginning with `x-` remain available as YAML anchor
+  holders at the top level only; an `x-` key inside a section is now
+  rejected like any other unknown key (inside these nine sections it was
+  silently dropped before). The policies and budgets subtrees were
+  already strict and are unchanged.
 
 ### Removed
 

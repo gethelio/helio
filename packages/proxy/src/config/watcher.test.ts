@@ -499,6 +499,34 @@ budgets:
     ])
   })
 
+  it('calls onError and keeps old policy when a reload introduces an unknown key inside a section', async () => {
+    await writeFile(configPath, configWithDenyRule())
+
+    const reloads: CompiledPolicy[] = []
+    const errors: Error[] = []
+
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: (policy) => reloads.push(policy),
+      onError: (err) => errors.push(err),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    // The reload is rejected as a whole: the typo'd retention key inside
+    // audit: must not be dropped while the rest of the file applies.
+    await writeFile(configPath, configWithDenyRule() + 'audit:\n  retentoin: "90d"\n')
+    await wait(500)
+
+    expect(reloads).toHaveLength(0)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toBeInstanceOf(ConfigError)
+    expect((errors[0] as ConfigError).details).toEqual([
+      { path: 'audit', message: 'Unrecognized key: "retentoin"' },
+    ])
+  })
+
   it('calls onError when policy has invalid regex', async () => {
     await writeFile(configPath, validConfig())
 

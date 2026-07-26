@@ -522,6 +522,32 @@ rules:
       }
     })
 
+    it('rejects a config with an unknown key inside a section (issue #182)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+  request_timout: "5s"
+dashboard:
+  enabled: false
+`,
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(stderr).toContain('upstream: Unrecognized key: "request_timout"')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('reports the budgets count alongside the policy rule count', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')
@@ -684,6 +710,22 @@ dashboard:
         writeFileSync(configPath, original + 'budget:\n  - name: openai-daily\n')
         await expect(startAndCaptureStderr(['-c', configPath])).rejects.toThrow(
           /Unrecognized key: "budget"/,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses to boot when a section carries an unknown key (issue #182)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        // The sideband-gate scenario: a typo'd sdk enable key. The proxy
+        // must exit before listening, not boot with the sideband silently
+        // disabled.
+        const original = readFileSync(configPath, 'utf-8')
+        writeFileSync(configPath, original + 'sdk:\n  enable: true\n')
+        await expect(startAndCaptureStderr(['-c', configPath])).rejects.toThrow(
+          /sdk: Unrecognized key: "enable"/,
         )
       } finally {
         rmSync(dir, { recursive: true, force: true })

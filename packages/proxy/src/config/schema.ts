@@ -50,6 +50,7 @@ const upstreamSchema = z
     forward_headers: z.array(z.string().min(1)).default([]),
     headers: z.record(z.string(), z.string()).default({}),
   })
+  .strict()
   .refine((data) => data.transport !== 'stdio' || data.command !== undefined, {
     message: '"command" is required when transport is "stdio"',
     path: ['command'],
@@ -89,10 +90,12 @@ const upstreamSchema = z
 // Listen
 // ---------------------------------------------------------------------------
 
-const listenSchema = z.object({
-  port: z.number().int().min(1).max(65535).default(3000),
-  host: z.string().default('127.0.0.1'),
-})
+const listenSchema = z
+  .object({
+    port: z.number().int().min(1).max(65535).default(3000),
+    host: z.string().default('127.0.0.1'),
+  })
+  .strict()
 
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'
@@ -106,14 +109,16 @@ function hasDashboardApiSecret(secret: string | undefined): boolean {
 // Dashboard
 // ---------------------------------------------------------------------------
 
-const dashboardSchema = z.object({
-  enabled: z.boolean().default(true),
-  port: z.number().int().min(1).max(65535).default(3100),
-  host: z.string().default('127.0.0.1'),
-  api_secret: z.string().optional(),
-  allow_open_mode: z.boolean().default(false),
-  sse_heartbeat_interval: durationSchema.default('30s'),
-})
+const dashboardSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    port: z.number().int().min(1).max(65535).default(3100),
+    host: z.string().default('127.0.0.1'),
+    api_secret: z.string().optional(),
+    allow_open_mode: z.boolean().default(false),
+    sse_heartbeat_interval: durationSchema.default('30s'),
+  })
+  .strict()
 
 // ---------------------------------------------------------------------------
 // Policy rule — match conditions
@@ -419,25 +424,31 @@ const budgetSchema = z
 // Approval channels (discriminated union)
 // ---------------------------------------------------------------------------
 
-const slackChannelSchema = z.object({
-  type: z.literal('slack'),
-  name: z.string().min(1).optional(),
-  bot_token: z.string(),
-  signing_secret: z.string(),
-  channel: z.string(),
-})
+const slackChannelSchema = z
+  .object({
+    type: z.literal('slack'),
+    name: z.string().min(1).optional(),
+    bot_token: z.string(),
+    signing_secret: z.string(),
+    channel: z.string(),
+  })
+  .strict()
 
-const webhookChannelSchema = z.object({
-  type: z.literal('webhook'),
-  name: z.string().min(1).optional(),
-  url: z.string(),
-  secret: z.string().optional(),
-})
+const webhookChannelSchema = z
+  .object({
+    type: z.literal('webhook'),
+    name: z.string().min(1).optional(),
+    url: z.string(),
+    secret: z.string().optional(),
+  })
+  .strict()
 
-const dashboardChannelSchema = z.object({
-  type: z.literal('dashboard'),
-  name: z.string().min(1).optional(),
-})
+const dashboardChannelSchema = z
+  .object({
+    type: z.literal('dashboard'),
+    name: z.string().min(1).optional(),
+  })
+  .strict()
 
 const approvalChannelSchema = z.discriminatedUnion('type', [
   slackChannelSchema,
@@ -449,39 +460,45 @@ const approvalChannelSchema = z.discriminatedUnion('type', [
 // Approval
 // ---------------------------------------------------------------------------
 
-const approvalSchema = z.object({
-  timeout: durationSchema.default('300s'),
-  default_on_timeout: z.enum(['deny', 'allow']).default('deny'),
-  channels: z.array(approvalChannelSchema).default([]),
-})
+const approvalSchema = z
+  .object({
+    timeout: durationSchema.default('300s'),
+    default_on_timeout: z.enum(['deny', 'allow']).default('deny'),
+    channels: z.array(approvalChannelSchema).default([]),
+  })
+  .strict()
 
 // ---------------------------------------------------------------------------
 // Audit
 // ---------------------------------------------------------------------------
 
-const auditSchema = z.object({
-  storage: z.enum(['sqlite']).default('sqlite'),
-  path: z.string().default('./helio-audit.db'),
-  retention: durationSchema.default('90d'),
-  include_responses: z.boolean().default(true),
-})
+const auditSchema = z
+  .object({
+    storage: z.enum(['sqlite']).default('sqlite'),
+    path: z.string().default('./helio-audit.db'),
+    retention: durationSchema.default('90d'),
+    include_responses: z.boolean().default(true),
+  })
+  .strict()
 
 // ---------------------------------------------------------------------------
 // SDK
 // ---------------------------------------------------------------------------
 
-const sdkSchema = z.object({
-  enabled: z.boolean().default(false),
-  port: z.number().int().min(1).max(65535).default(3200),
-  host: z.string().default('127.0.0.1'),
-  /**
-   * How long a sideband `/evaluate` decision waits for its `/audit` before the
-   * proxy finalizes it as `evaluation_expired` (issue #12, D4). Bounds the
-   * pending-evaluation registry; an adapter crash cannot silently drop a
-   * decided-allowed call from the trail.
-   */
-  evaluation_ttl: durationSchema.default('10m'),
-})
+const sdkSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    port: z.number().int().min(1).max(65535).default(3200),
+    host: z.string().default('127.0.0.1'),
+    /**
+     * How long a sideband `/evaluate` decision waits for its `/audit` before the
+     * proxy finalizes it as `evaluation_expired` (issue #12, D4). Bounds the
+     * pending-evaluation registry; an adapter crash cannot silently drop a
+     * decided-allowed call from the trail.
+     */
+    evaluation_ttl: durationSchema.default('10m'),
+  })
+  .strict()
 
 // ---------------------------------------------------------------------------
 // Root config

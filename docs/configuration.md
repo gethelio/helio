@@ -473,11 +473,16 @@ Invalid config: Invalid configuration (1 error)
   upstream.url: Invalid input: expected string, received undefined
 ```
 
-The top level of the file is strict: an unknown or misplaced top-level key — a `rules:` block at the top level instead of nested under `policies:`, or a singular `policy:` or `budget:` typo — is a hard error naming the key, not a silently ignored no-op. `helio start` refuses to boot on such a config, and a hot reload that introduces one is rejected while the proxy keeps its current configuration (see [Hot Reload](#hot-reload)).
+The whole file is strict, at every level: an unknown or misplaced key — a `rules:` block at the top level instead of nested under `policies:`, a singular `policy:` or `budget:` typo, a misspelled field inside a section like `upstream.request_timout` or `dashboard.api_secrett`, or an unknown key inside an approval channel entry — is a hard error naming the key and its path, not a silently ignored no-op. `helio start` refuses to boot on such a config, and a hot reload that introduces one is rejected while the proxy keeps its current configuration (see [Hot Reload](#hot-reload)).
 
 ```
 Invalid config: Invalid configuration (1 error)
   (top level): Unrecognized key: "rules"
+```
+
+```
+Invalid config: Invalid configuration (1 error)
+  upstream: Unrecognized key: "request_timout"
 ```
 
 The one exception is top-level keys beginning with lowercase `x-`. They are reserved as extension keys — holders for reusable YAML anchors, in the docker-compose style — and are ignored by the schema:
@@ -498,7 +503,7 @@ policies:
         tool: 'drop_*'
 ```
 
-`${VAR}` references inside an `x-` block are interpolated like everywhere else, so the variables must be set even though the block itself is ignored.
+`${VAR}` references inside an `x-` block are interpolated like everywhere else, so the variables must be set even though the block itself is ignored. The escape hatch is root-only: an `x-` key inside a section (`approval.x-shared:`, say) is rejected like any other unknown key — park anchor holders at the top level.
 
 ## Hot Reload
 

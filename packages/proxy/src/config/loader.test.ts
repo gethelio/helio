@@ -175,6 +175,28 @@ budget:
     }
   })
 
+  it('rejects an unknown key inside a section with the section path in details', async () => {
+    const yaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+  request_timout: "5s"
+dashboard:
+  enabled: false
+`
+    const filePath = await writeTempYaml('nested-typo.yaml', yaml)
+
+    try {
+      await loadConfig(filePath)
+      expect.fail('Should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigError)
+      expect((err as ConfigError).details).toEqual([
+        { path: 'upstream', message: 'Unrecognized key: "request_timout"' },
+      ])
+    }
+  })
+
   it('loads a config that parks a YAML anchor in a top-level x- key', async () => {
     const yaml = `
 x-shared: &tool-glob "delete_*"
@@ -414,8 +436,12 @@ policies:
         expect.fail('Should have thrown')
       } catch (err) {
         expect(err).toBeInstanceOf(ConfigError)
-        const paths = ((err as ConfigError).details ?? []).map((d) => d.path)
-        expect(paths).toContain('dashboard.api_secret')
+        // Strict approval rejects the removed #144 alias by name (the
+        // pre-#182 shape surfaced the cross-validator's missing-secret
+        // detail instead).
+        expect((err as ConfigError).details).toEqual([
+          { path: 'approval', message: 'Unrecognized key: "api_secret"' },
+        ])
       }
     })
 
