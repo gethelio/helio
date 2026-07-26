@@ -944,8 +944,13 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(false)
       if (result.success) return
-      const paths = result.error.issues.map((i) => i.path.join('.'))
-      expect(paths).toContain('dashboard.api_secret')
+      // Strict approval rejects the removed #144 alias BY NAME — a better
+      // error than the pre-#182 shape, where the lax schema dropped the
+      // alias and the cross-validator then demanded the dashboard secret.
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
+      expect(result.error.issues[0]?.path).toEqual(['approval'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "api_secret"')
     })
 
     it('rejects empty-string dashboard.api_secret when require_approval is used', () => {
@@ -1951,8 +1956,9 @@ describe('helioConfigSchema', () => {
 
     it('does not strip x- keys inside sections (root-only escape hatch)', () => {
       // policies is a strict subtree, so the un-stripped key is rejected
-      // there. Non-strict sections handle unknown keys their own way — the
-      // pin here is only that the strip never descends past the root.
+      // there. Every section is strict since #182, so an un-stripped x-
+      // key is always rejected — the pin here is that the strip never
+      // descends past the root.
       const result = helioConfigSchema.safeParse(minimalConfig({ policies: { 'x-shared': true } }))
       expect(result.success).toBe(false)
     })
@@ -1966,6 +1972,171 @@ describe('helioConfigSchema', () => {
       expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
       expect(result.error.issues[0]?.path).toEqual(['policies'])
       expect(result.error.issues[0]?.message).toBe('Unrecognized key: "default_action"')
+    })
+  })
+
+  describe('unknown keys in nested sections (issue #182)', () => {
+    it('rejects an unknown key in upstream, naming it under the section path', () => {
+      // Repro r1: the typo'd timeout silently kept the 30s default. Also
+      // proves .strict() composes on the object stage of upstream's
+      // .refine().superRefine() chain.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ upstream: { url: 'http://localhost:8080', request_timout: '5s' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
+      expect(result.error.issues[0]?.path).toEqual(['upstream'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "request_timout"')
+    })
+
+    it('rejects an unknown key in listen', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ listen: { prt: 3000 } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['listen'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "prt"')
+    })
+
+    it('rejects dashboard.api_secrett with allow_open_mode (the silent open-dashboard repro)', () => {
+      // Repro r4a: pre-#182 this VALIDATED and ran the dashboard open.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          dashboard: { api_secrett: 'unit-test-secret', allow_open_mode: true },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.path).toEqual(['dashboard'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "api_secrett"')
+    })
+
+    it('names dashboard.api_secrett instead of demanding the secret the operator believes is set', () => {
+      // Repro r4b: pre-#182 this failed, but with the MISLEADING
+      // cross-validator message ("dashboard.api_secret is required…").
+      // The nested strict failure suppresses the cross-validators, so the
+      // single issue names the actual typo.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ dashboard: { api_secrett: 'unit-test-secret' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(1)
+      expect(result.error.issues[0]?.path).toEqual(['dashboard'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "api_secrett"')
+    })
+
+    it('rejects approval.channel — the typo that silently dropped every channel', () => {
+      // Repro r2. No require_approval rules, so the #152 routing check
+      // could not have fired pre-#182 either; the config was "valid".
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: {
+            channel: [{ type: 'slack', bot_token: 'xoxb-x', signing_secret: 's', channel: '#a' }],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['approval'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "channel"')
+    })
+
+    it('rejects an unknown key in a slack channel entry', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: {
+            channels: [
+              {
+                type: 'slack',
+                bot_token: 'xoxb-x',
+                signing_secret: 's',
+                channel: '#a',
+                signing_secrt: 'oops',
+              },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.code).toBe('unrecognized_keys')
+      expect(result.error.issues[0]?.path).toEqual(['approval', 'channels', 0])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "signing_secrt"')
+    })
+
+    it('rejects a webhook channel with a misspelled secret (the unsigned-webhook repro)', () => {
+      // Repro r3, in the coherent shape: dashboard enabled with a secret,
+      // so pre-#182 no cross-validator masked the typo and the config
+      // VALIDATED — shipping an unsigned webhook.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          approval: {
+            channels: [
+              { type: 'webhook', name: 'hook', url: 'https://example.invalid/hook', secrt: 'h' },
+            ],
+          },
+          dashboard: { api_secret: 'unit-test-secret' },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['approval', 'channels', 0])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "secrt"')
+    })
+
+    it('rejects an unknown key in a dashboard channel entry', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ approval: { channels: [{ type: 'dashboard', channel: '#ops' }] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['approval', 'channels', 0])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "channel"')
+    })
+
+    it('rejects an unknown key in audit', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ audit: { retentoin: '90d' } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['audit'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "retentoin"')
+    })
+
+    it('rejects an unknown key in sdk', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ sdk: { enable: true } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['sdk'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "enable"')
+    })
+
+    it('rejects an x- key inside a previously lax section', () => {
+      // Behavior change the CHANGELOG states: pre-#182 the nine lax
+      // sections silently DROPPED nested x- keys; the strict subtrees
+      // already rejected them. Now every section rejects them — the
+      // escape hatch is root-only, as documented.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ audit: { 'x-defaults': { retention: '90d' } } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['audit'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "x-defaults"')
+    })
+
+    it('reports one issue per section when several sections carry unknown keys', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ audit: { retentoin: '90d' }, sdk: { enable: true } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues).toHaveLength(2)
+      const paths = result.error.issues.map((i) => i.path.join('.'))
+      expect(paths).toContain('audit')
+      expect(paths).toContain('sdk')
     })
   })
 })
