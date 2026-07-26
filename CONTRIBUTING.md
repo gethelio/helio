@@ -175,10 +175,11 @@ has never been executed, assume it is broken.
   to silence a failing Helio sample; fix the sample instead.
 - Canonical section order (`--enforce-order`) and root-key completeness of the
   `helio init` scaffold and `docs/configuration.md` (`--enforce-completeness`)
-  are both enforced. Every sample's top-level keys must follow the order in
-  `docs/configuration.md`, and every top-level section must appear in the
-  scaffold and the reference (the scaffold may satisfy completeness with a
-  commented stub; `docs/configuration.md` needs the key live in a fence).
+  are both enforced. Every sample's top-level keys, and the scaffold's
+  root-key stubs, must follow the order in `docs/configuration.md`, and every
+  top-level section must appear in the scaffold and the reference (the
+  scaffold may satisfy completeness with a commented stub;
+  `docs/configuration.md` needs the key live in a fence).
 
 ### Performance
 

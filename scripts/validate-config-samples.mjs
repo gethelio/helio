@@ -12,10 +12,11 @@
  * candidate document, so a silently-dropped section can never pass.
  *
  * Enforced at merge: fence validation (check 1), shipped-config validation
- * (check 2), canonical section order (check 3, --enforce-order), root-key
- * completeness of the init scaffold + configuration.md (check 4,
- * --enforce-completeness), the examples/basic README mirror rule, and
- * extraction hygiene. Both package.json entry points pass both flags.
+ * (check 2), canonical section order of every sample and the init scaffold
+ * (check 3, --enforce-order), root-key completeness of the init scaffold +
+ * configuration.md (check 4, --enforce-completeness), the examples/basic
+ * README mirror rule, and extraction hygiene. Both package.json entry
+ * points pass both flags.
  *
  * Usage: node scripts/validate-config-samples.mjs
  *   [--repo-root <dir>] [--cli <path>] [--scaffold-file <path>]
@@ -591,31 +592,56 @@ async function runValidate(cli, filePath, candidateText, expected) {
 }
 
 /**
+ * Acquire the init scaffold text: from --scaffold-file (the test override)
+ * or by running `<cli> init` in the workDir. Acquisition failures are
+ * reported as completeness violations — check 4 owns the scaffold surface,
+ * and both entry points always pass both enforce flags together.
+ */
+async function acquireScaffoldText(opts, workDir) {
+  if (opts.scaffoldFile) {
+    if (existsSync(opts.scaffoldFile)) {
+      return { text: readFileSync(opts.scaffoldFile, 'utf8'), violations: [] }
+    }
+    return { text: null, violations: [`scaffold file not found: ${opts.scaffoldFile}`] }
+  }
+  const scaffoldPath = join(workDir, 'scaffold.yaml')
+  const { code, output } = await run('node', [opts.cli, 'init', '-o', scaffoldPath], {
+    ...process.env,
+  })
+  if (code === 0 && existsSync(scaffoldPath)) {
+    return { text: readFileSync(scaffoldPath, 'utf8'), violations: [] }
+  }
+  return {
+    text: null,
+    violations: [`could not generate the init scaffold (exit ${code}):\n${output.trimEnd()}`],
+  }
+}
+
+/**
+ * Canonical-order check over the RAW scaffold text: the first match
+ * position of each root-key stub — `^(?:#\s*)?key:`, the completeness
+ * matcher and the cli.test.ts pin's regex — orders the found keys, and
+ * orderViolation() applies the same subsequence rule parsed documents get.
+ * Absent keys are skipped; completeness owns missing-key reporting.
+ */
+function scaffoldOrderViolation(scaffoldText) {
+  const found = []
+  for (const key of CANONICAL_ORDER) {
+    const match = scaffoldText.match(new RegExp(`^(?:#\\s*)?${key}:`, 'm'))
+    if (match) found.push({ key, index: match.index })
+  }
+  found.sort((a, b) => a.index - b.index)
+  return orderViolation(found.map((entry) => entry.key))
+}
+
+/**
  * Check 4: all 10 root keys present in the init scaffold (commented stubs
  * count) and, uncommented at column 0, in at least one configuration.md
  * fence. Returns violation strings.
  */
-async function checkCompleteness(opts, workDir, configurationFences) {
+function checkCompleteness(scaffoldText, configurationFences) {
   const violations = []
 
-  let scaffoldText = null
-  if (opts.scaffoldFile) {
-    if (existsSync(opts.scaffoldFile)) {
-      scaffoldText = readFileSync(opts.scaffoldFile, 'utf8')
-    } else {
-      violations.push(`scaffold file not found: ${opts.scaffoldFile}`)
-    }
-  } else {
-    const scaffoldPath = join(workDir, 'scaffold.yaml')
-    const { code, output } = await run('node', [opts.cli, 'init', '-o', scaffoldPath], {
-      ...process.env,
-    })
-    if (code === 0 && existsSync(scaffoldPath)) {
-      scaffoldText = readFileSync(scaffoldPath, 'utf8')
-    } else {
-      violations.push(`could not generate the init scaffold (exit ${code}):\n${output.trimEnd()}`)
-    }
-  }
   if (scaffoldText !== null) {
     for (const key of CANONICAL_ORDER) {
       if (!new RegExp(`^(?:#\\s*)?${key}:`, 'm').test(scaffoldText)) {
@@ -776,11 +802,18 @@ async function main() {
 
     // Skip-marked fences are non-Helio YAML by definition — they must not
     // satisfy the completeness check.
-    const completenessViolations = await checkCompleteness(
-      opts,
-      workDir,
-      fencesByFile.get('docs/configuration.md')?.filter((fence) => !fence.skip),
-    )
+    const scaffold = await acquireScaffoldText(opts, workDir)
+    const completenessViolations = [
+      ...scaffold.violations,
+      ...checkCompleteness(
+        scaffold.text,
+        fencesByFile.get('docs/configuration.md')?.filter((fence) => !fence.skip),
+      ),
+    ]
+    if (scaffold.text !== null) {
+      const violation = scaffoldOrderViolation(scaffold.text)
+      if (violation) orderViolations.push(`init scaffold: ${violation}`)
+    }
 
     // -----------------------------------------------------------------------
     // Report
