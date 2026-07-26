@@ -118,6 +118,18 @@ Maintainer notes:
   (GHSA-3jxr-9vmj-r5cp — exponential-time expansion DoS), dev/build-tooling
   transitives; the workspace overrides now map the advisories' full
   vulnerable ranges to the patched versions.
+- **postcss `8.5.12` → `8.5.18`** (GHSA-r28c-9q8g-f849 — path traversal in
+  previous-source-map auto-loading can disclose arbitrary `.map` files),
+  build-tooling transitive under vite; the workspace override pinning
+  postcss moved to the patched version.
+- **brace-expansion `5.0.7` → `5.0.8`** (GHSA-mh99-v99m-4gvg — memory
+  exhaustion via unbounded expansion length). The 1.x line under eslint's
+  `minimatch@3` has no patched release, only ever expands our own lint
+  globs, and cannot take the 5.x API; it is a tracked audit ignore (#205).
+- **react-router advisory GHSA-qwww-vcr4-c8h2 acknowledged** as unreachable:
+  the CSRF bypass lives in the unstable RSC code paths, and the dashboard
+  is a client-side SPA importing no `unstable_*`/RSC API. Tracked audit
+  ignore until the react-router 8 upgrade (#204).
 
 ## [0.10.0] - 2026-07-14
 

@@ -77,6 +77,6 @@ Action versions are pinned to major version tags (e.g., `@v4`). Dependabot propo
 
 The `pnpm-workspace.yaml` file includes overrides to patch known vulnerabilities in transitive dependencies when upstream packages haven't released fixes yet.
 
-Current security-patch overrides include `axios` pinned at `1.17.0` to address NO_PROXY bypass and proxy gadget advisories inherited via `@slack/web-api`.
+Current security-patch overrides include `axios` pinned at `1.18.1` for its Node-adapter advisories inherited via `@slack/web-api`, `postcss` at `8.5.18` for `GHSA-6g55-p6wh-862q` / `GHSA-r28c-9q8g-f849`, and `brace-expansion >=3.0.0` lifted to `5.0.8` for `GHSA-mh99-v99m-4gvg` (the 1.x line has no patched release and is a tracked audit ignore, #205).
 
-Vitest is pinned at `4.1.8` across JS workspaces to stay above the `GHSA-5xrq-8626-4rwp` floor, and dashboard `react-router` is pinned at `7.16.0` to stay above current `GHSA-49rj-9fvp-4h2h` / `GHSA-8x6r-g9mw-2r78` fixes.
+Vitest is pinned at `4.1.8` across JS workspaces to stay above the `GHSA-5xrq-8626-4rwp` floor, and dashboard `react-router` is pinned at `7.18.0` to stay above the `GHSA-chx6-hx7r-mcp5` fix; its `GHSA-qwww-vcr4-c8h2` (unstable-RSC-only) advisory is a tracked audit ignore until the v8 upgrade (#204).

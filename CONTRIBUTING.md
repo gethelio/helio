@@ -229,13 +229,15 @@ Our audit posture reflects that:
   ignored** via `auditConfig.ignoreGhsas` in `pnpm-workspace.yaml`, but **only** with a tracking issue to
   remove it. Prefer a real upgrade over an ignore.
 
-Current dev-only ignores (each tracked for removal):
+Current ignores (each with no exploit path in our usage, tracked for removal):
 
-| GHSA                  | Package (path)                      | Why ignored                                                                                                           | Tracking |
-| --------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------- |
-| `GHSA-gv7w-rqvm-qjhr` | esbuild (via vite, dashboard build) | dev-server request vuln; not in the shipped bundle                                                                    | #64      |
-| `GHSA-fx2h-pf6j-xcff` | vite (dashboard build)              | dev-server only; vite is not run in production                                                                        | #64      |
-| `GHSA-vmh5-mc38-953g` | undici (via `jsdom`, test env)      | SOCKS5 ProxyAgent TLS path, not exercised in tests; no patched undici is compatible with `jsdom@29`'s internal layout | #64      |
+| GHSA                  | Package (path)                                   | Why ignored                                                                                                                                                         | Tracking |
+| --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `GHSA-gv7w-rqvm-qjhr` | esbuild (via vite, dashboard build)              | dev-server request vuln; not in the shipped bundle                                                                                                                  | #64      |
+| `GHSA-fx2h-pf6j-xcff` | vite (dashboard build)                           | dev-server only; vite is not run in production                                                                                                                      | #64      |
+| `GHSA-vmh5-mc38-953g` | undici (via `jsdom`, test env)                   | SOCKS5 ProxyAgent TLS path, not exercised in tests; no patched undici is compatible with `jsdom@29`'s internal layout                                               | #64      |
+| `GHSA-qwww-vcr4-c8h2` | react-router (dashboard)                         | unstable-RSC-only CSRF per upstream; the dashboard is a client-side SPA importing no `unstable_*`/RSC API, and the fix line (8.x) needs a React peer bump           | #204     |
+| `GHSA-mh99-v99m-4gvg` | brace-expansion 1.x (via eslint's `minimatch@3`) | OOM-DoS on expansion; lint globs are our own trusted config, no patched 1.x exists, and 5.0.8's named CJS export breaks `minimatch@3` (5.x paths upgraded for real) | #205     |
 
 ## Issue Labels
 
