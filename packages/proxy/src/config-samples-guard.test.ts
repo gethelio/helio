@@ -271,6 +271,47 @@ describe('config-samples guard', () => {
   )
 
   it(
+    'reports a misordered init scaffold loudly by default and fails under --enforce-order',
+    { timeout: 60_000 },
+    async () => {
+      // All 10 stubs present so completeness stays clean and the order
+      // signal is isolated; dashboard: moved up between environment and
+      // policies — the #163 defect class on the one surface the guard
+      // never order-checked.
+      const misorderedScaffold = [
+        'version: "1"',
+        'upstream:',
+        '  url: "http://localhost:8080/mcp"',
+        '# listen:',
+        '# environment:',
+        '# dashboard:',
+        '# policies:',
+        '# budgets:',
+        '# approval:',
+        '# audit:',
+        '# sdk:',
+        '',
+      ].join('\n')
+      const root = makeTree({ 'scaffold.yaml': misorderedScaffold })
+      const scaffoldArgs = ['--scaffold-file', join(root, 'scaffold.yaml')]
+
+      const relaxed = await runGuard(root, scaffoldArgs)
+      expect(relaxed.code).toBe(0)
+      expect(relaxed.output).toContain('not enforced without --enforce-order')
+      expect(relaxed.output).toContain('init scaffold: top-level keys not in canonical order')
+
+      const enforced = await runGuard(root, [...scaffoldArgs, '--enforce-order'])
+      expect(enforced.code).toBe(1)
+      expect(enforced.output).toContain('init scaffold: top-level keys not in canonical order')
+      // The scaffold violation counts beside the candidate totals, never
+      // as a failed candidate — this fixture tree has zero candidates.
+      expect(enforced.output).toContain(
+        '0 checked, 0 passed, 0 failed, 0 skipped; 1 enforced order violation',
+      )
+    },
+  )
+
+  it(
     'reports a scaffold missing budgets: loudly by default and fails under --enforce-completeness',
     { timeout: 60_000 },
     async () => {
