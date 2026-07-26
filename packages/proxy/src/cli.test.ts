@@ -806,24 +806,22 @@ dashboard:
         )
         expect(updated).not.toBe(original)
 
-        // Chokidar start() is async and exposes no armed signal, so a single
-        // write can land before the watcher listens. Re-touch the file with
-        // the same content (fresh mtime) until the watcher reports it. The
-        // retries also paper over a watcher that drops only the first event
-        // — accepted: arming and first-event loss are indistinguishable here.
-        const sawRestartRequired = () =>
-          stderr.includes('Restart required: non-reloadable fields changed')
-        const retryDeadline = Date.now() + 8_000
+        // The Watching line prints from chokidar's ready hook, so the
+        // marker above means the initial scan is done and the watcher is
+        // armed. One gap remains below that API: on macOS the kernel
+        // FSEvents stream goes live a few milliseconds AFTER ready, and a
+        // write inside that window is dropped by the OS (measured
+        // sub-5ms and load-independent; Linux inotify has no such gap).
+        // The grace covers it with ~20x margin, so exactly ONE write
+        // suffices — a watcher that drops the first change event now
+        // fails this test.
+        const WATCH_ARM_GRACE_MS = 100
+        await new Promise((resolve) => setTimeout(resolve, WATCH_ARM_GRACE_MS))
         writeFileSync(configPath, updated)
-        for (;;) {
-          try {
-            await waitForLog(sawRestartRequired, 1_000)
-            break
-          } catch (err) {
-            if (Date.now() >= retryDeadline) throw err
-            writeFileSync(configPath, updated)
-          }
-        }
+        await waitForLog(
+          () => stderr.includes('Restart required: non-reloadable fields changed'),
+          8_000,
+        )
         expect(stderr).toContain('Restart required: non-reloadable fields changed')
         // The banner's "Helio proxy listening" also contains "listen" — match
         // the changed path inside the warning's parenthesized list instead.

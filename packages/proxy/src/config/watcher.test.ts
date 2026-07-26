@@ -1130,4 +1130,91 @@ policies:
     expect(reloads).toHaveLength(1)
     expect(reloads[0]?.rules).toHaveLength(1)
   })
+
+  // -------------------------------------------------------------------------
+  // Ready hook
+  // -------------------------------------------------------------------------
+
+  it('calls onReady exactly once, across repeated start() calls', async () => {
+    await writeFile(configPath, validConfig())
+    let readyCount = 0
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: () => {},
+      onError: () => {},
+      onReady: () => {
+        readyCount += 1
+      },
+      debounceMs: 50,
+    })
+    watcher.start()
+    watcher.start() // Second call is a no-op — must not re-arm or re-fire
+    await wait(300)
+    expect(readyCount).toBe(1)
+  })
+
+  it('does not call onReady after close()', async () => {
+    await writeFile(configPath, validConfig())
+    let readyCount = 0
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: () => {},
+      onError: () => {},
+      onReady: () => {
+        readyCount += 1
+      },
+      debounceMs: 50,
+    })
+    watcher.start()
+    watcher.close()
+    await wait(300)
+    expect(readyCount).toBe(0)
+  })
+
+  it('calls onReady even when the watched file is missing', async () => {
+    // No write: the path does not exist. Ready means "initial scan done",
+    // not "file exists" — a caller waiting on the hook must not hang when
+    // the config vanished between load and watch.
+    let readyCount = 0
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: () => {},
+      onError: () => {},
+      onReady: () => {
+        readyCount += 1
+      },
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(300)
+    expect(readyCount).toBe(1)
+  })
+
+  it('reports a change written after onReady', async () => {
+    await writeFile(configPath, validConfig())
+    const reloads: CompiledPolicy[] = []
+    let ready = false
+    watcher = new ConfigWatcher({
+      configPath,
+      onReload: (policy) => {
+        reloads.push(policy)
+      },
+      onError: () => {},
+      onReady: () => {
+        ready = true
+      },
+      debounceMs: 50,
+    })
+    watcher.start()
+    // 100ms after start: onReady must already have fired (ready lands in
+    // ~1-2ms), and the wait doubles as the platform arming grace — on
+    // macOS the kernel FSEvents stream goes live a few milliseconds
+    // AFTER ready, and a write inside that window is dropped by the OS.
+    await wait(100)
+    expect(ready).toBe(true)
+    await writeFile(configPath, configWithDenyRule())
+    await wait(500)
+    expect(reloads).toHaveLength(1)
+    expect(reloads[0]?.rules[0]?.name).toBe('block-delete')
+  })
 })

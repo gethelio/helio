@@ -25,6 +25,9 @@ export interface ConfigWatcherOptions {
   ) => void
   /** Called when a reload attempt fails (parse, validation, or compile error). */
   readonly onError: (error: Error) => void
+  /** Called once the underlying watcher has finished its initial scan
+   *  and is armed (chokidar's `ready` event). Optional. */
+  readonly onReady?: () => void
   /** Baseline config loaded at startup, used for restart-required diffing. */
   readonly initialConfig?: HelioConfig
   /** Environment variables for config interpolation. */
@@ -43,6 +46,7 @@ export class ConfigWatcher {
   private readonly configPath: string
   private readonly onReload: ConfigWatcherOptions['onReload']
   private readonly onError: ConfigWatcherOptions['onError']
+  private readonly onReady: ConfigWatcherOptions['onReady']
   private readonly initialConfig: HelioConfig | undefined
   private readonly env: Record<string, string | undefined> | undefined
   private readonly debounceMs: number
@@ -54,6 +58,7 @@ export class ConfigWatcher {
     this.configPath = options.configPath
     this.onReload = options.onReload
     this.onError = options.onError
+    this.onReady = options.onReady
     this.initialConfig = options.initialConfig
     this.env = options.env
     this.debounceMs = options.debounceMs ?? 200
@@ -71,6 +76,12 @@ export class ConfigWatcher {
 
     this.watcher.on('change', () => {
       this.scheduleReload()
+    })
+
+    this.watcher.on('ready', () => {
+      // close() nulls the watcher synchronously; chokidar also suppresses
+      // ready after close — this guard is our own invariant on top.
+      if (this.watcher && this.onReady) this.onReady()
     })
   }
 
