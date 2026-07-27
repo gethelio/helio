@@ -17,7 +17,7 @@
 import Database from 'better-sqlite3'
 import type { Database as DatabaseType, Statement } from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { LIST_MAX_PAGE_SIZE } from '../audit/store.js'
+import { EXPORT_MAX_RECORDS, LIST_MAX_PAGE_SIZE } from '../audit/store.js'
 import type {
   BudgetLedgerRow,
   BudgetMetaRow,
@@ -411,6 +411,25 @@ export class BudgetLedger implements BudgetPersistence {
     )
     const offset = Math.max(Math.trunc(page.offset ?? 0), 0)
     const events = this.listEventsStmt.all(budgetName, limit, offset) as BudgetEventRecord[]
+    const { total } = this.countEventsStmt.get(budgetName) as { total: number }
+    return { events, total }
+  }
+
+  /**
+   * A budget's spend history for bulk export (issue #155). Unlike
+   * {@link listEvents}, which enforces the dashboard's page clamp, this path
+   * allows up to `EXPORT_MAX_RECORDS` in a single call. Newest first — the
+   * listing's own order, and the opposite of the audit export's oldest-first:
+   * the export takes no time filters, so a capped export must keep the most
+   * recent spend reachable (older rows age out via retention). Same
+   * unknown-name and epoch-spanning posture as the listing.
+   */
+  listEventsForExport(budgetName: string, limit?: number): BudgetEventsPage {
+    const clamped = Math.min(
+      Math.max(Math.trunc(limit ?? EXPORT_MAX_RECORDS), 1),
+      EXPORT_MAX_RECORDS,
+    )
+    const events = this.listEventsStmt.all(budgetName, clamped, 0) as BudgetEventRecord[]
     const { total } = this.countEventsStmt.get(budgetName) as { total: number }
     return { events, total }
   }

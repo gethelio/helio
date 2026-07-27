@@ -436,6 +436,42 @@ function BudgetCard({
   panel: EventsPanelState | undefined
   onToggleEvents: () => void
 }) {
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+
+  // Same download idiom as the audit page's export control: no explicit auth
+  // headers — the same-origin session cookie authenticates the request.
+  const handleExport = useCallback(
+    async (format: 'csv' | 'json') => {
+      setExportError(null)
+      setExportBusy(true)
+      try {
+        const res = await fetch(
+          `/api/budgets/${encodeURIComponent(budget.name)}/events/export?format=${format}`,
+        )
+        if (!res.ok) {
+          const text = await res.text().catch(() => '')
+          throw new Error(text || `Export failed (${String(res.status)})`)
+        }
+
+        const blob = await res.blob()
+        const objectUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = objectUrl
+        a.download = `helio-budget-${budget.name}-events.${format}`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(objectUrl)
+      } catch (err) {
+        setExportError(err instanceof Error ? err.message : 'Failed to export events')
+      } finally {
+        setExportBusy(false)
+      }
+    },
+    [budget.name],
+  )
+
   return (
     <div
       className={`rounded-md border bg-white p-4 transition-shadow ${
@@ -479,14 +515,42 @@ function BudgetCard({
         </div>
       )}
 
-      {/* Recent events (ledger listing) */}
-      <button
-        type="button"
-        onClick={onToggleEvents}
-        className="mt-3 text-xs font-medium text-blue-600 hover:text-blue-500"
-      >
-        {panel ? 'Hide recent events' : 'Recent events'}
-      </button>
+      {/* Recent events (ledger listing) + ledger export */}
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onToggleEvents}
+          className="text-xs font-medium text-blue-600 hover:text-blue-500"
+        >
+          {panel ? 'Hide recent events' : 'Recent events'}
+        </button>
+        <div className="flex shrink-0 items-center gap-1.5 text-xs">
+          <span className="text-gray-400">Export</span>
+          <button
+            type="button"
+            disabled={exportBusy}
+            aria-label={`Export ${budget.name} events as CSV`}
+            onClick={() => {
+              void handleExport('csv')
+            }}
+            className="font-medium text-blue-600 hover:text-blue-500 disabled:text-gray-300"
+          >
+            CSV
+          </button>
+          <button
+            type="button"
+            disabled={exportBusy}
+            aria-label={`Export ${budget.name} events as JSON`}
+            onClick={() => {
+              void handleExport('json')
+            }}
+            className="font-medium text-blue-600 hover:text-blue-500 disabled:text-gray-300"
+          >
+            JSON
+          </button>
+        </div>
+      </div>
+      {exportError && <p className="mt-1 text-xs text-red-600">{exportError}</p>}
       {panel && <EventsPanel panel={panel} />}
     </div>
   )

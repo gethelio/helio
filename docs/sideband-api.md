@@ -12,7 +12,7 @@ The dashboard sideband is a read/write REST + SSE surface served on a separate p
 - **Bind address:** localhost-only by default. Bind publicly only behind a TLS-terminating reverse proxy you control.
 - **Auth:** By default, `dashboard.enabled: true` requires `dashboard.api_secret`. Browser clients unlock with `POST /api/auth/session` + HttpOnly cookie; non-browser clients can use `Authorization: Bearer <api_secret>`. Running without `api_secret` is only allowed with explicit `dashboard.allow_open_mode: true` on loopback hosts. Open mode disables all sideband authentication and is a local/demo posture only: the CORS allowlist above does not make it safe, since an unauthenticated loopback service is still reachable by a determined local attacker (for example via DNS rebinding). See [Authentication](#authentication) below.
 - **CORS:** Allows same-origin, `localhost` / `127.0.0.1` / `0.0.0.0`, and validated private-network IPv4 literals (`10.x`, `172.16-31.x`, `192.168.x`) for Docker bridge and LAN access. Origins are matched as real IP addresses, not by hostname prefix; every other origin, including hostnames, receives no CORS headers. (CORS is a browser-enforced control, not a server-side auth boundary.)
-- **Content type:** JSON for everything except `/api/audit/export` (JSON or CSV attachment) and `/api/events` (SSE stream).
+- **Content type:** JSON for everything except `/api/audit/export` and `/api/budgets/:name/events/export` (JSON or CSV attachments) and `/api/events` (SSE stream).
 - **Non-200 errors:** Always JSON in the shape `{ "error": "<message>" }`. Unknown `/api/*` paths return `404` with this shape (never HTML).
 
 ## Response shape conventions
@@ -54,14 +54,15 @@ The auth endpoints (`/api/auth/*`) and the approval action POSTs sit outside the
 
 ### Non-JSON responses
 
-Two endpoints fall outside the envelope model entirely:
+Three endpoints fall outside the envelope model entirely:
 
 - `GET /api/audit/export` — binary download with `Content-Disposition: attachment` and a `text/csv` or `application/json` body. The body is a bare `AuditRecord[]` array (no envelope) or a CSV document, intended for `curl -o audit.json` and spreadsheet pipelines.
+- `GET /api/budgets/:name/events/export` — the same attachment contract for one budget's spend ledger: a bare ledger-row array or a CSV document.
 - `GET /api/events` — Server-Sent Events stream. Each frame is an `event: <name>\ndata: <json>\n\n` block. Not a single response body.
 
 ### Error shape
 
-Every 4xx and 5xx response across every endpoint (with the two non-JSON exceptions above) returns:
+Every 4xx and 5xx response across every endpoint (with the three non-JSON exceptions above) returns:
 
 ```json
 { "error": "Human-readable error message" }
@@ -380,7 +381,29 @@ An unknown budget name returns `200` with an empty page (budget names are config
 - `audit_record_id` — the audit record of the call that produced the charge. The ledger is the source of truth for spend; the audit trail for calls — the referenced audit row may lag briefly (async audit writer) or be missing after a crash.
 - `origin` — `mcp`, or the adapter origin for sideband-committed charges.
 
-A CSV export of the ledger is not available yet; use the JSON listing.
+#### GET /api/budgets/:name/events/export
+
+Bulk export of one budget's ledger rows as a downloadable attachment. **Not a JSON envelope** — the body is a bare array of the listing's wire rows (or a CSV document with the same twelve columns, in the same order). Returned with `Content-Disposition: attachment; filename="helio-budget-<name>-events.<ext>"`, where `<name>` is the budget name stripped to the config-name character set (`A-Z a-z 0-9 _ -`), so browsers download a file identifiable per pot.
+
+Rows are exported newest-first — the listing's own order, and the deliberate opposite of the audit export's oldest-first: this endpoint takes no time filters, so a capped export keeps the most recent spend reachable, while older rows age out through the audit `retention` window. Like the listing, history spans config resets, and an unknown budget name returns `200` with an empty artifact.
+
+**Query parameters:**
+
+| Parameter | Default | Description                     |
+| --------- | ------- | ------------------------------- |
+| `format`  | `json`  | `json` or `csv`.                |
+| `limit`   | `10000` | Maximum records. Capped at 10k. |
+
+**Example:**
+
+```bash
+curl -s -H "Authorization: Bearer $HELIO_DASHBOARD_SECRET" \
+  "http://localhost:3100/api/budgets/daily-cap/events/export?format=csv" > daily-cap.csv
+```
+
+CSV cells follow the audit export's serialization rules: RFC 4180 escaping, null `audit_record_id` as an empty cell, and the formula-injection defense described in [Audit Trail → CSV Format](./audit.md#csv-format). The dashboard's Budgets view offers the same download per pot, and `helio export --budgets <name>` produces it offline from the database file.
+
+**Non-JSON endpoint** — attachment download, no envelope.
 
 ---
 

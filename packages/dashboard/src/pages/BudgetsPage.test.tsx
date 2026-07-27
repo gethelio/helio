@@ -1353,3 +1353,95 @@ describe('BudgetsPage', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Ledger export buttons (issue #155)
+// ---------------------------------------------------------------------------
+
+describe('BudgetsPage export buttons', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubDownloadEnv(response: Response | Error) {
+    const fetchMock =
+      response instanceof Error
+        ? vi.spyOn(globalThis, 'fetch').mockRejectedValue(response)
+        : vi.spyOn(globalThis, 'fetch').mockResolvedValue(response)
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => 'blob:http://localhost/fake'),
+      revokeObjectURL: vi.fn(),
+    })
+    const downloads: string[] = []
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      downloads.push(this.download)
+    })
+    return { fetchMock, downloads, clickSpy }
+  }
+
+  it('renders CSV and JSON export buttons on each budget card', async () => {
+    mockFetchBudgets.mockResolvedValue({ budgets: [budgetState()] })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Export daily-cap events as CSV')).toBeTruthy()
+      expect(screen.getByLabelText('Export daily-cap events as JSON')).toBeTruthy()
+    })
+  })
+
+  it('downloads the CSV export through the endpoint, cookie-auth only', async () => {
+    mockFetchBudgets.mockResolvedValue({ budgets: [budgetState()] })
+    const { fetchMock, downloads } = stubDownloadEnv(
+      new Response('id,budget_name', {
+        status: 200,
+        headers: { 'content-type': 'text/csv; charset=utf-8' },
+      }),
+    )
+    renderPage()
+
+    const button = await waitFor(() => screen.getByLabelText('Export daily-cap events as CSV'))
+    fireEvent.click(button)
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/budgets/daily-cap/events/export?format=csv')
+      expect(downloads).toEqual(['helio-budget-daily-cap-events.csv'])
+    })
+  })
+
+  it('downloads the JSON export with the .json filename', async () => {
+    mockFetchBudgets.mockResolvedValue({ budgets: [budgetState()] })
+    const { fetchMock, downloads } = stubDownloadEnv(
+      new Response('[]', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    renderPage()
+
+    const button = await waitFor(() => screen.getByLabelText('Export daily-cap events as JSON'))
+    fireEvent.click(button)
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/budgets/daily-cap/events/export?format=json')
+      expect(downloads).toEqual(['helio-budget-daily-cap-events.json'])
+    })
+  })
+
+  it('shows a per-card error and keeps the buttons usable when an export fails', async () => {
+    mockFetchBudgets.mockResolvedValue({ budgets: [budgetState()] })
+    stubDownloadEnv(new Error('network down'))
+    renderPage()
+
+    const button = await waitFor(() => screen.getByLabelText('Export daily-cap events as CSV'))
+    fireEvent.click(button)
+
+    await waitFor(() => {
+      expect(screen.getByText('network down')).toBeTruthy()
+    })
+    const csvButton = screen.getByLabelText<HTMLButtonElement>('Export daily-cap events as CSV')
+    expect(csvButton.disabled).toBe(false)
+  })
+})

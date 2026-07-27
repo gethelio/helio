@@ -1,6 +1,6 @@
 # @gethelio/dashboard
 
-Real-time governance dashboard for the Helio proxy. React SPA that displays live action feeds, approval workflows, audit logs, rate/spend limits, and analytics. Bundled into the proxy at build time and served as static files.
+Real-time governance dashboard for the Helio proxy. React SPA that displays live action feeds, approval workflows, audit logs, rate/spend limits, budgets, and analytics. Bundled into the proxy at build time and served as static files.
 
 ## Package Layout
 
@@ -14,17 +14,19 @@ src/
 ├── api.ts                    → REST client (apiFetch, qs, authHeaders, ApiError, CSRF token + auth/session helpers)
 ├── constants.ts              → Decision/outcome filters, chart color map, MS_PER_* + time-range presets
 ├── outcome.ts                → DisplayOutcome union + helpers that derive/filter audit & feed outcomes
-├── utils.ts                  → Formatting helpers (timeAgo, formatLabel, etc.)
+├── origin.ts                 → Origin + record_kind display labels (MCP/OpenClaw, install scan, drift, etc.)
+├── utils.ts                  → Formatting helpers (timeAgo, formatLabel, formatCurrency, etc.)
 ├── EventSourceContext.tsx    → SSE context provider (forwards onSessionExpired)
 ├── useEventSource.ts         → SSE hook (typed subscribe/unsubscribe)
 ├── useAuditQuery.ts          → Audit filtering + pagination hook
 ├── components/
 │   ├── Header.tsx            → Top bar with sidebar toggle + StatusIndicator
-│   ├── Sidebar.tsx           → Left nav (Feed/Approvals/Audit/Limits/Analytics)
+│   ├── Sidebar.tsx           → Left nav (Feed/Approvals/Audit/Limits/Budgets/Analytics)
 │   ├── ErrorBoundary.tsx     → Top-level React error boundary
 │   ├── PageError.tsx         → Inline per-page error state
 │   ├── ActionCard.tsx        → Collapsible tool action record card
 │   ├── PolicyBadge.tsx       → Color-coded decision badge
+│   ├── OriginBadge.tsx       → Origin + record_kind chips on feed/audit rows
 │   ├── ApprovalStatusBadge.tsx → Approval status indicator
 │   ├── ApprovalActions.tsx   → Approve/Deny/BreakGlass modal
 │   ├── StatusIndicator.tsx   → Connection status + version + uptime
@@ -41,6 +43,7 @@ src/
     ├── ApprovalsPage.tsx     → Pending + resolved tabs, real-time countdown
     ├── AuditPage.tsx         → Audit log (composes AuditFilterBar + AuditTable + AuditDetailPanel)
     ├── LimitsPage.tsx        → Rate + spend limit gauges (5s polling + SSE)
+    ├── BudgetsPage.tsx       → Cross-tool budget pots + ledger events (5s polling + SSE)
     └── AnalyticsPage.tsx     → Charts + aggregate stats (1h/24h/7d presets)
 ```
 
@@ -55,7 +58,7 @@ The proxy build runs this dashboard build first, then copies `packages/dashboard
 ## Tech Stack
 
 - **React** 19 (hooks-based; the one exception is `ErrorBoundary`, a class component since `getDerivedStateFromError`/`componentDidCatch` require it)
-- **React Router** 7 (client-side routing, 5 routes)
+- **React Router** 7 (client-side routing, 6 routes)
 - **Vite** 6 (dev server + bundler)
 - **Tailwind CSS** 4 (@tailwindcss/vite plugin)
 - **Recharts** 3 (charts: line, pie, bar)
@@ -69,22 +72,25 @@ No state management library. All state is React hooks (useState, useEffect, useC
 
 The dashboard talks to the proxy's sideband API (default port 3100):
 
-| Method                                | Path                                                                   | Purpose |
-| ------------------------------------- | ---------------------------------------------------------------------- | ------- |
-| `GET /api/health`                     | Proxy health, version, uptime (unauthenticated)                        |
-| `GET /api/auth/session`               | Current session state (`auth_required`, `authenticated`, `csrf_token`) |
-| `POST /api/auth/session`              | Log in with the dashboard secret                                       |
-| `POST /api/auth/logout`               | Log out / clear the session                                            |
-| `GET /api/feed`                       | Recent action records (limit/offset)                                   |
-| `GET /api/audit`                      | Paginated audit log (tool/decision/session/date filters)               |
-| `GET /api/audit/:id`                  | Single audit record detail                                             |
-| `GET /api/approvals`                  | Approval tickets (filter by status)                                    |
-| `POST /api/approvals/:id/approve`     | Approve a pending ticket                                               |
-| `POST /api/approvals/:id/deny`        | Deny a pending ticket                                                  |
-| `POST /api/approvals/:id/break-glass` | Break-glass override (reason required)                                 |
-| `GET /api/limits`                     | Rate + spend limit states                                              |
-| `GET /api/analytics`                  | Aggregated stats (from/to range)                                       |
-| `GET /api/evidence/:session_id`       | Session evidence chain                                                 |
+| Method                                 | Path                                                                   | Purpose |
+| -------------------------------------- | ---------------------------------------------------------------------- | ------- |
+| `GET /api/health`                      | Proxy health, version, uptime (unauthenticated)                        |
+| `GET /api/auth/session`                | Current session state (`auth_required`, `authenticated`, `csrf_token`) |
+| `POST /api/auth/session`               | Log in with the dashboard secret                                       |
+| `POST /api/auth/logout`                | Log out / clear the session                                            |
+| `GET /api/feed`                        | Recent action records (limit/offset)                                   |
+| `GET /api/audit`                       | Paginated audit log (tool/decision/session/date filters)               |
+| `GET /api/audit/:id`                   | Single audit record detail                                             |
+| `GET /api/approvals`                   | Approval tickets (filter by status)                                    |
+| `POST /api/approvals/:id/approve`      | Approve a pending ticket                                               |
+| `POST /api/approvals/:id/deny`         | Deny a pending ticket                                                  |
+| `POST /api/approvals/:id/break-glass`  | Break-glass override (reason required)                                 |
+| `GET /api/limits`                      | Rate + spend limit states                                              |
+| `GET /api/budgets`                     | Cross-tool budget pot states                                           |
+| `GET /api/budgets/:name/events`        | Paginated spend ledger for one budget                                  |
+| `GET /api/budgets/:name/events/export` | Ledger CSV/JSON attachment download (per-pot export buttons)           |
+| `GET /api/analytics`                   | Aggregated stats (from/to range)                                       |
+| `GET /api/evidence/:session_id`        | Session evidence chain                                                 |
 
 Mutating approval requests (approve/deny/break-glass) carry the CSRF token from the session response as an `x-helio-csrf` header; `api.ts` stores the token via `setCsrfToken()` and attaches it through `authHeaders()`. A 401 from any call triggers the registered unauthorized handler (`setUnauthorizedHandler`), which sends the UI back to the locked state.
 
@@ -92,7 +98,7 @@ Mutating approval requests (approve/deny/break-glass) carry the CSRF token from 
 
 **Dev-mode auth gotcha:** when the target proxy is started with `dashboard.api_secret` set, the dashboard starts in a locked state and requires manual secret login (`POST /api/auth/session`) before API calls succeed. Keep the secret handy from `helio.yaml` when iterating locally.
 
-**SSE:** EventSource connects to `/api/events`. Five event types: `action`, `approval_requested`, `approval_resolved`, `approval_notification_failed`, `limit_warning`.
+**SSE:** EventSource connects to `/api/events`. Seven event types: `action`, `approval_requested`, `approval_resolved`, `approval_notification_failed`, `limit_warning`, `budget_update`, `budget_breached`.
 
 ## Type System
 
@@ -101,10 +107,11 @@ Types are defined in `src/types.ts` (not imported from the proxy package). This 
 - `AuditRecord` — full audit trail entry (24 fields)
 - `ApprovalTicket` — approval request state (18 fields, including escalation + notification-failure data)
 - `RateLimitKeyState`, `SpendLimitKeyState` — limit gauge data
+- `BudgetState`, `BudgetBucketState`, `BudgetEventRecord` — budget pot + ledger data
 - `AnalyticsResponse` — aggregated stats + time series + top tools
 - `AuthSessionResponse` — session state (`auth_required`, `authenticated`, `csrf_token`)
 - `DisplayOutcome` (in `outcome.ts`) — derived outcome union used for badges and filters
-- `DashboardEventType` / `DashboardEventMap` — typed SSE event union (action, approval_requested, approval_resolved, approval_notification_failed, limit_warning)
+- `DashboardEventType` / `DashboardEventMap` — typed SSE event union (action, approval_requested, approval_resolved, approval_notification_failed, limit_warning, budget_update, budget_breached)
 
 ## Security Standards
 
@@ -147,7 +154,7 @@ The dashboard displays sensitive governance data — tool call details, policy d
 
 **Lazy detail loading:** ActionCard and approval cards fetch the full record only when expanded, avoiding large initial payloads.
 
-**Polling + SSE:** LimitsPage polls every 5s and also listens for SSE `limit_warning` events. Warning events trigger a 10s flash highlight effect.
+**Polling + SSE:** LimitsPage polls every 5s and also listens for SSE `limit_warning` events. BudgetsPage polls every 5s and listens for `budget_update` / `budget_breached`. Warning/breach events trigger a 10s flash highlight effect.
 
 **Record buffer cap:** FeedPage caps the in-memory record list at 500 entries to prevent memory growth during long sessions.
 

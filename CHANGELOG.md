@@ -19,6 +19,22 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **CSV export for the budget spend ledger (#155).** One budget's spend
+  history is now exportable everywhere the audit trail is:
+  `GET /api/budgets/:name/events/export?format=csv|json` downloads the
+  ledger as an attachment (`helio-budget-<name>-events.csv`), the
+  dashboard's Budgets view gains per-pot CSV/JSON export buttons, and
+  `helio export --budgets <name>` produces the same artifact offline from
+  the database file — with the proxy stopped or the dashboard disabled.
+  Exports are capped at 10,000 rows and run newest-first (the listing's
+  own order: with no time filters, a capped export keeps the most recent
+  spend reachable), span config resets like the listing, and carry the
+  listing's wire columns verbatim with the audit exporter's CSV escaping
+  and formula-injection defense. Direct embedders of the dashboard app:
+  the `budgets` dependency gains a required `listEventsForExport` method.
+
 ### Changed
 
 - **BREAKING: budget contributors are now `{ match: { tool, input? }, field }`

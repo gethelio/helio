@@ -7,7 +7,9 @@ The core governance proxy package. Intercepts MCP `tools/call` requests, evaluat
 ```
 src/
 ├── cli.ts                   → CLI entry point (helio start/init/validate/export)
+├── cli-forwarder.ts         → Build upstream McpForwarder from config (streamable-http / sse / stdio)
 ├── server.ts                → Hono app factory + HTTP server lifecycle
+├── shutdown.ts              → Ordered resource teardown (drain traffic doors before clearing governance state)
 ├── index.ts                 → Public API surface (re-exports from all modules)
 ├── version.ts               → VERSION constant (read from package.json)
 ├── crash-drain.ts           → Crash-drain registry: flush buffered state (audit writer) before process.exit
@@ -27,8 +29,13 @@ src/
 │   ├── forward-headers.ts   → Allowlist for headers crossing the proxy to upstream (authorization + `x-*` allowlist)
 │   └── response-normalizer.ts → Normalize an upstream forwarding outcome (success/error) into a JSON-RPC response
 ├── upstream/
-│   ├── forwarder.ts         → HTTP upstream forwarder (Streamable HTTP)
+│   ├── streamable-http-forwarder.ts → Spec-compliant Streamable HTTP upstream client (JSON + SSE responses, session relay)
+│   ├── forwarder.ts         → Deprecated alias: UpstreamForwarder extends StreamableHttpForwarder
 │   ├── sse-forwarder.ts     → SSE upstream forwarder
+│   ├── upstream-session-manager.ts → Lazy initialize handshake for Helio-internal sessionless requests
+│   ├── merge-headers.ts     → Merge base / forwarded / static upstream headers (static wins)
+│   ├── connection-error.ts  → Operator-facing messages for unreachable upstreams
+│   ├── sse-parse.ts         → SSE chunk parser + JSON-RPC response reader
 │   ├── response.ts          → Response parsing/capture utilities
 │   ├── response-summary.ts  → Response summarization utilities
 │   └── index.ts             → Re-exports
@@ -41,6 +48,7 @@ src/
 │   ├── parser.ts            → YAML config → compiled policy (pre-builds matchers, regexes, durations)
 │   ├── matchers.ts          → Rule matching: tool glob, annotations, input conditions, environment
 │   ├── engine.ts            → First-match-wins policy evaluator
+│   ├── decision-pipeline.ts → Side-effect-free decide() shared by MCP path and sideband governance API
 │   ├── annotation-cache.ts  → Caches tools/list annotations per upstream
 │   ├── governed-forwarder.ts → McpForwarder wrapper that applies policy before forwarding
 │   ├── rate-limiter.ts      → Sliding window rate limiter with injectable clock
@@ -53,9 +61,12 @@ src/
 │   ├── api.ts               → Sideband HTTP API (Hono app on SDK port, bearer-protected)
 │   ├── types.ts             → EvidenceEntry, SessionState, etc.
 │   └── index.ts             → Re-exports
+├── sideband/
+│   ├── governance-service.ts → Engine for hook-based adapters: evaluate / audit / install-scan / native approval resolve
+│   ├── governance-api.ts    → Hono routes for the governance sideband endpoints (Zod-validated)
+│   └── errors.ts            → GovernanceConfigError (fail-closed miswiring, e.g. approval without router)
 ├── feedback/
-│   ├── self-repair.ts       → Structured block feedback builders (discriminated union)
-│   └── index.ts             → Re-exports
+│   └── self-repair.ts       → Structured block feedback builders (discriminated union)
 ├── approval/
 │   ├── types.ts             → ApprovalTicket, ApprovalOutcome, ApprovalStatus, ApprovalChannel interface
 │   ├── queue.ts             → In-memory approval queue (Map, injectable clock, cleanup)
@@ -72,6 +83,13 @@ src/
 │   ├── writer.ts            → AuditWriter: async buffered writer (batch flush to SQLite)
 │   ├── csv.ts               → CSV serialization for audit export
 │   └── index.ts             → Re-exports
+├── budget/
+│   ├── types.ts             → CompiledBudget + contributor/window types
+│   ├── parser.ts            → YAML budgets → compiled budgets (BudgetParseError)
+│   ├── engine.ts            → BudgetEngine: pots, charges, breach decisions, replay/hydrate
+│   ├── ledger.ts            → BudgetLedger: SQLite persistence in the audit DB (budget_* tables)
+│   ├── csv.ts               → CSV serialization for ledger export
+│   └── index.ts             → Re-exports
 ├── dashboard/
 │   ├── api.ts               → createDashboardApp() factory: REST + SSE API on dashboard port
 │   ├── session.ts           → Dashboard auth sessions: secret login, CSRF token issue/verify, TTL cleanup
@@ -79,7 +97,8 @@ src/
 │   └── index.ts             → Re-exports
 ├── util/
 │   ├── clamp.ts             → Numeric clamp + clamped query-int parsing for pagination
-│   └── format-zod-errors.ts → Flatten ZodError issues into `{ path, message }` for CLI/validation output
+│   ├── format-zod-errors.ts → Flatten ZodError issues into `{ path, message }` for CLI/validation output
+│   └── canonical-json.ts    → Deterministic key-sorted JSON (drift fingerprints, /audit idempotency hashes)
 └── __tests__/
     ├── helpers/
     │   ├── mcp-test-server.ts   → Mock MCP server (Hono app with canned JSON-RPC)
@@ -91,11 +110,13 @@ src/
     ├── integration-stdio.test.ts
     ├── integration-governance.test.ts
     ├── integration-sideband.test.ts
+    ├── integration-streamable-http-session.test.ts
+    ├── sideband-shared-limiter.test.ts
     ├── e2e-full.test.ts
     └── e2e-python-sdk-sideband.test.ts
 ```
 
-(`cli.ts` and most behavior-bearing modules have colocated `*.test.ts` unit tests next to them; type-only/barrel files may not. Cross-cutting integration/e2e suites live in `__tests__/`.)
+(`cli.ts` and most behavior-bearing modules have colocated `*.test.ts` unit tests next to them; type-only/barrel files may not. `config-samples-guard.test.ts` exercises `scripts/validate-config-samples.mjs`. Cross-cutting integration/e2e suites live in `__tests__/`.)
 
 ## Build & Entry Points
 
@@ -116,7 +137,7 @@ interface McpForwarder {
 }
 ```
 
-Implementations: `UpstreamForwarder`, `SseUpstreamForwarder`, `StdioForwarder`, `GovernedForwarder` (decorator).
+Implementations: `StreamableHttpForwarder` (preferred; `UpstreamForwarder` is a deprecated alias), `SseUpstreamForwarder`, `StdioForwarder`, `GovernedForwarder` (decorator).
 
 **`CompiledPolicy`** (`policy/types.ts`) — engine-ready policy with pre-built matchers:
 
@@ -226,12 +247,12 @@ pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scrip
 
 ## CLI Commands
 
-| Command                                                                                                     | Description                                                                                        |
-| ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `helio start [-c path] [--no-hot-reload]`                                                                   | Load config, compile policies, start proxy server (`--no-hot-reload` disables config-watch reload) |
-| `helio init [-o path] [-f]`                                                                                 | Scaffold helio.yaml with commented defaults                                                        |
-| `helio validate [-c path]`                                                                                  | Validate config + compile policies, report errors/warnings                                         |
-| `helio export [-c path] [-f format] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records as JSON or CSV                                                                |
+| Command                                                                                                                 | Description                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `helio start [-c path] [--no-hot-reload]`                                                                               | Load config, compile policies, start proxy server (`--no-hot-reload` disables config-watch reload) |
+| `helio init [-o path] [-f]`                                                                                             | Scaffold helio.yaml with commented defaults                                                        |
+| `helio validate [-c path]`                                                                                              | Validate config + compile policies, report errors/warnings                                         |
+| `helio export [-c path] [-f format] [--budgets] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records — or one budget's spend ledger via `--budgets <name>` — as JSON or CSV        |
 
 ## Performance Constraints
 
