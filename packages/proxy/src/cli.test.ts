@@ -7,6 +7,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { AuditStore } from './audit/store.js'
 import type { AuditRecord } from './audit/types.js'
+import { BudgetLedger } from './budget/ledger.js'
+import type { BudgetLedgerRow } from './budget/engine.js'
 
 const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
 
@@ -1845,6 +1847,190 @@ budget:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
+    })
+
+    // --- helio export --budgets ---
+
+    describe('--budgets', () => {
+      function budgetRow(overrides: Partial<BudgetLedgerRow> = {}): BudgetLedgerRow {
+        return {
+          budget_name: 'daily-cap',
+          bucket_key: 'budget:daily-cap:global',
+          kind: 'spend',
+          amount: 25,
+          currency: 'USD',
+          tool_name: 'stripe_charge',
+          origin: 'mcp',
+          audit_record_id: 'audit-1',
+          timestamp: '2026-07-10T12:00:00.000Z',
+          timestamp_ms: 1_000_000,
+          generation: 1,
+          ...overrides,
+        }
+      }
+
+      /** Create a temp dir with a seeded budget ledger and helio.yaml. */
+      function setupBudgetExport(rows: BudgetLedgerRow[]) {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-export-'))
+        const dbPath = join(dir, 'audit.db')
+        const configPath = join(dir, 'helio.yaml')
+
+        const store = new AuditStore({
+          path: dbPath,
+          retention: '90d',
+          includeResponses: true,
+          cleanupIntervalMs: 0,
+        })
+        const ledger = new BudgetLedger({ database: store.database })
+        ledger.commitAll(rows)
+        store.close()
+
+        writeFileSync(
+          configPath,
+          `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
+audit:
+  path: "${dbPath}"
+  retention: "90d"
+  include_responses: true
+`,
+        )
+
+        return { dir, configPath }
+      }
+
+      const BUDGET_CSV_HEADER =
+        'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
+        'audit_record_id,timestamp,timestamp_ms,created_at'
+
+      it('exports a budget ledger as CSV, newest first', async () => {
+        const { dir, configPath } = setupBudgetExport([
+          budgetRow({ timestamp_ms: 1_000, tool_name: 'older' }),
+          budgetRow({ timestamp_ms: 2_000, tool_name: 'newer' }),
+        ])
+
+        try {
+          const { code, stdout, stderr } = await runCli([
+            'export',
+            '-c',
+            configPath,
+            '--budgets',
+            'daily-cap',
+            '-f',
+            'csv',
+          ])
+          expect(code).toBe(0)
+          expect(stderr).toContain('Exported 2 of 2 records')
+
+          const lines = stdout.trim().split('\n')
+          expect(lines[0]).toBe(BUDGET_CSV_HEADER)
+          expect(lines[1]).toContain('newer')
+          expect(lines[2]).toContain('older')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('exports a budget ledger as a bare JSON array', async () => {
+        const { dir, configPath } = setupBudgetExport([
+          budgetRow({ timestamp_ms: 1_000, tool_name: 'older' }),
+          budgetRow({ timestamp_ms: 2_000, tool_name: 'newer' }),
+        ])
+
+        try {
+          const { code, stdout, stderr } = await runCli([
+            'export',
+            '-c',
+            configPath,
+            '--budgets',
+            'daily-cap',
+            '-f',
+            'json',
+          ])
+          expect(code).toBe(0)
+          expect(stderr).toContain('Exported 2 of 2 records')
+
+          const events = JSON.parse(stdout) as Array<Record<string, unknown>>
+          expect(events.map((e) => e['tool_name'])).toEqual(['newer', 'older'])
+          expect(events[0]).not.toHaveProperty('epoch')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('rejects --budgets combined with audit filter flags', async () => {
+        const { dir, configPath } = setupBudgetExport([budgetRow()])
+
+        try {
+          const { code, stderr } = await runCli([
+            'export',
+            '-c',
+            configPath,
+            '--budgets',
+            'daily-cap',
+            '--decision',
+            'deny',
+          ])
+          expect(code).toBe(1)
+          expect(stderr).toContain('--budgets cannot be combined')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('keeps the newest rows when --limit truncates', async () => {
+        const { dir, configPath } = setupBudgetExport([
+          budgetRow({ timestamp_ms: 1_000, tool_name: 'oldest' }),
+          budgetRow({ timestamp_ms: 2_000, tool_name: 'middle' }),
+          budgetRow({ timestamp_ms: 3_000, tool_name: 'newest' }),
+        ])
+
+        try {
+          const { code, stdout, stderr } = await runCli([
+            'export',
+            '-c',
+            configPath,
+            '--budgets',
+            'daily-cap',
+            '-f',
+            'json',
+            '--limit',
+            '2',
+          ])
+          expect(code).toBe(0)
+          expect(stderr).toContain('Exported 2 of 3 records')
+
+          const events = JSON.parse(stdout) as Array<Record<string, unknown>>
+          expect(events.map((e) => e['tool_name'])).toEqual(['newest', 'middle'])
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('exports an empty artifact for an unknown budget name', async () => {
+        const { dir, configPath } = setupBudgetExport([budgetRow()])
+
+        try {
+          const { code, stdout, stderr } = await runCli([
+            'export',
+            '-c',
+            configPath,
+            '--budgets',
+            'no-such-budget',
+            '-f',
+            'csv',
+          ])
+          expect(code).toBe(0)
+          expect(stderr).toContain('Exported 0 of 0 records')
+          expect(stdout.trim()).toBe(BUDGET_CSV_HEADER)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
     })
   })
 })

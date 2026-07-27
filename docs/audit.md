@@ -133,7 +133,7 @@ Two indexes serve the hot paths: `idx_budget_events_replay` on `(budget_name, ep
 
 At startup the engine replays the ledger: duration windows rebuild from the rows inside the window (equivalent to never having restarted), and `window: session` pots rebuild from their lifetime sums if their last activity is within `idle_ttl`. Ledger rows may reference an audit record that is still in the async writer buffer (or was lost to a crash): the ledger is the source of truth for spend, the audit table for calls.
 
-The ledger is also the "where did the money go" surface: the dashboard's Budgets view lists it under each pot (approved overages carry a distinct badge), and [`GET /api/budgets/:name/events`](./sideband-api.md#get-apibudgetsnameevents) serves it newest-first, paginated — history spans config resets, so rows from before a pot-resetting edit stay listed. A CSV export of the ledger is not available yet; use the JSON listing.
+The ledger is also the "where did the money go" surface: the dashboard's Budgets view lists it under each pot (approved overages carry a distinct badge), and [`GET /api/budgets/:name/events`](./sideband-api.md#get-apibudgetsnameevents) serves it newest-first, paginated — history spans config resets, so rows from before a pot-resetting edit stay listed. For a spreadsheet artifact, [`GET /api/budgets/:name/events/export`](./sideband-api.md#get-apibudgetsnameeventsexport) downloads the ledger as CSV or JSON (also one click per pot in the Budgets view), and `helio export --budgets <name>` produces the same export offline from the database file.
 
 ### Local Schema Resets (Pre-1.0)
 
@@ -188,17 +188,18 @@ helio export
 
 **Options:**
 
-| Flag                    | Type   | Default      | Description                                            |
-| ----------------------- | ------ | ------------ | ------------------------------------------------------ |
-| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database). |
-| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                        |
-| `--tool <name>`         | string | —            | Filter by tool name.                                   |
-| `--decision <decision>` | string | —            | Filter by policy decision.                             |
-| `--reason <reason>`     | string | —            | Filter by block reason.                                |
-| `--session <id>`        | string | —            | Filter by session ID.                                  |
-| `--from <iso>`          | string | —            | Start time (ISO 8601).                                 |
-| `--to <iso>`            | string | —            | End time (ISO 8601).                                   |
-| `--limit <n>`           | number | `1000`       | Maximum number of records to export (up to 10,000).    |
+| Flag                    | Type   | Default      | Description                                                |
+| ----------------------- | ------ | ------------ | ---------------------------------------------------------- |
+| `-c, --config <path>`   | string | `helio.yaml` | Path to the config file (used to locate the database).     |
+| `-f, --format <format>` | string | `json`       | Output format: `json` or `csv`.                            |
+| `--budgets <name>`      | string | —            | Export the named budget ledger instead of the audit trail. |
+| `--tool <name>`         | string | —            | Filter by tool name.                                       |
+| `--decision <decision>` | string | —            | Filter by policy decision.                                 |
+| `--reason <reason>`     | string | —            | Filter by block reason.                                    |
+| `--session <id>`        | string | —            | Filter by session ID.                                      |
+| `--from <iso>`          | string | —            | Start time (ISO 8601).                                     |
+| `--to <iso>`            | string | —            | End time (ISO 8601).                                       |
+| `--limit <n>`           | number | `1000`       | Maximum number of records to export (up to 10,000).        |
 
 **Examples:**
 
@@ -214,9 +215,14 @@ helio export --tool create_payment --from "2026-04-09T11:00:00Z" --to "2026-04-0
 
 # Export to a file
 helio export -f csv > audit-report.csv
+
+# Export one budget's spend ledger as CSV
+helio export --budgets daily-cap -f csv > daily-cap.csv
 ```
 
 Audit data is written to stdout; status messages go to stderr. This means you can pipe or redirect the output without capturing log messages.
+
+`--budgets <name>` switches the export target to the named budget's spend ledger, read from the same database file — it works offline, with the proxy stopped and the dashboard disabled. Ledger rows export newest-first with the same twelve columns as the [ledger export endpoint](./sideband-api.md#get-apibudgetsnameeventsexport); `--format` and `--limit` apply unchanged, an unknown name exports an empty artifact, and combining `--budgets` with the audit filter flags (`--tool`, `--decision`, `--reason`, `--session`, `--from`, `--to`) is an error.
 
 ## Dashboard API Export
 

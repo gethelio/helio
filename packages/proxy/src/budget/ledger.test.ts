@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import type { Database as DatabaseType } from 'better-sqlite3'
 import { BudgetLedger } from './ledger.js'
 import type { BudgetLedgerRow, BudgetMetaRow } from './engine.js'
-import { AuditStore } from '../audit/index.js'
+import { AuditStore, EXPORT_MAX_RECORDS } from '../audit/index.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -507,6 +507,113 @@ describe('BudgetLedger.listEvents', () => {
     const page = ledger.listEvents('no-such-budget', {})
     expect(page.events).toEqual([])
     expect(page.total).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Bulk export (issue #155)
+// ---------------------------------------------------------------------------
+
+describe('BudgetLedger.listEventsForExport', () => {
+  it('exports newest first, same-ms ties by insert order', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([
+      ledgerRow({ timestamp_ms: 1_000, tool_name: 'oldest' }),
+      ledgerRow({ timestamp_ms: 3_000, tool_name: 'tie-first' }),
+      ledgerRow({ timestamp_ms: 3_000, tool_name: 'tie-second' }),
+      ledgerRow({ timestamp_ms: 2_000, tool_name: 'middle' }),
+    ])
+
+    const { events, total } = ledger.listEventsForExport('daily-cap')
+    expect(total).toBe(4)
+    expect(events.map((e) => e.tool_name)).toEqual(['tie-second', 'tie-first', 'middle', 'oldest'])
+  })
+
+  it('defaults the cap to EXPORT_MAX_RECORDS, above the 1000-row page clamp', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(
+      Array.from({ length: 1_005 }, (_, i) => ledgerRow({ timestamp_ms: 10_000 + i })),
+    )
+
+    const { events, total } = ledger.listEventsForExport('daily-cap')
+    expect(total).toBe(1_005)
+    expect(events).toHaveLength(1_005)
+  })
+
+  it('clamps an oversized limit to EXPORT_MAX_RECORDS, keeping the newest rows', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(
+      Array.from({ length: EXPORT_MAX_RECORDS + 5 }, (_, i) =>
+        ledgerRow({ timestamp_ms: 10_000 + i }),
+      ),
+    )
+
+    const { events, total } = ledger.listEventsForExport('daily-cap', 20_000)
+    expect(total).toBe(EXPORT_MAX_RECORDS + 5)
+    expect(events).toHaveLength(EXPORT_MAX_RECORDS)
+    expect(events[0]?.timestamp_ms).toBe(10_000 + EXPORT_MAX_RECORDS + 4)
+    expect(events[events.length - 1]?.timestamp_ms).toBe(10_005)
+  })
+
+  it('floors nonsense limits at one row instead of throwing', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow({ timestamp_ms: 1_000 }), ledgerRow({ timestamp_ms: 2_000 })])
+
+    const page = ledger.listEventsForExport('daily-cap', -3)
+    expect(page.events).toHaveLength(1)
+    expect(page.events[0]?.timestamp_ms).toBe(2_000)
+    expect(page.total).toBe(2)
+  })
+
+  it('keeps the newest rows when the limit truncates, with the full total', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll(Array.from({ length: 5 }, (_, i) => ledgerRow({ timestamp_ms: 1_000 + i })))
+
+    const { events, total } = ledger.listEventsForExport('daily-cap', 2)
+    expect(total).toBe(5)
+    expect(events.map((e) => e.timestamp_ms)).toEqual([1_004, 1_003])
+  })
+
+  it('exports history across epochs — a config reset does not hide old spend', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([
+      ledgerRow({ generation: 1, timestamp_ms: 1_000 }),
+      ledgerRow({ generation: 2, timestamp_ms: 2_000 }),
+    ])
+
+    const { events, total } = ledger.listEventsForExport('daily-cap')
+    expect(total).toBe(2)
+    expect(events.map((e) => e.timestamp_ms)).toEqual([2_000, 1_000])
+  })
+
+  it('returns an empty page for an unknown budget name', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow()])
+
+    const page = ledger.listEventsForExport('no-such-budget')
+    expect(page.events).toEqual([])
+    expect(page.total).toBe(0)
+  })
+
+  it('exports exactly the wire columns — no epoch, no generation', () => {
+    const { ledger } = createLedger()
+    ledger.commitAll([ledgerRow({ generation: 7 })])
+
+    const { events } = ledger.listEventsForExport('daily-cap')
+    expect(Object.keys(events[0] ?? {}).sort()).toEqual([
+      'amount',
+      'audit_record_id',
+      'bucket_key',
+      'budget_name',
+      'created_at',
+      'currency',
+      'id',
+      'kind',
+      'origin',
+      'timestamp',
+      'timestamp_ms',
+      'tool_name',
+    ])
   })
 })
 

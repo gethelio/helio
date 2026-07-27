@@ -25,6 +25,7 @@ import { DashboardSessionStore } from './session.js'
 import type { AdapterLivenessEntry } from '../sideband/governance-service.js'
 import type { BudgetState } from '../budget/engine.js'
 import type { BudgetEventsPage } from '../budget/ledger.js'
+import { budgetEventsToCsv } from '../budget/csv.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,15 +47,18 @@ export interface DashboardAppDeps {
    */
   readonly adapterLiveness?: { listAdapters(): AdapterLivenessEntry[] }
   /**
-   * Budget read surface for `GET /api/budgets` and
-   * `GET /api/budgets/:name/events` (issue #14) — narrow views of the
-   * BudgetEngine (live pot states) and BudgetLedger (spend history).
-   * Optional on the adapterLiveness pattern: absent (direct embedders),
-   * both endpoints serve empty lists with 200.
+   * Budget read surface for `GET /api/budgets`,
+   * `GET /api/budgets/:name/events`, and
+   * `GET /api/budgets/:name/events/export` (issues #14, #155) — narrow
+   * views of the BudgetEngine (live pot states) and BudgetLedger (spend
+   * history). Optional on the adapterLiveness pattern: absent (direct
+   * embedders), the listings serve empty lists and the export serves an
+   * empty artifact, all with 200.
    */
   readonly budgets?: {
     listStates(): BudgetState[]
     listEvents(name: string, page: { limit: number; offset: number }): BudgetEventsPage
+    listEventsForExport(name: string, limit: number): BudgetEventsPage
   }
 }
 
@@ -150,6 +154,11 @@ const auditQuerySchema = z.object({
 const budgetEventsQuerySchema = z.object({
   limit: clampedQueryInt(50, 1, LIST_MAX_PAGE_SIZE),
   offset: clampedQueryInt(0, 0, Number.MAX_SAFE_INTEGER),
+})
+
+const budgetEventsExportQuerySchema = z.object({
+  format: z.preprocess((value) => (value === 'csv' ? 'csv' : 'json'), z.enum(['json', 'csv'])),
+  limit: clampedQueryInt(EXPORT_MAX_RECORDS, 1, EXPORT_MAX_RECORDS),
 })
 
 const analyticsQuerySchema = z.object({
@@ -601,6 +610,39 @@ export function createDashboardAppWithLifecycle(
       total: page.total,
       limit: query.limit,
       offset: query.offset,
+    })
+  })
+
+  // Bulk ledger export (issue #155) — the audit export's contract
+  // (attachment download, bare body, EXPORT_MAX_RECORDS cap) with the
+  // listing's own semantics: newest first, history across config resets,
+  // unknown names and an absent dep export empty. Newest-first is the
+  // deliberate opposite of the audit export: with no time filters, a capped
+  // export must keep the most recent spend reachable. The filename embeds
+  // the budget name stripped to the config-name charset so the arbitrary
+  // route param can never reach the header raw.
+  app.get('/api/budgets/:name/events/export', (c) => {
+    const query = budgetEventsExportQuerySchema.parse(c.req.query())
+    const name = c.req.param('name')
+    const page = budgets?.listEventsForExport(name, query.limit) ?? { events: [], total: 0 }
+
+    const safeName = name.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+    const filename = safeName ? `helio-budget-${safeName}-events` : 'helio-budget-events'
+
+    if (query.format === 'csv') {
+      return new Response(budgetEventsToCsv(page.events), {
+        headers: {
+          'content-type': 'text/csv; charset=utf-8',
+          'content-disposition': `attachment; filename="${filename}.csv"`,
+        },
+      })
+    }
+
+    return new Response(JSON.stringify(page.events, null, 2), {
+      headers: {
+        'content-type': 'application/json',
+        'content-disposition': `attachment; filename="${filename}.json"`,
+      },
     })
   })
 

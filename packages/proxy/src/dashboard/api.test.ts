@@ -856,6 +856,7 @@ function budgetFixture(configs: Parameters<typeof compileBudgets>[0]) {
     listStates: () => engine.listStates(),
     listEvents: (name: string, page: { limit: number; offset: number }) =>
       ledger.listEvents(name, page),
+    listEventsForExport: (name: string, limit: number) => ledger.listEventsForExport(name, limit),
   }
   cleanup.push(engine, auditStore)
   return { engine, ledger, budgets }
@@ -1050,6 +1051,164 @@ describe('GET /api/budgets/:name/events', () => {
     const { get } = setup({ apiSecret: 'test-secret' })
     const res = await get('/api/budgets/daily-cap/events')
     expect(res.status).toBe(401)
+  })
+})
+
+describe('GET /api/budgets/:name/events/export', () => {
+  function seedExportEvents(ledger: BudgetLedger, count: number) {
+    ledger.commitAll(
+      Array.from({ length: count }, (_, i) => ({
+        budget_name: 'daily-cap',
+        bucket_key: 'budget:daily-cap:global',
+        kind: 'spend' as const,
+        amount: 5,
+        currency: 'USD',
+        tool_name: `tool-${String(i)}`,
+        origin: 'mcp',
+        audit_record_id: `audit-${String(i)}`,
+        timestamp: new Date(1_000_000 + i).toISOString(),
+        timestamp_ms: 1_000_000 + i,
+        generation: 1,
+      })),
+    )
+  }
+
+  it('exports as JSON by default: a bare newest-first array as an attachment', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedExportEvents(ledger, 3)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events/export')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
+    expect(res.headers.get('content-disposition')).toBe(
+      'attachment; filename="helio-budget-daily-cap-events.json"',
+    )
+    const body = (await res.json()) as Array<Record<string, unknown>>
+    expect(Array.isArray(body)).toBe(true)
+    expect(body.map((e) => e['tool_name'])).toEqual(['tool-2', 'tool-1', 'tool-0'])
+    expect(body[0]).not.toHaveProperty('epoch')
+  })
+
+  it('exports as CSV when format=csv, with the wire header row', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedExportEvents(ledger, 2)
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events/export?format=csv')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('text/csv')
+    expect(res.headers.get('content-disposition')).toBe(
+      'attachment; filename="helio-budget-daily-cap-events.csv"',
+    )
+    const lines = (await res.text()).split('\n')
+    expect(lines[0]).toBe(
+      'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
+        'audit_record_id,timestamp,timestamp_ms,created_at',
+    )
+    // Newest first in the CSV rows too, not only in the JSON body.
+    expect(lines[1]).toContain('tool-1')
+    expect(lines[2]).toContain('tool-0')
+    expect(lines).toHaveLength(3)
+  })
+
+  it('exports history across epochs, newest first', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    ledger.commitAll([
+      {
+        budget_name: 'daily-cap',
+        bucket_key: 'budget:daily-cap:global',
+        kind: 'spend' as const,
+        amount: 5,
+        currency: 'USD',
+        tool_name: 'old-epoch',
+        origin: 'mcp',
+        audit_record_id: 'audit-old',
+        timestamp: new Date(1_000).toISOString(),
+        timestamp_ms: 1_000,
+        generation: 1,
+      },
+      {
+        budget_name: 'daily-cap',
+        bucket_key: 'budget:daily-cap:global',
+        kind: 'spend' as const,
+        amount: 5,
+        currency: 'USD',
+        tool_name: 'new-epoch',
+        origin: 'mcp',
+        audit_record_id: 'audit-new',
+        timestamp: new Date(2_000).toISOString(),
+        timestamp_ms: 2_000,
+        generation: 2,
+      },
+    ])
+
+    const { get } = setup({ budgets })
+    const res = await get('/api/budgets/daily-cap/events/export')
+    const body = (await res.json()) as Array<Record<string, unknown>>
+    expect(body.map((e) => e['tool_name'])).toEqual(['new-epoch', 'old-epoch'])
+  })
+
+  it('exports above the listing page cap and keeps the newest rows under limit', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedExportEvents(ledger, 1_200)
+
+    const { get } = setup({ budgets })
+    const full = await get('/api/budgets/daily-cap/events/export')
+    const fullBody = (await full.json()) as Array<Record<string, unknown>>
+    expect(fullBody).toHaveLength(1_200)
+
+    const partial = await get('/api/budgets/daily-cap/events/export?limit=1100')
+    const partialBody = (await partial.json()) as Array<Record<string, unknown>>
+    expect(partialBody).toHaveLength(1_100)
+    expect(partialBody[0]?.['tool_name']).toBe('tool-1199')
+    expect(partialBody[partialBody.length - 1]?.['tool_name']).toBe('tool-100')
+  })
+
+  it('exports an empty artifact for an unknown name, sanitizing the filename', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedExportEvents(ledger, 1)
+
+    const { get } = setup({ budgets })
+    const hostile = await get('/api/budgets/bad%22name%0D%0Aevil/events/export')
+    expect(hostile.status).toBe(200)
+    expect(hostile.headers.get('content-disposition')).toBe(
+      'attachment; filename="helio-budget-badnameevil-events.json"',
+    )
+    expect(await hostile.json()).toEqual([])
+
+    const empty = await get('/api/budgets/%2A%2A/events/export')
+    expect(empty.headers.get('content-disposition')).toBe(
+      'attachment; filename="helio-budget-events.json"',
+    )
+  })
+
+  it('serves an empty export when the budgets dep is absent', async () => {
+    const { get } = setup()
+    const json = await get('/api/budgets/daily-cap/events/export')
+    expect(json.status).toBe(200)
+    expect(await json.json()).toEqual([])
+
+    const csv = await get('/api/budgets/daily-cap/events/export?format=csv')
+    expect(csv.status).toBe(200)
+    expect(await csv.text()).toBe(
+      'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
+        'audit_record_id,timestamp,timestamp_ms,created_at',
+    )
+  })
+
+  it('requires auth when a secret is set, like the audit export', async () => {
+    const { ledger, budgets } = budgetFixture([stripeBudgetConfig])
+    seedExportEvents(ledger, 1)
+
+    const { get } = setup({ budgets, apiSecret: 'test-secret' })
+    const denied = await get('/api/budgets/daily-cap/events/export')
+    expect(denied.status).toBe(401)
+
+    const allowed = await get('/api/budgets/daily-cap/events/export', {
+      authorization: 'Bearer test-secret',
+    })
+    expect(allowed.status).toBe(200)
   })
 })
 

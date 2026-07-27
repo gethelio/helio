@@ -24,7 +24,7 @@ import {
 } from './approval/index.js'
 import { RateLimiter } from './policy/index.js'
 import { SpendLimiter } from './policy/index.js'
-import { BudgetEngine, BudgetLedger, compileBudgets } from './budget/index.js'
+import { BudgetEngine, BudgetLedger, budgetEventsToCsv, compileBudgets } from './budget/index.js'
 import { parseDuration } from './config/schema.js'
 import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
 import type { AuditRecord } from './audit/index.js'
@@ -581,6 +581,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         budgets: {
           listStates: () => budgetEngine.listStates(),
           listEvents: (name, page) => budgetLedger.listEvents(name, page),
+          listEventsForExport: (name, limit) => budgetLedger.listEventsForExport(name, limit),
         },
       },
       {
@@ -819,6 +820,7 @@ async function validateCommand(configPath: string): Promise<void> {
 interface ExportOptions {
   config: string
   format: string
+  budgets?: string
   tool?: string
   decision?: string
   reason?: string
@@ -840,6 +842,28 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
   }
   const limit = Math.min(parsedLimit, EXPORT_MAX_RECORDS)
 
+  // The audit filter flags have no meaning against the budget ledger; a
+  // silently ignored filter would make a truncated-looking export lie.
+  if (opts.budgets !== undefined) {
+    const conflicting = (
+      [
+        ['--tool', opts.tool],
+        ['--decision', opts.decision],
+        ['--reason', opts.reason],
+        ['--session', opts.session],
+        ['--from', opts.from],
+        ['--to', opts.to],
+      ] as const
+    ).filter(([, value]) => value !== undefined)
+    if (conflicting.length > 0) {
+      console.error(
+        'Error: --budgets cannot be combined with audit filters ' +
+          `(${conflicting.map(([flag]) => flag).join(', ')})`,
+      )
+      process.exit(1)
+    }
+  }
+
   let config
   try {
     config = await loadConfig(opts.config)
@@ -860,6 +884,22 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
   })
 
   try {
+    // Budget ledger export (issue #155): same database file, the ledger's
+    // own tables. Newest first — the ledger export's order everywhere.
+    if (opts.budgets !== undefined) {
+      const ledger = new BudgetLedger({ database: store.database })
+      const page = ledger.listEventsForExport(opts.budgets, limit)
+
+      if (opts.format === 'csv') {
+        console.log(budgetEventsToCsv(page.events))
+      } else {
+        console.log(JSON.stringify(page.events, null, 2))
+      }
+
+      console.error(`Exported ${String(page.events.length)} of ${String(page.total)} records`)
+      return
+    }
+
     const result = store.listForExport(
       {
         tool_name: opts.tool,
@@ -998,9 +1038,10 @@ program
 
 program
   .command('export')
-  .description('Export audit records to JSON or CSV')
+  .description('Export audit records or a budget ledger to JSON or CSV')
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .option('-f, --format <format>', 'Output format: json or csv', 'json')
+  .option('--budgets <name>', 'Export the named budget ledger instead of the audit trail')
   .option('--tool <name>', 'Filter by tool name')
   .option('--decision <decision>', 'Filter by policy decision')
   .option('--reason <reason>', 'Filter by block reason')
