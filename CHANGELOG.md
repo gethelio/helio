@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-03
+
 ### Security
 
 - **The MCP transports now match the `Content-Type` essence rather than
@@ -720,7 +722,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/gethelio/helio/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/gethelio/helio/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/gethelio/helio/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/gethelio/helio/compare/v0.8.0...v0.9.0
