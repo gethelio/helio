@@ -51,6 +51,12 @@ The split exists because an agent on the main MCP port must not be able to self-
 
 The SDK sideband port (default `127.0.0.1:3200`, when `sdk.enabled: true`) is a third internal API for evidence submission from the Python SDK. See `docs/configuration.md` for details.
 
+### Browser-originated traffic on the agent edge
+
+Because the agent edge is bound to loopback by default, the browser on the same machine is part of its threat model: a page an operator visits can address `localhost` even though it cannot read what comes back. Helio requires `Content-Type: application/json` on `/mcp` and `/sse`, and compares the media type essence rather than searching the header for a substring. That distinction is the control: `text/plain`, `multipart/form-data`, and `application/x-www-form-urlencoded` are CORS-safelisted and cross a browser without a preflight, while `application/json` always triggers one that Helio does not answer. Loosening that check to a substring or prefix match re-opens the endpoint to any web page, so treat it as a security boundary rather than protocol hygiene.
+
+Validating the `Origin` header on these transports is tracked separately in issue #213, along with the residual gap that stream establishment on `/sse` carries no `Origin` from any browser.
+
 ## Scope
 
 The following are in scope for security reports:

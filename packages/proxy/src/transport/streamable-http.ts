@@ -3,6 +3,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { PARSE_ERROR, INVALID_REQUEST, makeJsonRpcError } from '../mcp/types.js'
 import type { McpForwarder, McpRequest } from '../mcp/types.js'
 import { parseJsonRpcRequest } from '../mcp/validation.js'
+import { isJsonContentType } from './content-type.js'
 import { buildForwardHeaders } from './forward-headers.js'
 import { normalizeUpstreamOutcome } from './response-normalizer.js'
 
@@ -32,8 +33,7 @@ export function createStreamableHttpRoute(
 
   app.post('/', async (c) => {
     // Require JSON content type
-    const contentType = c.req.header('content-type') ?? ''
-    if (!contentType.includes('application/json')) {
+    if (!isJsonContentType(c.req.header('content-type'))) {
       return c.json(
         makeJsonRpcError(null, INVALID_REQUEST, 'Content-Type must be application/json'),
         415,

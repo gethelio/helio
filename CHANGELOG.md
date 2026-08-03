@@ -19,6 +19,26 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Security
+
+- **The MCP transports now match the `Content-Type` essence rather than
+  searching the header for a substring (GHSA-qm2p-4gh2-q6pm).** `/mcp` and
+  `/sse` required `application/json` by testing whether the raw header
+  contained that string, so a value such as
+  `text/plain;x=application/json` satisfied the check. Media types in that
+  family are CORS-safelisted, meaning a browser sends them cross-site with
+  no preflight and no cooperation from the proxy, so a web page an operator
+  visited could reach the MCP endpoint and invoke any tool their policy
+  permitted. Policy evaluation was never bypassed: deny rules, budgets, and
+  approvals applied to these calls exactly as to any other, and the
+  responses were not readable cross-origin. Both transports now compare the
+  media type essence (the part before `;`, case insensitively, per RFC
+  9110), which also makes an uppercase `APPLICATION/JSON` acceptable as the
+  RFC requires. Clients sending a correct `Content-Type` are unaffected;
+  any client relying on a non-JSON media type now receives the 415 it
+  should always have received. All releases through 0.11.0 are affected;
+  upgrading is recommended.
+
 ## [0.11.0] - 2026-07-27
 
 ### Added

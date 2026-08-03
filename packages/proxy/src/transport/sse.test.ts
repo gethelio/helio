@@ -254,6 +254,52 @@ describe('SSE transport', () => {
     expect(res.status).toBe(415)
   })
 
+  // See the matching case in streamable-http.test.ts: a CORS-safelisted
+  // Content-Type reaches the endpoint from a browser without a preflight, so
+  // the JSON requirement has to compare the essence rather than search for a
+  // substring the caller can hide in a parameter.
+  it.each([
+    'text/plain;x=application/json',
+    'text/plain; charset=application/json',
+    'multipart/form-data; boundary=application/json',
+    'application/x-www-form-urlencoded;v=application/json',
+    'text/plain;charset=utf-8',
+  ])('returns 415 for CORS-safelisted Content-Type %s', async (contentType) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const res = await app.request(`/sse?sessionId=${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      headers: { 'Content-Type': contentType },
+    })
+
+    expect(res.status).toBe(415)
+    expect(forwarder.calls).toHaveLength(0)
+  })
+
+  it('accepts Content-Type with a charset parameter', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const res = await app.request(`/sse?sessionId=${sessionId}`, {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    })
+
+    expect(res.status).toBe(202)
+    expect(forwarder.calls).toHaveLength(1)
+  })
+
   it('returns -32700 for malformed JSON', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)

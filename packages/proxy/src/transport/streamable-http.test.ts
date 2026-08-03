@@ -223,6 +223,65 @@ describe('streamable-http transport', () => {
     expect(forwarder.calls).toHaveLength(0)
   })
 
+  // A CORS-safelisted Content-Type needs no preflight, so a browser can send
+  // one cross-site without the target's cooperation. Matching the header as a
+  // substring let such a request satisfy the JSON requirement by smuggling the
+  // token into a parameter, putting the MCP endpoint within reach of any web
+  // page. The essence (the part before ';') is what must be compared.
+  it.each([
+    'text/plain;x=application/json',
+    'text/plain; charset=application/json',
+    'multipart/form-data; boundary=application/json',
+    'application/x-www-form-urlencoded;v=application/json',
+    // The ordinary form of a safelisted type, which carries no smuggled token.
+    // Guards against a future rewrite that admits the essence itself.
+    'text/plain;charset=utf-8',
+  ])('returns 415 for CORS-safelisted Content-Type %s', async (contentType) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await app.request('/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      headers: { 'Content-Type': contentType },
+    })
+
+    expect(res.status).toBe(415)
+    expect(forwarder.calls).toHaveLength(0)
+  })
+
+  it.each([
+    'application/json',
+    'application/json; charset=utf-8',
+    'APPLICATION/JSON',
+    '  application/json  ',
+  ])('accepts Content-Type %s', async (contentType) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await app.request('/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      headers: { 'Content-Type': contentType },
+    })
+
+    expect(res.status).toBe(200)
+    expect(forwarder.calls).toHaveLength(1)
+  })
+
+  it('returns 415 when Content-Type is absent', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await app.request('/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    })
+
+    expect(res.status).toBe(415)
+    expect(forwarder.calls).toHaveLength(0)
+  })
+
   it('returns -32700 parse error for malformed JSON', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)

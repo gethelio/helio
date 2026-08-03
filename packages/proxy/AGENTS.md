@@ -26,6 +26,7 @@ src/
 │   ├── streamable-http.ts   → Streamable HTTP MCP transport (primary)
 │   ├── sse.ts               → SSE MCP transport (legacy compat)
 │   ├── stdio-wrapper.ts     → Stdio transport for local MCP servers
+│   ├── content-type.ts      → Media type essence match for the inbound JSON requirement (substring matching is a cross-site hole)
 │   ├── forward-headers.ts   → Allowlist for headers crossing the proxy to upstream (authorization + `x-*` allowlist)
 │   └── response-normalizer.ts → Normalize an upstream forwarding outcome (success/error) into a JSON-RPC response
 ├── upstream/
