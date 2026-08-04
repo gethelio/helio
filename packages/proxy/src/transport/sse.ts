@@ -6,6 +6,7 @@ import type { McpForwarder, McpRequest } from '../mcp/types.js'
 import { parseJsonRpcRequest } from '../mcp/validation.js'
 import { isJsonContentType } from './content-type.js'
 import { buildForwardHeaders } from './forward-headers.js'
+import { createOriginGuard } from './origin-guard.js'
 import { normalizeUpstreamOutcome } from './response-normalizer.js'
 
 const encoder = new TextEncoder()
@@ -27,6 +28,8 @@ interface SseSession {
 export interface SseRouteOptions {
   /** Caller `x-*` headers that may be forwarded upstream. */
   readonly forwardHeadersAllowlist?: readonly string[]
+  /** Origins allowed to send an `Origin` header (issue #213). Default: none. */
+  readonly allowedOrigins?: readonly string[]
 }
 
 const ssePostQuerySchema = z.object({
@@ -48,6 +51,10 @@ export function createSseRoute(forwarder: McpForwarder, options: SseRouteOptions
   const sessions = new Map<string, SseSession>()
   const app = new Hono()
   const forwardHeaderAllowlist = options.forwardHeadersAllowlist ?? []
+
+  // Hono runs middleware in registration order — the guard must stay above
+  // the handlers or it never runs for matched requests.
+  app.use('*', createOriginGuard(options.allowedOrigins ?? []))
 
   const writeSessionEvent = (sessionId: string, eventPayload: string): void => {
     const session = sessions.get(sessionId)

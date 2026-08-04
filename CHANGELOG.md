@@ -19,6 +19,34 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Security
+
+- **The MCP transports now validate the `Origin` header (#213).** Any
+  request to `/mcp` or `/sse` carrying an `Origin` not listed in the new
+  `listen.allowed_origins` setting is refused with `403` and a JSON-RPC
+  error before it reaches the transport. The default is an empty list,
+  which refuses every `Origin`: MCP clients are non-browser processes
+  and never send one, so no shipped client, adapter, or workflow is
+  affected. The Streamable HTTP specification makes this validation a
+  MUST, and it closes the DNS-rebinding path on both transports' message
+  endpoints — a rebound page keeps the attacker's own hostname in its
+  origin while that name resolves to the proxy, so the browser sees a
+  same-origin request, but its POSTs carry an `Origin` regardless and
+  its value still names the attacker. Stream establishment on `GET /sse`
+  stays uncovered where the browser sends no `Origin` at all, which is
+  the same-origin and no-cors cases; a cross-origin `EventSource` or
+  cors-mode `fetch` does send one and is refused.
+  This is defense-in-depth alongside the `Content-Type` essence check
+  shipped in 0.11.1. Rejections are logged server-side, deduplicated and
+  capped so a rotating attacker-chosen origin cannot flood the log.
+  Allowlist entries must be exact serialized `http(s)` origins
+  (validated at startup, with typos like a trailing slash rejected and
+  the intended form suggested); the list is not CORS support — Helio
+  emits no CORS response headers — and exists for deployments where a
+  fronting proxy or embedding host injects an `Origin` the operator
+  needs to name. Changing it requires a restart, like the rest of
+  `listen`.
+
 ## [0.11.1] - 2026-08-03
 
 ### Security

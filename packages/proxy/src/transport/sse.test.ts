@@ -488,4 +488,57 @@ describe('SSE transport — stale session sweeper', () => {
       expect(res.status).toBe(202)
     }
   })
+
+  describe('origin validation (issue #213)', () => {
+    it('rejects a hostile Origin on GET without opening a stream or minting a session', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await app.request('/sse', {
+        headers: { origin: 'https://evil.example' },
+      })
+
+      expect(res.status).toBe(403)
+      expect(res.headers.get('content-type')).not.toContain('text/event-stream')
+      expect(await res.text()).not.toContain('sessionId')
+      errorSpy.mockRestore()
+    })
+
+    it('rejects a hostile Origin on POST to a live session and never calls the forwarder', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const sseRes = await app.request('/sse')
+      const events = await readSseEvents(sseRes, 1)
+      const sessionId = extractSessionId(events[0]?.data ?? '')
+      expect(sessionId).not.toBe('')
+
+      const res = await postSse(
+        app,
+        sessionId,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { origin: 'https://evil.example' },
+      )
+
+      expect(res.status).toBe(403)
+      expect(forwarder.calls).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
+
+    it('establishes a stream when the Origin is allowlisted', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder, { allowedOrigins: ['http://localhost:5173'] })
+
+      const res = await app.request('/sse', {
+        headers: { origin: 'http://localhost:5173' },
+      })
+
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-type')).toContain('text/event-stream')
+      const events = await readSseEvents(res, 1)
+      expect(events[0]?.event).toBe('endpoint')
+    })
+  })
 })

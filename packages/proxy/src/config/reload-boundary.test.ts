@@ -124,6 +124,16 @@ describe('diffReloadBoundary', () => {
     const diff = diffReloadBoundary(previous, next)
     expect(diff.restartRequiredPaths).toEqual(['listen', 'audit'])
   })
+
+  it('requires restart when listen.allowed_origins changes (issue #213)', () => {
+    const previous = minimalConfig()
+    const next = minimalConfig({
+      listen: { allowed_origins: ['http://localhost:5173'] },
+    })
+
+    const diff = diffReloadBoundary(previous, next)
+    expect(diff.restartRequiredPaths).toEqual(['listen'])
+  })
 })
 
 // ---------------------------------------------------------------------------

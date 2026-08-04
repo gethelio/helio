@@ -326,6 +326,117 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // listen.allowed_origins (issue #213)
+  // -------------------------------------------------------------------------
+
+  describe('listen.allowed_origins', () => {
+    it('defaults to an empty list', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.listen.allowed_origins).toEqual([])
+    })
+
+    it('accepts a list of serialized http(s) origins', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          listen: {
+            allowed_origins: ['http://localhost:5173', 'http://[::1]:3000', 'https://app.example'],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.listen.allowed_origins).toEqual([
+        'http://localhost:5173',
+        'http://[::1]:3000',
+        'https://app.example',
+      ])
+    })
+
+    it('rejects a non-array value', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: 'http://localhost:5173' } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects an array containing a non-string', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: [5173] } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('still rejects an unknown key under listen', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origin: ['http://localhost:5173'] } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it.each([
+      ['http://localhost:5173/', 'http://localhost:5173'],
+      ['http://LocalHost:5173', 'http://localhost:5173'],
+      ['http://localhost:80', 'http://localhost'],
+      ['https://app.example:443', 'https://app.example'],
+    ])('rejects "%s" naming the normalized form "%s"', (entry, normalized) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: [entry] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const issue = result.error.issues[0]
+      expect(issue?.path).toEqual(['listen', 'allowed_origins', 0])
+      expect(issue?.message).toContain(normalized)
+    })
+
+    it.each(['ws://app.example', 'wss://app.example', 'ftp://files.example'])(
+      'rejects the non-http(s) scheme "%s"',
+      (entry) => {
+        // These have tuple origins, so `new URL(entry).origin === entry` alone
+        // accepts them — yet no browser ever sends such an Origin, making the
+        // entry silently unmatchable.
+        const result = helioConfigSchema.safeParse(
+          minimalConfig({ listen: { allowed_origins: [entry] } }),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        expect(result.error.issues[0]?.path).toEqual(['listen', 'allowed_origins', 0])
+        expect(result.error.issues[0]?.message).toContain('http(s)')
+      },
+    )
+
+    it('rejects "file://" without allowlisting the opaque origin', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: ['file://'] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['listen', 'allowed_origins', 0])
+      expect(result.error.issues[0]?.message).toContain('http(s)')
+    })
+
+    it('rejects the literal "null"', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: ['null'] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['listen', 'allowed_origins', 0])
+    })
+
+    it('rejects the literal "*"', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ listen: { allowed_origins: ['*'] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['listen', 'allowed_origins', 0])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Dashboard — SSE heartbeat interval
   // -------------------------------------------------------------------------
 

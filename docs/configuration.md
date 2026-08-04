@@ -35,6 +35,7 @@ upstream:
 listen:
   port: 3000 # Proxy listening port
   host: '127.0.0.1' # Bind address
+  allowed_origins: [] # Origins allowed on /mcp and /sse (default: refuse every Origin)
 
 environment: 'production' # Label for policy matching
 
@@ -182,10 +183,40 @@ While cache data is unknown, policy annotation matching still uses MCP defaults 
 
 Where the proxy listens for incoming MCP requests.
 
-| Field  | Type    | Required | Default     | Description             |
-| ------ | ------- | -------- | ----------- | ----------------------- |
-| `port` | integer | No       | `3000`      | Port number (1–65535).  |
-| `host` | string  | No       | `127.0.0.1` | Hostname or IP to bind. |
+| Field             | Type     | Required | Default     | Description                                                      |
+| ----------------- | -------- | -------- | ----------- | ---------------------------------------------------------------- |
+| `port`            | integer  | No       | `3000`      | Port number (1–65535).                                           |
+| `host`            | string   | No       | `127.0.0.1` | Hostname or IP to bind.                                          |
+| `allowed_origins` | string[] | No       | `[]`        | Origins allowed to send an `Origin` header to `/mcp` and `/sse`. |
+
+Any request to `/mcp` or `/sse` that carries an `Origin` header not listed in
+`allowed_origins` is refused with `403` before it reaches the transport. The
+default (an empty list) refuses every `Origin`: MCP clients are non-browser
+processes and never send one, so this blocks browser-originated traffic
+without affecting any normal client. Rejections are logged server-side.
+
+This also covers DNS-rebinding pages on the message endpoints (`POST /mcp`
+and `POST /sse?sessionId=…`). A rebound page keeps the attacker's own
+hostname in its origin while that hostname resolves to the proxy, so the
+browser treats the request as same-origin. A `POST` carries an `Origin`
+regardless, and its value is still the attacker's hostname, so the request
+is refused. Stream establishment on
+`GET /sse` is the residual: a browser omits `Origin` on a same-origin `GET`
+(including from a rebound page) and on a no-cors `GET` such as an `<img>`
+load, so neither can be gated here. A cross-origin `EventSource` or cors-mode
+`fetch` does send `Origin` and is refused. Closing the Origin-less path needs
+`Host` validation, tracked in issue #231.
+
+Entries are matched exactly and must be serialized `http(s)` origins in
+`URL.origin` form: lowercase host, no trailing slash, no path, and no default
+port (`http://localhost:5173`, not `http://localhost:5173/`). Wildcards, the
+literal `null`, and non-`http(s)` schemes (such as browser-extension origins)
+are rejected at validation time. This is **not** CORS support — Helio emits no
+CORS response headers, so a browser still cannot read responses or complete a
+preflight even for an allowlisted origin. The setting exists for deployments
+where something in front of Helio (a reverse proxy, service mesh, or embedding
+host) injects an `Origin` the operator needs to name. Like the rest of
+`listen`, changing it requires a restart; it is not applied by hot reload.
 
 ### environment
 

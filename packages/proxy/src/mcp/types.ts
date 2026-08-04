@@ -100,3 +100,17 @@ export function makeJsonRpcError(
     error: { code, message },
   }
 }
+
+/**
+ * Build a JSON-RPC 2.0 error response with the `id` member omitted entirely.
+ *
+ * The MCP 2026-07-28 error-response type declares `id` as optional and does
+ * not permit `null`, so rejections issued before any request is parsed (no
+ * id exists yet) must leave the member out rather than emit `id: null`.
+ */
+export function makeJsonRpcErrorWithoutId(code: number, message: string): JsonRpcResponse {
+  return {
+    jsonrpc: '2.0',
+    error: { code, message },
+  }
+}

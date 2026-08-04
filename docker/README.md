@@ -112,7 +112,11 @@ is denied instead.)
 No agent handy? You can also point the official
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector)
 at <http://localhost:3000/mcp> (run `npx @modelcontextprotocol/inspector`,
-transport: Streamable HTTP) and call the tools from its UI.
+transport: Streamable HTTP) and call the tools from its UI. Inspector
+reaches Helio through its own local backend process, which sends no
+`Origin` header, so this works as written. If you switch it to connect
+directly from the browser, the browser-sent `Origin` is rejected by
+design — `listen.allowed_origins` is an allowlist, not CORS support.
 
 ## Break the budget
 
@@ -207,7 +211,12 @@ you from:
   state, or approve pending tickets).
 
 The main MCP port (3000) is the "agent edge" — anything that can
-reach it can send tool calls. The dashboard sideband (3100) is the
+reach it can send tool calls. Browser pages are kept off this edge:
+requests to `/mcp` or `/sse` that carry an `Origin` header are refused
+with `403` unless the origin is listed in `listen.allowed_origins`
+(empty by default), so a website you visit cannot drive tool calls
+through the proxy even though the port is reachable from your
+browser. The dashboard sideband (3100) is the
 "operator control plane" — every `/api/*` endpoint except
 `/api/health`, `/api/auth/session`, and `/api/auth/logout` requires
 authentication via either:
