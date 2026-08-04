@@ -44,7 +44,7 @@ function makeConfig(upstreamUrl: string): HelioConfig {
       forward_headers: [],
       headers: {},
     },
-    listen: { port: 0, host: '127.0.0.1' },
+    listen: { port: 0, host: '127.0.0.1', allowed_origins: [] },
     dashboard: {
       enabled: false,
       port: 3100,

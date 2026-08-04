@@ -173,7 +173,11 @@ docker compose up
 ```
 
 Then point the agent's MCP client at `http://helio:3000/mcp` instead of the MCP
-server directly. The dashboard is at `http://localhost:3100`.
+server directly. The dashboard is at `http://localhost:3100`. Because
+`listen.host: '0.0.0.0'` deployments are often fronted by a reverse proxy or
+service mesh, note that any `Origin` header arriving at Helio is refused with
+`403` unless listed in `listen.allowed_origins` — if something in front of the
+proxy injects or forwards one, either strip it there or name it in the list.
 
 ## VS Code Dev Containers
 

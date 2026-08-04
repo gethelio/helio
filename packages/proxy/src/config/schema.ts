@@ -94,8 +94,72 @@ const listenSchema = z
   .object({
     port: z.number().int().min(1).max(65535).default(3000),
     host: z.string().default('127.0.0.1'),
+    /**
+     * Origin allowlist for the MCP transports (issue #213). Requests to /mcp
+     * or /sse carrying an Origin header not in this list are refused with 403.
+     * Empty (the default) means every Origin is refused — MCP clients are
+     * non-browser processes and never send one. This is NOT CORS support: the
+     * proxy emits no CORS response headers, so a browser still cannot read
+     * responses. The list exists for deployments where a fronting proxy or
+     * embedding host injects an Origin the operator needs to name.
+     */
+    allowed_origins: z.array(z.string().min(1)).default([]),
   })
   .strict()
+  .superRefine((data, ctx) => {
+    for (const [index, entry] of data.allowed_origins.entries()) {
+      if (entry === '*') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allowed_origins', index],
+          message: 'listen.allowed_origins does not support wildcards — list each origin exactly.',
+        })
+        continue
+      }
+      if (entry === 'null') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allowed_origins', index],
+          message:
+            'The literal "null" cannot be allowlisted: it is the opaque origin sent by ' +
+            'sandboxed frames, data: documents, and file:// pages, so allowing it would ' +
+            'admit all of them.',
+        })
+        continue
+      }
+      let parsed: URL
+      try {
+        parsed = new URL(entry)
+      } catch {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allowed_origins', index],
+          message: `"${entry}" is not a serialized origin. Use scheme://host[:port], e.g. "http://localhost:5173".`,
+        })
+        continue
+      }
+      // Only http(s) origins can ever appear in a browser-sent Origin header
+      // on these transports. Opaque schemes (file:, chrome-extension:) serialize
+      // their origin as the string "null", and other special schemes (ws:, wss:,
+      // ftp:) get a tuple origin that compares equal to the entry — so without
+      // this check both classes would validate and then never match.
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allowed_origins', index],
+          message: `"${entry}" is not an http(s) origin. Allowlist entries must be serialized http(s) origins, e.g. "http://localhost:5173".`,
+        })
+        continue
+      }
+      if (parsed.origin !== entry) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['allowed_origins', index],
+          message: `"${entry}" is not in serialized origin form and would never match a browser-sent Origin — did you mean "${parsed.origin}"?`,
+        })
+      }
+    }
+  })
 
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'

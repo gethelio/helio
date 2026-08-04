@@ -147,7 +147,7 @@ Instead of connecting your MCP client directly to the upstream server, point it 
 
 **No client or agent handy?** You don't need one to try Helio:
 
-- **MCP Inspector** — run `npx @modelcontextprotocol/inspector`, choose the Streamable HTTP transport, and point it at `http://localhost:3000/mcp`. Every tool call you make appears in the dashboard with its policy decision.
+- **MCP Inspector** — run `npx @modelcontextprotocol/inspector`, choose the Streamable HTTP transport, and point it at `http://localhost:3000/mcp`. Inspector reaches Helio through its own local backend process, which sends no `Origin` header, so this works as written; if you switch it to connect directly from the browser, the browser-sent `Origin` is rejected by design (`listen.allowed_origins` is an allowlist, not CORS support). Every tool call you make appears in the dashboard with its policy decision.
 - **curl** — send a request straight through the proxy (see [Step 6](#step-6-send-a-test-tool-call) below). This works against any upstream, including the echo server.
 
 ### Error normalization behavior

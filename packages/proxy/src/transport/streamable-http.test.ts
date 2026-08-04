@@ -482,4 +482,76 @@ describe('streamable-http transport', () => {
 
     expect(forwarder.calls[0]?.headers).toBeUndefined()
   })
+
+  describe('origin validation (issue #213)', () => {
+    it('rejects a hostile Origin with 403 and never calls the forwarder', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { origin: 'https://evil.example' },
+      )
+
+      expect(res.status).toBe(403)
+      expect(forwarder.calls).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
+
+    it('rejects OPTIONS /mcp with a hostile Origin', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await app.request('/mcp', {
+        method: 'OPTIONS',
+        headers: { origin: 'https://evil.example' },
+      })
+
+      expect(res.status).toBe(403)
+      expect(forwarder.calls).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
+
+    it('forwards a request whose Origin is allowlisted', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder, { allowedOrigins: ['http://localhost:5173'] })
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { origin: 'http://localhost:5173' },
+      )
+
+      expect(res.status).toBe(200)
+      expect(forwarder.calls).toHaveLength(1)
+    })
+
+    it('emits no Access-Control-Allow-Origin even for an allowlisted Origin', async () => {
+      // Pins that allowed_origins is not CORS support: the request passes,
+      // but a browser still cannot read the response.
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder, { allowedOrigins: ['http://localhost:5173'] })
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        { origin: 'http://localhost:5173' },
+      )
+
+      expect(res.headers.get('access-control-allow-origin')).toBeNull()
+    })
+
+    it('still forwards requests without an Origin header', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder, { allowedOrigins: [] })
+
+      const res = await postMcp(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+      expect(res.status).toBe(200)
+      expect(forwarder.calls).toHaveLength(1)
+    })
+  })
 })

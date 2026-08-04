@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { createApp, startSidebandServer } from './server.js'
 import type { HelioConfig } from './config/index.js'
@@ -29,7 +29,7 @@ const minimalConfig = {
     forward_headers: [],
     headers: {},
   },
-  listen: { port: 3000, host: '127.0.0.1' },
+  listen: { port: 3000, host: '127.0.0.1', allowed_origins: [] },
   dashboard: {
     enabled: false,
     port: 3100,
@@ -202,6 +202,136 @@ describe('createApp', () => {
     })
 
     expect(res.status).toBe(404)
+  })
+
+  // ---------------------------------------------------------------------------
+  // Origin validation on the MCP transports (issue #213)
+  // ---------------------------------------------------------------------------
+
+  describe('origin validation (issue #213)', () => {
+    const hostileOrigin = 'https://evil.example'
+    const okResponse: McpResponse = {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: { jsonrpc: '2.0', id: 1, result: { tools: [] } },
+    }
+
+    it('rejects a hostile Origin on every MCP mount and method with zero forwarder calls', async () => {
+      // Behavioral coverage test (D3): a guard registered after the handlers
+      // still shows up in route-table introspection but never runs, so this
+      // must assert behavior against the wired app, not route structure.
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = createApp(minimalConfig, forwarder)
+
+      const mcpMounts = ['/mcp', '/sse']
+      const methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']
+      for (const mount of mcpMounts) {
+        for (const method of methods) {
+          const init: RequestInit = {
+            method,
+            headers: { origin: hostileOrigin, 'content-type': 'application/json' },
+          }
+          if (method !== 'GET' && method !== 'HEAD') {
+            init.body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+          }
+          const res = await app.request(mount, init)
+          expect(res.status, `${method} ${mount}`).toBe(403)
+        }
+      }
+      expect(forwarder.calls).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
+
+    it.each([
+      ['an uppercase header name', { ORIGIN: 'https://evil.example' }],
+      ['a mixed-case header name', { OrIgIn: 'https://evil.example' }],
+      ['an empty header value', { origin: '' }],
+    ])('rejects a hostile Origin sent with %s', async (_label, originHeader) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const forwarder = createMockForwarder(okResponse)
+      const app = createApp(minimalConfig, forwarder)
+
+      const res = await app.request('/mcp', {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        headers: { 'content-type': 'application/json', ...originHeader },
+      })
+
+      expect(res.status).toBe(403)
+      expect(forwarder.calls).toHaveLength(0)
+      errorSpy.mockRestore()
+    })
+
+    it.each(['/mcp/', '/mcp?sessionId=abc', '/sse/', '/sse?sessionId=abc'])(
+      'rejects a hostile Origin on the path variant %s',
+      async (path) => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const forwarder = createMockForwarder(okResponse)
+        const app = createApp(minimalConfig, forwarder)
+
+        const res = await app.request(path, {
+          method: 'POST',
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+          headers: { 'content-type': 'application/json', origin: hostileOrigin },
+        })
+
+        expect(res.status).toBe(403)
+        expect(forwarder.calls).toHaveLength(0)
+        errorSpy.mockRestore()
+      },
+    )
+
+    it('keeps GET /healthz reachable with a hostile Origin', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = createApp(minimalConfig, forwarder)
+
+      const res = await app.request('/healthz', {
+        headers: { origin: hostileOrigin },
+      })
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ status: 'ok' })
+    })
+
+    it('keeps /slack/actions unguarded (signature verification protects it)', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const slackActionApp = new Hono()
+      slackActionApp.post('/', (c) => c.json({ reached: true }))
+      const app = createApp(minimalConfig, forwarder, { slackActionApp })
+
+      const res = await app.request('/slack/actions', {
+        method: 'POST',
+        headers: { origin: hostileOrigin, 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'payload=%7B%7D',
+      })
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ reached: true })
+    })
+
+    it('threads listen.allowed_origins from config to both transports', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const config = {
+        ...minimalConfig,
+        listen: { ...minimalConfig.listen, allowed_origins: ['http://localhost:5173'] },
+      } as HelioConfig
+      const app = createApp(config, forwarder)
+
+      const mcpRes = await app.request('/mcp', {
+        method: 'POST',
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+        headers: { 'Content-Type': 'application/json', origin: 'http://localhost:5173' },
+      })
+      expect(mcpRes.status).toBe(200)
+      expect(forwarder.calls).toHaveLength(1)
+
+      const sseRes = await app.request('/sse', {
+        headers: { origin: 'http://localhost:5173' },
+      })
+      expect(sseRes.status).toBe(200)
+      expect(sseRes.headers.get('content-type')).toBe('text/event-stream')
+    })
   })
 })
 

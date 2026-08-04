@@ -5,6 +5,7 @@ import type { McpForwarder, McpRequest } from '../mcp/types.js'
 import { parseJsonRpcRequest } from '../mcp/validation.js'
 import { isJsonContentType } from './content-type.js'
 import { buildForwardHeaders } from './forward-headers.js'
+import { createOriginGuard } from './origin-guard.js'
 import { normalizeUpstreamOutcome } from './response-normalizer.js'
 
 const MCP_SESSION_HEADER = 'mcp-session-id'
@@ -16,6 +17,8 @@ const ALLOWED_RESPONSE_HEADERS = new Set(['content-type', 'mcp-session-id'])
 export interface StreamableHttpRouteOptions {
   /** Caller `x-*` headers that may be forwarded upstream. */
   readonly forwardHeadersAllowlist?: readonly string[]
+  /** Origins allowed to send an `Origin` header (issue #213). Default: none. */
+  readonly allowedOrigins?: readonly string[]
 }
 
 /**
@@ -30,6 +33,10 @@ export function createStreamableHttpRoute(
 ): Hono {
   const app = new Hono()
   const forwardHeaderAllowlist = options.forwardHeadersAllowlist ?? []
+
+  // Hono runs middleware in registration order — the guard must stay above
+  // the handlers or it never runs for matched requests.
+  app.use('*', createOriginGuard(options.allowedOrigins ?? []))
 
   app.post('/', async (c) => {
     // Require JSON content type

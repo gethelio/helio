@@ -170,7 +170,7 @@ npx @gethelio/proxy start
 }
 ```
 
-**No agent handy?** You don't need one to see Helio work. Point the official [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) at `http://localhost:3000/mcp` (run `npx @modelcontextprotocol/inspector`, transport: Streamable HTTP), or send a call straight through the proxy from the terminal:
+**No agent handy?** You don't need one to see Helio work. Point the official [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) at `http://localhost:3000/mcp` (run `npx @modelcontextprotocol/inspector`, transport: Streamable HTTP — Inspector connects through its own local backend, which sends no `Origin` header; a browser-sent `Origin` is rejected by design), or send a call straight through the proxy from the terminal:
 
 ```bash
 curl -s -X POST http://localhost:3000/mcp \

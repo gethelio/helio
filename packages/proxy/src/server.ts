@@ -140,15 +140,19 @@ export function createApp(
 ): Hono {
   const app = new Hono()
   const forwardHeadersAllowlist = config.upstream.forward_headers
+  const allowedOrigins = config.listen.allowed_origins
 
   // Health check
   app.get('/healthz', (c) => c.json({ status: 'ok' }))
 
   // MCP Streamable HTTP transport
-  app.route('/mcp', createStreamableHttpRoute(forwarder, { forwardHeadersAllowlist }))
+  app.route(
+    '/mcp',
+    createStreamableHttpRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins }),
+  )
 
   // MCP SSE transport (for older clients)
-  app.route('/sse', createSseRoute(forwarder, { forwardHeadersAllowlist }))
+  app.route('/sse', createSseRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins }))
 
   // Slack interactive action handler
   if (options?.slackActionApp) {
