@@ -12,7 +12,7 @@ Route non-read-only tool calls to a Slack channel for human approval before exec
 
 ## Prerequisites
 
-- Node.js 22+
+- Node.js 24+
 - `jq` (optional) for pretty-printing JSON command output. If unavailable, remove `| jq` from curl commands.
 - A Slack workspace you control
 - Build the proxy from the repo root:

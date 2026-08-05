@@ -12,7 +12,7 @@ Cap monetary spend across payment and refund tools using sliding window tracking
 
 ## Prerequisites
 
-- Node.js 22+
+- Node.js 24+
 - `jq` (optional) for pretty-printing JSON command output. If unavailable, remove `| jq` from curl commands.
 - Build the proxy from the repo root:
 

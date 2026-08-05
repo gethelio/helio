@@ -15,7 +15,7 @@
 # ===========================================================================
 # Stage 1: Install all dependencies
 # ===========================================================================
-FROM node:22-slim AS deps
+FROM node:24-slim AS deps
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.13.0 --activate
@@ -66,7 +66,7 @@ RUN CI=true pnpm install --frozen-lockfile --prod --ignore-scripts
 # ===========================================================================
 # Stage 4: Slim runtime image
 # ===========================================================================
-FROM node:22-slim AS runtime
+FROM node:24-slim AS runtime
 
 # Enable corepack for pnpm workspace resolution
 RUN corepack enable && corepack prepare pnpm@11.13.0 --activate

@@ -10,6 +10,11 @@ updates:
       production-dependencies:
         dependency-type: production
     open-pull-requests-limit: 10
+    # @types/node tracks the supported runtime line (currently 24.x),
+    # not latest. Patch and minor bumps within the line are welcome.
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /

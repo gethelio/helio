@@ -27,7 +27,7 @@ assignees: ''
 ## Environment
 
 - **Helio version:** <!-- e.g. 0.1.0 -->
-- **Node.js version:** <!-- e.g. 22.x -->
+- **Node.js version:** <!-- e.g. 24.x -->
 - **OS:** <!-- e.g. macOS 15, Ubuntu 24.04 -->
 - **Installation method:** <!-- npm global / npx / Docker -->
 - **MCP client:** <!-- e.g. Claude Desktop, Cursor, custom -->

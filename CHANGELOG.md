@@ -19,6 +19,21 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: the supported Node.js floor is now 24 (#241).** The
+  `engines` field moves from `>=22` to `>=24` across the workspace.
+  Installs on Node 22 or older now surface an engine mismatch: npm and
+  pnpm print an unsupported-engine warning and continue, while Yarn
+  and `engine-strict` setups refuse outright. Either way, Node 22 is
+  no longer tested or supported. Node 22 entered Maintenance LTS in
+  October 2025 and receives security fixes only; Node 24 has been
+  Active LTS since the same month. The toolchain moves with the floor:
+  CI, the Docker image (now built on `node:24-slim`), and the build
+  target all run Node 24, so the supported floor is the tested floor.
+  Upgrade the host runtime to Node 24 before taking this release; no
+  configuration or API changes are required.
+
 ### Security
 
 - **The MCP transports now validate the `Origin` header (#213).** Any
