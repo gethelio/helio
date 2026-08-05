@@ -14,7 +14,7 @@ Two pots over the same payment tools. An umbrella budget — `agent-payments`, $
 
 ## Prerequisites
 
-- Node.js 22+
+- Node.js 24+
 - `jq` (optional) for pretty-printing JSON command output. If unavailable, remove `| jq` from curl commands.
 - Build the proxy from the repo root:
 

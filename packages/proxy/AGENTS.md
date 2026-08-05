@@ -121,7 +121,7 @@ src/
 
 ## Build & Entry Points
 
-Two tsup entry points, both ESM targeting Node 22:
+Two tsup entry points, both ESM targeting Node 24:
 
 - `src/index.ts` → `dist/index.js` (library, with `.d.ts`)
 - `src/cli.ts` → `dist/cli.js` (CLI binary, with `#!/usr/bin/env node` banner; no `.d.ts`)

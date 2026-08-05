@@ -64,7 +64,7 @@ The proxy build runs this dashboard build first, then copies `packages/dashboard
 - **Recharts** 3 (charts: line, pie, bar)
 - **TypeScript** 5 (strict mode, `ES2023` lib; target inherited from the repo base config)
 - **Vitest** + **@testing-library/react** (unit + component tests, jsdom)
-- **Node** ≥ 22 (`engines.node` in package.json)
+- **Node** ≥ 24 (`engines.node` in package.json)
 
 No state management library. All state is React hooks (useState, useEffect, useCallback, useMemo, memo).
 

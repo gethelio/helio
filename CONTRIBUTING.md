@@ -12,7 +12,7 @@ This project follows the [Contributor Covenant Code of Conduct](./CODE_OF_CONDUC
 
 ### Prerequisites
 
-- **Node.js** 22 or later
+- **Node.js** 24 or later
 - **pnpm** 11 or later (`corepack enable` picks up the pinned version automatically, or `npm install -g pnpm`)
 - **Python** 3.10 or later (`python3 --version`)
 - **Git**

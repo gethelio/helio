@@ -32,7 +32,7 @@ Supporting directories: `examples/`, `docs/`, `docker/`, `scripts/`, `.github/`
 
 ## Tech Stack
 
-- **Runtime:** Node.js 22+, TypeScript 5.x (strict mode), pnpm 11 workspaces
+- **Runtime:** Node.js 24+, TypeScript 5.x (strict mode), pnpm 11 workspaces
 - **HTTP:** Hono (`@hono/node-server`)
 - **Validation:** Zod v4 (single source of truth for helio.yaml schema)
 - **YAML:** js-yaml

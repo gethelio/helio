@@ -7,7 +7,7 @@ export default defineConfig([
     format: ['esm'],
     dts: true,
     clean: true,
-    target: 'node22',
+    target: 'node24',
     external: ['better-sqlite3'],
   },
   // CLI entry
@@ -16,7 +16,7 @@ export default defineConfig([
     format: ['esm'],
     dts: false,
     clean: false,
-    target: 'node22',
+    target: 'node24',
     external: ['better-sqlite3'],
     banner: {
       js: '#!/usr/bin/env node',

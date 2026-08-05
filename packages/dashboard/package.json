@@ -11,7 +11,7 @@
     "directory": "packages/dashboard"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "vite",
@@ -30,7 +30,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "4.2.2",
     "@testing-library/react": "16.3.2",
-    "@types/node": "25.5.0",
+    "@types/node": "24.13.3",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "4.7.0",

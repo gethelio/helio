@@ -4,7 +4,7 @@ Get Helio running in under 5 minutes. By the end, you'll have an MCP governance 
 
 ## Prerequisites
 
-- **Node.js 22+** — check with `node --version`
+- **Node.js 24+** — check with `node --version`
 - **`jq` (optional)** — used in examples below for pretty-printing JSON. If unavailable, remove `| jq` and read raw JSON output.
 - **An MCP server to govern** — any server that speaks Streamable HTTP, SSE, or stdio. Helio works with any spec-compliant MCP server (e.g. FastMCP, the official MCP SDKs) with zero changes to the server. **No server to test against?** Use the zero-dependency echo server below — no clone or install needed. (If you've cloned the repo as a contributor, you can instead run the bundled examples with `pnpm start`; see [`examples/basic/`](../examples/basic/).)
 
