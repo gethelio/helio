@@ -1,6 +1,6 @@
 # @gethelio/dashboard
 
-The operator UI for the [Helio MCP governance proxy](https://github.com/gethelio/helio). A React 19 + Vite single-page app that renders the live tool-call feed, audit search, policy decision analytics, rate/spend limit state, and the approval queue.
+The operator UI for the [Helio MCP governance proxy](https://github.com/gethelio/helio). A React 19 + Vite single-page app that renders the live tool-call feed, audit search, policy decision analytics, rate/spend limit state, cross-tool budget pots, and the approval queue.
 
 This package is consumed by `@gethelio/proxy` — when you run `helio start` with `dashboard.enabled: true`, the proxy serves the dashboard's static assets directly. This workspace package is internal and is not published separately.
 
@@ -39,14 +39,14 @@ See `packages/proxy/src/dashboard/api.ts` for the auth/session middleware and `p
 
 ## Detail panel truncation + history safety
 
-Dashboard detail views can receive arbitrarily large payloads from upstream tools and approval inputs. The UI now applies consistent 4 KB preview caps via `stringifyForDisplay()` / `truncateForDisplay()` in `src/utils.ts`:
+Dashboard detail views can receive arbitrarily large payloads from upstream tools and approval inputs. The UI applies consistent 4 KB preview caps via `stringifyForDisplay()` / `truncateForDisplay()` in `src/utils.ts`:
 
 - `AuditDetailPanel` truncates `tool_input`, `upstream_response`, and `upstream_error`.
 - `ApprovalsPage` truncates `tool_input` in both pending and resolved detail rows.
 
 This protects the browser from expensive mega-string renders while keeping operators aware that the preview is truncated. The full audit record remains available through CLI/API export paths (`helio export`, `GET /api/audit/export`).
 
-Approvals history loading is additionally safety-capped at 5,000 rows in the current implementation. When that cap is reached, the page renders an explicit warning banner so older entries are never silently omitted.
+Approvals history loading is additionally safety-capped at 5,000 rows (20 pages of 250). When that cap is reached, the page renders an explicit warning banner so older entries are never silently omitted.
 
 This package does not ship any runtime JavaScript module exports. Proxy runtime serving uses bundled static assets copied into `@gethelio/proxy` during build.
 
@@ -62,7 +62,7 @@ pnpm --filter @gethelio/proxy dev
 pnpm --filter @gethelio/dashboard dev
 ```
 
-Open the Vite URL (default `http://localhost:5173`). If your proxy has `dashboard.api_secret` set, the app shows the lock screen first; enter the secret and the proxy establishes a cookie session automatically. If your proxy has no `api_secret` configured, the app goes straight to the dashboard.
+Open the Vite URL (default `http://localhost:5173`). If your proxy has `dashboard.api_secret` set, the app shows the lock screen first; enter the secret and the proxy establishes a cookie session automatically. If your proxy has no `api_secret` configured (which the config schema only allows with `dashboard.allow_open_mode: true` on a loopback host), the app goes straight to the dashboard.
 
 ## Scripts
 

@@ -15,11 +15,13 @@
 
 ---
 
-Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, tracks spend, and records everything - **without changing your agent code or your MCP servers.**
+Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, caps cumulative spend, and records everything - **without changing your agent code or your MCP servers.**
 
 ```bash
 npx @gethelio/proxy init
 ```
+
+`@gethelio/proxy` is the only Node package you install. It ships the proxy runtime and bundled dashboard UI assets together.
 
 ## Why Helio?
 
@@ -31,25 +33,22 @@ Helio governs what agents **do to the rest of the world** across any MCP-compati
 
 ## How It Works
 
-```
-┌──────────────┐     ┌──────────────────────┐     ┌──────────────┐
-│              │     │       Helio           │     │              │
-│  MCP Client  │────▶│                       │────▶│  MCP Server  │
-│  (Agent)     │◀────│  • Policy engine      │◀────│  (Tools)     │
-│              │     │  • Evidence grounding  │     │              │
-└──────────────┘     │  • Approval workflows  │     └──────────────┘
-                     │  • Rate & spend limits │
-        Optional     │  • Audit trail         │
-      ┌─────────┐    │  • Self-repair feedback│
-      │  SDK    │───▶│                       │
-      │ (thin)  │    └──────────────────────┘
-      └─────────┘
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/gethelio/helio/main/docs/images/how-it-works.svg" alt="MCP clients send tool calls through Helio — which applies its policy engine, evidence grounding, approval workflows, cross-tool spend budgets, rate and spend limits, audit trail, and self-repair feedback — before forwarding them to MCP servers. An optional thin Python SDK connects to Helio over a sideband." width="900" />
+</p>
 
 Two integration paths:
 
 1. **Proxy only**: Point your MCP client at Helio instead of your MCP server. Zero code changes. Immediate governance.
 2. **Proxy + SDK**: Add the thin Python SDK to annotate tool calls with evidence context and action dependencies. Richer governance, under 500 lines of code.
+
+### Enforcement grades
+
+Helio governs at the strongest grade each path physically allows, and records it per call:
+
+- **Structural** (stdio MCP) — Helio owns the only path to the tool; the agent cannot route around it.
+- **Network** (HTTP MCP) — structural given you control the upstream's egress.
+- **Host-enforced** (hook adapters via the [adapter API](https://github.com/gethelio/helio/blob/main/docs/adapter-api.md), e.g. OpenClaw) — for frameworks that run tools in-process and expose hooks rather than an MCP transport. The framework's hook gate enforces; Helio decides. This is a cooperative, lower grade than the proxy path, and Helio labels it as such rather than overclaiming. Helio's decisions still cannot be evicted from the agent's context or prompt-injected, and any attempt to route around them is visible in the audit trail.
 
 ## Quick Start (5 minutes)
 
@@ -59,15 +58,22 @@ Two integration paths:
 npx @gethelio/proxy init
 ```
 
+This single package includes the built-in dashboard UI bundle.
+
 ### 2. Configure
 
-Create a `helio.yaml` in your project root:
+`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. Helio v0.1 proxies a single upstream MCP server.
+
+> **Heads up — Helio starts in audit-only mode.** `init` scaffolds the `policies` section **commented out**, so out of the box Helio runs with `default: allow` and **zero rules**: it records every tool call to the audit trail but **blocks nothing**. Uncomment and edit `policies` (or paste your own rules) to start enforcing. See the [Policy Guide](https://github.com/gethelio/helio/blob/main/docs/policies.md) for rule syntax.
+
+The block below is an **illustrative target** — not the file `init` writes — showing policies, budgets, audit, and a dashboard secret:
 
 ```yaml
 version: '1'
 
 upstream:
-  url: 'http://localhost:3001/mcp' # Your existing MCP server
+  url: 'http://localhost:8080/mcp' # Your existing MCP server
+  transport: streamable-http # streamable-http (default), sse, or stdio
 
 listen:
   port: 3000 # Helio listens here
@@ -75,17 +81,8 @@ listen:
 policies:
   default: allow
 
+  # These rules match on tool-name globs (deny / rate-limit / spend-limit):
   rules:
-    # Require approval for write operations
-    - match:
-        tool: '*'
-        annotations:
-          readOnlyHint: false
-      action: require_approval
-      approval:
-        channel: dashboard
-        timeout: 300s
-
     # Block destructive operations
     - match:
         tool: 'delete_*'
@@ -137,18 +134,23 @@ audit:
 dashboard:
   enabled: true
   port: 3100
-  # Required whenever any rule uses `require_approval`. Generate with:
-  #   openssl rand -hex 32
   api_secret: '${HELIO_DASHBOARD_SECRET}'
 ```
 
-If you use the `${HELIO_DASHBOARD_SECRET}` placeholder above, set it before `start`:
+Omitted fields like `listen.host`, `dashboard.host`, and `audit.path` fall back to safe defaults (`127.0.0.1` for both hosts — loopback only — and `./helio-audit.db`). The [Configuration Reference](https://github.com/gethelio/helio/blob/main/docs/configuration.md) is the authoritative list of every field, its default, and the canonical section order.
 
-```bash
-export HELIO_DASHBOARD_SECRET="$(openssl rand -hex 32)"
-```
+If your upstream requires a static credential (for example `Authorization: Bearer …` on a hosted MCP server), set [`upstream.headers`](https://github.com/gethelio/helio/blob/main/docs/configuration.md#static-request-headers) — values support `${VAR}` interpolation so secrets stay out of the file.
 
-> **Host binding defaults.** `helio start` binds `listen.host` and `dashboard.host` to `127.0.0.1` by default (the `helio init` template writes this value, and the schema defaults to it). Do **not** flip either to `0.0.0.0` without putting an authenticating reverse proxy in front — the MCP edge has no authentication at all, and the dashboard sideband's bearer is a shared secret, not a user session. The [Docker quickstart](https://github.com/gethelio/helio/tree/main/docker) inverts this layering: inside the container the bundled config binds `0.0.0.0` (correct for the container's virtual network) and Compose's `ports:` map publishes both ports back to `127.0.0.1` on the host.
+No MCP server to test against? Helio ships a zero-dependency echo server you can run in one command — see the [Getting Started guide](https://github.com/gethelio/helio/blob/main/docs/getting-started.md#no-mcp-server-to-test-with).
+
+About `dashboard.api_secret`:
+
+- **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains a generated `api_secret` (a literal 32-byte hex value, also printed when you ran `init`). It's set — skip this step.
+- **If you authored `helio.yaml` by hand** using the `${HELIO_DASHBOARD_SECRET}` placeholder shown above, set the variable before `start`:
+
+  ```bash
+  export HELIO_DASHBOARD_SECRET="$(openssl rand -hex 32)"
+  ```
 
 ### 3. Start Helio
 
@@ -168,15 +170,27 @@ npx @gethelio/proxy start
 }
 ```
 
+**No agent handy?** You don't need one to see Helio work. Point the official [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) at `http://localhost:3000/mcp` (run `npx @modelcontextprotocol/inspector`, transport: Streamable HTTP — Inspector connects through its own local backend, which sends no `Origin` header; a browser-sent `Origin` is rejected by design), or send a call straight through the proxy from the terminal:
+
+```bash
+curl -s -X POST http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather","arguments":{"city":"London"}}}'
+```
+
+Either way the call appears in the dashboard with its policy decision. (`get_weather` is one of the demo tools in Helio's [echo server](https://github.com/gethelio/helio/blob/main/docs/getting-started.md#no-mcp-server-to-test-with).)
+
 ### 5. Open the dashboard
 
 ```
 http://localhost:3100
 ```
 
-That's it. Every tool call now passes through Helio. This includes full audit trail, approval workflows, rate limits, and spend controls.
+If prompted, log in with the `dashboard.api_secret` that `init` generated (also printed when you ran it).
 
-> **Notification transport semantics (v0.1).** For JSON-RPC notifications (requests with no `id`), Helio's `streamable-http` endpoint returns `HTTP 202 Accepted` with an empty body after forwarding upstream fire-and-forget. For the legacy `sse` transport, POST requests also return `202` with empty body and response payloads are delivered on the SSE stream. For correlated (non-notification) requests, Helio now requires upstream JSON-RPC responses to include an `id`; missing-id upstream replies are wrapped as protocol-invalid upstream errors.
+That's it. Every tool call now passes through Helio with a full audit trail, rate limits, and spend controls.
+
+Want human-in-the-loop approvals for write operations? See [docs/approvals.md](https://github.com/gethelio/helio/blob/main/docs/approvals.md) for the full Slack and dashboard approval flow, or copy [examples/slack-approvals/](https://github.com/gethelio/helio/tree/main/examples/slack-approvals) as a starting point.
 
 ## Features
 
@@ -200,12 +214,11 @@ Cumulative cross-tool spend enforcement: one depleting pot aggregates spend acro
 
 ```yaml
 budgets:
-  - name: agent-payments
+  - name: daily-cap
     limit: 50
     currency: USD
-    window: session
-    key: session
-    on_exceed: require_approval # or: deny
+    window: 24h
+    on_exceed: require_approval # a breach becomes a human decision
     contributors:
       - match:
           tool: 'stripe_*'
@@ -214,6 +227,8 @@ budgets:
           tool: 'paypal_*'
         field: '$.total'
 ```
+
+Budgets govern tools that expose what they are spending in an argument field. Watch the full flow — live depletion, breach, break-glass approval, the approved overage landing in the ledger — in the [Docker quickstart demo](https://github.com/gethelio/helio/blob/main/docker/README.md#break-the-budget) or the runnable [budgets example](https://github.com/gethelio/helio/tree/main/examples/budgets).
 
 ### Evidence Grounding
 
@@ -239,15 +254,15 @@ with HelioContext() as ctx:
     ctx.mark_evidence("orders.lookup", "order_data", result)
 ```
 
-The SDK talks to the proxy over the sideband API (default `127.0.0.1:3200`; bind host is configurable via `sdk.host`). On every `helio start` the proxy generates a fresh 32-byte hex token and prints it to stderr:
+The SDK talks to the proxy over the sideband API (default `127.0.0.1:3200`; bind host is configurable via `sdk.host`). When the SDK sideband is enabled (`sdk.enabled: true`, off by default), the proxy generates a fresh 32-byte hex token on every `helio start` and prints it to stderr:
 
 ```
 SDK sideband listening on http://127.0.0.1:3200
-SDK token (pass as HELIO_SDK_TOKEN env var to your SDK clients):
+SDK token (generated per-boot HELIO_SDK_TOKEN; pass as HELIO_SDK_TOKEN env var to your SDK clients):
   3f9c2b...d8a1
 ```
 
-Pass the same value to the SDK process via `HELIO_SDK_TOKEN` and the SDK automatically attaches `Authorization: Bearer <token>` to every sideband call. The sideband also rejects any request carrying a non-null `Origin` header, so a malicious local HTML file cannot talk to it through a browser. Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of regenerating one.
+Pass the same value to the SDK process via `HELIO_SDK_TOKEN` and the SDK automatically attaches `Authorization: Bearer <token>` to every sideband call. The sideband also rejects any request carrying a non-null `Origin` header, so a malicious local HTML file cannot talk to it through a browser. Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of regenerating one, and does not echo it to stderr.
 
 ### Self-Repair Feedback
 
@@ -278,7 +293,6 @@ policies:
 ### Approval Workflows
 
 Route sensitive actions to Slack, webhook, or the Helio dashboard. Configurable timeout and escalation, plus a dashboard-only break-glass override (REST API and dashboard UI; not exposed as a Slack button).
-If a channel delivery fails, Helio logs an operational warning and emits an `approval_notification_failed` dashboard event so operators can investigate without losing the underlying pending ticket.
 
 ### Rate & Spend Limits
 
@@ -334,7 +348,7 @@ Ready-made configurations for common patterns:
 - **[Basic](https://github.com/gethelio/helio/tree/main/examples/basic)**: Deny destructive operations, allow everything else
 - **[Slack Approvals](https://github.com/gethelio/helio/tree/main/examples/slack-approvals)**: Route destructive actions to Slack
 - **[Spend Limits](https://github.com/gethelio/helio/tree/main/examples/spend-limits)**: Govern payment tool usage
-- **[Budgets](https://github.com/gethelio/helio/tree/main/examples/budgets)**: One cross-tool budget across Stripe and PayPal tools, with break-glass overage approvals
+- **[Budgets](https://github.com/gethelio/helio/tree/main/examples/budgets)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
 
 ## Contributing
 
