@@ -12,7 +12,7 @@ pip install helio-client
 
 ## Quick Start
 
-The proxy prints a per-boot SDK token to stderr on startup (`SDK token (pass as HELIO_SDK_TOKEN env var to your SDK clients): ...`). Export it in the environment where your SDK client runs — the client reads `HELIO_SDK_TOKEN` automatically and attaches it as `Authorization: Bearer <token>` on every sideband call. Without it, requests to the proxy sideband are rejected with `401`.
+When the proxy runs with `sdk.enabled: true` (off by default), it prints a per-boot SDK token to stderr on startup (`SDK token (generated per-boot HELIO_SDK_TOKEN; pass as HELIO_SDK_TOKEN env var to your SDK clients): ...`); if the proxy's environment already has `HELIO_SDK_TOKEN` set, that value is reused instead and not echoed. Export the same token in the environment where your SDK client runs — the client reads `HELIO_SDK_TOKEN` automatically and attaches it as `Authorization: Bearer <token>` on every sideband call. Without it, requests to the proxy sideband are rejected with `401`.
 
 ```bash
 export HELIO_SDK_TOKEN=<token-from-proxy-startup-logs>
