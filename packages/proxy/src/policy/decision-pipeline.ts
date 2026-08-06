@@ -16,7 +16,7 @@ import type { CompiledPolicy, PolicyAction, ToolAnnotationHints } from './types.
 import { evaluatePolicy } from './engine.js'
 import type { PolicyDecision } from './engine.js'
 import type { ToolDriftEvent } from './annotation-cache.js'
-import { sessionRequiredForGroundingMessage } from './session-gate.js'
+import { isWellFormedSessionId, sessionRequiredForGroundingMessage } from './session-gate.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import { checkEvidence, checkDependencies } from '../evidence/grounding.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/grounding.js'
@@ -87,7 +87,12 @@ export interface PipelineDecision {
  * so MCP behavior is bit-identical.
  */
 export function decide(input: DecideInput): PipelineDecision {
-  const { toolName, toolArguments, sessionId, policy, environment, evidenceStore } = input
+  const { toolName, toolArguments, policy, environment, evidenceStore } = input
+  // Trim-empty ids are not identity (issue #218): the MCP resolver never
+  // stamps one, but the sideband passes adapter-supplied ids through raw —
+  // without this a whitespace-only session_id would act as a shared
+  // anonymous evidence session for every caller that sends one.
+  const sessionId = isWellFormedSessionId(input.sessionId) ? input.sessionId : undefined
 
   const annotations = input.baselineAnnotations
   const driftEvent = input.driftEvent

@@ -4,6 +4,7 @@ import {
   compileSessionIdentity,
   resolveSession,
   resetSessionResolverWarningForTests,
+  DEFAULT_SESSION_IDENTITY,
   type CompiledSessionIdentity,
 } from './session-resolver.js'
 
@@ -40,6 +41,21 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // compileSessionIdentity
 // ---------------------------------------------------------------------------
+
+describe('DEFAULT_SESSION_IDENTITY', () => {
+  it('stays equal to the schema default chain (drift guard)', async () => {
+    // The library-construction fallback duplicates the schema default by
+    // necessity; this pins the two together so a future default-chain change
+    // (e.g. dropping legacy_header) cannot silently diverge them.
+    const { helioConfigSchema } = await import('../config/schema.js')
+    const parsed = helioConfigSchema.parse({
+      version: '1',
+      upstream: { url: 'http://localhost:8080' },
+      dashboard: { enabled: false },
+    })
+    expect(DEFAULT_SESSION_IDENTITY).toEqual(compileSessionIdentity(parsed.session))
+  })
+})
 
 describe('compileSessionIdentity', () => {
   it('summarizes the default chain for deny messages', () => {

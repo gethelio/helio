@@ -79,6 +79,22 @@ describe('gateSession', () => {
     expect(gateSession(null, 'deny')).toEqual({ ok: false })
   })
 
+  it('treats empty and whitespace-only ids as unresolved (sideband bypass regression)', () => {
+    // The MCP resolver skips these before the gate; the sideband hands
+    // adapter-supplied ids over raw, so the gate itself must apply the same
+    // non-empty-after-trim well-formedness or " " counts as identity and
+    // pools into a silent shared whitespace bucket.
+    expect(gateSession('', 'deny')).toEqual({ ok: false })
+    expect(gateSession(' ', 'deny')).toEqual({ ok: false })
+    expect(gateSession('\t\n', 'deny')).toEqual({ ok: false })
+
+    const anonymous = gateSession('   ', 'anonymous')
+    expect(anonymous.ok).toBe(true)
+    if (!anonymous.ok) return
+    expect(anonymous.session).toBe('unknown')
+    expect(anonymous.anonymous).toBe(true)
+  })
+
   it('mints the literal unknown bucket value under anonymous mode', () => {
     const gate = gateSession(null, 'anonymous')
     expect(gate.ok).toBe(true)
@@ -303,7 +319,11 @@ describe('gate module call-site backstops', () => {
       }
     }
     await walk(srcRoot)
-    const FORGE = /as (?:unknown as )?(?:GatedSession|GatedCharges|FrozenBudgetPlans?)\b/
+    // Comments are stripped before matching so a prose mention can neither
+    // trip nor mask the scan, and the pattern tolerates newlines,
+    // parentheses, and a chained unknown-cast between `as` and the brand.
+    const FORGE =
+      /\bas[\s(]+(?:unknown[\s)]+as[\s(]+)?(?:GatedSession|GatedCharges|FrozenBudgetPlans?)\b/
     const SANCTIONED = new Set([
       'policy/session-gate.ts', // the production mints
       '__tests__/helpers/session-gate-mints.ts', // the two test mints
@@ -312,7 +332,8 @@ describe('gate module call-site backstops', () => {
       const rel = relative(srcRoot, file)
       if (SANCTIONED.has(rel)) continue
       const source = await readFile(file, 'utf-8')
-      expect(FORGE.test(source), `${rel} must not forge gate brands`).toBe(false)
+      const stripped = source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+      expect(FORGE.test(stripped), `${rel} must not forge gate brands`).toBe(false)
     }
   })
 

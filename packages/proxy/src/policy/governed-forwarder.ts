@@ -48,6 +48,7 @@ import type { CompiledApproval } from './types.js'
 import {
   gateSession,
   gateBudgetCharges,
+  isWellFormedSessionId,
   sessionLimitKey,
   sessionUnresolvedControlMessage,
   warnSessionUnresolvedEngagementOnce,
@@ -612,9 +613,19 @@ export class GovernedForwarder implements McpForwarder {
     // retryable to the caller while the money state is already committed).
     try {
       // Record tool call for dependency tracking (never in dry-run — nothing was forwarded)
-      if (forwarded && !isDryRun && this.evidenceStore && request.session?.id && toolName) {
+      // Well-formedness is defense-in-depth here: the transports never stamp
+      // a trim-empty id, but a hand-built embedder request must not write
+      // dependency state under a whitespace session key.
+      const dependencySessionId = request.session?.id
+      if (
+        forwarded &&
+        !isDryRun &&
+        this.evidenceStore &&
+        isWellFormedSessionId(dependencySessionId) &&
+        toolName
+      ) {
         const succeeded = !hasJsonRpcError(result)
-        this.evidenceStore.recordToolCall(request.session.id, toolName, succeeded)
+        this.evidenceStore.recordToolCall(dependencySessionId, toolName, succeeded)
       }
     } catch (err) {
       // eslint-disable-next-line no-console -- Bookkeeping bugs must not affect the response

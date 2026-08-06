@@ -45,6 +45,7 @@ import {
   gateBudgetCharges,
   freezeGatedPlans,
   remintDeferredCharges,
+  isWellFormedSessionId,
   sessionLimitKey,
   sessionUnresolvedControlMessage,
   warnSessionUnresolvedEngagementOnce,
@@ -396,6 +397,12 @@ export class GovernanceService {
       return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
     }
 
+    // Trim-empty adapter session ids are not identity (issue #218):
+    // normalized ONCE so the pipeline, the gates, the approval ticket, the
+    // pending entry, and the audit row all agree — the same well-formedness
+    // the MCP resolver applies before stamping a request.
+    const sessionId = isWellFormedSessionId(req.session_id) ? req.session_id : null
+
     // Memory budgets: tool_input size, origin cardinality, pending pressure.
     const inputBytes = byteLength(req.arguments ?? {})
     if (inputBytes > MAX_TOOL_INPUT_BYTES) {
@@ -411,7 +418,7 @@ export class GovernanceService {
       byteLength({
         tool: req.tool.name,
         agent_id: req.agent_id,
-        session_id: req.session_id,
+        session_id: sessionId,
         origin: req.origin,
       })
     if (!this.caches.has(req.origin) && this.caches.size >= MAX_ORIGINS) {
@@ -444,7 +451,7 @@ export class GovernanceService {
     const pipeline = decide({
       toolName,
       toolArguments: req.arguments,
-      sessionId: req.session_id ?? undefined,
+      sessionId: sessionId ?? undefined,
       sessionStrategySummary: this.session.strategySummary,
       policy: this.policy,
       environment: this.environment,
@@ -495,12 +502,12 @@ export class GovernanceService {
       // action; a per-rule `action: dry_run` has no limits, and an
       // evidence-blocked call arrives here already flipped to 'deny'.
       if (decision.action === 'rate_limit') {
-        const planned = this.planRate(decision, toolName, req.session_id, senderId)
+        const planned = this.planRate(decision, toolName, sessionId, senderId)
         if (planned?.block) limitsBlock = { rate: planned.block }
         if (planned?.sessionUnresolved) dryRunSessionUnresolved = true
         ruleLimitOk = planned?.allowed ?? true
       } else if (decision.action === 'spend_limit') {
-        const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
+        const planned = this.planSpend(decision, toolName, sessionId, req.arguments, senderId)
         if (planned?.block) limitsBlock = { spend: planned.block }
         if (planned?.sessionUnresolved) dryRunSessionUnresolved = true
         ruleLimitOk = planned?.allowed ?? true
@@ -510,7 +517,7 @@ export class GovernanceService {
     } else if (decision.action === 'require_approval') {
       wire = 'require_approval'
     } else if (decision.action === 'rate_limit') {
-      const planned = this.planRate(decision, toolName, req.session_id, senderId)
+      const planned = this.planRate(decision, toolName, sessionId, senderId)
       if (planned?.sessionUnresolved) {
         // Identity failure, not a limit breach: the wire decision stays
         // 'deny' (issue #218) and the body carries the identity override.
@@ -525,7 +532,7 @@ export class GovernanceService {
         wire = planned?.allowed ? 'allow' : 'rate_limited'
       }
     } else if (decision.action === 'spend_limit') {
-      const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
+      const planned = this.planSpend(decision, toolName, sessionId, req.arguments, senderId)
       if (planned?.sessionUnresolved) {
         wire = 'deny'
         sessionUnresolvedDeny = true
@@ -571,7 +578,7 @@ export class GovernanceService {
     ) {
       // Mandatory ordering (issue #218): identity gate → resolveCharges →
       // engagement check → peek → freeze → append.
-      const budgetSessionGate = gateSession(req.session_id, this.session.onUnresolved)
+      const budgetSessionGate = gateSession(sessionId, this.session.onUnresolved)
       const { charges, failures } = this.budgetEngine.resolveCharges({
         toolName,
         toolArguments: req.arguments,
@@ -748,7 +755,7 @@ export class GovernanceService {
         timestampIso,
         origin: req.origin,
         agentId: req.agent_id,
-        sessionId: req.session_id,
+        sessionId,
         toolName,
         toolInput: req.arguments ?? {},
         metadata: req.metadata,
@@ -828,7 +835,7 @@ export class GovernanceService {
         // rewrite it (same guard as the pending entry's evidence below).
         tool_input: structuredClone(req.arguments ?? {}),
         matched_rule: decision.matchedRule,
-        session_id: req.session_id,
+        session_id: sessionId,
         origin: req.origin,
         timeout_ms: timeoutMs,
         breached_budgets: budgetBreachContexts,
@@ -850,7 +857,7 @@ export class GovernanceService {
       evaluationId,
       origin: req.origin,
       agentId: req.agent_id,
-      sessionId: req.session_id,
+      sessionId,
       toolName,
       // Cloned: direct embedders share these references and could otherwise
       // mutate the audit evidence (and desync the byte accounting) after
@@ -1157,7 +1164,9 @@ export class GovernanceService {
       timestampIso: new Date(this.now()).toISOString(),
       origin: req.origin,
       agentId: req.agent_id,
-      sessionId: req.session_id,
+      // Same trim-empty normalization as /evaluate: a whitespace-only id
+      // must not land in the audit row as attributed sideband identity.
+      sessionId: isWellFormedSessionId(req.session_id) ? req.session_id : null,
       toolName,
       toolInput: { ...req.package },
       metadata: req.metadata,

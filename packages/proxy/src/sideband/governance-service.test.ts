@@ -3563,6 +3563,23 @@ describe('session identity (issue #218)', () => {
     resetSessionGateWarningsForTests()
   })
 
+  it('denies an engaged session rate limit for a whitespace-only session_id (deny mode)', () => {
+    // Bypass regression: " " passes the sideband Zod boundary
+    // (z.string().max(256).nullish()) but is not identity — without the
+    // gate's trim check it would pool into a silent shared whitespace
+    // bucket instead of denying.
+    const { service, records, rateLimiter } = makeService({
+      policy: SESSION_RATE_POLICY,
+      withLimiters: true,
+    })
+
+    const res = service.evaluate(evalInput({ session_id: '   ' }))
+
+    expect(res.body['decision']).toBe('deny')
+    expect(records[0]?.record.block_reason).toBe('session_unresolved')
+    expect(rateLimiter?.listKeyStates()).toEqual([])
+  })
+
   it('denies an engaged session rate limit without session_id (deny mode)', () => {
     const { service, records } = makeService({ policy: SESSION_RATE_POLICY, withLimiters: true })
 
@@ -3620,6 +3637,38 @@ describe('session identity (issue #218)', () => {
     service.audit(auditInput(id), 'h')
 
     expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:unknown'])
+  })
+
+  it('treats a whitespace-only session_id as no identity for evidence rules', () => {
+    // The second half of the whitespace bypass: " " must not act as a
+    // shared anonymous evidence session — even with evidence planted under
+    // the whitespace key, an evaluate carrying it gets the grounded-rule
+    // no-session deny, never a lookup against that pool.
+    const { service, records, evidenceStore } = makeService({
+      policy: compile({
+        default: 'allow',
+        rules: [{ match: { tool: 'send' }, action: 'allow', evidence: { requires: ['probe'] } }],
+      }),
+      withEvidence: true,
+    })
+    evidenceStore?.setAllowedEvidenceKeys(['probe'])
+    evidenceStore?.putEvidence('   ', {
+      evidence_key: 'probe',
+      data: { ok: true },
+      tool_name: 'probe',
+    })
+
+    const res = service.evaluate(evalInput({ session_id: '   ' }))
+
+    const body = res.body
+    expect(body['decision']).toBe('deny')
+    expect(body['reason']).toContain('evidence.requires')
+    expect(body['reason']).not.toContain('Required evidence not satisfied')
+    expect(records[0]?.record.block_reason).toBe('policy_denied')
+    expect(records[0]?.record.evidence_chain?.['session']).toMatchObject({ unresolved: true })
+    // The normalized identity also reaches the audit row: null, not " ".
+    expect(records[0]?.record.session_id).toBeNull()
+    expect(records[0]?.record.session_source).toBeNull()
   })
 
   it('still denies evidence-gated rules without identity under anonymous mode', () => {

@@ -193,8 +193,13 @@ describe('session-keyed limits under on_unresolved: deny (issue #218)', () => {
       budgetEngine: engine,
     })
 
-    await governed.forward(toolsCall('send_email'))
-    await budgeted.forward(toolsCall('stripe_charge', { amount: 10 }))
+    // Anchor the empty-store assertions to REAL denies: peek paths create no
+    // buckets, so empty stores alone would also pass a silently-forwarding
+    // missed gate. The deny assertions make that failure mode loud.
+    const rateDenied = await governed.forward(toolsCall('send_email'))
+    const budgetDenied = await budgeted.forward(toolsCall('stripe_charge', { amount: 10 }))
+    expect(errorOf(rateDenied)?.data['reason']).toBe('session_unresolved')
+    expect(errorOf(budgetDenied)?.data['reason']).toBe('session_unresolved')
 
     expect(rateLimiter.listKeyStates()).toHaveLength(0)
     expect(engine.listStates().flatMap((state) => state.buckets)).toHaveLength(0)

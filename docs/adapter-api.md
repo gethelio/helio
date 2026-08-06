@@ -49,7 +49,7 @@ If you embed `GovernanceService` directly (instead of running `helio start`), wi
   "origin": "openclaw",                  // optional; default "sideband"; ^[a-z0-9_-]{1,64}$
   "adapter_version": "0.1.0",            // optional, ≤64 chars; per-origin liveness (dashboard GET /api/adapters)
   "agent_id": "main",                    // optional, ≤128 chars
-  "session_id": "oc-session-1",          // optional, ≤256 chars; required for evidence/dependency rules and, under session.on_unresolved: deny, for session-keyed limits/budgets
+  "session_id": "oc-session-1",          // optional, ≤256 chars; required for evidence/dependency rules and, under session.on_unresolved: deny, for session-keyed limits/budgets. A whitespace-only value is treated as absent.
   "tool": {
     "name": "send_message",              // required, ≤256 chars
     "description": "…",                  // optional ┐ full definition enables the drift guard

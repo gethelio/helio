@@ -83,6 +83,8 @@ export function resetSessionResolverWarningForTests(): void {
  * Accept a candidate identity value verbatim, or skip it (undefined) when it
  * is empty after trimming or longer than the cap. Skipping continues the
  * chain — a malformed value in one source must not veto a later source.
+ * The empty-after-trim half must stay aligned with the gate module's
+ * `isWellFormedSessionId`: both sides of the doors share that rule.
  */
 function sanitizeCandidate(value: string | undefined, origin: string): string | undefined {
   if (value === undefined) return undefined

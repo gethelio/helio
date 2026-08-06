@@ -59,6 +59,18 @@ export type SessionGate =
   | { readonly ok: false }
 
 /**
+ * Well-formed session identity: non-null and non-empty AFTER trimming — the
+ * same rule the MCP resolver applies before stamping a request. Every
+ * consumer of adapter-supplied ids (the gate, the decision pipeline's
+ * grounded-rule presence check, sideband ingress) shares this ONE seam so a
+ * whitespace-only id can neither key a bucket nor act as an evidence
+ * session anywhere.
+ */
+export function isWellFormedSessionId(id: string | null | undefined): id is string {
+  return id != null && id.trim() !== ''
+}
+
+/**
  * Run the identity gate for one request. A resolved id mints its attributed
  * brand under both modes; an unresolved id mints the literal `unknown`
  * bucket value under `anonymous` (pre-0.12 pooling, preserved on disk) and
@@ -68,7 +80,7 @@ export function gateSession(
   sessionId: string | null | undefined,
   onUnresolved: 'deny' | 'anonymous',
 ): SessionGate {
-  if (sessionId != null && sessionId !== '') {
+  if (isWellFormedSessionId(sessionId)) {
     return { ok: true, session: sessionId as GatedSession, anonymous: false }
   }
   if (onUnresolved === 'anonymous') {
@@ -206,9 +218,10 @@ export function warnSessionUnresolvedEngagementOnce(tried: string): void {
   // eslint-disable-next-line no-console -- Intentional operational warning
   console.error(
     `[helio] Warning: a session-keyed control was engaged with no resolved session ` +
-      `identity (tried: ${tried}); denying under session.on_unresolved: deny. ` +
-      'Send an identity the chain can read (e.g. the x-helio-session-id header), or ' +
-      'set session.on_unresolved: anonymous to restore pre-0.12 shared pooling.',
+      `identity (tried: ${tried}); session.on_unresolved: deny denies such requests ` +
+      '(dry-run reports them). Send an identity the chain can read (e.g. the ' +
+      'x-helio-session-id header), or set session.on_unresolved: anonymous to ' +
+      'restore pre-0.12 shared pooling.',
   )
 }
 

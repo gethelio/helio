@@ -50,11 +50,14 @@ Maintainer notes:
   `session.on_unresolved: anonymous` (evidence/dependency rules still
   require identity under both modes). The same policy applies to the
   adapter sideband's `session_id`. Bucket continuity is preserved for
-  well-formed ids (non-empty, at most 256 chars): legacy ids key the
-  same buckets byte-for-byte, so persisted budget pots carry over,
-  while over-long or empty-string ids — which previously keyed buckets
-  literally — now resolve as unresolved. The evidence/dependency deny
-  message changed to name the configured identity strategies.
+  well-formed ids (non-empty after trimming, at most 256 chars): legacy
+  ids key the same buckets byte-for-byte, so persisted budget pots
+  carry over, while over-long, empty, or whitespace-only ids — which
+  previously keyed buckets literally — now resolve as unresolved. The
+  evidence/dependency deny message changed to name the configured
+  identity strategies, and the SDK sideband's evidence and context
+  writes reject whitespace-only session ids with 400 (such a write
+  could never be read back).
 - **BREAKING: pre-0.12 local audit databases fail fast at startup
   (#218).** The audit schema gains a `session_source` column through
   the documented pre-1.0 clean-break mechanism: Helio refuses to start
