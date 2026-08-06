@@ -45,6 +45,13 @@ export interface JsonRpcResponse {
 // MCP types
 // ---------------------------------------------------------------------------
 
+/** Resolved governance session identity (issue #218). */
+export interface ResolvedSession {
+  readonly id: string
+  /** Strategy that produced it — recorded in the audit trail. */
+  readonly source: 'header' | 'meta' | 'legacy_header' | 'transport'
+}
+
 /** A parsed MCP request enriched with session context. */
 export interface McpRequest extends JsonRpcRequest {
   /** MCP session ID extracted from the `Mcp-Session-Id` header. */
