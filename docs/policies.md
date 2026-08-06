@@ -607,6 +607,8 @@ Rules using `evidence.requires` or `requires` are session-bound. If no [session 
 
 SDK evidence keys are validated against policy: `POST /evidence` accepts keys that appear in at least one rule's `evidence.requires` list. If an SDK client sends an unknown key, the sideband returns `400` with `code: "evidence_key_not_in_policy_allowlist"` plus a capped preview of configured keys so operators can quickly align policy and SDK call sites.
 
+**The SDK correlation contract:** the Python SDK's `session_id` is the canonical correlation key. Give the SDK an explicit `session_id` and send the same value as the `x-helio-session-id` header on every MCP request — the default [session identity](./configuration.md#session) chain resolves it with zero extra configuration. The SDK's auto-generated UUID default cannot satisfy gates on its own, because the proxy never sees it on the MCP side.
+
 ## Dependency Chains
 
 A lighter-weight alternative to evidence: require that specific tools have been called **and succeeded** in the current session before a gated tool is allowed:

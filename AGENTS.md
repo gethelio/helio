@@ -93,7 +93,7 @@ Helio sits in the critical path between AI agents and external systems. A vulner
 - **The sideband SDK API (port 3200) defaults to 127.0.0.1 and requires a per-boot Bearer token.** The sideband binds to `sdk.host` (default `127.0.0.1`); non-loopback binds are allowed but emit a startup warning and should be protected with strict network controls. The proxy generates `HELIO_SDK_TOKEN` as 32 random bytes on every `helio start` (unless the operator pre-set the env var, in which case it is respected) and prints it to stderr. Every sideband request except `GET /healthz` must carry `Authorization: Bearer <token>`. The sideband also rejects any request carrying a non-null `Origin` header and blocks `OPTIONS` preflights, which defends against a malicious local HTML file POSTing to sideband through a browser. This is the v0.1.0 trust model — no rotation, no revocation, no key management; a restart gives you a new token.
 - **The dashboard API (port 3100) binds to 127.0.0.1 by default.** When `dashboard.api_secret` is set the API is gated: the secret logs in (issuing a cookie session + CSRF token), or is accepted directly as an `Authorization: Bearer` token. For mutating routes (approve/deny/break-glass), `x-helio-csrf` is required when authentication is via cookie session; bearer-authenticated requests do not require CSRF. `dashboard.api_secret` is mandatory whenever any rule uses `require_approval` (or the dashboard is enabled at all) unless `dashboard.allow_open_mode: true` is set explicitly — and open mode is only permitted on a loopback `dashboard.host`. Production deployments behind a reverse proxy should keep the 127.0.0.1 bind.
 - **No telemetry, no phone-home, no analytics.** Helio never transmits data to external services beyond explicitly configured upstream MCP servers and approval channels.
-- **MCP session IDs are opaque.** Never derive session IDs from user-controllable input. Generate them server-side or pass through the upstream `Mcp-Session-Id` header.
+- **Session identity is proxy-owned (issue #218).** Governance session identity is resolved by the proxy from the configured `session.identity` chain (the `x-helio-session-id` header by default, with the legacy `Mcp-Session-Id` accepted for the deprecation window) — never from tool arguments the model can rewrite. The wire `Mcp-Session-Id` remains a transport relay only, and a proxy-resolved identity is never sent upstream as one.
 
 ### Audit Trail Integrity
 
@@ -168,7 +168,7 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 
 1. **First-match-wins policy evaluation.** Rules are evaluated in YAML definition order. First matching rule determines the action. If no rule matches, `policies.default` applies.
 2. **Hot-reload without restart.** Config watcher re-parses and atomically swaps rules on file change. Invalid config keeps the old rules and logs the error — never crash.
-3. **Evidence grounding is per-session.** Evidence cache is keyed by MCP session ID. Evidence expires when the session ends.
+3. **Evidence grounding is per-session.** The evidence cache is keyed by the proxy-resolved session identity (`session.identity`, issue #218). Evidence expires when the session ends.
 4. **Approval timeout defaults to deny.** Configurable, but the safe default is to block on timeout.
 5. **Performance is a hard requirement.** Policy evaluation < 1ms. Total proxy overhead < 5ms p99. Benchmark on every release.
 
@@ -215,6 +215,12 @@ listen:
   port: 3000
   host: '127.0.0.1'
 environment: 'production' # optional label, recorded on every audit record
+session:
+  identity: # ordered identity sources; first match wins (issue #218)
+    - source: header
+      name: x-helio-session-id # default caller-set identity header
+    - source: legacy_header # verbatim Mcp-Session-Id (deprecation window)
+  on_unresolved: deny # deny | anonymous (deny fails closed on session-keyed controls)
 policies:
   default: allow # allow | deny  (use deny in production)
   flag_destructive: require_approval # optional: log | require_approval — applies to tools with destructiveHint
@@ -308,7 +314,7 @@ sdk:
 - `better-sqlite3` (and `esbuild`) native builds are approved via `allowBuilds` in `pnpm-workspace.yaml` — no manual rebuild needed. `pnpm-workspace.yaml` also pins a few transitive `overrides` and the audit ignore list (`auditConfig.ignoreGhsas`).
 - CI runs on the Node version in `.nvmrc` and Python 3.12; the E2E Python SDK test does `pip install ./packages/python-sdk`.
 - The proxy depends on the official `@modelcontextprotocol/sdk` pinned to an exact version (`devDependencies` in `packages/proxy`) — monitor it for breaking changes.
-- MCP session tracking via `Mcp-Session-Id` header — pass through transparently and use as the key for evidence/dependency state.
+- Session identity is resolved by the proxy (`session.identity`, issue #218): the `x-helio-session-id` header by default, the legacy `Mcp-Session-Id` during the deprecation window. The resolved id keys evidence/dependency state and session-scoped limits/budgets; the wire `Mcp-Session-Id` is relayed to the upstream verbatim and never replaced.
 - The name "Helio" comes from Helios, the Greek Titan god of the Sun.
 
 ## Post-v1 Roadmap

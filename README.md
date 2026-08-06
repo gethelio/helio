@@ -78,6 +78,13 @@ upstream:
 listen:
   port: 3000 # Helio listens here
 
+session:
+  identity: # Ordered identity sources; first match wins
+    - source: header
+      name: x-helio-session-id # Agent harnesses set this once per run
+    - source: legacy_header # Verbatim Mcp-Session-Id (deprecation window)
+  on_unresolved: deny # deny | anonymous
+
 policies:
   default: allow
 

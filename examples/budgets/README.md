@@ -66,6 +66,7 @@ Keep the Budgets tab visible while you run these — the pots update live on eve
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":10,"category":"content_distribution","currency":"USD","customer":"cus_123"}}}' | jq
 ```
 
@@ -76,6 +77,7 @@ Succeeds, and both bars move: **content-distribution 10/15**, **agent-payments 1
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":10,"category":"content_distribution","currency":"USD","customer":"cus_123"}}}' | jq
 ```
 
@@ -88,6 +90,7 @@ Check the Budgets tab: **agent-payments is still 10/50**. The gate is all-or-not
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}' | jq
 ```
 
@@ -100,6 +103,7 @@ This is the honest edge of input scoping, and the reason the two pots are paired
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"paypal_payout","arguments":{"total":20,"recipient":"ops@example.com"}}}' | jq
 ```
 
@@ -110,6 +114,7 @@ Succeeds and lands the umbrella pot exactly on its limit — **agent-payments 50
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"stripe_charge","arguments":{"amount":20,"currency":"USD","customer":"cus_123"}}}' | jq
 ```
 
@@ -146,7 +151,7 @@ The Budgets tab shows both pots exactly where they left off — agent-payments a
 - **The gate is all-or-nothing.** Every budget matching a call is checked before it forwards; one breach denies (or gates) the whole call, and a denied call records nothing on any budget — or on rule-level rate/spend counters. Charge 2 is that rule in action: the category cap refused, so the umbrella pot stayed where it was.
 - **Contributors select on the whole predicate.** A contributor participates when its `tool` glob matches and every `match.input` condition holds; selection is first-match-wins in config order over that combined predicate. A call that matches the glob but fails the conditions does not feed the budget at all — which is why an unlabeled payment charges only the umbrella.
 - **Rules decide first, budgets deplete after.** The `policies` rules in this example never mention the payment tools; the budget layer is independent. A deny rule that matched a payment tool would block it before the budget gate — keep deny rules scoped so the budget gate stays reachable.
-- **`window: session` pots never replenish on a timer.** Idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal. The curl walkthrough sends no MCP session id, so its calls pool into the budget's shared `unknown` session pot — real MCP clients with sessions each get their own pot.
+- **`window: session` pots never replenish on a timer.** Idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal. The curl walkthrough sends `x-helio-session-id: demo` — Helio's [session identity](../../docs/configuration.md#session) header — so every call depletes the `demo` session pot. Drop the header and the default `session.on_unresolved: deny` denies the call instead of pooling it into a shared pot; each real caller sends its own id and gets its own pot.
 - **Break-glass is scope-once and fails closed.** Approving covers exactly the one call's overage; timeouts never fail open for money gates.
 
 See the [Policy Guide](../../docs/policies.md#cross-tool-spend-budgets) for full budget semantics and the [configuration reference](../../docs/configuration.md#budgets) for every field and validation rule.

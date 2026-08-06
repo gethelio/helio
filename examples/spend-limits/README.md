@@ -48,6 +48,7 @@ Run these commands in sequence to see the spend limit in action:
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_payment","arguments":{"amount":200,"currency":"USD","recipient":"Alice"}}}' | jq
 ```
 
@@ -58,6 +59,7 @@ Succeeds. Helio extracts `amount: 200` from the tool arguments and records it ag
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_payment","arguments":{"amount":200,"currency":"USD","recipient":"Bob"}}}' | jq
 ```
 
@@ -68,6 +70,7 @@ Succeeds. Cumulative spend is now $400 out of the $500 limit.
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_payment","arguments":{"amount":200,"currency":"USD","recipient":"Charlie"}}}' | jq
 ```
 
@@ -82,6 +85,7 @@ Open [http://localhost:3100](http://localhost:3100) and navigate to the **Limits
 ```bash
 curl -s -X POST http://localhost:3000/mcp \
   -H 'Content-Type: application/json' \
+  -H 'x-helio-session-id: demo' \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_refund","arguments":{"amount":150,"order_id":"ORD-001"}}}' | jq
 ```
 
@@ -100,7 +104,7 @@ The `field: '$.amount'` setting tells Helio which tool argument contains the mon
 ### Scoping
 
 - **`key: tool`** — All sessions share a single spend bucket per tool. If one agent spends $400, only $100 remains for any other agent using the same tool.
-- **`key: session`** — Each MCP session gets its own independent spend bucket. One session hitting its limit doesn't affect others.
+- **`key: session`** — Each resolved [session identity](../../docs/configuration.md#session) gets its own independent spend bucket. One session hitting its limit doesn't affect others. The walkthrough's curls send `x-helio-session-id: demo` to identify themselves; a call with no resolvable identity is denied under the default `session.on_unresolved: deny` instead of pooling into a shared bucket.
 
 ### Blocked calls don't count against the spend bucket
 
