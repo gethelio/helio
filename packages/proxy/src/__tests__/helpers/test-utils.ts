@@ -57,6 +57,7 @@ export function makeConfig(
     approval?: Partial<HelioConfig['approval']>
     audit?: Partial<HelioConfig['audit']>
     environment?: string
+    session?: Partial<HelioConfig['session']>
     sdk?: Partial<HelioConfig['sdk']>
   } = {},
 ): HelioConfig {
@@ -77,6 +78,11 @@ export function makeConfig(
       ...overrides.dashboard,
     },
     environment: overrides.environment,
+    session: {
+      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+      on_unresolved: 'deny',
+      ...overrides.session,
+    },
     policies: { default: 'allow', dry_run: false, rules: [], ...overrides.policies },
     approval: { timeout: '300s', default_on_timeout: 'deny', channels: [], ...overrides.approval },
     audit: {

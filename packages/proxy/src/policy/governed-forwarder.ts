@@ -324,7 +324,7 @@ export class GovernedForwarder implements McpForwarder {
 
     // Intercept tools/list responses to diff tool definitions
     if (request.method === 'tools/list') {
-      this.applyToolDefinitionUpdate(result.response.body, request.sessionId)
+      this.applyToolDefinitionUpdate(result.response.body, request.session?.id)
     }
 
     return result
@@ -456,7 +456,7 @@ export class GovernedForwarder implements McpForwarder {
     } = decide({
       toolName,
       toolArguments,
-      sessionId: request.sessionId,
+      sessionId: request.session?.id,
       policy: this.policy,
       environment: this.environment,
       evidenceStore: this.evidenceStore,
@@ -591,9 +591,9 @@ export class GovernedForwarder implements McpForwarder {
     // retryable to the caller while the money state is already committed).
     try {
       // Record tool call for dependency tracking (never in dry-run — nothing was forwarded)
-      if (forwarded && !isDryRun && this.evidenceStore && request.sessionId && toolName) {
+      if (forwarded && !isDryRun && this.evidenceStore && request.session?.id && toolName) {
         const succeeded = !hasJsonRpcError(result)
-        this.evidenceStore.recordToolCall(request.sessionId, toolName, succeeded)
+        this.evidenceStore.recordToolCall(request.session.id, toolName, succeeded)
       }
     } catch (err) {
       // eslint-disable-next-line no-console -- Bookkeeping bugs must not affect the response
@@ -661,7 +661,7 @@ export class GovernedForwarder implements McpForwarder {
         tool_name: toolName,
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
-        session_id: request.sessionId ?? null,
+        session_id: request.session?.id ?? null,
         breached_budgets: gate.breachContexts,
         approval: gate.approval,
       },
@@ -841,7 +841,7 @@ export class GovernedForwarder implements McpForwarder {
     const { charges, failures } = engine.resolveCharges({
       toolName,
       toolArguments,
-      sessionId: request.sessionId ?? null,
+      sessionId: request.session?.id ?? null,
       senderId: null, // adapter context; absent on the MCP path
     })
 
@@ -1013,7 +1013,7 @@ export class GovernedForwarder implements McpForwarder {
 
       this.auditWriter.pushImmediate({
         timestamp,
-        session_id: request.sessionId ?? null,
+        session_id: request.session?.id ?? null,
         agent_id: null,
         environment: this.environment ?? null,
         tool_name: '<nameless>',
@@ -1058,7 +1058,7 @@ export class GovernedForwarder implements McpForwarder {
         tool_name: toolName,
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
-        session_id: request.sessionId ?? null,
+        session_id: request.session?.id ?? null,
       },
       request.signal,
     )
@@ -1392,7 +1392,7 @@ export class GovernedForwarder implements McpForwarder {
       const { charges, failures } = this.budgetEngine.resolveCharges({
         toolName,
         toolArguments,
-        sessionId: request.sessionId ?? null,
+        sessionId: request.session?.id ?? null,
         senderId: null,
       })
       if (failures.length > 0 || charges.length > 0) {
@@ -1435,7 +1435,7 @@ export class GovernedForwarder implements McpForwarder {
   ): string {
     switch (keyType) {
       case 'session':
-        return `session:${request.sessionId ?? 'unknown'}`
+        return `session:${request.session?.id ?? 'unknown'}`
       case 'agent':
         // agent_id is not yet available on McpRequest — fall back to tool
         if (!this.agentKeyWarned) {
@@ -1624,7 +1624,7 @@ export class GovernedForwarder implements McpForwarder {
 
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
       timestamp,
-      session_id: request.sessionId ?? null,
+      session_id: request.session?.id ?? null,
       agent_id: null,
       environment: this.environment ?? null,
       tool_name: toolName,

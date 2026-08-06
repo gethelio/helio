@@ -53,13 +53,16 @@ export class StreamableHttpForwarder implements McpForwarder {
   async forward(request: McpRequest): Promise<ForwardResult> {
     // `initialize` is transport machinery: forward verbatim, never inject a
     // managed session, and let the response's Mcp-Session-Id flow downstream.
+    // Only the verbatim transport session id ever reaches the wire — a
+    // proxy-resolved governance id would be rejected by session-enforcing
+    // upstreams that never minted it (issue #218).
     if (request.method === 'initialize') {
-      return this.send(request, request.sessionId, /* protocolVersion */ undefined)
+      return this.send(request, request.transportSessionId, /* protocolVersion */ undefined)
     }
 
     // Downstream-driven and external sessionless callers alike are transparent
     // passthrough: forward whatever session the caller did (or did not) supply.
-    return this.send(request, request.sessionId, HELIO_MCP_PROTOCOL_VERSION)
+    return this.send(request, request.transportSessionId, HELIO_MCP_PROTOCOL_VERSION)
   }
 
   /**

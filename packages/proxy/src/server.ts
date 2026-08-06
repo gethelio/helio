@@ -4,6 +4,7 @@ import type { ServerType } from '@hono/node-server'
 import type { Socket } from 'node:net'
 import { createStreamableHttpRoute } from './transport/streamable-http.js'
 import { createSseRoute } from './transport/sse.js'
+import { compileSessionIdentity } from './mcp/session-resolver.js'
 import type { HelioConfig } from './config/index.js'
 import type { McpForwarder } from './mcp/types.js'
 
@@ -141,6 +142,9 @@ export function createApp(
   const app = new Hono()
   const forwardHeadersAllowlist = config.upstream.forward_headers
   const allowedOrigins = config.listen.allowed_origins
+  // Compiled once at startup, like the listener itself — the session section
+  // is restart-required at the reload boundary (issue #218).
+  const session = compileSessionIdentity(config.session)
 
   // Health check
   app.get('/healthz', (c) => c.json({ status: 'ok' }))
@@ -148,11 +152,11 @@ export function createApp(
   // MCP Streamable HTTP transport
   app.route(
     '/mcp',
-    createStreamableHttpRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins }),
+    createStreamableHttpRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins, session }),
   )
 
   // MCP SSE transport (for older clients)
-  app.route('/sse', createSseRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins }))
+  app.route('/sse', createSseRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins, session }))
 
   // Slack interactive action handler
   if (options?.slackActionApp) {

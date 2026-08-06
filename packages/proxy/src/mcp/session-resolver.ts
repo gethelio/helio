@@ -44,6 +44,22 @@ export function compileSessionIdentity(config: SessionConfig): CompiledSessionId
   }
 }
 
+/**
+ * The schema-default identity chain, compiled. Route factories fall back to
+ * it when no compiled config is supplied (direct or library construction),
+ * matching the behavior of an absent `session:` section.
+ */
+export const DEFAULT_SESSION_IDENTITY: CompiledSessionIdentity = compileSessionIdentity({
+  identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+  on_unresolved: 'deny',
+})
+
+/** Extract `params._meta` from a JSON-RPC params value, if any. */
+export function paramsMeta(params: unknown): unknown {
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) return undefined
+  return (params as Record<string, unknown>)['_meta']
+}
+
 /** Per-request inputs the transports hand to the resolver. */
 export interface ResolveSessionInput {
   /** RAW request headers (lowercased names), before any forward allowlist. */

@@ -88,7 +88,7 @@ function mockForwarder(
   }
 }
 
-/** Build a tools/call request with a session ID. */
+/** Build a tools/call request with a resolved governance session. */
 function toolsCallWithSession(
   name: string,
   sessionId: string,
@@ -99,7 +99,7 @@ function toolsCallWithSession(
     id: 1,
     method: 'tools/call',
     params: { name, arguments: args ?? {} },
-    sessionId,
+    session: { id: sessionId, source: 'header' },
   }
 }
 
@@ -803,7 +803,7 @@ describe('GovernedForwarder', () => {
         id: 1,
         method: 'tools/call',
         params: { name: 'test_tool', arguments: {} },
-        sessionId: 'session-abc-123',
+        session: { id: 'session-abc-123', source: 'header' },
       }
       await governed.forward(request)
 

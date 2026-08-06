@@ -54,8 +54,10 @@ export interface ResolvedSession {
 
 /** A parsed MCP request enriched with session context. */
 export interface McpRequest extends JsonRpcRequest {
-  /** MCP session ID extracted from the `Mcp-Session-Id` header. */
-  sessionId?: string
+  /** Proxy-resolved governance session identity (undefined when no strategy matched). */
+  session?: ResolvedSession
+  /** Verbatim Mcp-Session-Id from the wire. Transport relay ONLY — never governance. */
+  transportSessionId?: string
   /** Per-request headers to forward to upstream (e.g. Authorization, X-* headers). */
   headers?: Record<string, string>
   /** Abort signal tied to the downstream client request lifecycle. */

@@ -109,14 +109,16 @@ describe('StdioForwarder', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/list',
-      sessionId: 'session-123',
+      session: { id: 'session-123', source: 'header' },
+      transportSessionId: 'session-123',
       headers: { authorization: 'Bearer token' },
     }
     const result = await forwarder.forward(request)
     const body = result.response.body as { result: { received: Record<string, unknown> } }
     const received = body.result.received
 
-    expect(received).not.toHaveProperty('sessionId')
+    expect(received).not.toHaveProperty('session')
+    expect(received).not.toHaveProperty('transportSessionId')
     expect(received).not.toHaveProperty('headers')
     expect(received).toHaveProperty('method', 'tools/list')
   })

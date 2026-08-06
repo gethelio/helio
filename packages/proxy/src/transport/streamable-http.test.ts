@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
 import { createStreamableHttpRoute } from './streamable-http.js'
+import { compileSessionIdentity } from '../mcp/session-resolver.js'
 import type { McpForwarder, McpRequest, McpResponse, JsonRpcResponse } from '../mcp/types.js'
 import type { StreamableHttpRouteOptions } from './streamable-http.js'
 
@@ -139,7 +140,21 @@ describe('streamable-http transport', () => {
     errorSpy.mockRestore()
   })
 
-  it('extracts Mcp-Session-Id header and passes to forwarder', async () => {
+  it('resolves x-helio-session-id as the governance session (source: header)', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    await postMcp(
+      app,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'x-helio-session-id': 'run-a' },
+    )
+
+    expect(forwarder.calls[0]?.session).toEqual({ id: 'run-a', source: 'header' })
+    expect(forwarder.calls[0]?.transportSessionId).toBeUndefined()
+  })
+
+  it('resolves a lone Mcp-Session-Id via legacy_header and keeps it as transportSessionId', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)
 
@@ -151,16 +166,54 @@ describe('streamable-http transport', () => {
       },
     )
 
-    expect(forwarder.calls[0]?.sessionId).toBe('session-abc-123')
+    expect(forwarder.calls[0]?.session).toEqual({
+      id: 'session-abc-123',
+      source: 'legacy_header',
+    })
+    expect(forwarder.calls[0]?.transportSessionId).toBe('session-abc-123')
   })
 
-  it('passes undefined sessionId when header is absent', async () => {
+  it('prefers the identity header over the legacy transport id', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    await postMcp(
+      app,
+      { jsonrpc: '2.0', id: 1, method: 'tools/call' },
+      { 'x-helio-session-id': 'run-a', 'Mcp-Session-Id': 'legacy-9' },
+    )
+
+    expect(forwarder.calls[0]?.session).toEqual({ id: 'run-a', source: 'header' })
+    expect(forwarder.calls[0]?.transportSessionId).toBe('legacy-9')
+  })
+
+  it('respects a custom compiled identity chain passed via options', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, {
+      session: compileSessionIdentity({
+        identity: [{ source: 'header', name: 'x-team-session' }],
+        on_unresolved: 'deny',
+      }),
+    })
+
+    await postMcp(
+      app,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'x-team-session': 'team-1', 'Mcp-Session-Id': 'ignored-legacy' },
+    )
+
+    expect(forwarder.calls[0]?.session).toEqual({ id: 'team-1', source: 'header' })
+    expect(forwarder.calls[0]?.transportSessionId).toBe('ignored-legacy')
+  })
+
+  it('leaves session and transportSessionId undefined when no session headers are present', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)
 
     await postMcp(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
 
-    expect(forwarder.calls[0]?.sessionId).toBeUndefined()
+    expect(forwarder.calls[0]?.session).toBeUndefined()
+    expect(forwarder.calls[0]?.transportSessionId).toBeUndefined()
   })
 
   it('passes downstream request abort signal to forwarder', async () => {
