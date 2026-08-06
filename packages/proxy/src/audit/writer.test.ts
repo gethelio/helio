@@ -13,6 +13,7 @@ function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {
     timestamp: new Date().toISOString(),
     session_id: null,
+    session_source: null,
     agent_id: null,
     environment: null,
     tool_name: 'test_tool',

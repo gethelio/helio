@@ -30,6 +30,12 @@ export function AuditDetailPanel({
     selectedRecord?.upstream_response != null
       ? stringifyForDisplay(selectedRecord.upstream_response)
       : null
+  // The strategies an unresolved record tried (evidence_chain.session, #218).
+  const sessionChain = selectedRecord?.evidence_chain?.['session']
+  const sessionTried =
+    sessionChain && typeof sessionChain === 'object' && 'tried' in sessionChain
+      ? String((sessionChain as Record<string, unknown>)['tried'])
+      : null
 
   return (
     <>
@@ -98,6 +104,25 @@ export function AuditDetailPanel({
                   dryRun={selectedRecord.dry_run}
                   showContext={true}
                 />
+              </DetailSection>
+
+              {/* Session identity (issue #218): id plus the strategy that
+                  resolved it; unresolved records show what was tried. */}
+              <DetailSection label="Session">
+                {selectedRecord.session_id ? (
+                  <div className="text-xs">
+                    <span className="font-mono">{selectedRecord.session_id}</span>
+                    {selectedRecord.session_source && (
+                      <span className="ml-2 text-gray-500">
+                        via {selectedRecord.session_source}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-xs text-gray-500">
+                    {sessionTried ? `Unresolved (tried: ${sessionTried})` : 'None'}
+                  </span>
+                )}
               </DetailSection>
 
               {/* Input parameters */}

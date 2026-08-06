@@ -171,6 +171,7 @@ beforeAll(async () => {
         block_reason: record.block_reason,
         approval_status: record.approval_status,
         session_id: record.session_id,
+        session_source: record.session_source,
         agent_id: record.agent_id,
         environment: record.environment,
         timestamp: record.timestamp,

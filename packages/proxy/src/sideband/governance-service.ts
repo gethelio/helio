@@ -1818,6 +1818,9 @@ export class GovernanceService {
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
       timestamp: args.timestampIso,
       session_id: args.sessionId,
+      // Adapter-supplied ids are attributed to the sideband door itself —
+      // the MCP resolver's source vocabulary does not apply here.
+      session_source: args.sessionId != null ? 'sideband' : null,
       agent_id: args.agentId,
       environment: this.environment ?? null,
       tool_name: args.toolName,

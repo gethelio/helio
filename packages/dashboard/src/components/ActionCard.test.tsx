@@ -10,6 +10,7 @@ const baseRecord: ActionEvent = {
   block_reason: null,
   approval_status: null,
   session_id: 'sess-12345678901234',
+  session_source: 'header',
   agent_id: null,
   environment: null,
   timestamp: new Date().toISOString(),

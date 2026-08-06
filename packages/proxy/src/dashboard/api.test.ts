@@ -105,6 +105,7 @@ function insertAuditRecord(
   const defaults: Omit<AuditRecord, 'id' | 'created_at'> = {
     timestamp: new Date().toISOString(),
     session_id: null,
+    session_source: null,
     agent_id: null,
     environment: null,
     tool_name: 'test_tool',
@@ -1344,6 +1345,7 @@ describe('GET /api/events', () => {
       block_reason: null,
       approval_status: null,
       session_id: null,
+      session_source: null,
       agent_id: null,
       environment: null,
       timestamp: '2026-04-02T12:00:00Z',

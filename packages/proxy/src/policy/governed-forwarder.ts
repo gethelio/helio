@@ -343,7 +343,7 @@ export class GovernedForwarder implements McpForwarder {
 
     // Intercept tools/list responses to diff tool definitions
     if (request.method === 'tools/list') {
-      this.applyToolDefinitionUpdate(result.response.body, request.session?.id)
+      this.applyToolDefinitionUpdate(result.response.body, request.session)
     }
 
     return result
@@ -357,7 +357,7 @@ export class GovernedForwarder implements McpForwarder {
    */
   private applyToolDefinitionUpdate(
     responseBody: unknown,
-    sessionId: string | undefined,
+    session: McpRequest['session'],
   ): ToolCacheUpdateResult {
     const update = this.annotationCache.update(responseBody)
     if (!update.updated) return update
@@ -368,14 +368,14 @@ export class GovernedForwarder implements McpForwarder {
       console.error(
         `[helio] Tool definition drift detected: "${drift.toolName}" changed (${aspects}) after baseline — calls governed by policies.on_tool_drift (${this.policy.onToolDrift ?? 'block'})`,
       )
-      this.writeDriftAuditRecord(drift, sessionId, 'tool_drift')
+      this.writeDriftAuditRecord(drift, session, 'tool_drift')
     }
     for (const toolName of update.reverted) {
       // eslint-disable-next-line no-console -- Intentional operational warning
       console.error(
         `[helio] Tool definition drift cleared: "${toolName}" returned to its baseline definition`,
       )
-      this.writeDriftAuditRecord({ toolName, changes: [] }, sessionId, 'tool_drift_reverted')
+      this.writeDriftAuditRecord({ toolName, changes: [] }, session, 'tool_drift_reverted')
     }
     return update
   }
@@ -383,13 +383,14 @@ export class GovernedForwarder implements McpForwarder {
   /** Write an immediate audit record for a drift event (not a tool call). */
   private writeDriftAuditRecord(
     drift: ToolDriftEvent,
-    sessionId: string | undefined,
+    session: McpRequest['session'],
     decision: 'tool_drift' | 'tool_drift_reverted',
   ): void {
     if (!this.auditWriter) return
     this.auditWriter.pushImmediate({
       timestamp: new Date().toISOString(),
-      session_id: sessionId ?? null,
+      session_id: session?.id ?? null,
+      session_source: session?.source ?? null,
       agent_id: null,
       environment: this.environment ?? null,
       tool_name: drift.toolName,
@@ -1051,6 +1052,7 @@ export class GovernedForwarder implements McpForwarder {
       this.auditWriter.pushImmediate({
         timestamp,
         session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
         agent_id: null,
         environment: this.environment ?? null,
         tool_name: '<nameless>',
@@ -1747,6 +1749,7 @@ export class GovernedForwarder implements McpForwarder {
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
       timestamp,
       session_id: request.session?.id ?? null,
+      session_source: request.session?.source ?? null,
       agent_id: null,
       environment: this.environment ?? null,
       tool_name: toolName,

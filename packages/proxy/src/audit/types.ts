@@ -8,8 +8,14 @@ export interface AuditRecord {
   readonly id: string
   /** ISO 8601 timestamp of when the tool call was received by the proxy. */
   readonly timestamp: string
-  /** MCP session ID from the Mcp-Session-Id header, if present. */
+  /** Resolved governance session id, or the adapter-supplied id on sideband records. */
   readonly session_id: string | null
+  /**
+   * Which identity strategy produced session_id (issue #218): `header`,
+   * `meta`, `legacy_header`, or `transport` on the MCP door, `sideband` for
+   * adapter-supplied ids. Null when no session resolved.
+   */
+  readonly session_source: string | null
   /** Agent identifier from config or request header, if present. */
   readonly agent_id: string | null
   /** Runtime environment label configured on proxy startup, if set. */

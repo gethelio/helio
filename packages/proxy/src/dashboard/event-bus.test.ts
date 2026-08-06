@@ -14,6 +14,7 @@ function makeActionEvent(overrides: Partial<ActionEvent> = {}): ActionEvent {
     block_reason: null,
     approval_status: null,
     session_id: null,
+    session_source: null,
     agent_id: null,
     environment: null,
     timestamp: '2026-04-02T12:00:00Z',

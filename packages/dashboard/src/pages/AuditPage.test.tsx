@@ -31,6 +31,7 @@ function makeAuditRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     id: 'rec-001',
     timestamp: '2025-01-15T10:00:00.000Z',
     session_id: 'sess-abc-1234567890',
+    session_source: 'header',
     agent_id: null,
     environment: null,
     tool_name: 'send_email',

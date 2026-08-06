@@ -27,6 +27,8 @@ export interface AuditRecord {
   readonly id: string
   readonly timestamp: string
   readonly session_id: string | null
+  /** Identity strategy that produced session_id (issue #218), or null. */
+  readonly session_source: string | null
   readonly agent_id: string | null
   readonly environment: string | null
   readonly tool_name: string
@@ -238,6 +240,8 @@ export interface ActionEvent {
   readonly block_reason: string | null
   readonly approval_status: string | null
   readonly session_id: string | null
+  /** Identity strategy that produced session_id (issue #218), or null. */
+  readonly session_source: string | null
   readonly agent_id: string | null
   readonly environment: string | null
   readonly timestamp: string
