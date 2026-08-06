@@ -132,8 +132,10 @@ export class SseUpstreamForwarder implements McpForwarder {
       this.staticHeaders,
     )
 
-    if (request.sessionId) {
-      headers['mcp-session-id'] = request.sessionId
+    // Only the verbatim transport session id reaches the wire — never a
+    // proxy-resolved governance id (issue #218).
+    if (request.transportSessionId) {
+      headers['mcp-session-id'] = request.transportSessionId
     }
 
     const start = performance.now()

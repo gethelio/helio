@@ -13,13 +13,20 @@
 // ---------------------------------------------------------------------------
 
 import { matchInput, resolvePath } from '../policy/matchers.js'
+import type { GatedCharges, GatedSession } from '../policy/session-gate.js'
 import type { CompiledBudget } from './types.js'
 
 /** Everything the engine needs about one tool call to resolve its charges. */
 export interface BudgetChargeContext {
   readonly toolName: string
   readonly toolArguments: Record<string, unknown> | undefined
-  readonly sessionId: string | null
+  /**
+   * Gate-minted session bucket value (issue #218), or null when identity is
+   * unresolved — `bucketKey` builds `session:unknown` from null, which is
+   * legal ONLY because `gateBudgetCharges` denies unresolved session-keyed
+   * engagement before `peekAll`/`recordAll` can run.
+   */
+  readonly sessionId: GatedSession | null
   /** Adapter-supplied sender id (sideband only); null on the MCP path. */
   readonly senderId: string | null
 }
@@ -398,8 +405,12 @@ export class BudgetEngine {
     return { charges, failures }
   }
 
-  /** Check every charge without mutating. All-or-nothing: one deny flips `allowed`. */
-  peekAll(charges: readonly BudgetCharge[]): { allowed: boolean; entries: BudgetPeekEntry[] } {
+  /**
+   * Check every charge without mutating. All-or-nothing: one deny flips
+   * `allowed`. Accepts only gate-branded charges (issue #218) — a caller
+   * cannot peek budget state without having run the session engagement check.
+   */
+  peekAll(charges: GatedCharges): { allowed: boolean; entries: BudgetPeekEntry[] } {
     const entries = charges.map((charge) => this.snapshot(charge))
     return { allowed: entries.every((entry) => entry.allowed), entries }
   }
@@ -411,7 +422,7 @@ export class BudgetEngine {
    * Recording is unconditional past the sink (an approved overage
    * legitimately pushes a bucket past its limit).
    */
-  recordAll(charges: readonly BudgetCharge[], meta: BudgetCommitMeta): BudgetPeekEntry[] {
+  recordAll(charges: GatedCharges, meta: BudgetCommitMeta): BudgetPeekEntry[] {
     const nowMs = this.now()
 
     // Stale-generation charges were frozen before a tuple-changing reload (or

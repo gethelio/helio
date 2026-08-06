@@ -274,7 +274,7 @@ describe('config-samples guard', () => {
     'reports a misordered init scaffold loudly by default and fails under --enforce-order',
     { timeout: 60_000 },
     async () => {
-      // All 10 stubs present so completeness stays clean and the order
+      // All 11 stubs present so completeness stays clean and the order
       // signal is isolated; dashboard: moved up between environment and
       // policies — the #163 defect class on the one surface the guard
       // never order-checked.
@@ -285,6 +285,7 @@ describe('config-samples guard', () => {
         '# listen:',
         '# environment:',
         '# dashboard:',
+        '# session:',
         '# policies:',
         '# budgets:',
         '# approval:',
@@ -312,6 +313,41 @@ describe('config-samples guard', () => {
   )
 
   it(
+    'fails under --enforce-order when session: sits outside environment → policies (#218)',
+    { timeout: 60_000 },
+    async () => {
+      // Pins session's membership AND position in the guard vocabulary: with
+      // session: absent from CANONICAL_ORDER the matcher would skip the stub
+      // and this scaffold would pass both runs.
+      const sessionMisplacedScaffold = [
+        'version: "1"',
+        'upstream:',
+        '  url: "http://localhost:8080/mcp"',
+        '# listen:',
+        '# environment:',
+        '# policies:',
+        '# session:',
+        '# budgets:',
+        '# approval:',
+        '# audit:',
+        '# dashboard:',
+        '# sdk:',
+        '',
+      ].join('\n')
+      const root = makeTree({ 'scaffold.yaml': sessionMisplacedScaffold })
+      const scaffoldArgs = ['--scaffold-file', join(root, 'scaffold.yaml')]
+
+      const relaxed = await runGuard(root, scaffoldArgs)
+      expect(relaxed.code).toBe(0)
+      expect(relaxed.output).toContain('init scaffold: top-level keys not in canonical order')
+
+      const enforced = await runGuard(root, [...scaffoldArgs, '--enforce-order'])
+      expect(enforced.code).toBe(1)
+      expect(enforced.output).toContain('init scaffold: top-level keys not in canonical order')
+    },
+  )
+
+  it(
     'reports a scaffold missing budgets: loudly by default and fails under --enforce-completeness',
     { timeout: 60_000 },
     async () => {
@@ -321,6 +357,7 @@ describe('config-samples guard', () => {
         '  url: "http://localhost:8080/mcp"',
         '# listen:',
         'environment: production',
+        '# session:',
         '# policies:',
         '# approval:',
         '# audit:',
@@ -336,6 +373,8 @@ describe('config-samples guard', () => {
         'listen:',
         '  port: 3000',
         'environment: production',
+        'session:',
+        '  on_unresolved: deny',
         'policies:',
         '  rules: []',
         'budgets: []',
@@ -607,13 +646,15 @@ describe('config-samples guard', () => {
     'ignores skipped fences when checking configuration.md completeness',
     { timeout: 60_000 },
     async () => {
-      const nineKeysConfig = [
+      const allButBudgetsConfig = [
         "version: '1'",
         'upstream:',
         "  url: 'http://localhost:8080/mcp'",
         'listen:',
         '  port: 3000',
         'environment: production',
+        'session:',
+        '  on_unresolved: deny',
         'policies:',
         '  rules: []',
         'approval:',
@@ -631,6 +672,7 @@ describe('config-samples guard', () => {
         '  url: "x"',
         '# listen:',
         '# environment:',
+        '# session:',
         '# policies:',
         '# budgets:',
         '# approval:',
@@ -647,7 +689,7 @@ describe('config-samples guard', () => {
           '# Config',
           '',
           '```yaml',
-          nineKeysConfig,
+          allButBudgetsConfig,
           '```',
           '',
           '<!-- helio-config-guard: skip -->',

@@ -13,6 +13,7 @@ export type DisplayOutcome =
   | 'rate_limited'
   | 'spend_limited'
   | 'budget_exceeded'
+  | 'session_unresolved'
   | 'dry_run'
 
 export type OutcomeFilterValue = Exclude<DisplayOutcome, never>
@@ -46,6 +47,11 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       // so it must be pinned before the policy_decision fallthrough or the
       // dashboard would render a blocked call as Allow.
       return 'budget_exceeded'
+    case 'session_unresolved':
+      // A session-keyed control engaged with no resolved identity
+      // (issue #218). Rides policy_decision "rate_limit" | "spend_limit" |
+      // "allow" — same render-as-Allow hazard as budget_exceeded above.
+      return 'session_unresolved'
     case 'approval_denied':
       return 'approval_denied'
     case 'approval_timeout':
@@ -96,6 +102,8 @@ export function formatDisplayOutcome(outcome: DisplayOutcome): string {
       return 'Spend Limited'
     case 'budget_exceeded':
       return 'Budget Exceeded'
+    case 'session_unresolved':
+      return 'Session Unresolved'
     case 'dry_run':
       return 'Dry Run'
   }
@@ -149,6 +157,8 @@ export function outcomeFilterToAuditParams(filter: OutcomeFilterValue | null): A
       return { reason: 'spend_limited' }
     case 'budget_exceeded':
       return { reason: 'budget_exceeded' }
+    case 'session_unresolved':
+      return { reason: 'session_unresolved' }
     case 'dry_run':
       return { dry_run: true }
     default:

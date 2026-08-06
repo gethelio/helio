@@ -24,7 +24,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    const { response } = await fwd.forward(req({ sessionId: 'S1' }))
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect((response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
 
@@ -36,7 +36,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    const { response } = await fwd.forward(req({ sessionId: 'S1' }))
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect((response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
 
@@ -51,7 +51,7 @@ describe('StreamableHttpForwarder', () => {
       )
     }
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    await fwd.forward(req({ sessionId: 'S1' }))
+    await fwd.forward(req({ transportSessionId: 'S1' }))
     expect(seen['mcp-protocol-version']).toBeDefined()
     expect(seen['mcp-session-id']).toBe('S1')
   })
@@ -69,11 +69,33 @@ describe('StreamableHttpForwarder', () => {
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
     await fwd.forward(
       req({
-        sessionId: 'S1',
+        transportSessionId: 'S1',
         headers: { 'mcp-protocol-version': '2025-03-26' },
       }),
     )
     expect(seen['mcp-protocol-version']).toBe('2025-03-26')
+  })
+
+  it('never sends a resolved governance session upstream as Mcp-Session-Id', async () => {
+    // The FastMCP-corruption regression: session-enforcing upstreams 400/404
+    // any id they did not mint, so only the verbatim transport relay may
+    // reach the wire — on both forward branches.
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(req({ session: { id: 'run-a', source: 'header' } }))
+    expect(seen['mcp-session-id']).toBeUndefined()
+
+    await fwd.forward(req({ method: 'initialize', session: { id: 'run-a', source: 'header' } }))
+    expect(seen['mcp-session-id']).toBeUndefined()
   })
 
   it('relays the upstream Mcp-Session-Id response header', async () => {
@@ -84,7 +106,9 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    const { response } = await fwd.forward(req({ method: 'initialize', sessionId: undefined }))
+    const { response } = await fwd.forward(
+      req({ method: 'initialize', transportSessionId: undefined }),
+    )
     expect(response.headers['mcp-session-id']).toBe('U-new')
   })
 
@@ -103,7 +127,7 @@ describe('StreamableHttpForwarder', () => {
       )
     }
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    await fwd.forward(req({ method: 'initialize', sessionId: undefined }))
+    await fwd.forward(req({ method: 'initialize', transportSessionId: undefined }))
     expect(seen['mcp-protocol-version']).toBeUndefined()
     expect(seen['mcp-session-id']).toBeUndefined()
   })
@@ -125,7 +149,7 @@ describe('StreamableHttpForwarder', () => {
         ),
       )
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
-    const { response } = await fwd.forward(req({ sessionId: 'S1' }))
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect(response.status).toBe(404)
   })
 
@@ -271,7 +295,7 @@ describe('StreamableHttpForwarder', () => {
       )
     const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
     const { response } = await fwd.forward(
-      req({ id: undefined, method: 'notifications/progress', sessionId: 'S1' }),
+      req({ id: undefined, method: 'notifications/progress', transportSessionId: 'S1' }),
     )
     expect(response.body).toEqual({ jsonrpc: '2.0' })
   })
@@ -295,7 +319,10 @@ describe('StreamableHttpForwarder', () => {
       headers: { authorization: 'Bearer cfg' },
     })
     await fwd.forward(
-      req({ sessionId: 'S1', headers: { Authorization: 'Bearer caller', 'x-trace': 't1' } }),
+      req({
+        transportSessionId: 'S1',
+        headers: { Authorization: 'Bearer caller', 'x-trace': 't1' },
+      }),
     )
     // Static config wins — caller cannot override Authorization
     expect(seen['authorization']).toBe('Bearer cfg')

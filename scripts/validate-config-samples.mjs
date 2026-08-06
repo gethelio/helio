@@ -51,6 +51,7 @@ const CANONICAL_ORDER = [
   'upstream',
   'listen',
   'environment',
+  'session',
   'policies',
   'budgets',
   'approval',

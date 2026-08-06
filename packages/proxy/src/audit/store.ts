@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
   id                TEXT PRIMARY KEY,
   timestamp         TEXT NOT NULL,
   session_id        TEXT,
+  session_source    TEXT,
   agent_id          TEXT,
   environment       TEXT,
   tool_name         TEXT NOT NULL,
@@ -91,14 +92,14 @@ CREATE INDEX IF NOT EXISTS idx_audit_origin          ON audit_records (origin);
 
 const INSERT_SQL = `
 INSERT INTO audit_records (
-  id, timestamp, session_id, agent_id, environment, tool_name, tool_input,
+  id, timestamp, session_id, session_source, agent_id, environment, tool_name, tool_input,
   policy_decision, block_reason, matched_rule, matched_rule_index, evidence_chain, approval_status,
   approved_by, upstream_response, upstream_error, upstream_latency_ms,
   upstream_http_status,
   total_duration_ms, approval_wait_ms, proxy_compute_ms,
   flagged_destructive, dry_run, record_kind, origin, metadata, created_at
 ) VALUES (
-  @id, @timestamp, @session_id, @agent_id, @environment, @tool_name, @tool_input,
+  @id, @timestamp, @session_id, @session_source, @agent_id, @environment, @tool_name, @tool_input,
   @policy_decision, @block_reason, @matched_rule, @matched_rule_index, @evidence_chain, @approval_status,
   @approved_by, @upstream_response, @upstream_error, @upstream_latency_ms,
   @upstream_http_status,
@@ -118,6 +119,9 @@ const REQUIRED_AUDIT_COLUMNS = [
   'record_kind',
   'origin',
   'metadata',
+  // Deliberately listed (issue #218): pre-0.12 local DBs fail fast with the
+  // documented delete-these-files message — the pre-1.0 clean-break policy.
+  'session_source',
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -128,6 +132,7 @@ interface RawAuditRow {
   id: string
   timestamp: string
   session_id: string | null
+  session_source: string | null
   agent_id: string | null
   environment: string | null
   tool_name: string
@@ -163,6 +168,7 @@ function deserializeRow(row: RawAuditRow): AuditRecord {
     id: row.id,
     timestamp: row.timestamp,
     session_id: row.session_id,
+    session_source: row.session_source,
     agent_id: row.agent_id,
     environment: row.environment,
     tool_name: row.tool_name,
@@ -444,6 +450,7 @@ export class AuditStore {
       id: resolvedId,
       timestamp: record.timestamp,
       session_id: record.session_id,
+      session_source: record.session_source,
       agent_id: record.agent_id,
       environment: record.environment,
       tool_name: record.tool_name,

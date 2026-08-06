@@ -19,8 +19,59 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Proxy-owned session identity (#218, closes #214/#215).** A new
+  top-level `session:` config section declares how Helio resolves the
+  governance identity that keys `key: session` limits and budgets,
+  scopes evidence/dependency rules, and attributes audit records. The
+  default chain reads the new `x-helio-session-id` caller header, then
+  the legacy `Mcp-Session-Id` (kept for the MCP spec's deprecation
+  window); an optional `meta` source derives an agent-level id from the
+  `io.modelcontextprotocol/clientInfo` `_meta` claim, and on `/sse` the
+  minted per-stream id remains an implicit final fallback. The section
+  is optional — an absent `session:` validates and uses the defaults —
+  and is restart-required at the hot-reload boundary. Audit records,
+  the CSV export (as a trailing column), and the dashboard's new
+  Session detail section carry `session_source`, the strategy that
+  produced each record's id.
+
 ### Changed
 
+- **BREAKING: unresolved session identity now fails closed (#218).**
+  Under the default `session.on_unresolved: deny`, a request that
+  engages a session-keyed rate limit, spend limit, or budget — or an
+  evidence/dependency rule — without resolvable identity is denied
+  with the new `block_reason: session_unresolved` (evidence rules keep
+  `policy_denied`) instead of silently pooling into a shared `unknown`
+  bucket. Requests governed only by `key: tool`/`global` controls are
+  unaffected, and dry-run reports a named `session_unresolved: true`
+  marker instead of denying. One-line restore of the pre-0.12 pooling:
+  `session.on_unresolved: anonymous` (evidence/dependency rules still
+  require identity under both modes). The same policy applies to the
+  adapter sideband's `session_id`. Bucket continuity is preserved for
+  well-formed ids (non-empty after trimming, at most 256 chars): legacy
+  ids key the same buckets byte-for-byte, so persisted budget pots
+  carry over, while over-long, empty, or whitespace-only ids — which
+  previously keyed buckets literally — now resolve as unresolved. The
+  evidence/dependency deny message changed to name the configured
+  identity strategies, and the SDK sideband's evidence and context
+  writes reject whitespace-only session ids with 400 (such a write
+  could never be read back).
+- **BREAKING: pre-0.12 local audit databases fail fast at startup
+  (#218).** The audit schema gains a `session_source` column through
+  the documented pre-1.0 clean-break mechanism: Helio refuses to start
+  on an old local DB and prints the delete-these-files instructions.
+- **BREAKING: TypeScript API changes for direct embedders (#218).**
+  `McpRequest.sessionId` splits into `session` (the proxy-resolved
+  identity with its source) and `transportSessionId` (the verbatim
+  wire `Mcp-Session-Id`, relayed upstream unchanged — a proxy-resolved
+  id is never sent upstream, which session-enforcing upstreams would
+  reject). `BudgetEngine.peekAll`/`recordAll` now accept only
+  gate-branded charges obtained via `gateBudgetCharges`; runtime
+  behavior is unchanged. On `/sse`, the minted stream id is no longer
+  sent upstream as `Mcp-Session-Id`, and an explicit identity header
+  on the POST leg now overrides the stream identity.
 - **BREAKING: the supported Node.js floor is now 24 (#241).** The
   `engines` field moves from `>=22` to `>=24` across the workspace.
   Installs on Node 22 or older now surface an engine mismatch: npm and

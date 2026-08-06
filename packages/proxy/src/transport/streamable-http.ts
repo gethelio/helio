@@ -3,6 +3,12 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import { PARSE_ERROR, INVALID_REQUEST, makeJsonRpcError } from '../mcp/types.js'
 import type { McpForwarder, McpRequest } from '../mcp/types.js'
 import { parseJsonRpcRequest } from '../mcp/validation.js'
+import {
+  DEFAULT_SESSION_IDENTITY,
+  paramsMeta,
+  resolveSession,
+  type CompiledSessionIdentity,
+} from '../mcp/session-resolver.js'
 import { isJsonContentType } from './content-type.js'
 import { buildForwardHeaders } from './forward-headers.js'
 import { createOriginGuard } from './origin-guard.js'
@@ -19,13 +25,17 @@ export interface StreamableHttpRouteOptions {
   readonly forwardHeadersAllowlist?: readonly string[]
   /** Origins allowed to send an `Origin` header (issue #213). Default: none. */
   readonly allowedOrigins?: readonly string[]
+  /** Compiled session identity chain (issue #218). Default: the schema default chain. */
+  readonly session?: CompiledSessionIdentity
 }
 
 /**
  * Create a Hono sub-app that handles MCP Streamable HTTP transport.
  *
- * Accepts JSON-RPC POST requests, validates the envelope, extracts the
- * MCP session ID, and delegates to the provided forwarder.
+ * Accepts JSON-RPC POST requests, validates the envelope, resolves the
+ * governance session identity from the configured chain (issue #218),
+ * captures the verbatim transport session id for the upstream relay, and
+ * delegates to the provided forwarder.
  */
 export function createStreamableHttpRoute(
   forwarder: McpForwarder,
@@ -33,6 +43,7 @@ export function createStreamableHttpRoute(
 ): Hono {
   const app = new Hono()
   const forwardHeaderAllowlist = options.forwardHeadersAllowlist ?? []
+  const sessionIdentity = options.session ?? DEFAULT_SESSION_IDENTITY
 
   // Hono runs middleware in registration order — the guard must stay above
   // the handlers or it never runs for matched requests.
@@ -65,8 +76,20 @@ export function createStreamableHttpRoute(
     const method = parsedRequest.request.method
     const params = parsedRequest.request.params
 
-    // Extract MCP session ID
-    const sessionId = c.req.header(MCP_SESSION_HEADER)
+    // Verbatim transport session id — upstream relay only, never governance.
+    const transportSessionId = c.req.header(MCP_SESSION_HEADER)
+
+    // Resolve governance identity from the RAW request headers:
+    // McpRequest.headers is the allowlist-filtered forward set and will
+    // typically not contain the identity header.
+    const session = resolveSession(
+      {
+        headers: Object.fromEntries(c.req.raw.headers),
+        meta: paramsMeta(params),
+        transportSessionId,
+      },
+      sessionIdentity,
+    )
 
     const forwardHeaders = buildForwardHeaders(c.req.raw.headers, forwardHeaderAllowlist)
 
@@ -76,7 +99,8 @@ export function createStreamableHttpRoute(
       id,
       method,
       params,
-      sessionId,
+      session,
+      transportSessionId,
       headers: forwardHeaders,
       signal: c.req.raw.signal,
     }

@@ -149,9 +149,57 @@ describe('SSE transport', () => {
     expect(postRes.status).toBe(202)
     expect(forwarder.calls).toHaveLength(1)
     expect(forwarder.calls[0]?.method).toBe('tools/list')
-    expect(forwarder.calls[0]?.sessionId).toBe(sessionId)
+    // The minted stream id is the implicit transport fallback — and it is
+    // NOT the verbatim wire session id, so nothing is relayed upstream.
+    expect(forwarder.calls[0]?.session).toEqual({ id: sessionId, source: 'transport' })
+    expect(forwarder.calls[0]?.transportSessionId).toBeUndefined()
     expect(forwarder.calls[0]?.signal).toBeDefined()
     expect(forwarder.calls[0]?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('lets an explicit x-helio-session-id override the minted stream identity', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const postRes = await postSse(
+      app,
+      sessionId,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'x-helio-session-id': 'explicit-run' },
+    )
+
+    expect(postRes.status).toBe(202)
+    expect(forwarder.calls[0]?.session).toEqual({ id: 'explicit-run', source: 'header' })
+  })
+
+  it('lets a wire Mcp-Session-Id override the stream identity via legacy_header', async () => {
+    // Named behavior change (issue #218): the SSE POST leg used to ignore
+    // this header entirely; chain uniformity now applies it before the
+    // implicit transport fallback, and it becomes the upstream relay value.
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const postRes = await postSse(
+      app,
+      sessionId,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'Mcp-Session-Id': 'client-upstream-session' },
+    )
+
+    expect(postRes.status).toBe(202)
+    expect(forwarder.calls[0]?.session).toEqual({
+      id: 'client-upstream-session',
+      source: 'legacy_header',
+    })
+    expect(forwarder.calls[0]?.transportSessionId).toBe('client-upstream-session')
   })
 
   it('POST notification returns 202 with empty body and no SSE response envelope', async () => {

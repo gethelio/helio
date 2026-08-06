@@ -57,6 +57,7 @@ export function makeConfig(
     approval?: Partial<HelioConfig['approval']>
     audit?: Partial<HelioConfig['audit']>
     environment?: string
+    session?: Partial<HelioConfig['session']>
     sdk?: Partial<HelioConfig['sdk']>
   } = {},
 ): HelioConfig {
@@ -77,6 +78,11 @@ export function makeConfig(
       ...overrides.dashboard,
     },
     environment: overrides.environment,
+    session: {
+      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+      on_unresolved: 'deny',
+      ...overrides.session,
+    },
     policies: { default: 'allow', dry_run: false, rules: [], ...overrides.policies },
     approval: { timeout: '300s', default_on_timeout: 'deny', channels: [], ...overrides.approval },
     audit: {
@@ -99,7 +105,12 @@ export async function sendMcpRequest(
   method: string,
   params?: unknown,
   id: number | string = 1,
-  options?: { sessionId?: string },
+  options?: {
+    /** Sets the legacy Mcp-Session-Id wire header (deprecation window). */
+    sessionId?: string
+    /** Sets the canonical x-helio-session-id identity header (issue #218). */
+    helioSessionId?: string
+  },
 ): Promise<{ status: number; headers: Headers; body: Record<string, unknown> }> {
   const payload: Record<string, unknown> = {
     jsonrpc: '2.0',
@@ -113,6 +124,9 @@ export async function sendMcpRequest(
   const reqHeaders: Record<string, string> = { 'content-type': 'application/json' }
   if (options?.sessionId) {
     reqHeaders['mcp-session-id'] = options.sessionId
+  }
+  if (options?.helioSessionId) {
+    reqHeaders['x-helio-session-id'] = options.helioSessionId
   }
 
   const res = await fetch(baseUrl, {

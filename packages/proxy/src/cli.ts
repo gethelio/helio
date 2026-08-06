@@ -12,6 +12,7 @@ import { createApp, startServer, startSidebandServer } from './server.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
+import { compileSessionIdentity } from './mcp/session-resolver.js'
 import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
 import { AuditStore, AuditWriter, EXPORT_MAX_RECORDS } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
@@ -122,6 +123,13 @@ upstream:
 #   host: 127.0.0.1
 
 # environment: production
+
+# session:
+#   identity: # ordered; first match wins
+#     - source: header
+#       name: x-helio-session-id
+#     - source: legacy_header # verbatim Mcp-Session-Id (deprecation window)
+#   on_unresolved: deny # deny | anonymous
 
 # policies:
 #   default: allow
@@ -377,6 +385,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         block_reason: record.block_reason,
         approval_status: record.approval_status,
         session_id: record.session_id,
+        session_source: record.session_source,
         agent_id: record.agent_id,
         environment: record.environment,
         timestamp: record.timestamp,
@@ -475,6 +484,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   })
   budgetEngine.hydrate()
 
+  // Compiled once at startup, shared by both doors — session is
+  // restart-required at the reload boundary (issue #218).
+  const session = compileSessionIdentity(config.session)
+
   const governedForwarder = new GovernedForwarder(forwarder, policy, {
     environment: config.environment,
     auditWriter,
@@ -483,6 +496,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     rateLimiter,
     spendLimiter,
     budgetEngine,
+    session,
   })
 
   const annotationPrime = await startAnnotationPrimeLoop(governedForwarder)
@@ -547,6 +561,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       rateLimiter,
       spendLimiter,
       budgetEngine,
+      session,
       auditWriter,
       approvalTimeoutMs: parseDuration(config.approval.timeout),
       ttlMs: parseDuration(config.sdk.evaluation_ttl),

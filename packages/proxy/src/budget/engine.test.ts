@@ -10,10 +10,14 @@ import type {
 import { BudgetLedger } from './ledger.js'
 import { compileBudgets } from './parser.js'
 import type { BudgetConfig } from '../config/schema.js'
+import { mintGatedCharges, mintGatedSession } from '../__tests__/helpers/session-gate-mints.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Engine unit tests bypass the door gates by design (issue #218). */
+const gated = mintGatedCharges
 
 function budgetConfig(overrides: Partial<BudgetConfig> = {}): BudgetConfig {
   return {
@@ -61,7 +65,7 @@ function chargeCtx(toolName: string, args: Record<string, unknown>, sessionId?: 
   return {
     toolName,
     toolArguments: args,
-    sessionId: sessionId ?? null,
+    sessionId: sessionId === undefined ? null : mintGatedSession(sessionId),
     senderId: null,
   }
 }
@@ -272,8 +276,8 @@ describe('BudgetEngine peek and record', () => {
     const { engine } = createEngine([budgetConfig()])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 }))
 
-    const first = engine.peekAll(charges)
-    const second = engine.peekAll(charges)
+    const first = engine.peekAll(gated(charges))
+    const second = engine.peekAll(gated(charges))
 
     expect(first.allowed).toBe(true)
     expect(first.entries[0]?.spent).toBe(0)
@@ -284,10 +288,10 @@ describe('BudgetEngine peek and record', () => {
   it('record accumulates and a later peek that would exceed is denied', () => {
     const { engine } = createEngine([budgetConfig()])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 }))
-    engine.recordAll(spend.charges, COMMIT_META)
+    engine.recordAll(gated(spend.charges), COMMIT_META)
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 50 }))
-    const peek = engine.peekAll(next.charges)
+    const peek = engine.peekAll(gated(next.charges))
 
     expect(peek.allowed).toBe(false)
     expect(peek.entries[0]?.spent).toBe(60)
@@ -300,7 +304,7 @@ describe('BudgetEngine peek and record', () => {
       budgetConfig({ name: 'small', limit: 10 }),
     ])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 50 }))
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
 
     expect(peek.allowed).toBe(false)
     expect(peek.entries.find((e) => e.budget.name === 'big')?.allowed).toBe(true)
@@ -310,17 +314,17 @@ describe('BudgetEngine peek and record', () => {
   it('recordAll records on every matched budget together', () => {
     const { engine } = createEngine([budgetConfig({ name: 'a' }), budgetConfig({ name: 'b' })])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 }))
-    engine.recordAll(charges, COMMIT_META)
+    engine.recordAll(gated(charges), COMMIT_META)
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
-    const peek = engine.peekAll(next.charges)
+    const peek = engine.peekAll(gated(next.charges))
     expect(peek.entries.map((e) => e.spent)).toEqual([30, 30])
   })
 
   it('recordAll can push past the limit (approved overage semantics)', () => {
     const { engine } = createEngine([budgetConfig({ limit: 50 })])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 80 }))
-    const snapshots = engine.recordAll(charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(charges), COMMIT_META)
 
     expect(snapshots[0]?.spent).toBe(80)
     expect(snapshots[0]?.remaining).toBe(0)
@@ -329,12 +333,12 @@ describe('BudgetEngine peek and record', () => {
   it('duration windows replenish after the window slides', () => {
     const { engine, advance } = createEngine([budgetConfig({ window: '1h' })])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 }))
-    engine.recordAll(spend.charges, COMMIT_META)
+    engine.recordAll(gated(spend.charges), COMMIT_META)
 
     advance(3_600_001)
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 }))
-    expect(engine.peekAll(next.charges).allowed).toBe(true)
+    expect(engine.peekAll(gated(next.charges)).allowed).toBe(true)
   })
 
   it('session pots never replenish on a timer', () => {
@@ -342,12 +346,12 @@ describe('BudgetEngine peek and record', () => {
       budgetConfig({ name: 'sc', window: 'session', key: 'session' }),
     ])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 }, 's1'))
-    engine.recordAll(spend.charges, { ...COMMIT_META })
+    engine.recordAll(gated(spend.charges), { ...COMMIT_META })
 
     advance(3_600_000 * 20) // well past any duration window, within idle TTL
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }, 's1'))
-    expect(engine.peekAll(next.charges).allowed).toBe(false)
+    expect(engine.peekAll(gated(next.charges)).allowed).toBe(false)
   })
 
   it('reports reset_at_ms for duration windows and null for session pots', () => {
@@ -356,7 +360,7 @@ describe('BudgetEngine peek and record', () => {
       budgetConfig({ name: 's', window: 'session', key: 'session' }),
     ])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1'))
-    const snapshots = engine.recordAll(spend.charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(spend.charges), COMMIT_META)
 
     expect(snapshots.find((e) => e.budget.name === 'd')?.resetAtMs).toBe(1_000_000 + 3_600_000)
     expect(snapshots.find((e) => e.budget.name === 's')?.resetAtMs).toBeNull()
@@ -377,9 +381,9 @@ describe('BudgetEngine ledger sink', () => {
     const { engine } = createEngine([budgetConfig()], { ledger: throwingSink })
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 }))
 
-    expect(() => engine.recordAll(charges, COMMIT_META)).toThrow('disk full')
+    expect(() => engine.recordAll(gated(charges), COMMIT_META)).toThrow('disk full')
 
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
     expect(peek.entries[0]?.spent).toBe(0)
   })
 
@@ -394,7 +398,7 @@ describe('BudgetEngine ledger sink', () => {
       ledger: sink,
     })
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 }))
-    engine.recordAll(charges, COMMIT_META)
+    engine.recordAll(gated(charges), COMMIT_META)
 
     expect(rows).toHaveLength(2)
     expect(rows[0]).toMatchObject({
@@ -424,7 +428,7 @@ describe('BudgetEngine ledger sink', () => {
     )
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 50 }))
 
-    engine.recordAll(charges, {
+    engine.recordAll(gated(charges), {
       ...COMMIT_META,
       kinds: new Map([['small', 'approved_overage' as const]]),
     })
@@ -451,7 +455,7 @@ describe('BudgetEngine commit events', () => {
     const onCommit = vi.fn()
     const { engine } = createEngine([budgetConfig()], { onCommit })
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }))
-    engine.recordAll(charges, COMMIT_META)
+    engine.recordAll(gated(charges), COMMIT_META)
 
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onCommit.mock.calls[0]?.[0]).toMatchObject({
@@ -475,10 +479,10 @@ describe('BudgetEngine breach events (PR 4)', () => {
       onBreach,
     })
     const seed = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 90 }))
-    engine.recordAll(seed.charges, COMMIT_META)
+    engine.recordAll(gated(seed.charges), COMMIT_META)
 
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }))
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
     expect(peek.allowed).toBe(false)
 
     engine.reportBreaches(peek.entries.filter((entry) => !entry.allowed))
@@ -507,7 +511,7 @@ describe('BudgetEngine breach events (PR 4)', () => {
       { onBreach },
     )
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 25 }))
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
 
     expect(() => {
       engine.reportBreaches(peek.entries)
@@ -519,7 +523,7 @@ describe('BudgetEngine breach events (PR 4)', () => {
   it('reportBreaches is a no-op without an onBreach subscriber', () => {
     const { engine } = createEngine([budgetConfig({ limit: 10 })])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 25 }))
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
     expect(() => {
       engine.reportBreaches(peek.entries)
     }).not.toThrow()
@@ -540,7 +544,7 @@ describe('BudgetEngine commit robustness (review round)', () => {
 
     // A throwing subscriber must not abort the commit nor leave memory
     // partially updated relative to the (already-written) ledger.
-    expect(() => engine.recordAll(charges, COMMIT_META)).not.toThrow()
+    expect(() => engine.recordAll(gated(charges), COMMIT_META)).not.toThrow()
     expect(seen).toEqual(['a', 'b'])
     expect(engine.listStates().map((s2) => s2.buckets[0]?.spent)).toEqual([30, 30])
   })
@@ -558,7 +562,7 @@ describe('BudgetEngine commit robustness (review round)', () => {
     // but the frozen charge must not repopulate the reset pot.
     engine.reconcile(compileBudgets([budgetConfig({ limit: 500 })]))
 
-    const snapshots = engine.recordAll(charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(charges), COMMIT_META)
     expect(snapshots).toHaveLength(1)
     expect(snapshots[0]?.stale).toBe(true)
     expect(snapshots[0]?.amount).toBe(30)
@@ -585,7 +589,7 @@ describe('BudgetEngine commit robustness (review round)', () => {
     // but no bucket state may be recreated for a budget that no longer exists.
     engine.reconcile([])
 
-    const snapshots = engine.recordAll(charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(charges), COMMIT_META)
     expect(snapshots[0]?.stale).toBe(true)
     expect(rows).toHaveLength(1)
     expect(engine.listStates()).toEqual([])
@@ -609,7 +613,7 @@ describe('BudgetEngine commit robustness (review round)', () => {
       ]),
     )
 
-    const snapshots = engine.recordAll(charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(charges), COMMIT_META)
     expect(snapshots).toHaveLength(1)
     expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(30)
   })
@@ -637,13 +641,13 @@ describe('BudgetEngine lazy expiry (review round)', () => {
   it('reports a live reset_at_ms after entries expire, not a past one', () => {
     const { engine, advance } = createEngine([budgetConfig({ window: '1h' })])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges),
       COMMIT_META,
     )
     advance(3_600_001) // the only entry expired; no gc() has run
 
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }))
-    const peek = engine.peekAll(charges)
+    const peek = engine.peekAll(gated(charges))
     expect(peek.entries[0]?.spent).toBe(0)
     // A stale first-entry timestamp would report a reset in the past.
     expect(peek.entries[0]?.resetAtMs).toBeGreaterThan(1_000_000 + 3_600_001)
@@ -652,7 +656,7 @@ describe('BudgetEngine lazy expiry (review round)', () => {
   it('drops fully-expired duration buckets from listStates and hasBucket without gc', () => {
     const { engine, advance } = createEngine([budgetConfig({ window: '1h' })])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges),
       COMMIT_META,
     )
     advance(3_600_001)
@@ -672,7 +676,7 @@ describe('BudgetEngine.reconcile', () => {
   it('preserves accrued spend across a contributor edit', () => {
     const { engine } = createEngine([budgetConfig()])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 }))
-    engine.recordAll(spend.charges, COMMIT_META)
+    engine.recordAll(gated(spend.charges), COMMIT_META)
 
     engine.reconcile(
       compileBudgets([
@@ -686,37 +690,37 @@ describe('BudgetEngine.reconcile', () => {
     )
 
     const viaNewContributor = engine.resolveCharges(chargeCtx('paypal_send', { total: 50 }))
-    expect(engine.peekAll(viaNewContributor.charges).allowed).toBe(false)
+    expect(engine.peekAll(gated(viaNewContributor.charges)).allowed).toBe(false)
   })
 
   it('resets state when the limit changes', () => {
     const { engine } = createEngine([budgetConfig()])
     const spend = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 }))
-    engine.recordAll(spend.charges, COMMIT_META)
+    engine.recordAll(gated(spend.charges), COMMIT_META)
 
     engine.reconcile(compileBudgets([budgetConfig({ limit: 200 })]))
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
-    expect(engine.peekAll(next.charges).entries[0]?.spent).toBe(0)
+    expect(engine.peekAll(gated(next.charges)).entries[0]?.spent).toBe(0)
   })
 
   it('resets state when the currency changes', () => {
     const { engine } = createEngine([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
     engine.reconcile(compileBudgets([budgetConfig({ currency: 'EUR' })]))
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
-    expect(engine.peekAll(next.charges).entries[0]?.spent).toBe(0)
+    expect(engine.peekAll(gated(next.charges)).entries[0]?.spent).toBe(0)
   })
 
   it('resets state when the key scope changes', () => {
     const { engine } = createEngine([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
@@ -739,7 +743,7 @@ describe('BudgetEngine.reconcile', () => {
 
     engine.reconcile(compileBudgets([budgetConfig({ key: 'session' })]))
 
-    const snapshots = engine.recordAll(charges, COMMIT_META)
+    const snapshots = engine.recordAll(gated(charges), COMMIT_META)
     expect(snapshots[0]?.stale).toBe(true)
     expect(rows).toHaveLength(1)
     expect(engine.listStates().flatMap((s2) => s2.buckets)).toEqual([])
@@ -748,20 +752,20 @@ describe('BudgetEngine.reconcile', () => {
   it('resets state when the window changes', () => {
     const { engine } = createEngine([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
     engine.reconcile(compileBudgets([budgetConfig({ window: '1h' })]))
 
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
-    expect(engine.peekAll(next.charges).entries[0]?.spent).toBe(0)
+    expect(engine.peekAll(gated(next.charges)).entries[0]?.spent).toBe(0)
   })
 
   it('drops state for removed budgets and starts fresh for new names', () => {
     const { engine } = createEngine([budgetConfig({ name: 'old' })])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
@@ -770,7 +774,7 @@ describe('BudgetEngine.reconcile', () => {
     expect(engine.listStates().map((s) => s.name)).toEqual(['new'])
     const next = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
     expect(next.charges[0]?.budget.name).toBe('new')
-    expect(engine.peekAll(next.charges).entries[0]?.spent).toBe(0)
+    expect(engine.peekAll(gated(next.charges)).entries[0]?.spent).toBe(0)
   })
 })
 
@@ -784,12 +788,12 @@ describe('BudgetEngine.gc', () => {
       budgetConfig({ name: 'sc', window: 'session', key: 'session', idle_ttl: '1h' }),
     ])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 }, 'stale')).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 }, 'stale')).charges),
       COMMIT_META,
     )
     advance(1_800_000)
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 'active')).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 'active')).charges),
       COMMIT_META,
     )
     advance(1_800_001) // stale pot now idle > 1h; active pot idle 30min
@@ -804,13 +808,13 @@ describe('BudgetEngine.gc', () => {
 
     // The collected pot starts fresh if the session reappears.
     const revived = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }, 'stale'))
-    expect(engine.peekAll(revived.charges).allowed).toBe(true)
+    expect(engine.peekAll(gated(revived.charges)).allowed).toBe(true)
   })
 
   it('evicts expired duration entries on gc', () => {
     const { engine, advance } = createEngine([budgetConfig({ window: '1h' })])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 100 })).charges),
       COMMIT_META,
     )
     advance(3_600_001)
@@ -845,7 +849,7 @@ describe('BudgetEngine read surface', () => {
   it('reports live bucket state with wire field names', () => {
     const { engine } = createEngine([budgetConfig({ window: '1h' })])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -863,7 +867,7 @@ describe('BudgetEngine read surface', () => {
     const { engine } = createEngine([budgetConfig()])
     expect(engine.hasBucket('budget:daily-cap:global')).toBe(false)
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 })).charges),
       COMMIT_META,
     )
     expect(engine.hasBucket('budget:daily-cap:global')).toBe(true)
@@ -872,7 +876,7 @@ describe('BudgetEngine read surface', () => {
   it('close clears all state', () => {
     const { engine } = createEngine([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 })).charges),
       COMMIT_META,
     )
     engine.close()
@@ -940,7 +944,7 @@ function persistentHarness(initialTime = 1_000_000) {
 
 function spentAfterBoot(engine: BudgetEngine, amount = 1): number {
   const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount }))
-  return engine.peekAll(charges).entries[0]?.spent ?? -1
+  return engine.peekAll(gated(charges)).entries[0]?.spent ?? -1
 }
 
 describe('BudgetEngine persistence (PR 2)', () => {
@@ -961,7 +965,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig({ window: '1h' })])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -979,7 +983,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const config = budgetConfig({ window: '1h', limit: 50 })
     const first = boot([config])
     const { charges } = first.resolveCharges(chargeCtx('stripe_charge', { amount: 80 }))
-    first.recordAll(charges, {
+    first.recordAll(gated(charges), {
       ...COMMIT_META,
       kinds: new Map([['daily-cap', 'approved_overage' as const]]),
     })
@@ -995,14 +999,14 @@ describe('BudgetEngine persistence (PR 2)', () => {
     // An overage stays spent: the pot comes back over its limit.
     expect(spentAfterBoot(second)).toBe(80)
     const next = second.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
-    expect(second.peekAll(next.charges).allowed).toBe(false)
+    expect(second.peekAll(gated(next.charges)).allowed).toBe(false)
   })
 
   it('replays nothing for a duration window when the whole window elapsed while down', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig({ window: '1h' })])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1017,11 +1021,11 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges),
       COMMIT_META,
     )
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }, 's2')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }, 's2')).charges),
       COMMIT_META,
     )
 
@@ -1044,12 +1048,12 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges),
       COMMIT_META,
     )
     advance(30 * 60_000)
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1074,7 +1078,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1093,7 +1097,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, db } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1113,7 +1117,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
 
     // The same session id comes back: a fresh pot in memory...
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 7 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 7 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1147,7 +1151,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     })
     engine.hydrate()
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1168,7 +1172,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, ledger } = persistentHarness()
     const first = boot([budgetConfig()])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1182,7 +1186,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, ledger } = persistentHarness()
     const first = boot([budgetConfig()])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1196,14 +1200,14 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, ledger } = persistentHarness()
     const first = boot([budgetConfig()]) // A, epoch 1
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
     advance(60_000)
     const second = boot([budgetConfig({ limit: 200 })]) // B, epoch 2
     second.recordAll(
-      second.resolveCharges(chargeCtx('stripe_charge', { amount: 50 })).charges,
+      gated(second.resolveCharges(chargeCtx('stripe_charge', { amount: 50 })).charges),
       COMMIT_META,
     )
 
@@ -1217,7 +1221,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, ledger, advance } = persistentHarness()
     const engine = boot([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1236,7 +1240,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, ledger, advance } = persistentHarness()
     const engine = boot([budgetConfig()])
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1254,7 +1258,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig()])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1265,7 +1269,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const second = boot([])
     second.reconcile(compileBudgets([budgetConfig()]))
     second.recordAll(
-      second.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges,
+      gated(second.resolveCharges(chargeCtx('stripe_charge', { amount: 10 })).charges),
       COMMIT_META,
     )
     expect(spentAfterBoot(second)).toBe(10)
@@ -1278,10 +1282,13 @@ describe('BudgetEngine persistence (PR 2)', () => {
   it('replays approved_overage rows identically to spend rows', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig({ window: '1h' })])
-    first.recordAll(first.resolveCharges(chargeCtx('stripe_charge', { amount: 120 })).charges, {
-      ...COMMIT_META,
-      kind: 'approved_overage',
-    })
+    first.recordAll(
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 120 })).charges),
+      {
+        ...COMMIT_META,
+        kind: 'approved_overage',
+      },
+    )
 
     advance(60_000)
     const second = boot([budgetConfig({ window: '1h' })])
@@ -1303,7 +1310,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig({ window: '1h' })])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1317,7 +1324,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([budgetConfig({ window: '1h' })])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1336,7 +1343,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 10 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1358,7 +1365,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, db } = persistentHarness()
     const first = boot([config])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 40 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1383,7 +1390,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
 
     // The same session key resurrects with fresh spend...
     secondB.recordAll(
-      secondB.resolveCharges(chargeCtx('stripe_charge', { amount: 7 }, 's1')).charges,
+      gated(secondB.resolveCharges(chargeCtx('stripe_charge', { amount: 7 }, 's1')).charges),
       COMMIT_META,
     )
 
@@ -1400,7 +1407,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, ledger } = persistentHarness()
     const first = boot([budgetConfig()])
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
 
@@ -1441,7 +1448,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { boot, advance, ledger, db } = persistentHarness()
     const first = boot([budgetConfig()]) // meta {limit 100, epoch 1}
     first.recordAll(
-      first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges,
+      gated(first.resolveCharges(chargeCtx('stripe_charge', { amount: 30 })).charges),
       COMMIT_META,
     )
     // Divergent rows above the meta epoch (historical corruption).
@@ -1468,7 +1475,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     })
     const engine = boot([budgetConfig()], flaky)
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
@@ -1482,7 +1489,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 1 }))
     expect(charges[0]?.budget.limit).toBe(100)
     expect(charges[0]?.generation).toBe(1)
-    expect(engine.peekAll(charges).entries[0]?.spent).toBe(60)
+    expect(engine.peekAll(gated(charges)).entries[0]?.spent).toBe(60)
     expect(ledger.readMeta('daily-cap')).toMatchObject({ limit_amount: 100, epoch: 1 })
 
     // Restart on the ORIGINAL config: continuity, not resurrection — the pot
@@ -1509,7 +1516,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     })
     const engine = boot([budgetConfig()], flaky)
     engine.recordAll(
-      engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges,
+      gated(engine.resolveCharges(chargeCtx('stripe_charge', { amount: 60 })).charges),
       COMMIT_META,
     )
 
@@ -1521,7 +1528,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     // Still configured, still enforcing, nothing bumped anywhere.
     expect(engine.listStates().map((s) => s.name)).toEqual(['daily-cap'])
     const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 50 }))
-    expect(engine.peekAll(charges).allowed).toBe(false) // 60 + 50 > 100
+    expect(engine.peekAll(gated(charges)).allowed).toBe(false) // 60 + 50 > 100
     expect(ledger.readMeta('daily-cap')?.epoch).toBe(1)
   })
 
@@ -1567,7 +1574,9 @@ describe('BudgetEngine persistence (PR 2)', () => {
     // NaN binds as NULL and violates the amount NOT NULL constraint on the
     // SECOND insert of the transaction — a genuine mid-batch fault through
     // the full recordAll path.
-    expect(() => engine.recordAll([chargeA, { ...chargeB, amount: NaN }], COMMIT_META)).toThrow()
+    expect(() =>
+      engine.recordAll(gated([chargeA, { ...chargeB, amount: NaN }]), COMMIT_META),
+    ).toThrow()
 
     const countRows = () =>
       (db.prepare('SELECT COUNT(*) AS count FROM budget_events').get() as { count: number }).count
@@ -1575,7 +1584,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
     expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
 
     // The fault clears; the same call then commits cleanly.
-    expect(() => engine.recordAll(charges, COMMIT_META)).not.toThrow()
+    expect(() => engine.recordAll(gated(charges), COMMIT_META)).not.toThrow()
     expect(countRows()).toBe(2)
     expect(engine.listStates().map((s) => s.buckets[0]?.spent)).toEqual([30, 30])
   })

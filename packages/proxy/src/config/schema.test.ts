@@ -169,6 +169,7 @@ describe('helioConfigSchema', () => {
         approval: {},
         budgets: [],
         policies: {},
+        session: {},
         environment: 'production',
         listen: {},
         upstream: { url: 'http://localhost:8080' },
@@ -181,6 +182,7 @@ describe('helioConfigSchema', () => {
         'upstream',
         'listen',
         'environment',
+        'session',
         'policies',
         'budgets',
         'approval',
@@ -188,6 +190,142 @@ describe('helioConfigSchema', () => {
         'dashboard',
         'sdk',
       ])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Session identity (issue #218)
+  // -------------------------------------------------------------------------
+
+  describe('session identity (issue #218)', () => {
+    it('applies the default chain and mode when the section is absent', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.session).toEqual({
+        identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+        on_unresolved: 'deny',
+      })
+    })
+
+    it('defaults header name to x-helio-session-id when omitted', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { identity: [{ source: 'header' }] } }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.session.identity).toEqual([
+        { source: 'header', name: 'x-helio-session-id' },
+      ])
+      expect(result.data.session.on_unresolved).toBe('deny')
+    })
+
+    it('accepts an explicit chain and lowercases header names', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          session: {
+            identity: [
+              { source: 'header', name: 'X-Team-Session' },
+              { source: 'meta' },
+              { source: 'legacy_header' },
+            ],
+            on_unresolved: 'anonymous',
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.session.identity[0]).toEqual({ source: 'header', name: 'x-team-session' })
+      expect(result.data.session.on_unresolved).toBe('anonymous')
+    })
+
+    it('rejects an explicit empty identity chain', () => {
+      // An explicit [] would override the default and permanently unresolve
+      // every request — dead config, same treatment as contributors .min(1).
+      const result = helioConfigSchema.safeParse(minimalConfig({ session: { identity: [] } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['session', 'identity'])
+      expect(result.error.issues[0]?.message).toMatch(/unresolved/)
+    })
+
+    it('rejects an unknown key in session (no ttl knob)', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ session: { ttl: '1h' } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['session'])
+      expect(result.error.issues[0]?.message).toBe('Unrecognized key: "ttl"')
+    })
+
+    it('rejects an unknown key inside an identity source entry (no meta path)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { identity: [{ source: 'meta', path: '$.x' }] } }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects an unknown source with the identity index in the path', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { identity: [{ source: 'auth_subject' }] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path.slice(0, 3)).toEqual(['session', 'identity', 0])
+    })
+
+    it('rejects a header name without the x- prefix', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { identity: [{ source: 'header', name: 'session-id' }] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['session', 'identity', 0, 'name'])
+      expect(result.error.issues[0]?.message).toMatch(/start with "x-"/)
+    })
+
+    it('rejects reserved transport headers as identity headers', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { identity: [{ source: 'header', name: 'Mcp-Session-Id' }] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const reservedIssue = result.error.issues.find((issue) => /reserved/i.test(issue.message))
+      expect(reservedIssue?.path).toEqual(['session', 'identity', 0, 'name'])
+    })
+
+    it('rejects duplicate header names case-insensitively', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          session: {
+            identity: [
+              { source: 'header', name: 'x-run-id' },
+              { source: 'header', name: 'X-Run-Id' },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['session', 'identity', 1, 'name'])
+      expect(result.error.issues[0]?.message).toMatch(/[Dd]uplicate/)
+    })
+
+    it('accepts two header sources with distinct names', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          session: {
+            identity: [{ source: 'header', name: 'x-run-id' }, { source: 'header' }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects on_unresolved values outside deny | anonymous', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ session: { on_unresolved: 'warn' } }),
+      )
+      expect(result.success).toBe(false)
     })
   })
 

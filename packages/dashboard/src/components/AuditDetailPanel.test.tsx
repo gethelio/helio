@@ -12,6 +12,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     id: 'rec-001',
     timestamp: '2025-01-15T10:00:00.000Z',
     session_id: 'sess-abc-1234567890',
+    session_source: 'header',
     agent_id: null,
     environment: null,
     tool_name: 'send_email',
@@ -324,5 +325,41 @@ describe('AuditDetailPanel', () => {
     expect(rendered.length).toBeLessThanOrEqual(4096 + 4)
     expect(rendered).toContain('\u2026')
     expect(screen.getByText('Input payload preview is truncated for readability.')).toBeTruthy()
+  })
+})
+
+describe('AuditDetailPanel session section (issue #218)', () => {
+  it('renders the session id and its resolving source', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord({ session_id: 'run-a', session_source: 'header' })}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Session')).toBeTruthy()
+    expect(screen.getByText('run-a')).toBeTruthy()
+    expect(screen.getByText(/via header/)).toBeTruthy()
+  })
+
+  it('shows the tried strategies for an unresolved record', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord({
+          session_id: null,
+          session_source: null,
+          evidence_chain: {
+            session: { unresolved: true, tried: 'header "x-helio-session-id"' },
+          },
+        })}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(
+      screen.getAllByText(/Unresolved \(tried: header "x-helio-session-id"\)/).length,
+    ).toBeGreaterThan(0)
   })
 })

@@ -506,7 +506,7 @@ A matched contributor whose amount field is missing, non-numeric, negative, or n
 
 ### Scope and windows
 
-`key` picks the pot structure: one shared pot (`global`, the default), one per MCP session (`session`), or one per adapter-supplied sender (`sender_id`, host-enforced path only — requires `sdk.enabled: true`). Calls that carry no session or sender id pool into a shared `unknown` pot — worth knowing when curl-testing a session-keyed budget.
+`key` picks the pot structure: one shared pot (`global`, the default), one per resolved [session identity](./configuration.md#session) (`session`), or one per adapter-supplied sender (`sender_id`, host-enforced path only — requires `sdk.enabled: true`). Under the default `session.on_unresolved: deny`, a call that feeds a session-keyed budget without resolvable identity is denied with `block_reason: session_unresolved` instead of pooling; under `anonymous` it pools into the shared literal `unknown` pot with a one-time warning — worth knowing when curl-testing a session-keyed budget (send `-H 'x-helio-session-id: demo'`).
 
 `window` is either a sliding duration (`1h`, `24h` — spend ages out continuously, like spend limits) or `session`: the pot depletes for the lifetime of a session key and never replenishes on a timer; idle pots are collected after `idle_ttl` (default 24h), because neither door has an authoritative session-end signal.
 
@@ -603,9 +603,11 @@ The `data` object also carries `rule`, `rule_index`, `action`, `expired_evidence
 
 Evidence entries have a configurable TTL (default: 300 seconds). If evidence has expired, the response includes `"reason": "evidence_expired"` with a suggestion to refresh it.
 
-Rules using `evidence.requires` or `requires` are session-bound. If `Mcp-Session-Id` is missing on a matching request, Helio denies the call fail-closed.
+Rules using `evidence.requires` or `requires` are session-bound. If no [session identity](./configuration.md#session) resolves on a matching request, Helio denies the call fail-closed under **both** `on_unresolved` modes — a shared anonymous evidence session would let any caller satisfy any other caller's gates — and the deny message names the identity strategies that were tried. The recommended identity carrier is the `x-helio-session-id` header; the legacy `Mcp-Session-Id` keeps working through the `legacy_header` source for the deprecation window. `key: session` rate and spend limits follow `on_unresolved` like session-keyed budgets: denied when unresolved under `deny`, pooled into the shared `unknown` bucket under `anonymous`.
 
-SDK evidence keys are validated against policy: `POST /evidence` accepts keys that appear in at least one rule's `evidence.requires` list. If an SDK client sends an unknown key, the sideband returns `400` with `code: "evidence_key_not_in_policy_allowlist"` plus a capped preview of configured keys so operators can quickly align policy and SDK call sites.
+SDK evidence keys are validated against policy: `POST /evidence` accepts keys that appear in at least one rule's `evidence.requires` list. If an SDK client sends an unknown key, the sideband returns `400` with `code: "evidence_key_not_in_policy_allowlist"` plus a capped preview of configured keys so operators can quickly align policy and SDK call sites. Whitespace-only `session_id` values are rejected with `400` on the evidence and context routes: the governance doors treat a trim-empty id as no identity, so such a write could never be read back.
+
+**The SDK correlation contract:** the Python SDK's `session_id` is the canonical correlation key. Give the SDK an explicit `session_id` and send the same value as the `x-helio-session-id` header on every MCP request — the default [session identity](./configuration.md#session) chain resolves it with zero extra configuration. The SDK's auto-generated UUID default cannot satisfy gates on its own, because the proxy never sees it on the MCP side.
 
 ## Dependency Chains
 

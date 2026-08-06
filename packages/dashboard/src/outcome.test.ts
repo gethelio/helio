@@ -115,3 +115,33 @@ describe('budget_exceeded outcome', () => {
     expect(DECISION_FILTERS.some((f) => f.value === 'budget_exceeded')).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// session_unresolved (issue #218)
+// ---------------------------------------------------------------------------
+
+describe('session_unresolved outcome', () => {
+  it('renders a session-unresolved denial as Session Unresolved, never Allow', () => {
+    // These denies ride policy_decision "rate_limit" | "spend_limit" |
+    // "allow" — the same render-as-Allow hazard as budget_exceeded: the
+    // block_reason pin must win over the policy_decision fallthrough.
+    for (const decision of ['allow', 'rate_limit', 'spend_limit']) {
+      const outcome = deriveDisplayOutcome({
+        policy_decision: decision,
+        block_reason: 'session_unresolved',
+      })
+      expect(outcome).toBe('session_unresolved')
+    }
+    expect(formatDisplayOutcome('session_unresolved')).toBe('Session Unresolved')
+  })
+
+  it('maps the session_unresolved filter to the block-reason query param', () => {
+    expect(outcomeFilterToAuditParams('session_unresolved')).toEqual({
+      reason: 'session_unresolved',
+    })
+  })
+
+  it('offers Session Unresolved in the decision filter list', () => {
+    expect(DECISION_FILTERS.some((f) => f.value === 'session_unresolved')).toBe(true)
+  })
+})

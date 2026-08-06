@@ -183,6 +183,24 @@ describe('Sideband API', () => {
       expect(res.status).toBe(400)
     })
 
+    it('returns 400 when session_id is whitespace-only (issue #218)', async () => {
+      // The governance doors treat trim-empty ids as no identity, so a
+      // write under one could never be read back — reject it here instead
+      // of storing unreachable evidence.
+      const { post } = setup()
+
+      const evidence = await post('/evidence', {
+        session_id: '   ',
+        tool_name: 't',
+        evidence_key: 'k',
+        evidence_data: null,
+      })
+      expect(evidence.status).toBe(400)
+
+      const context = await post('/context', { session_id: '\t', key: 'k', value: 1 })
+      expect(context.status).toBe(400)
+    })
+
     it('returns 400 for invalid JSON', async () => {
       const { app } = setup()
 

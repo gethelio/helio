@@ -76,7 +76,7 @@ The SDK communicates with the proxy over localhost HTTP. Even though this is a l
 ### Data Integrity
 
 - **Evidence data is passed through as-is to the proxy.** The SDK does not validate, transform, or cache evidence content. The proxy is the single source of truth for evidence validation and enforcement.
-- **Session IDs are generated securely.** When not provided, the SDK generates a UUID hex string using Python's `uuid.uuid4()`. Never generate session IDs from predictable or user-controllable sources.
+- **Session IDs are generated securely.** When not provided, the SDK generates a UUID hex string using Python's `uuid.uuid4()`. Never generate session IDs from predictable or user-controllable sources. Note the correlation contract (issue #218): evidence/dependency gating only works when the SDK's `session_id` equals the identity the proxy resolves on the MCP side — pass an explicit `session_id` and send the same value as `x-helio-session-id` on every MCP request; the auto-generated default is silently non-functional for gating.
 - **The SDK never stores evidence or governance state on disk.** All state is in-memory and tied to the client/context instance lifetime.
 
 ### Network Safety

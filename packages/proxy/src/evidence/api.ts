@@ -15,8 +15,19 @@ const SIDEBAND_BODY_LIMIT_BYTES = 1 * 1_024 * 1_024
 // Request body schemas
 // ---------------------------------------------------------------------------
 
+// Whitespace-only session ids are rejected, not normalized (issue #218):
+// evidence REQUIRES a session, and the governance doors treat trim-empty ids
+// as no identity, so a write under one could never be read back — the value
+// is kept verbatim otherwise (ids are matched byte-for-byte, never trimmed).
+const sessionIdSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value.trim() !== '', {
+    message: 'session_id must not be whitespace-only',
+  })
+
 const postEvidenceBody = z.object({
-  session_id: z.string().min(1),
+  session_id: sessionIdSchema,
   tool_name: z.string().min(1),
   evidence_key: z.string().min(1),
   evidence_data: z.unknown().refine((v) => v !== undefined, { message: 'Required' }),
@@ -24,7 +35,7 @@ const postEvidenceBody = z.object({
 })
 
 const postContextBody = z.object({
-  session_id: z.string().min(1),
+  session_id: sessionIdSchema,
   key: z.string().min(1),
   value: z.unknown().refine((v) => v !== undefined, { message: 'Required' }),
 })

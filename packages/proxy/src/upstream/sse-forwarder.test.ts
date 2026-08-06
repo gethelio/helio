@@ -15,6 +15,8 @@ interface MockSseServer {
   port: number
   /** Captured POST bodies for assertions. */
   receivedBodies: unknown[]
+  /** Captured POST request headers (lowercased names) for assertions. */
+  receivedHeaders: Record<string, string>[]
 }
 
 /**
@@ -24,6 +26,7 @@ interface MockSseServer {
  */
 function createMockSseServer(postStatus: number = 202): MockSseServer {
   const receivedBodies: unknown[] = []
+  const receivedHeaders: Record<string, string>[] = []
   const app = new Hono()
 
   // Store SSE writers by session (for simplicity, just use a single writer)
@@ -50,6 +53,7 @@ function createMockSseServer(postStatus: number = 202): MockSseServer {
   app.post('/messages', async (c) => {
     const body: { id?: string | number | null; method?: string } = await c.req.json()
     receivedBodies.push(body)
+    receivedHeaders.push(Object.fromEntries(c.req.raw.headers))
 
     if (body.id !== undefined && postStatus === 202) {
       const response = JSON.stringify({
@@ -70,7 +74,7 @@ function createMockSseServer(postStatus: number = 202): MockSseServer {
   const server = serve({ fetch: app.fetch, port: 0 })
   const port = (server.address() as AddressInfo).port
 
-  return { server, port, receivedBodies }
+  return { server, port, receivedBodies, receivedHeaders }
 }
 
 function closeServer(server: ServerType): Promise<void> {
@@ -153,7 +157,7 @@ describe('SseUpstreamForwarder', () => {
     expect(result.durationMs).toBeLessThan(5000)
   })
 
-  it('strips sessionId and headers from the POST body', async () => {
+  it('strips session fields and headers from the POST body', async () => {
     mock = createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
@@ -164,15 +168,41 @@ describe('SseUpstreamForwarder', () => {
       jsonrpc: '2.0',
       id: 1,
       method: 'tools/list',
-      sessionId: 'session-123',
+      transportSessionId: 'session-123',
+      session: { id: 'run-a', source: 'header' },
       headers: { authorization: 'Bearer token' },
     }
     await forwarder.forward(request)
 
     const sent = mock.receivedBodies[0] as Record<string, unknown>
-    expect(sent).not.toHaveProperty('sessionId')
+    expect(sent).not.toHaveProperty('session')
+    expect(sent).not.toHaveProperty('transportSessionId')
     expect(sent).not.toHaveProperty('headers')
     expect(sent).toHaveProperty('method', 'tools/list')
+  })
+
+  it('sends only transportSessionId upstream as Mcp-Session-Id, never the resolved session', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      session: { id: 'run-a', source: 'header' },
+    })
+    expect(mock.receivedHeaders[0]?.['mcp-session-id']).toBeUndefined()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/list',
+      transportSessionId: 'wire-77',
+    })
+    expect(mock.receivedHeaders[1]?.['mcp-session-id']).toBe('wire-77')
   })
 
   it('rejects forward when not connected', async () => {

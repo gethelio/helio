@@ -11,6 +11,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     id: 'rec-001',
     timestamp: '2025-01-15T10:00:00.000Z',
     session_id: 'sess-abc',
+    session_source: 'header',
     agent_id: null,
     environment: null,
     tool_name: 'send_email',
@@ -176,7 +177,7 @@ describe('recordsToCsv', () => {
     expect(row).toContain('"tool,with,commas"')
   })
 
-  it('includes all 27 AuditRecord fields in headers, in a stable order', () => {
+  it('includes all 28 AuditRecord fields in headers, in a stable order', () => {
     // Downstream consumers parse by column index, so new columns must only
     // ever be appended, never inserted or reordered.
     expect(CSV_HEADERS).toEqual([
@@ -207,6 +208,7 @@ describe('recordsToCsv', () => {
       'record_kind',
       'origin',
       'metadata',
+      'session_source',
     ])
   })
 
@@ -257,5 +259,26 @@ describe('recordsToCsv', () => {
     expect(lines).toHaveLength(4) // header + 3 rows
     expect(lines[2]).toContain('delete_user')
     expect(lines[3]).toContain('deny')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// session_source column (issue #218)
+// ---------------------------------------------------------------------------
+
+describe('session_source column', () => {
+  it('appends session_source as the LAST column so positional consumers hold', () => {
+    expect(CSV_HEADERS[CSV_HEADERS.length - 1]).toBe('session_source')
+    // The pre-#218 prefix stays byte-stable.
+    expect(CSV_HEADERS.slice(0, 3)).toEqual(['id', 'timestamp', 'session_id'])
+  })
+
+  it('exports the session_source value in the trailing cell', () => {
+    const csv = recordsToCsv([makeRecord({ session_id: 'run-a', session_source: 'header' })])
+    const lines = csv.split('\n')
+    const headers = (lines[0] ?? '').split(',')
+    const cells = (lines[1] ?? '').split(',')
+    expect(headers[headers.length - 1]).toBe('session_source')
+    expect(cells[cells.length - 1]).toBe('header')
   })
 })

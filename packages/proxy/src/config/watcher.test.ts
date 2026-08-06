@@ -11,6 +11,7 @@ import { SpendLimiter } from '../policy/spend-limiter.js'
 import { compilePolicies } from '../policy/parser.js'
 import { BudgetEngine } from '../budget/engine.js'
 import { compileBudgets } from '../budget/parser.js'
+import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
 import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mcp/types.js'
 
 // ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ ${extraContributor}
       sessionId: null,
       senderId: null,
     })
-    engine.recordAll(charges, {
+    engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
       auditRecordId: 'a1',
       origin: 'mcp',
@@ -297,7 +298,7 @@ budgets:
       sessionId: null,
       senderId: null,
     })
-    engine.recordAll(charges, {
+    engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
       auditRecordId: 'a1',
       origin: 'mcp',
@@ -395,7 +396,7 @@ budgets:
       sessionId: null,
       senderId: null,
     })
-    engine.recordAll(charges, {
+    engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
       auditRecordId: 'a1',
       origin: 'mcp',
@@ -416,7 +417,7 @@ budgets:
       sessionId: null,
       senderId: null,
     })
-    expect(engine.peekAll(post.charges).allowed).toBe(false)
+    expect(engine.peekAll(mintGatedCharges(post.charges)).allowed).toBe(false)
 
     engine.close()
   })

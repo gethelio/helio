@@ -110,3 +110,19 @@ describe('EvidenceChain', () => {
     expect(progressBar?.className).toContain('bg-red-500')
   })
 })
+
+describe('EvidenceChain session block (issue #218)', () => {
+  it('renders a session-only chain instead of an empty mounted section', () => {
+    // The empty-section hazard: hasContent must recognize the session block
+    // or a session-unresolved deny's chain renders as a blank panel.
+    const { container } = render(
+      <EvidenceChain
+        chain={{ session: { unresolved: true, tried: 'header "x-helio-session-id"' } }}
+      />,
+    )
+    expect(container.innerHTML).not.toBe('')
+    expect(screen.getByText('Session Identity')).toBeTruthy()
+    expect(screen.getByText(/Unresolved/)).toBeTruthy()
+    expect(screen.getByText(/x-helio-session-id/)).toBeTruthy()
+  })
+})

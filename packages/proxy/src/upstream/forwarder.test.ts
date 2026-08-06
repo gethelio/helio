@@ -114,18 +114,29 @@ describe('UpstreamForwarder', () => {
     expect(calls[0]?.headers['x-api-key']).toBe('secret-key')
   })
 
-  it('forwards sessionId as Mcp-Session-Id header', async () => {
+  it('forwards transportSessionId as Mcp-Session-Id header', async () => {
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
 
-    await forwarder.forward(makeRequest({ sessionId: 'sess-42' }))
+    await forwarder.forward(makeRequest({ transportSessionId: 'sess-42' }))
 
     expect(calls[0]?.headers['mcp-session-id']).toBe('sess-42')
   })
 
-  it('does not set Mcp-Session-Id when sessionId is absent', async () => {
+  it('does not set Mcp-Session-Id when transportSessionId is absent', async () => {
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
 
-    await forwarder.forward(makeRequest({ sessionId: undefined }))
+    await forwarder.forward(makeRequest({ transportSessionId: undefined }))
+
+    expect(calls[0]?.headers['mcp-session-id']).toBeUndefined()
+  })
+
+  it('never sends a resolved governance session upstream as Mcp-Session-Id', async () => {
+    // The FastMCP-corruption regression: a session-enforcing legacy upstream
+    // 400/404s any id it did not mint, so proxy-resolved identity must stay
+    // out of the transport relay.
+    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+
+    await forwarder.forward(makeRequest({ session: { id: 'run-a', source: 'header' } }))
 
     expect(calls[0]?.headers['mcp-session-id']).toBeUndefined()
   })
@@ -150,16 +161,21 @@ describe('UpstreamForwarder', () => {
     expect(calls[0]?.headers).not.toHaveProperty('Authorization')
   })
 
-  it('omits sessionId and headers from the JSON-RPC body', async () => {
+  it('omits session fields and headers from the JSON-RPC body', async () => {
     const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
 
     await forwarder.forward(
-      makeRequest({ sessionId: 'sess-1', headers: { authorization: 'Bearer x' } }),
+      makeRequest({
+        transportSessionId: 'sess-1',
+        session: { id: 'run-a', source: 'header' },
+        headers: { authorization: 'Bearer x' },
+      }),
     )
 
     const body = JSON.parse(calls[0]?.body ?? '{}') as Record<string, unknown>
     expect(body).toEqual({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
-    expect(body).not.toHaveProperty('sessionId')
+    expect(body).not.toHaveProperty('session')
+    expect(body).not.toHaveProperty('transportSessionId')
     expect(body).not.toHaveProperty('headers')
   })
 

@@ -45,6 +45,11 @@ interface ApprovalContextData {
   escalated_to?: string[]
 }
 
+interface SessionBlockData {
+  unresolved: boolean
+  tried: string
+}
+
 // ---------------------------------------------------------------------------
 // Type guards
 // ---------------------------------------------------------------------------
@@ -92,6 +97,12 @@ function isApprovalContextData(v: unknown): v is ApprovalContextData {
     return false
   }
   return true
+}
+
+function isSessionBlockData(v: unknown): v is SessionBlockData {
+  if (!v || typeof v !== 'object') return false
+  const o = v as Record<string, unknown>
+  return typeof o.unresolved === 'boolean' && typeof o.tried === 'string'
 }
 
 // ---------------------------------------------------------------------------
@@ -147,12 +158,28 @@ export function EvidenceChain({ chain }: EvidenceChainProps) {
   const spendLimit = isSpendLimitData(chain.spend_limit) ? chain.spend_limit : null
   const breakGlass = isBreakGlassData(chain.break_glass) ? chain.break_glass : null
   const approval = isApprovalContextData(chain.approval) ? chain.approval : null
+  const session = isSessionBlockData(chain.session) ? chain.session : null
 
-  const hasContent = evidence || dependencies || rateLimit || spendLimit || breakGlass || approval
+  const hasContent =
+    evidence || dependencies || rateLimit || spendLimit || breakGlass || approval || session
   if (!hasContent) return null
 
   return (
     <div className="space-y-3">
+      {/* Session identity (issue #218) — unresolved while a session-keyed
+          control was engaged; names the strategies the proxy tried. */}
+      {session && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-gray-500">Session Identity</p>
+          <div className="flex items-center gap-2">
+            {session.unresolved ? <XIcon /> : <CheckIcon />}
+            <span className="text-xs text-gray-700">
+              {session.unresolved ? 'Unresolved' : 'Resolved'} (tried: {session.tried})
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Evidence keys */}
       {evidence &&
         (evidence.found.length > 0 ||

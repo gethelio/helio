@@ -91,6 +91,8 @@ Caught error types:
 | `session_id` | Auto-generated UUID | Correlation key for evidence/context |
 | `timeout` | `5.0` | HTTP request timeout in seconds |
 
+**Correlating with MCP traffic:** `session_id` is the canonical correlation key between the SDK and the proxy's MCP door. Give the SDK an **explicit** `session_id` and send the same value as the `x-helio-session-id` header on every MCP request — the default [session identity](https://github.com/gethelio/helio/blob/main/docs/configuration.md#session) chain resolves it with zero proxy configuration. The auto-generated UUID default cannot satisfy evidence or dependency gates on its own: the proxy never sees it on the MCP side, so gated calls fail closed until both sides share one id.
+
 ## Constraints
 
 - **Under 500 lines** — governance logic belongs in the proxy, not the SDK

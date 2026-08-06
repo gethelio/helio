@@ -16,6 +16,7 @@ function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {
     timestamp: new Date().toISOString(),
     session_id: null,
+    session_source: null,
     agent_id: null,
     environment: null,
     tool_name: 'test_tool',
@@ -225,6 +226,82 @@ CREATE TABLE IF NOT EXISTS audit_records (
         )
       } finally {
         rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('fails fast when a pre-0.12 schema is missing session_source (issue #218)', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-audit-migrate-session-source-'))
+      const dbPath = join(dir, 'audit.db')
+      const legacyDb = new Database(dbPath)
+      legacyDb
+        .prepare(
+          `
+CREATE TABLE IF NOT EXISTS audit_records (
+  id                TEXT PRIMARY KEY,
+  timestamp         TEXT NOT NULL,
+  session_id        TEXT,
+  agent_id          TEXT,
+  environment       TEXT,
+  tool_name         TEXT NOT NULL,
+  tool_input        TEXT NOT NULL,
+  policy_decision   TEXT NOT NULL,
+  block_reason      TEXT,
+  matched_rule      TEXT,
+  matched_rule_index INTEGER,
+  evidence_chain    TEXT,
+  approval_status   TEXT,
+  approved_by       TEXT,
+  upstream_response TEXT,
+  upstream_error    TEXT,
+  upstream_http_status INTEGER,
+  upstream_latency_ms REAL,
+  total_duration_ms REAL NOT NULL,
+  approval_wait_ms  REAL NOT NULL DEFAULT 0,
+  proxy_compute_ms  REAL NOT NULL,
+  flagged_destructive INTEGER NOT NULL DEFAULT 0,
+  dry_run           INTEGER NOT NULL DEFAULT 0,
+  record_kind       TEXT NOT NULL DEFAULT 'tool_call',
+  origin            TEXT NOT NULL DEFAULT 'mcp',
+  metadata          TEXT,
+  created_at        TEXT NOT NULL
+);`,
+        )
+        .run()
+      legacyDb.close()
+
+      try {
+        expect(
+          () =>
+            new AuditStore({
+              path: dbPath,
+              retention: '90d',
+              includeResponses: true,
+              cleanupIntervalMs: 0,
+            }),
+        ).toThrow(
+          /Audit DB schema mismatch: missing required columns .*"session_source".*Delete ".*audit\.db".*then restart Helio\./,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('round-trips session_source through insert and list (issue #218)', () => {
+      const store = new AuditStore({
+        path: ':memory:',
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        store.insert(makeRecord({ session_id: 'run-a', session_source: 'header' }))
+        store.insert(makeRecord({ session_id: 'oc-1', session_source: 'sideband' }))
+        store.insert(makeRecord({ session_id: null, session_source: null }))
+
+        const sources = store.list().records.map((record) => record.session_source)
+        expect(new Set(sources)).toEqual(new Set(['header', 'sideband', null]))
+      } finally {
+        store.close()
       }
     })
 

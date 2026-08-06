@@ -24,6 +24,7 @@ export type BlockReason =
   | 'shutdown_cancelled'
   | 'tool_definition_drift'
   | 'budget_exceeded'
+  | 'session_unresolved'
 
 // ---------------------------------------------------------------------------
 // Feedback types — discriminated union keyed on `reason`.
@@ -174,6 +175,18 @@ export interface BudgetApprovalTimeoutFeedback extends SelfRepairFeedbackBase {
   readonly budgets: readonly BudgetBreachBlock[]
 }
 
+/**
+ * A session-dependent control was engaged while identity was unresolved
+ * (issue #218, `session.on_unresolved: deny`).
+ */
+export interface SessionUnresolvedFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'session_unresolved'
+  /** Which session-keyed control the request engaged. */
+  readonly control: 'rate_limit' | 'spend_limit' | 'budget'
+  /** The identity strategies the proxy tried, in configured order. */
+  readonly tried: string
+}
+
 /** Discriminated union of all self-repair feedback types. */
 export type SelfRepairFeedback =
   | PolicyDeniedFeedback
@@ -190,6 +203,7 @@ export type SelfRepairFeedback =
   | BudgetExceededFeedback
   | BudgetApprovalDeniedFeedback
   | BudgetApprovalTimeoutFeedback
+  | SessionUnresolvedFeedback
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -466,6 +480,31 @@ export function buildToolDriftFeedback(
       'Helio baselined it. An operator must review the change; restarting the proxy ' +
       're-baselines, or the upstream can revert the change.',
     retry_allowed: false,
+  }
+}
+
+/**
+ * Build self-repair feedback when a session-dependent control was engaged
+ * with no resolved session identity (issue #218). `blocked: true` is load-
+ * bearing: the audit `block_reason` is extracted from this payload, and a
+ * bare error without it would render as Allow.
+ */
+export function buildSessionUnresolvedFeedback(
+  decision: PolicyDecision,
+  control: 'rate_limit' | 'spend_limit' | 'budget',
+  tried: string,
+): SessionUnresolvedFeedback {
+  return {
+    blocked: true,
+    reason: 'session_unresolved',
+    ...ruleInfo(decision.matchedRule),
+    control,
+    tried,
+    suggestion:
+      `No session identity resolved (tried: ${tried}). Send an identity the chain ` +
+      'can read — for example set the x-helio-session-id header once per agent run — ' +
+      'or set session.on_unresolved: anonymous to restore shared pooling.',
+    retry_allowed: true,
   }
 }
 
