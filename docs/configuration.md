@@ -39,6 +39,13 @@ listen:
 
 environment: 'production' # Label for policy matching
 
+session:
+  identity: # Ordered identity sources; first match wins
+    - source: header
+      name: x-helio-session-id # Caller-set identity header (default)
+    - source: legacy_header # Verbatim Mcp-Session-Id (deprecation window)
+  on_unresolved: deny # deny | anonymous
+
 policies:
   default: allow # Default when no rule matches: allow | deny
   flag_destructive: log # Auto-flag destructive tools: log | require_approval
@@ -225,6 +232,29 @@ host) injects an `Origin` the operator needs to name. Like the rest of
 | `environment` | string | No       | —       | A label (e.g. `production`, `staging`) used in policy rule matching. Required whenever any rule uses `match.environment`. See [Policy Guide — Environment](./policies.md#environment). |
 
 If a rule sets `match.environment` but top-level `environment` is missing, config validation fails (startup, `helio validate`, and hot-reload).
+
+### session
+
+Proxy-owned session identity: how Helio resolves the governance identity that keys `key: session` rate limits, spend limits, and budgets, scopes evidence (`evidence.requires`) and prerequisite (`requires`) rules, and attributes audit records. The proxy resolves identity itself from the inputs named here — it is never taken from tool arguments, which the model can rewrite.
+
+In the canonical section order, `session` sits after `environment` and before `policies` because it is a request-path input that policy evaluation consumes: `upstream`, `listen`, and `environment` say where and as what Helio runs, `session` says who is calling, and `policies` and `budgets` then govern those calls.
+
+| Field           | Type   | Required | Default                                               | Description                                                                                                                                       |
+| --------------- | ------ | -------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `identity`      | array  | No       | `header` (`x-helio-session-id`), then `legacy_header` | Ordered identity sources; the first source that yields a value wins. Cannot be explicitly empty — omit the field to use the default chain.        |
+| `on_unresolved` | string | No       | `deny`                                                | What happens when no source resolves and the request engages a session-dependent control: `deny` (fail closed) or `anonymous` (pre-0.12 pooling). |
+
+**Identity sources:**
+
+- **`header`** — reads a caller-set HTTP header on each request. `name` defaults to `x-helio-session-id`, is matched case-insensitively, must start with `x-`, and must not be a reserved transport header; each `header` entry needs its own name. This is the recommended source: the agent harness sets the header once per run, outside the model's reach.
+- **`meta`** — derives identity from `_meta["io.modelcontextprotocol/clientInfo"]`, as `clientinfo:<name>@<version>`. This is agent identity, not session identity: two concurrent runs of the same client share the key, so it is not recommended for `key: session` limits or budgets.
+- **`legacy_header`** — the verbatim `Mcp-Session-Id` transport header, kept for the MCP spec's deprecation window. Ids resolving through it key the same buckets as before this section existed, so persisted budget pots carry over untouched.
+
+On `/sse`, when no configured source matches, the per-stream id Helio mints for the transport serves as an implicit final fallback — SSE requests never become unresolved. Candidate values that are empty after trimming or longer than 256 characters are skipped with a one-time warning and the chain continues.
+
+`on_unresolved` is engagement-scoped, not a door check: a request is denied only when its evaluation actually engages a session-dependent control — a `key: session` rate/spend limit or budget, or a rule with `evidence.requires`/`requires` — while identity is unresolved. Requests governed only by `key: tool`/`global` controls pass through either way. Under `anonymous`, session-keyed limits and budgets pool into the shared literal `unknown` bucket with a one-time warning — exactly the pre-0.12 behavior — but evidence and dependency rules still deny without identity under **both** modes: a shared anonymous evidence session would let any caller satisfy any other caller's gates. Set `session.on_unresolved: anonymous` to restore pre-0.12 pooling for session-keyed limits.
+
+Like `listen`, the `session` section is compiled into the transports at startup: changing it requires a restart (hot reload logs a restart-required warning and keeps the startup values). Re-scoping identity resolution live would silently move bucket attribution mid-flight.
 
 ### policies
 
@@ -595,22 +625,23 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.
 
-| Config path                 | Reloads on save? | Notes                                                                                     |
-| --------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                        |
-| `budgets`                   | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.          |
-| `policies.default`          | Yes              | Takes effect immediately on the next request.                                             |
-| `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                             |
-| `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                             |
-| `policies.dry_run`          | Yes              | Takes effect immediately on the next request.                                             |
-| `policies.hot_reload`       | No               | Controls watcher startup behavior; changing it on a running process requires restart.     |
-| `environment`               | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart. |
-| `upstream.*`                | No               | Upstream transport/client initialized at startup.                                         |
-| `listen.*`                  | No               | Proxy listener socket bound at startup.                                                   |
-| `dashboard.*`               | No               | Dashboard server/session settings initialized at startup.                                 |
-| `approval.*`                | No               | Router/channels/timeouts initialized at startup.                                          |
-| `audit.*`                   | No               | SQLite store path/settings initialized at startup.                                        |
-| `sdk.*`                     | No               | Sideband listener/token behavior initialized at startup.                                  |
+| Config path                 | Reloads on save? | Notes                                                                                         |
+| --------------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
+| `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                            |
+| `budgets`                   | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.              |
+| `policies.default`          | Yes              | Takes effect immediately on the next request.                                                 |
+| `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                                 |
+| `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                                 |
+| `policies.dry_run`          | Yes              | Takes effect immediately on the next request.                                                 |
+| `policies.hot_reload`       | No               | Controls watcher startup behavior; changing it on a running process requires restart.         |
+| `environment`               | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.     |
+| `session.*`                 | No               | Identity resolution is compiled into the transports at startup; changing it requires restart. |
+| `upstream.*`                | No               | Upstream transport/client initialized at startup.                                             |
+| `listen.*`                  | No               | Proxy listener socket bound at startup.                                                       |
+| `dashboard.*`               | No               | Dashboard server/session settings initialized at startup.                                     |
+| `approval.*`                | No               | Router/channels/timeouts initialized at startup.                                              |
+| `audit.*`                   | No               | SQLite store path/settings initialized at startup.                                            |
+| `sdk.*`                     | No               | Sideband listener/token behavior initialized at startup.                                      |
 
 When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields.
 

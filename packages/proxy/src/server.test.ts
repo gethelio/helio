@@ -37,6 +37,10 @@ const minimalConfig = {
     allow_open_mode: false,
     sse_heartbeat_interval: '30s',
   },
+  session: {
+    identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+    on_unresolved: 'deny',
+  },
   policies: { default: 'allow', dry_run: false, rules: [] },
   approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
   audit: {

@@ -37,6 +37,19 @@ export function parseDuration(duration: string): number {
 // Upstream
 // ---------------------------------------------------------------------------
 
+/**
+ * Transport/protocol headers the forwarders own on the wire. Operators can
+ * neither override them upstream (upstream.headers) nor read them as a
+ * session identity source (session.identity header names).
+ */
+const RESERVED_TRANSPORT_HEADERS = new Set([
+  'mcp-session-id',
+  'mcp-protocol-version',
+  'content-type',
+  'content-length',
+  'host',
+])
+
 const transportSchema = z.enum(['streamable-http', 'sse', 'stdio'])
 
 const upstreamSchema = z
@@ -68,15 +81,8 @@ const upstreamSchema = z
 
     // Reserved transport/protocol headers must not be operator-overridden via
     // upstream.headers — the forwarders own these.
-    const reserved = new Set([
-      'mcp-session-id',
-      'mcp-protocol-version',
-      'content-type',
-      'content-length',
-      'host',
-    ])
     for (const name of Object.keys(data.headers)) {
-      if (reserved.has(name.toLowerCase())) {
+      if (RESERVED_TRANSPORT_HEADERS.has(name.toLowerCase())) {
         ctx.addIssue({
           code: 'custom',
           path: ['headers', name],
@@ -183,6 +189,94 @@ const dashboardSchema = z
     sse_heartbeat_interval: durationSchema.default('30s'),
   })
   .strict()
+
+// ---------------------------------------------------------------------------
+// Session identity (issue #218)
+// ---------------------------------------------------------------------------
+
+const sessionHeaderSourceSchema = z
+  .object({
+    source: z.literal('header'),
+    /** Lowercased on parse — HTTP header names are case-insensitive. */
+    name: z
+      .string()
+      .min(1)
+      .default('x-helio-session-id')
+      .transform((name) => name.toLowerCase()),
+  })
+  .strict()
+
+// Fixed to _meta["io.modelcontextprotocol/clientInfo"] — no path parameter.
+// A configurable _meta path would let identity point at model-influenced
+// fields, the exact trust inversion proxy-owned identity exists to prevent.
+const sessionMetaSourceSchema = z
+  .object({
+    source: z.literal('meta'),
+  })
+  .strict()
+
+/** The verbatim Mcp-Session-Id transport header (spec deprecation window). */
+const sessionLegacyHeaderSourceSchema = z
+  .object({
+    source: z.literal('legacy_header'),
+  })
+  .strict()
+
+const sessionIdentitySourceSchema = z.discriminatedUnion('source', [
+  sessionHeaderSourceSchema,
+  sessionMetaSourceSchema,
+  sessionLegacyHeaderSourceSchema,
+])
+
+const sessionSchema = z
+  .object({
+    /** Ordered identity sources; the first source that yields a value wins. */
+    identity: z
+      .array(sessionIdentitySourceSchema)
+      .min(1, {
+        message:
+          'session.identity cannot be empty — an empty chain would leave every request ' +
+          'unresolved. Omit the section to use the defaults, or list at least one source.',
+      })
+      .default([{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }]),
+    on_unresolved: z.enum(['deny', 'anonymous']).default('deny'),
+  })
+  .strict()
+  .superRefine((session, ctx) => {
+    const seen = new Set<string>()
+    for (const [index, entry] of session.identity.entries()) {
+      if (entry.source !== 'header') continue
+      if (!entry.name.startsWith('x-')) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['identity', index, 'name'],
+          message:
+            'Session identity header names must start with "x-" ' +
+            '(for example "x-helio-session-id")',
+        })
+      }
+      if (RESERVED_TRANSPORT_HEADERS.has(entry.name)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['identity', index, 'name'],
+          message:
+            `session.identity must not read reserved transport header "${entry.name}" — the ` +
+            'proxy owns it on the wire. Use source: legacy_header for Mcp-Session-Id, or a ' +
+            'custom x- header.',
+        })
+      }
+      if (seen.has(entry.name)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['identity', index, 'name'],
+          message:
+            `Duplicate session identity header "${entry.name}" — the first entry always wins, ` +
+            'so the duplicate is dead config. Remove it.',
+        })
+      }
+      seen.add(entry.name)
+    }
+  })
 
 // ---------------------------------------------------------------------------
 // Policy rule — match conditions
@@ -574,6 +668,10 @@ const helioConfigBaseSchema = z
     upstream: upstreamSchema,
     listen: listenSchema.prefault({}),
     environment: z.string().optional(),
+    // Session precedes policies deliberately: upstream/listen/environment say
+    // where and as-what Helio runs, session says who is calling, and
+    // policies/budgets then govern those calls (issue #218).
+    session: sessionSchema.prefault({}),
     policies: policiesSchema.prefault({}),
     // Budgets sit beside policies deliberately: they are the second half of the
     // governance declaration (policy decision → budget gate), not plumbing.
@@ -993,6 +1091,12 @@ export type ApprovalChannel = z.infer<typeof approvalChannelSchema>
 
 /** The policies section of the config. */
 export type PoliciesConfig = z.infer<typeof policiesSchema>
+
+/** The session identity section of the config (issue #218). */
+export type SessionConfig = z.infer<typeof sessionSchema>
+
+/** A single identity source from `session.identity`. */
+export type SessionIdentitySource = z.infer<typeof sessionIdentitySourceSchema>
 
 /** The audit section of the config. */
 export type AuditConfig = z.infer<typeof auditSchema>

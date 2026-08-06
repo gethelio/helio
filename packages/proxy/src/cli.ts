@@ -123,6 +123,13 @@ upstream:
 
 # environment: production
 
+# session:
+#   identity: # ordered; first match wins
+#     - source: header
+#       name: x-helio-session-id
+#     - source: legacy_header # verbatim Mcp-Session-Id (deprecation window)
+#   on_unresolved: deny # deny | anonymous
+
 # policies:
 #   default: allow
 #   dry_run: false

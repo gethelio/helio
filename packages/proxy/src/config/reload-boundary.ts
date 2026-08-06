@@ -37,6 +37,12 @@ export function diffReloadBoundary(previous: HelioConfig, next: HelioConfig): Re
   if (!isDeepStrictEqual(previous.environment, next.environment)) {
     restartRequiredPaths.push('environment')
   }
+  // Identity resolution is compiled into the transports at startup like
+  // `listen`; hot-swapping it would re-scope bucket attribution live —
+  // exactly the silent re-scoping issue #218 exists to kill.
+  if (!isDeepStrictEqual(previous.session, next.session)) {
+    restartRequiredPaths.push('session')
+  }
   if (!isDeepStrictEqual(previous.approval, next.approval)) {
     restartRequiredPaths.push('approval')
   }

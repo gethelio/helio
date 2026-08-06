@@ -395,6 +395,7 @@ describe('CLI', () => {
           'upstream',
           'listen',
           'environment',
+          'session',
           'policies',
           'budgets',
           'approval',

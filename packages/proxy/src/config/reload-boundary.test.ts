@@ -104,6 +104,16 @@ describe('diffReloadBoundary', () => {
     expect(diff.restartRequiredPaths).toEqual(['environment'])
   })
 
+  it('requires restart when session identity config changes (issue #218)', () => {
+    const previous = minimalConfig()
+    const next = minimalConfig({
+      session: { on_unresolved: 'anonymous' },
+    })
+
+    const diff = diffReloadBoundary(previous, next)
+    expect(diff.restartRequiredPaths).toEqual(['session'])
+  })
+
   it('requires restart when upstream changes', () => {
     const previous = minimalConfig()
     const next = minimalConfig({
