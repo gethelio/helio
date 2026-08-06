@@ -45,6 +45,17 @@ import { spendBucketKey } from './spend-limiter.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 import type { CompiledApproval } from './types.js'
+import {
+  gateSession,
+  gateBudgetCharges,
+  sessionLimitKey,
+  sessionUnresolvedControlMessage,
+  warnSessionUnresolvedEngagementOnce,
+  warnAnonymousPoolingOnce,
+} from './session-gate.js'
+import { buildSessionUnresolvedFeedback } from '../feedback/self-repair.js'
+import { DEFAULT_SESSION_IDENTITY } from '../mcp/session-resolver.js'
+import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 
 /** Custom JSON-RPC error code for policy denials. */
 const POLICY_DENIED = -32001
@@ -65,6 +76,12 @@ export interface GovernedForwarderOptions {
   spendLimiter?: SpendLimiter
   /** Budget engine for named cross-tool budgets (issue #14). */
   budgetEngine?: BudgetEngine
+  /**
+   * Compiled session identity config (issue #218): the `on_unresolved` mode
+   * and the strategy summary deny messages name. Defaults to the schema
+   * default chain (deny mode) for direct/library construction.
+   */
+  session?: CompiledSessionIdentity
 }
 
 /**
@@ -181,6 +198,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly inner: McpForwarder
   private policy: CompiledPolicy
   private readonly environment: string | undefined
+  private readonly session: CompiledSessionIdentity
   private readonly auditWriter: AuditWriter | undefined
   private readonly evidenceStore: EvidenceStore | undefined
   private readonly approvalRouter: ApprovalRouter | undefined
@@ -201,6 +219,7 @@ export class GovernedForwarder implements McpForwarder {
     this.rateLimiter = options?.rateLimiter
     this.spendLimiter = options?.spendLimiter
     this.budgetEngine = options?.budgetEngine
+    this.session = options?.session ?? DEFAULT_SESSION_IDENTITY
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
     }
@@ -457,6 +476,7 @@ export class GovernedForwarder implements McpForwarder {
       toolName,
       toolArguments,
       sessionId: request.session?.id,
+      sessionStrategySummary: this.session.strategySummary,
       policy: this.policy,
       environment: this.environment,
       evidenceStore: this.evidenceStore,
@@ -616,6 +636,7 @@ export class GovernedForwarder implements McpForwarder {
       evidenceResult,
       dependencyResult,
       evidenceBlocked,
+      sessionBlocked,
       approvalOutcome,
       approvalContext,
       rateLimitResult,
@@ -838,19 +859,35 @@ export class GovernedForwarder implements McpForwarder {
     const engine = this.budgetEngine
     if (!engine) return { kind: 'proceed' }
 
+    // Mandatory ordering (issue #218): identity gate → resolveCharges →
+    // engagement check → peek. Gate once — the deferred commit below reuses
+    // the same branded charges; never re-resolve after an approval wait.
+    const sessionGate = gateSession(request.session?.id, this.session.onUnresolved)
     const { charges, failures } = engine.resolveCharges({
       toolName,
       toolArguments,
-      sessionId: request.session?.id ?? null,
+      sessionId: sessionGate.ok ? sessionGate.session : null,
       senderId: null, // adapter context; absent on the MCP path
     })
 
     if (charges.length === 0 && failures.length === 0) return { kind: 'proceed' }
 
+    const gated = gateBudgetCharges({ charges, failures }, sessionGate)
+    if (!gated.ok) {
+      // A session-keyed budget engaged with unresolved identity denies
+      // BEFORE any peek — no bucket is read or materialized (issue #218).
+      warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+      return {
+        kind: 'blocked',
+        result: this.makeSessionUnresolvedResult(request, decision, 'budget'),
+        chain: [],
+      }
+    }
+
     // Peek the valid charges even when failures deny the call — the feedback
     // must show every failure AND every simultaneous breach, with real
     // bucket snapshots throughout.
-    const peek = charges.length > 0 ? engine.peekAll(charges) : { allowed: true, entries: [] }
+    const peek = charges.length > 0 ? engine.peekAll(gated.charges) : { allowed: true, entries: [] }
     const breaches = peek.entries.filter((entry) => !entry.allowed)
     // A single deny-breach (or invalid amount) denies the call outright —
     // the money gate forbids what a break-glass approver would be asked to
@@ -913,7 +950,7 @@ export class GovernedForwarder implements McpForwarder {
       kinds?: ReadonlyMap<string, 'spend' | 'approved_overage'>,
     ) =>
       engine
-        .recordAll(charges, {
+        .recordAll(gated.charges, {
           kind: 'spend',
           ...(kinds ? { kinds } : {}),
           auditRecordId,
@@ -1180,7 +1217,20 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    const key = this.buildLimitKey(limits.key, toolName, request)
+    let key: string
+    if (limits.key === 'session') {
+      const sessionKey = this.gateSessionLimitKey(request)
+      if (sessionKey === null) {
+        return {
+          proceed: false,
+          result: this.makeSessionUnresolvedResult(request, decision, 'rate_limit'),
+          approvalWaitMs: 0,
+        }
+      }
+      key = sessionKey
+    } else {
+      key = this.buildLimitKey(limits.key, toolName)
+    }
     const params = { key, maxCalls: limits.maxCalls, windowMs: limits.windowMs }
     // Peek at the gate; record at the forward site (commitRuleLimit) so a call
     // a later gate blocks never consumes the counter. Peek → record stays in
@@ -1232,8 +1282,22 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
+    let baseKey: string
+    if (maxSpend.key === 'session') {
+      const sessionKey = this.gateSessionLimitKey(request)
+      if (sessionKey === null) {
+        return {
+          proceed: false,
+          result: this.makeSessionUnresolvedResult(request, decision, 'spend_limit'),
+          approvalWaitMs: 0,
+        }
+      }
+      baseKey = sessionKey
+    } else {
+      baseKey = this.buildLimitKey(maxSpend.key, toolName)
+    }
     // Extract the monetary amount from tool arguments
-    const key = this.buildSpendLimitKey(maxSpend.key, toolName, request, decision.matchedRule.index)
+    const key = spendBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, toolArguments ?? {})
     if (typeof rawAmount !== 'number') {
       // eslint-disable-next-line no-console -- Intentional operational warning
@@ -1323,6 +1387,9 @@ export class GovernedForwarder implements McpForwarder {
     const evidenceSatisfied = !evidenceBlocked
     let wouldForward = false
     let limitsOk = true
+    /** Dry-run reports (never denies): an engaged session-keyed control with
+     * unresolved identity under deny mode is a named marker (issue #218). */
+    let sessionUnresolved = false
 
     if (!evidenceBlocked) {
       switch (decision.action) {
@@ -1335,14 +1402,24 @@ export class GovernedForwarder implements McpForwarder {
             decision.matchedRule?.limits?.maxCalls &&
             decision.matchedRule.limits.windowMs
           ) {
-            const key = this.buildLimitKey(decision.matchedRule.limits.key, toolName, request)
-            const peekResult = this.rateLimiter.peek({
-              key,
-              maxCalls: decision.matchedRule.limits.maxCalls,
-              windowMs: decision.matchedRule.limits.windowMs,
-            })
-            wouldForward = peekResult.allowed
-            limitsOk = peekResult.allowed
+            const limits = decision.matchedRule.limits
+            const key =
+              limits.key === 'session'
+                ? this.gateSessionLimitKey(request)
+                : this.buildLimitKey(limits.key, toolName)
+            if (key === null) {
+              wouldForward = false
+              limitsOk = false
+              sessionUnresolved = true
+            } else {
+              const peekResult = this.rateLimiter.peek({
+                key,
+                maxCalls: decision.matchedRule.limits.maxCalls,
+                windowMs: decision.matchedRule.limits.windowMs,
+              })
+              wouldForward = peekResult.allowed
+              limitsOk = peekResult.allowed
+            }
           }
           break
         case 'spend_limit':
@@ -1364,20 +1441,24 @@ export class GovernedForwarder implements McpForwarder {
               wouldForward = false
               limitsOk = false
             } else {
-              const key = this.buildSpendLimitKey(
-                maxSpend.key,
-                toolName,
-                request,
-                decision.matchedRule.index,
-              )
-              const peekResult = this.spendLimiter.peek({
-                key,
-                amount: rawAmount,
-                limit: maxSpend.limit,
-                windowMs: maxSpend.windowMs,
-              })
-              wouldForward = peekResult.allowed
-              limitsOk = peekResult.allowed
+              const baseKey =
+                maxSpend.key === 'session'
+                  ? this.gateSessionLimitKey(request)
+                  : this.buildLimitKey(maxSpend.key, toolName)
+              if (baseKey === null) {
+                wouldForward = false
+                limitsOk = false
+                sessionUnresolved = true
+              } else {
+                const peekResult = this.spendLimiter.peek({
+                  key: spendBucketKey(baseKey, decision.matchedRule.index),
+                  amount: rawAmount,
+                  limit: maxSpend.limit,
+                  windowMs: maxSpend.windowMs,
+                })
+                wouldForward = peekResult.allowed
+                limitsOk = peekResult.allowed
+              }
             }
           }
           break
@@ -1389,31 +1470,42 @@ export class GovernedForwarder implements McpForwarder {
     // also clear every matching budget. Dry-run never records.
     let budgets: Array<Record<string, unknown>> | undefined
     if (wouldForward && this.budgetEngine) {
+      const sessionGate = gateSession(request.session?.id, this.session.onUnresolved)
       const { charges, failures } = this.budgetEngine.resolveCharges({
         toolName,
         toolArguments,
-        sessionId: request.session?.id ?? null,
+        sessionId: sessionGate.ok ? sessionGate.session : null,
         senderId: null,
       })
       if (failures.length > 0 || charges.length > 0) {
-        const peek =
-          charges.length > 0 ? this.budgetEngine.peekAll(charges) : { allowed: true, entries: [] }
-        const ok = failures.length === 0 && peek.allowed
-        wouldForward &&= ok
-        limitsOk &&= ok
-        budgets = [
-          ...peek.entries.map((entry) => budgetChainBlock(entry)),
-          ...failures.map((failure) => ({
-            name: failure.budget.name,
-            bucket_key: failure.bucketKey,
-            allowed: false,
-            reason: failure.reason,
-            spent: failure.spent,
-            limit: failure.budget.limit,
-            remaining: failure.remaining,
-            currency: failure.budget.currency,
-          })),
-        ]
+        const gated = gateBudgetCharges({ charges, failures }, sessionGate)
+        if (!gated.ok) {
+          warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+          wouldForward = false
+          limitsOk = false
+          sessionUnresolved = true
+        } else {
+          const peek =
+            charges.length > 0
+              ? this.budgetEngine.peekAll(gated.charges)
+              : { allowed: true, entries: [] }
+          const ok = failures.length === 0 && peek.allowed
+          wouldForward &&= ok
+          limitsOk &&= ok
+          budgets = [
+            ...peek.entries.map((entry) => budgetChainBlock(entry)),
+            ...failures.map((failure) => ({
+              name: failure.budget.name,
+              bucket_key: failure.bucketKey,
+              allowed: false,
+              reason: failure.reason,
+              spent: failure.spent,
+              limit: failure.budget.limit,
+              remaining: failure.remaining,
+              currency: failure.budget.currency,
+            })),
+          ]
+        }
       }
     }
 
@@ -1424,18 +1516,21 @@ export class GovernedForwarder implements McpForwarder {
       evidenceSatisfied,
       limitsOk,
       budgets,
+      sessionUnresolved,
     )
   }
 
-  /** Construct a limit bucket key based on the configured key type. */
+  /**
+   * Construct a non-session limit bucket key. Session keys are deliberately
+   * NOT built here: they come only from the gate module's `sessionLimitKey`,
+   * whose `GatedSession` parameter makes skipping the identity gate a
+   * compile error (issue #218) — call sites branch on `key === 'session'`.
+   */
   private buildLimitKey(
-    keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
+    keyType: 'tool' | 'agent' | 'sender_id' | undefined,
     toolName: string,
-    request: McpRequest,
   ): string {
     switch (keyType) {
-      case 'session':
-        return `session:${request.session?.id ?? 'unknown'}`
       case 'agent':
         // agent_id is not yet available on McpRequest — fall back to tool
         if (!this.agentKeyWarned) {
@@ -1465,17 +1560,32 @@ export class GovernedForwarder implements McpForwarder {
   }
 
   /**
-   * Construct a spend bucket key via the shared {@link spendBucketKey}
-   * composer — see its doc for why spend buckets are rule-discriminated.
-   * Rate buckets keep the undiscriminated keys.
+   * Gate a session-keyed limit at its key-build site (issue #218). Returns
+   * the bucket key, or null when identity is unresolved under deny mode —
+   * the caller denies (enforce) or reports the marker (dry-run).
    */
-  private buildSpendLimitKey(
-    keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
-    toolName: string,
+  private gateSessionLimitKey(request: McpRequest): string | null {
+    const gate = gateSession(request.session?.id, this.session.onUnresolved)
+    if (!gate.ok) {
+      warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+      return null
+    }
+    if (gate.anonymous) warnAnonymousPoolingOnce()
+    return sessionLimitKey(gate.session)
+  }
+
+  private makeSessionUnresolvedResult(
     request: McpRequest,
-    ruleIndex: number,
-  ): string {
-    return spendBucketKey(this.buildLimitKey(keyType, toolName, request), ruleIndex)
+    decision: PolicyDecision,
+    control: 'rate_limit' | 'spend_limit' | 'budget',
+  ): ForwardResult {
+    const feedback = buildSessionUnresolvedFeedback(decision, control, this.session.strategySummary)
+    return makeErrorResult(
+      request,
+      POLICY_DENIED,
+      sessionUnresolvedControlMessage(this.session.strategySummary),
+      { ...feedback },
+    )
   }
 
   private writeAuditRecord(
@@ -1493,6 +1603,7 @@ export class GovernedForwarder implements McpForwarder {
     evidenceResult?: EvidenceCheckResult,
     dependencyResult?: DependencyCheckResult,
     evidenceBlocked?: boolean,
+    sessionBlocked?: boolean,
     approvalOutcome?: ApprovalOutcome,
     approvalContext?: ApprovalAuditContext,
     rateLimitResult?: RateLimitResult,
@@ -1622,6 +1733,17 @@ export class GovernedForwarder implements McpForwarder {
 
     const blockReason = extractBlockReason(result)
 
+    // Session-unresolved denies (and the grounded-rule no-session deny) name
+    // the tried strategies in the record itself — non-forwarded denies carry
+    // no upstream_response, so without this the strategy text would exist
+    // only in agent-facing feedback (issue #218).
+    if (sessionBlocked || blockReason === 'session_unresolved') {
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        session: { unresolved: true, tried: this.session.strategySummary },
+      }
+    }
+
     const record: Omit<AuditRecord, 'id' | 'created_at'> = {
       timestamp,
       session_id: request.session?.id ?? null,
@@ -1725,6 +1847,7 @@ export class GovernedForwarder implements McpForwarder {
     evidenceSatisfied: boolean,
     limitsOk: boolean,
     budgets?: Array<Record<string, unknown>>,
+    sessionUnresolved?: boolean,
   ): ForwardResult {
     const payload = {
       dry_run: true,
@@ -1734,6 +1857,7 @@ export class GovernedForwarder implements McpForwarder {
       evidence_satisfied: evidenceSatisfied,
       limits_ok: limitsOk,
       ...(budgets ? { budgets } : {}),
+      ...(sessionUnresolved ? { session_unresolved: true } : {}),
     }
     const body = {
       jsonrpc: '2.0' as const,
@@ -1786,15 +1910,13 @@ export class GovernedForwarder implements McpForwarder {
     decision: PolicyDecision,
   ): ForwardResult {
     const feedback = buildPolicyDeniedFeedback(decision)
-    return makeErrorResult(
-      request,
-      POLICY_DENIED,
-      'Mcp-Session-Id is required for evidence/dependency-gated policy rules',
-      {
-        ...feedback,
-        retry_allowed: true,
-      },
-    )
+    // decision.reason is the pipeline's strategy-naming grounded-gate message
+    // (sessionRequiredForGroundingMessage) — one deny string, both copies
+    // collapsed (issue #218).
+    return makeErrorResult(request, POLICY_DENIED, decision.reason, {
+      ...feedback,
+      retry_allowed: true,
+    })
   }
 
   private makeClientDisconnectedBlockResult(

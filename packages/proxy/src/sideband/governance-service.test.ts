@@ -18,6 +18,9 @@ import type { BudgetConfig } from '../config/schema.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
 import { EvidenceStore } from '../evidence/index.js'
+import { compileSessionIdentity } from '../mcp/session-resolver.js'
+import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
+import { resetSessionGateWarningsForTests } from '../policy/session-gate.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,6 +74,7 @@ function makeService(opts?: {
   budgetLedger?: BudgetLedgerSink
   onBudgetBreach?: (event: unknown) => void
   onBudgetCommit?: (event: unknown) => void
+  session?: CompiledSessionIdentity
 }): ServiceHarness {
   let time = 1_000_000
   const now = () => time
@@ -121,6 +125,7 @@ function makeService(opts?: {
     sweepIntervalMs: 0,
     ...(opts?.maxSenderKeys !== undefined && { maxSenderKeys: opts.maxSenderKeys }),
     ...(opts?.maxPendingBytes !== undefined && { maxPendingBytes: opts.maxPendingBytes }),
+    ...(opts?.session !== undefined && { session: opts.session }),
     budgetEngine,
   })
 
@@ -3518,5 +3523,185 @@ describe('GovernanceService — terminal audit rows are immune to response mutat
 
     const chain = records[0]?.record.evidence_chain as { rate: Record<string, unknown> }
     expect(chain.rate['current']).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Session identity on the sideband door (issue #218)
+// ---------------------------------------------------------------------------
+
+describe('session identity (issue #218)', () => {
+  const SESSION_RATE_POLICY = compile({
+    default: 'allow',
+    rules: [
+      {
+        match: { tool: 'send' },
+        action: 'rate_limit',
+        limits: { max_calls: 5, window: '1m', key: 'session' },
+      },
+    ],
+  })
+
+  const SESSION_BUDGET: BudgetConfig = {
+    name: 'per-run',
+    limit: 50,
+    currency: 'USD',
+    window: '1h',
+    key: 'session',
+    on_exceed: 'deny',
+    contributors: [{ match: { tool: 'send' }, field: '$.amount' }],
+  }
+
+  const ANONYMOUS = compileSessionIdentity({
+    identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+    on_unresolved: 'anonymous',
+  })
+
+  const TRIED = 'header "x-helio-session-id", legacy_header'
+
+  afterEach(() => {
+    resetSessionGateWarningsForTests()
+  })
+
+  it('denies an engaged session rate limit without session_id (deny mode)', () => {
+    const { service, records } = makeService({ policy: SESSION_RATE_POLICY, withLimiters: true })
+
+    const res = service.evaluate(evalInput({ session_id: null }))
+
+    expect(res.status).toBe(200)
+    const body = res.body
+    expect(body['decision']).toBe('deny')
+    expect(body['reason']).toContain(`tried: ${TRIED}`)
+    expect((body['feedback'] as Record<string, unknown>)['message']).toContain(`tried: ${TRIED}`)
+
+    expect(records).toHaveLength(1)
+    expect(records[0]?.record.block_reason).toBe('session_unresolved')
+    expect(records[0]?.record.evidence_chain?.['session']).toEqual({
+      unresolved: true,
+      tried: TRIED,
+    })
+  })
+
+  it('denies an engaged session budget without session_id (deny mode)', () => {
+    const { service, records, budgetEngine } = makeService({ budgets: [SESSION_BUDGET] })
+
+    const res = service.evaluate(evalInput({ session_id: null, arguments: { amount: 10 } }))
+
+    expect(res.body['decision']).toBe('deny')
+    expect(records[0]?.record.block_reason).toBe('session_unresolved')
+    // Anti-drift: the deny ran before any peek — nothing materialized.
+    expect(budgetEngine?.listStates().flatMap((state) => state.buckets)).toHaveLength(0)
+  })
+
+  it('passes a supplied session_id through to its own buckets', () => {
+    const { service, rateLimiter } = makeService({
+      policy: SESSION_RATE_POLICY,
+      withLimiters: true,
+    })
+
+    const res = service.evaluate(evalInput({ session_id: 'run-a' }))
+    expect(res.body['decision']).toBe('allow')
+    const id = res.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:run-a'])
+  })
+
+  it('pools into session:unknown under anonymous mode', () => {
+    const { service, rateLimiter } = makeService({
+      policy: SESSION_RATE_POLICY,
+      withLimiters: true,
+      session: ANONYMOUS,
+    })
+
+    const res = service.evaluate(evalInput({ session_id: null }))
+    expect(res.body['decision']).toBe('allow')
+    const id = res.body['evaluation_id'] as string
+    service.audit(auditInput(id), 'h')
+
+    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:unknown'])
+  })
+
+  it('still denies evidence-gated rules without identity under anonymous mode', () => {
+    const { service, records } = makeService({
+      policy: compile({
+        default: 'allow',
+        rules: [{ match: { tool: 'send' }, action: 'allow', evidence: { requires: ['probe'] } }],
+      }),
+      withEvidence: true,
+      session: ANONYMOUS,
+    })
+
+    const res = service.evaluate(evalInput({ session_id: null }))
+
+    const body = res.body
+    expect(body['decision']).toBe('deny')
+    expect(body['reason']).toContain('evidence.requires')
+    expect(body['reason']).toContain(`tried: ${TRIED}`)
+    // Grounded-rule denies keep policy_denied — no reclassification — but
+    // the record still names the tried strategies in the chain.
+    expect(records[0]?.record.block_reason).toBe('policy_denied')
+    expect(records[0]?.record.evidence_chain?.['session']).toEqual({
+      unresolved: true,
+      tried: TRIED,
+    })
+  })
+
+  it('reports the named marker in dry-run instead of denying', () => {
+    const { service, records } = makeService({
+      policy: compile({
+        default: 'allow',
+        dry_run: true,
+        rules: [
+          {
+            match: { tool: 'send' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+        ],
+      }),
+      withLimiters: true,
+    })
+
+    const res = service.evaluate(evalInput({ session_id: null }))
+
+    const body = res.body
+    expect(body['decision']).toBe('dry_run')
+    expect(body['dry_run']).toMatchObject({
+      would_forward: false,
+      limits_ok: false,
+      session_unresolved: true,
+    })
+    expect(records[0]?.record.block_reason).toBeNull()
+  })
+
+  it('reports the named marker for an engaged session budget in dry-run', () => {
+    const { service } = makeService({
+      policy: compile({ default: 'allow', dry_run: true, rules: [] }),
+      budgets: [SESSION_BUDGET],
+    })
+
+    const res = service.evaluate(evalInput({ session_id: null, arguments: { amount: 10 } }))
+
+    const body = res.body
+    expect(body['decision']).toBe('dry_run')
+    expect(body['dry_run']).toMatchObject({ would_forward: false, session_unresolved: true })
+  })
+
+  it('commits deferred session-keyed budget plans through the freeze/remint pair', () => {
+    const { service, budgetEngine } = makeService({ budgets: [SESSION_BUDGET] })
+
+    const res = service.evaluate(evalInput({ session_id: 'run-a', arguments: { amount: 10 } }))
+    expect(res.body['decision']).toBe('allow')
+    const id = res.body['evaluation_id'] as string
+
+    // The actual_amount override is the remint's legitimate rewrite path.
+    const audit = service.audit(auditInput(id, { actual_amount: 42 }), 'h')
+    expect(audit.status).toBe(201)
+
+    const buckets = budgetEngine?.listStates().flatMap((state) => state.buckets)
+    expect(buckets).toHaveLength(1)
+    expect(buckets?.[0]?.bucket_key).toBe('budget:per-run:session:run-a')
+    expect(buckets?.[0]?.spent).toBe(42)
   })
 })

@@ -123,7 +123,9 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
       'tools/call',
       { name: 'get_weather', arguments: { city: 'London' } },
       1,
-      { sessionId: SESSION_ID },
+      // The canonical correlation contract (issue #218): the SDK's explicit
+      // session_id is sent as x-helio-session-id on every MCP request.
+      { helioSessionId: SESSION_ID },
     )
 
     const error = body['error'] as { code: number; message: string; data: Record<string, unknown> }
@@ -159,13 +161,25 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
       'tools/call',
       { name: 'get_weather', arguments: { city: 'London' } },
       2,
-      { sessionId: SESSION_ID },
+      { helioSessionId: SESSION_ID },
     )
 
     // Should be a success response (no error field)
     expect(body['error']).toBeUndefined()
     const result = body['result'] as { content: Array<{ type: string; text: string }> }
     expect(result.content[0]?.text).toBe('Sunny, 22°C in London')
+
+    // Legacy variant (deprecation window): the same session id sent as the
+    // wire Mcp-Session-Id resolves via legacy_header to the SAME evidence
+    // session, so the call still succeeds.
+    const legacy = await sendMcpRequest(
+      proxyUrl,
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'London' } },
+      3,
+      { sessionId: SESSION_ID },
+    )
+    expect(legacy.body['error']).toBeUndefined()
   })
 
   it('rejects SDK requests that omit the sideband bearer token (401)', async () => {

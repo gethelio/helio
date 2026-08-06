@@ -16,6 +16,7 @@ import type { CompiledPolicy, PolicyAction, ToolAnnotationHints } from './types.
 import { evaluatePolicy } from './engine.js'
 import type { PolicyDecision } from './engine.js'
 import type { ToolDriftEvent } from './annotation-cache.js'
+import { sessionRequiredForGroundingMessage } from './session-gate.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import { checkEvidence, checkDependencies } from '../evidence/grounding.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/grounding.js'
@@ -33,6 +34,12 @@ export interface DecideInput {
   readonly toolName: string
   readonly toolArguments: Record<string, unknown> | undefined
   readonly sessionId: string | undefined
+  /**
+   * The configured identity strategies, pre-summarized (issue #218) — the
+   * grounded-rule deny names what was tried. Absent falls back to a generic
+   * phrase; both doors thread their compiled summary in.
+   */
+  readonly sessionStrategySummary?: string
   readonly policy: CompiledPolicy
   readonly environment: string | undefined
   readonly evidenceStore: EvidenceStore | undefined
@@ -175,7 +182,9 @@ export function decide(input: DecideInput): PipelineDecision {
     decision = {
       action: 'deny',
       matchedRule: decision.matchedRule,
-      reason: 'Mcp-Session-Id is required for evidence/dependency-gated policy rules',
+      reason: sessionRequiredForGroundingMessage(
+        input.sessionStrategySummary ?? 'the configured session.identity chain',
+      ),
     }
   }
 

@@ -12,6 +12,7 @@ import { createApp, startServer, startSidebandServer } from './server.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
+import { compileSessionIdentity } from './mcp/session-resolver.js'
 import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
 import { AuditStore, AuditWriter, EXPORT_MAX_RECORDS } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
@@ -482,6 +483,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   })
   budgetEngine.hydrate()
 
+  // Compiled once at startup, shared by both doors — session is
+  // restart-required at the reload boundary (issue #218).
+  const session = compileSessionIdentity(config.session)
+
   const governedForwarder = new GovernedForwarder(forwarder, policy, {
     environment: config.environment,
     auditWriter,
@@ -490,6 +495,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     rateLimiter,
     spendLimiter,
     budgetEngine,
+    session,
   })
 
   const annotationPrime = await startAnnotationPrimeLoop(governedForwarder)
@@ -554,6 +560,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       rateLimiter,
       spendLimiter,
       budgetEngine,
+      session,
       auditWriter,
       approvalTimeoutMs: parseDuration(config.approval.timeout),
       ttlMs: parseDuration(config.sdk.evaluation_ttl),

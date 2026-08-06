@@ -1930,7 +1930,9 @@ describe('GovernedForwarder', () => {
       expect(inner.forward).not.toHaveBeenCalled()
       const error = errorFromResult(result)
       expect(error.data['reason']).toBe('policy_denied')
-      expect(error.message).toContain('Mcp-Session-Id')
+      // The deny message names the configured identity strategies (#218).
+      expect(error.message).toContain('tried: header "x-helio-session-id", legacy_header')
+      expect(error.message).toContain('evidence.requires')
     })
   })
 

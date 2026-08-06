@@ -17,6 +17,7 @@ export const DECISION_FILTERS: ReadonlyArray<{ label: string; value: OutcomeFilt
     { label: 'Rate Limited', value: 'rate_limited' },
     { label: 'Spend Limited', value: 'spend_limited' },
     { label: 'Budget Exceeded', value: 'budget_exceeded' },
+    { label: 'Session Unresolved', value: 'session_unresolved' },
     { label: 'Dry Run', value: 'dry_run' },
   ]
 

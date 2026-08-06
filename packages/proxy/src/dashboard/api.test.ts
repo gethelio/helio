@@ -17,6 +17,7 @@ import { EvidenceStore } from '../evidence/store.js'
 import { BudgetEngine } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
+import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -881,7 +882,7 @@ describe('GET /api/budgets', () => {
       sessionId: null,
       senderId: null,
     })
-    engine.recordAll(charges, {
+    engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
       auditRecordId: 'audit-1',
       origin: 'mcp',

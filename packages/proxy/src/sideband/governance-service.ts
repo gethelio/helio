@@ -40,7 +40,19 @@ import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
 import { spendBucketKey } from '../policy/spend-limiter.js'
 import type { BudgetEngine, BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
-import type { CompiledBudget } from '../budget/types.js'
+import {
+  gateSession,
+  gateBudgetCharges,
+  freezeGatedPlans,
+  remintDeferredCharges,
+  sessionLimitKey,
+  sessionUnresolvedControlMessage,
+  warnSessionUnresolvedEngagementOnce,
+  warnAnonymousPoolingOnce,
+} from '../policy/session-gate.js'
+import type { FrozenBudgetPlan } from '../policy/session-gate.js'
+import { DEFAULT_SESSION_IDENTITY } from '../mcp/session-resolver.js'
+import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 import { GovernanceConfigError } from './errors.js'
 
 // ---------------------------------------------------------------------------
@@ -182,24 +194,12 @@ interface LimitPlan {
   readonly currency?: string
 }
 
-/** A budget's share of a call, frozen at /evaluate and committed at /audit. */
-interface BudgetPlan {
-  readonly kind: 'budget'
-  readonly budget: CompiledBudget
-  readonly bucketKey: string
-  readonly amount: number
-  /** Config generation at evaluate time; stale charges are skipped at commit. */
-  readonly generation: number
-  /**
-   * Whether this charge breached its budget at /evaluate (issue #14 break-
-   * glass): a breached plan whose ticket was APPROVED commits as
-   * `approved_overage`; every other executed plan commits as plain `spend`.
-   */
-  readonly breached: boolean
-}
+// Budget plans are frozen at /evaluate through the session gate's
+// `freezeGatedPlans` (issue #218) — the element brand proves the charges
+// passed the engagement check, and /audit remints them for the commit.
 
 /** Everything /audit must commit once the call actually executed. */
-type Plan = LimitPlan | BudgetPlan
+type Plan = LimitPlan | FrozenBudgetPlan
 
 interface PendingEvaluation {
   readonly evaluationId: string
@@ -285,6 +285,13 @@ export interface GovernanceServiceOptions {
   readonly spendLimiter?: SpendLimiter
   /** Budget engine for named cross-tool budgets (issue #14). */
   readonly budgetEngine?: BudgetEngine
+  /**
+   * Compiled session identity config (issue #218): the sideband door gets
+   * the SAME on_unresolved policy as the MCP door — an adapter omitting
+   * session_id while a session-keyed control is engaged is denied under
+   * `deny`, pools under `anonymous`. Defaults to the schema default chain.
+   */
+  readonly session?: CompiledSessionIdentity
   readonly auditWriter?: AuditWriter
   /** Default approval timeout (ms) when a rule sets none. */
   readonly approvalTimeoutMs?: number
@@ -309,6 +316,7 @@ export interface GovernanceServiceOptions {
 export class GovernanceService {
   private policy: CompiledPolicy
   private readonly environment: string | undefined
+  private readonly session: CompiledSessionIdentity
   private readonly evidenceStore: EvidenceStore | undefined
   private readonly approvalRouter: ApprovalRouter | undefined
   private readonly rateLimiter: RateLimiter | undefined
@@ -344,6 +352,7 @@ export class GovernanceService {
   constructor(options: GovernanceServiceOptions) {
     this.policy = options.policy
     this.environment = options.environment
+    this.session = options.session ?? DEFAULT_SESSION_IDENTITY
     this.evidenceStore = options.evidenceStore
     this.approvalRouter = options.approvalRouter
     this.rateLimiter = options.rateLimiter
@@ -436,6 +445,7 @@ export class GovernanceService {
       toolName,
       toolArguments: req.arguments,
       sessionId: req.session_id ?? undefined,
+      sessionStrategySummary: this.session.strategySummary,
       policy: this.policy,
       environment: this.environment,
       evidenceStore: this.evidenceStore,
@@ -457,6 +467,10 @@ export class GovernanceService {
     // Rule-limit result for the dry-run simulation: true unless a matched
     // rate/spend rule's peek (or an unreadable spend amount) would block.
     let ruleLimitOk = true
+    /** A session-keyed control engaged with unresolved identity under deny
+     * mode (issue #218): enforce wires deny; dry-run reports the marker. */
+    let sessionUnresolvedDeny = false
+    let dryRunSessionUnresolved = false
     // Sender-key slots inserted by THIS call, released if a later gate 503s.
     const reservedThisCall: string[] = []
     const reserve = (key: string): boolean => {
@@ -483,10 +497,12 @@ export class GovernanceService {
       if (decision.action === 'rate_limit') {
         const planned = this.planRate(decision, toolName, req.session_id, senderId)
         if (planned?.block) limitsBlock = { rate: planned.block }
+        if (planned?.sessionUnresolved) dryRunSessionUnresolved = true
         ruleLimitOk = planned?.allowed ?? true
       } else if (decision.action === 'spend_limit') {
         const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
         if (planned?.block) limitsBlock = { spend: planned.block }
+        if (planned?.sessionUnresolved) dryRunSessionUnresolved = true
         ruleLimitOk = planned?.allowed ?? true
       }
     } else if (decision.action === 'deny') {
@@ -495,20 +511,32 @@ export class GovernanceService {
       wire = 'require_approval'
     } else if (decision.action === 'rate_limit') {
       const planned = this.planRate(decision, toolName, req.session_id, senderId)
-      if (planned?.plan && !reserve(planned.plan.key)) {
-        return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+      if (planned?.sessionUnresolved) {
+        // Identity failure, not a limit breach: the wire decision stays
+        // 'deny' (issue #218) and the body carries the identity override.
+        wire = 'deny'
+        sessionUnresolvedDeny = true
+      } else {
+        if (planned?.plan && !reserve(planned.plan.key)) {
+          return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+        }
+        if (planned?.plan) plans.push(planned.plan)
+        limitsBlock = planned?.block ? { rate: planned.block } : undefined
+        wire = planned?.allowed ? 'allow' : 'rate_limited'
       }
-      if (planned?.plan) plans.push(planned.plan)
-      limitsBlock = planned?.block ? { rate: planned.block } : undefined
-      wire = planned?.allowed ? 'allow' : 'rate_limited'
     } else if (decision.action === 'spend_limit') {
       const planned = this.planSpend(decision, toolName, req.session_id, req.arguments, senderId)
-      if (planned?.plan && !reserve(planned.plan.key)) {
-        return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+      if (planned?.sessionUnresolved) {
+        wire = 'deny'
+        sessionUnresolvedDeny = true
+      } else {
+        if (planned?.plan && !reserve(planned.plan.key)) {
+          return { status: 503, body: { error: 'limit_capacity_exhausted' } }
+        }
+        if (planned?.plan) plans.push(planned.plan)
+        limitsBlock = planned?.block ? { spend: planned.block } : undefined
+        wire = planned?.allowed ? 'allow' : 'spend_limited'
       }
-      if (planned?.plan) plans.push(planned.plan)
-      limitsBlock = planned?.block ? { spend: planned.block } : undefined
-      wire = planned?.allowed ? 'allow' : 'spend_limited'
     } else {
       wire = 'allow'
     }
@@ -541,19 +569,39 @@ export class GovernanceService {
       this.budgetEngine &&
       (wire === 'allow' || wire === 'require_approval' || wire === 'dry_run')
     ) {
+      // Mandatory ordering (issue #218): identity gate → resolveCharges →
+      // engagement check → peek → freeze → append.
+      const budgetSessionGate = gateSession(req.session_id, this.session.onUnresolved)
       const { charges, failures } = this.budgetEngine.resolveCharges({
         toolName,
         toolArguments: req.arguments,
-        sessionId: req.session_id,
+        sessionId: budgetSessionGate.ok ? budgetSessionGate.session : null,
         senderId,
       })
 
-      if (charges.length > 0 || failures.length > 0) {
+      const gatedCharges =
+        charges.length > 0 || failures.length > 0
+          ? gateBudgetCharges({ charges, failures }, budgetSessionGate)
+          : undefined
+      if (gatedCharges && !gatedCharges.ok) {
+        // A session-keyed budget engaged with unresolved identity denies
+        // BEFORE any peek — no bucket is read or materialized (issue #218).
+        warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+        if (wire === 'dry_run') {
+          budgetDryRunOk = false
+          dryRunSessionUnresolved = true
+        } else {
+          releaseReservations()
+          plans.length = 0
+          wire = 'deny'
+          sessionUnresolvedDeny = true
+        }
+      } else if (gatedCharges) {
         // Peek the valid charges even when failures deny the call: the
         // response must show every failure AND every simultaneous breach.
         const peek =
           charges.length > 0
-            ? this.budgetEngine.peekAll(charges)
+            ? this.budgetEngine.peekAll(gatedCharges.charges)
             : { allowed: true, entries: [] as BudgetPeekEntry[] }
         budgetsBlock = [
           ...peek.entries.map((entry) => budgetWireBlock(entry)),
@@ -585,19 +633,19 @@ export class GovernanceService {
         } else {
           if (breaches.length > 0) budgetDryRunOk = false
           if (wire !== 'dry_run') {
-            for (const [index, charge] of charges.entries()) {
-              if (!reserve(charge.bucketKey)) {
+            // Freeze AFTER the peek: the breach markers come from it and
+            // pair positionally with the charges. The frozen brand carries
+            // the engagement-check proof into the deferred /audit commit.
+            const frozen = freezeGatedPlans(
+              gatedCharges.charges,
+              charges.map((_, index) => peek.entries[index]?.allowed === false),
+            )
+            for (const plan of frozen) {
+              if (!reserve(plan.bucketKey)) {
                 releaseReservations()
                 return { status: 503, body: { error: 'limit_capacity_exhausted' } }
               }
-              plans.push({
-                kind: 'budget',
-                budget: charge.budget,
-                bucketKey: charge.bucketKey,
-                amount: charge.amount,
-                generation: charge.generation,
-                breached: peek.entries[index]?.allowed === false,
-              })
+              plans.push(plan)
             }
             if (breaches.length > 0) {
               budgetBreachEntries = breaches
@@ -662,6 +710,20 @@ export class GovernanceService {
             : 'Wait for the window to reset or reduce the amount.',
       }
     }
+    if (sessionUnresolvedDeny) {
+      // Identity-failure override (issue #218): the matched rule's reason and
+      // feedback describe the RULE (which may literally have said allow); the
+      // deny is about identity. The wire decision stays 'deny' — same
+      // override precedent as break-glass and budget_exceeded above.
+      const message = sessionUnresolvedControlMessage(this.session.strategySummary)
+      responseBody['reason'] = message
+      responseBody['feedback'] = {
+        message,
+        suggestion:
+          'Send a session_id the identity policy accepts, or set ' +
+          'session.on_unresolved: anonymous to restore shared pooling.',
+      }
+    }
     if (limitsBlock) responseBody['limits'] = limitsBlock
     if (wire === 'dry_run') {
       responseBody['dry_run'] = {
@@ -673,6 +735,7 @@ export class GovernanceService {
           budgetDryRunOk,
         evidence_satisfied: !pipeline.evidenceBlocked,
         limits_ok: ruleLimitOk && budgetDryRunOk,
+        ...(dryRunSessionUnresolved ? { session_unresolved: true } : {}),
       }
     }
     if (pipeline.driftEvent) {
@@ -701,6 +764,8 @@ export class GovernanceService {
         // buffers records by reference until flush — a direct embedder
         // editing the returned body must not be able to rewrite evidence.
         limitsChain: limitsBlock ? structuredClone(limitsBlock) : undefined,
+        sessionUnresolved: sessionUnresolvedDeny,
+        sessionChain: pipeline.sessionBlocked,
       })
       this.tombstones.set(evaluationId, {
         auditRecordId: auditId,
@@ -1503,12 +1568,30 @@ export class GovernanceService {
     toolName: string,
     sessionId: string | null,
     senderId: string | null,
-  ): { plan?: LimitPlan; block?: Record<string, unknown>; allowed: boolean } | undefined {
+  ):
+    | {
+        plan?: LimitPlan
+        block?: Record<string, unknown>
+        allowed: boolean
+        sessionUnresolved?: true
+      }
+    | undefined {
     const limits = decision.matchedRule?.limits
     if (!this.rateLimiter || !limits?.maxCalls || !limits.windowMs) {
       return { allowed: true }
     }
-    const key = buildLimitKey(limits.key, toolName, sessionId, senderId)
+    let key: string
+    if (limits.key === 'session') {
+      const gate = gateSession(sessionId, this.session.onUnresolved)
+      if (!gate.ok) {
+        warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+        return { allowed: false, sessionUnresolved: true }
+      }
+      if (gate.anonymous) warnAnonymousPoolingOnce()
+      key = sessionLimitKey(gate.session)
+    } else {
+      key = buildLimitKey(limits.key, toolName, senderId)
+    }
     const peek = this.rateLimiter.peek({
       key,
       maxCalls: limits.maxCalls,
@@ -1532,16 +1615,32 @@ export class GovernanceService {
     sessionId: string | null,
     args: Record<string, unknown> | undefined,
     senderId: string | null,
-  ): { plan?: LimitPlan; block?: Record<string, unknown>; allowed: boolean } | undefined {
+  ):
+    | {
+        plan?: LimitPlan
+        block?: Record<string, unknown>
+        allowed: boolean
+        sessionUnresolved?: true
+      }
+    | undefined {
     const maxSpend = decision.matchedRule?.limits?.maxSpend
     if (!this.spendLimiter || !maxSpend) return { allowed: true }
 
     // Spend buckets are rule-discriminated via the shared composer so both
     // doors — which feed the same limiter — cannot drift apart on key format.
-    const key = spendBucketKey(
-      buildLimitKey(maxSpend.key, toolName, sessionId, senderId),
-      decision.matchedRule.index,
-    )
+    let baseKey: string
+    if (maxSpend.key === 'session') {
+      const gate = gateSession(sessionId, this.session.onUnresolved)
+      if (!gate.ok) {
+        warnSessionUnresolvedEngagementOnce(this.session.strategySummary)
+        return { allowed: false, sessionUnresolved: true }
+      }
+      if (gate.anonymous) warnAnonymousPoolingOnce()
+      baseKey = sessionLimitKey(gate.session)
+    } else {
+      baseKey = buildLimitKey(maxSpend.key, toolName, senderId)
+    }
+    const key = spendBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, args ?? {})
     if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount) || rawAmount < 0) {
       // Invalid amount — terminal block (mirrors the MCP invalid-amount deny).
@@ -1590,7 +1689,9 @@ export class GovernanceService {
     // the retry re-run recordAll and double-commit the budgets. Adding a
     // fallible step to this window requires latching the budget commit
     // separately first.
-    const budgetPlans = entry.plans.filter((plan): plan is BudgetPlan => plan.kind === 'budget')
+    const budgetPlans = entry.plans.filter(
+      (plan): plan is FrozenBudgetPlan => plan.kind === 'budget',
+    )
     if (budgetPlans.length > 0 && this.budgetEngine) {
       // Break-glass kinds (issue #14): a breached plan whose ticket was
       // APPROVED committed a sanctioned overage. Any other executed breach
@@ -1603,14 +1704,10 @@ export class GovernanceService {
           .map((plan) => [plan.budget.name, 'approved_overage' as const]),
       )
       // actual_amount, when supplied, is the call's one true realized cost
-      // and overrides every budget plan amount.
+      // and overrides every budget plan amount — the remint applies it while
+      // carrying the evaluate-time engagement proof (issue #218).
       const snapshots = this.budgetEngine.recordAll(
-        budgetPlans.map((plan) => ({
-          budget: plan.budget,
-          bucketKey: plan.bucketKey,
-          amount: actualAmount ?? plan.amount,
-          generation: plan.generation,
-        })),
+        remintDeferredCharges(budgetPlans, actualAmount),
         {
           kind: 'spend',
           ...(kinds.size > 0 ? { kinds } : {}),
@@ -1696,6 +1793,15 @@ export class GovernanceService {
 
     const blockReason = deriveBlockReason(args)
     let evidenceChain: Record<string, unknown> | null = args.limitsChain ?? null
+    if (args.sessionUnresolved || args.sessionChain) {
+      // Session-unresolved denies (and the grounded-rule no-session deny)
+      // name the tried strategies in the record itself — non-forwarded
+      // denies have no upstream fields to carry them (issue #218).
+      evidenceChain = {
+        ...(evidenceChain ?? {}),
+        session: { unresolved: true, tried: this.session.strategySummary },
+      }
+    }
     if (args.sidebandUnreported) {
       evidenceChain = {
         ...(evidenceChain ?? {}),
@@ -1793,6 +1899,12 @@ interface WriteAuditArgs {
   sidebandCommitted?: boolean
   /** A budget-only break-glass denial/timeout the adapter honored (issue #14). */
   budgetBreachBlocked?: boolean
+  /** A session-keyed control engaged with no resolved identity (issue #218,
+   * deny mode). Drives block_reason AND the evidence_chain session block. */
+  sessionUnresolved?: boolean
+  /** Merge the evidence_chain session block without reclassifying the
+   * block_reason — the grounded-rule no-session deny stays policy_denied. */
+  sessionChain?: boolean
 }
 
 function deriveBlockReason(args: WriteAuditArgs): string | null {
@@ -1805,6 +1917,9 @@ function deriveBlockReason(args: WriteAuditArgs): string | null {
   // event the MCP door records as budget_exceeded (cross-door filter parity).
   // The approval_status column still carries the denied/timeout outcome.
   if (args.budgetBreachBlocked) return 'budget_exceeded'
+  // Pinned before the approvalStatus checks and the wire switch: these
+  // denies ride wire 'deny', which would classify as policy_denied.
+  if (args.sessionUnresolved) return 'session_unresolved'
   if (args.approvalStatus === 'denied') return 'approval_denied'
   if (args.approvalStatus === 'timeout') return 'approval_timeout'
   if (args.approvalStatus === 'cancelled') return 'cancelled'
@@ -1872,15 +1987,18 @@ function policyCanRequireApproval(policy: CompiledPolicy): boolean {
   return policy.rules.some((rule) => rule.action === 'require_approval')
 }
 
+/**
+ * Construct a non-session limit bucket key. Session keys are deliberately
+ * NOT built here: they come only from the gate module's `sessionLimitKey`,
+ * whose `GatedSession` parameter makes skipping the identity gate a compile
+ * error (issue #218) — call sites branch on `key === 'session'`.
+ */
 function buildLimitKey(
-  keyType: 'tool' | 'agent' | 'session' | 'sender_id' | undefined,
+  keyType: 'tool' | 'agent' | 'sender_id' | undefined,
   toolName: string,
-  sessionId: string | null,
   senderId: string | null,
 ): string {
   switch (keyType) {
-    case 'session':
-      return `session:${sessionId ?? 'unknown'}`
     case 'sender_id':
       return `sender:${senderId ?? 'unknown'}`
     case 'agent':
