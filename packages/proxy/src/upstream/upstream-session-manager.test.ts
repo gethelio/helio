@@ -82,6 +82,29 @@ function neverClosingStream(): ReadableStream<Uint8Array> {
   })
 }
 
+/**
+ * A stream that delivers more than MAX_SSE_SCAN_BYTES (256 KiB) of SSE
+ * comment lines — a leading `:` is valid SSE syntax that `parseSseChunk`
+ * ignores — so it never produces a matching envelope. Only the byte cap can
+ * end the scan.
+ */
+function oversizedSseStream(): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const chunk = encoder.encode(':' + 'x'.repeat(64 * 1024) + '\n') // 64 KiB+ per chunk
+  const chunkCount = 5 // 5 * 64 KiB > 256 KiB MAX_SSE_SCAN_BYTES
+  let sent = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent >= chunkCount) {
+        controller.close()
+        return
+      }
+      controller.enqueue(chunk)
+      sent += 1
+    },
+  })
+}
+
 /** A legacy `initialize` responder, optionally minting a session id. */
 function legacyInitializeHandler(
   sessionId?: string,
@@ -185,23 +208,34 @@ describe('UpstreamSessionManager', () => {
     expect(methodsOf(calls)).toEqual(['server/discover', 'initialize', 'notifications/initialized'])
   })
 
-  it('treats 400 with a modern error body as modern and does NOT fall back', async () => {
-    const calls = stubUpstream({
-      'server/discover': () =>
-        jsonRpcError(
-          { code: -32020, message: 'HeaderMismatch: Mcp-Method does not match the request' },
-          400,
-        ),
-      initialize: legacyInitializeHandler('U-never-used'),
-    })
-    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+  it.each([
+    [-32020, 'HeaderMismatch: Mcp-Method does not match the request'],
+    [-32021, 'MissingRequiredClientCapability: io.modelcontextprotocol/clientCapabilities missing'],
+  ])(
+    'treats 400 with a modern error body (%i) as modern and does NOT fall back',
+    async (code, message) => {
+      const calls = stubUpstream({
+        'server/discover': () => jsonRpcError({ code, message }, 400),
+        initialize: legacyInitializeHandler('U-never-used'),
+      })
+      const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+      const label = message.split(':')[0]
 
-    const message = await rejectionMessage(mgr.ensureInternalSession())
+      const rejected = await rejectionMessage(mgr.ensureInternalSession())
 
-    expect(message).toContain('-32020')
-    expect(message).toContain('HeaderMismatch')
-    expect(methodsOf(calls)).toEqual(['server/discover'])
-  })
+      expect(rejected).toContain(String(code))
+      expect(rejected).toContain(label)
+      expect(methodsOf(calls)).toEqual(['server/discover'])
+
+      // The refusal caches no era: a second call re-probes from scratch rather
+      // than reusing a cached conclusion, and still never reaches initialize.
+      const secondRejected = await rejectionMessage(mgr.ensureInternalSession())
+
+      expect(secondRejected).toContain(String(code))
+      expect(secondRejected).toContain(label)
+      expect(methodsOf(calls)).toEqual(['server/discover', 'server/discover'])
+    },
+  )
 
   it('tries initialize once when a modern server supports no version Helio speaks', async () => {
     const calls = stubUpstream({
@@ -440,6 +474,26 @@ describe('UpstreamSessionManager', () => {
 
     // No era was cached, so the next call re-probes rather than assuming legacy.
     await expect(mgr.ensureInternalSession()).rejects.toThrow(/server\/discover probe/)
+    expect(methodsOf(calls)).toEqual(['server/discover', 'server/discover'])
+  })
+
+  it('treats an SSE probe body exceeding the byte cap as no era conclusion, rejecting and re-probing', async () => {
+    const calls = stubUpstream({
+      'server/discover': () => sseResponse(oversizedSseStream()),
+      initialize: legacyInitializeHandler('U-never-used'),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const message = await rejectionMessage(mgr.ensureInternalSession())
+
+    expect(message).toContain('exceeded')
+    expect(message).toContain('262144')
+    expect(methodsOf(calls)).toEqual(['server/discover']) // no initialize
+
+    // No era was cached, so the next call re-probes rather than assuming legacy.
+    const secondMessage = await rejectionMessage(mgr.ensureInternalSession())
+
+    expect(secondMessage).toContain('exceeded')
     expect(methodsOf(calls)).toEqual(['server/discover', 'server/discover'])
   })
 

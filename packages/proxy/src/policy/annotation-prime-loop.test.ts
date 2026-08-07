@@ -128,6 +128,39 @@ describe('startAnnotationPrimeLoop', () => {
     controller.stop()
   })
 
+  it('starts the revalidation cadence after the initial prime fails and the first retry succeeds', async () => {
+    const forwarder = fakeForwarder([fail('still down'), ok(2)], ok(3))
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000))
+
+    // The initial attempt fails right away (no deferred promise here), so the
+    // 1.5s startup race resolves via the 'completed' branch, not a timeout,
+    // and a retry is armed straight from handlePrimeResult.
+    expect(forwarder.calls).toBe(1)
+    expect(messages()).toContain(
+      '[helio] Annotation cache priming failed: still down — undocumented tools will be denied (fail-closed) until priming succeeds',
+    )
+    expect(messages()).toContain('[helio] Annotation cache prime retry 1 scheduled in 1000ms')
+
+    // Retry 1 succeeds: this is the only place the cadence gets armed —
+    // every other revalidation test primes on the initial attempt instead.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(forwarder.calls).toBe(2)
+    expect(messages()).toContain(
+      '[helio] Annotation cache primed after retry 1: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)',
+    )
+
+    // Nothing fires before the interval elapses.
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(forwarder.calls).toBe(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(forwarder.calls).toBe(3)
+
+    // The cadence repeats.
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(forwarder.calls).toBe(4)
+    controller.stop()
+  })
+
   it('schedules revalidation at intervalMs after the first success and keeps the cadence', async () => {
     const forwarder = fakeForwarder([], ok(2))
     const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000))
