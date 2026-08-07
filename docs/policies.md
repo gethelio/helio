@@ -892,13 +892,11 @@ Helio baselines every tool's definition — annotations, input/output schema,
 description, title — the first time it sees it. Definitions reach the cache
 three ways: the startup prime, any `tools/list` that passes through from a
 client, and the [scheduled revalidation](#proactive-revalidation) Helio runs
-on its own clock. The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
+on its own clock. Against a modern upstream, the `tools/list` requests Helio sends to baseline and re-check these definitions conform to the `2026-07-28` wire shape (headers and `_meta`); traffic relayed from a downstream client is unchanged until the header and version negotiation work for that path lands. The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
 for the same tool — for example a tool that was `readOnlyHint: true` when you
 wrote your policy turning destructive, or a description gaining injected
 instructions — Helio marks the tool as **drifted**, writes an audit record
 (`policy_decision: tool_drift`), and gates subsequent calls to it:
-
-Against a modern upstream, the `tools/list` requests Helio sends to baseline and re-check these definitions conform to the `2026-07-28` wire shape (headers and `_meta`); traffic relayed from a downstream client is unchanged until the header and version negotiation work for that path lands.
 
 ```yaml
 policies:

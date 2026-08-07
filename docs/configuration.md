@@ -49,6 +49,10 @@ session:
 policies:
   default: allow # Default when no rule matches: allow | deny
   flag_destructive: log # Auto-flag destructive tools: log | require_approval
+  tool_revalidation:
+    enabled: true # Proxy-scheduled tools/list revalidation + downward ttlMs clamp
+    interval: 5m # Revalidation cadence (10s minimum)
+    max_advertised_ttl: 5m # Clamp cap on forwarded ttlMs (default: interval)
   dry_run: false # Simulate without forwarding
   hot_reload: true # Watch helio.yaml for changes — set false to pin policy
   rules:
