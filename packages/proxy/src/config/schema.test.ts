@@ -440,6 +440,24 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(false)
     })
+
+    it.each(['mcp-method', 'Mcp-Name'])(
+      'rejects reserved modern transport header %s (case-insensitive)',
+      (name) => {
+        const result = helioConfigSchema.safeParse(
+          minimalConfig({
+            upstream: {
+              url: 'http://localhost:8080',
+              headers: { [name]: 'x' },
+            },
+          }),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const reservedIssue = result.error.issues.find((issue) => /reserved/i.test(issue.message))
+        expect(reservedIssue).toBeDefined()
+      },
+    )
   })
 
   // -------------------------------------------------------------------------
@@ -1274,6 +1292,51 @@ describe('helioConfigSchema', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())
       expect(result.success).toBe(true)
       if (result.success) expect(result.data.policies.on_tool_drift).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Policies — tool_revalidation (issue #221)
+  // -------------------------------------------------------------------------
+
+  describe('policies.tool_revalidation', () => {
+    it('applies defaults when the section is present and empty', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { tool_revalidation: {} } }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.policies.tool_revalidation).toEqual({ enabled: true, interval: '5m' })
+    })
+
+    it('is undefined when omitted (defaults applied at compile time)', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.policies.tool_revalidation).toBeUndefined()
+    })
+
+    it('rejects an interval below 10s', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { tool_revalidation: { interval: '5s' } } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.message).toMatch(/at least 10s/)
+    })
+
+    it('rejects unknown keys and bad durations', () => {
+      const unknownKeyResult = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { tool_revalidation: { intervall: '5m' } } }),
+      )
+      expect(unknownKeyResult.success).toBe(false)
+
+      const badDurationResult = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { tool_revalidation: { max_advertised_ttl: 'soon' } } }),
+      )
+      expect(badDurationResult.success).toBe(false)
+      if (badDurationResult.success) return
+      expect(badDurationResult.error.issues[0]?.message).toMatch(/Duration/)
     })
   })
 

@@ -35,6 +35,19 @@ Maintainer notes:
   the CSV export (as a trailing column), and the dashboard's new
   Session detail section carry `session_source`, the strategy that
   produced each record's id.
+- **Proxy-scheduled tool definition revalidation (#221).** A new
+  `policies.tool_revalidation` config section (`enabled` default
+  `true`, `interval` default `5m`, 10s floor) runs Helio's own
+  `tools/list` against the upstream on that cadence once the first
+  annotation-cache prime succeeds, so a definition change is still
+  caught even when no client re-issues `tools/list` and the upstream
+  advertises a long cache lifetime. The same section clamps a
+  forwarded `tools/list` response's numeric `ttlMs` down to
+  `max_advertised_ttl` (default: `interval`) before it reaches the
+  caller — a value at or below the cap passes through untouched, and a
+  response carrying no `ttlMs` never gains one. `tool_revalidation`
+  reconfigures live on hot reload: enabling, disabling, or retiming
+  the cadence takes effect on the next tick without a restart.
 
 ### Changed
 
@@ -84,6 +97,41 @@ Maintainer notes:
   target all run Node 24, so the supported floor is the tested floor.
   Upgrade the host runtime to Node 24 before taking this release; no
   configuration or API changes are required.
+- **Default posture:** the proxy now issues its own `tools/list` to
+  the upstream every 5 minutes and clamps a forwarded `tools/list`
+  response's numeric `ttlMs` down to `max_advertised_ttl` by default.
+  Restore the pre-0.12 behavior — no proxy-initiated revalidation, no
+  clamping — with `policies.tool_revalidation.enabled: false`.
+- **BREAKING: `upstream.headers` may no longer set `Mcp-Method` or
+  `Mcp-Name` (#216).** Both join the reserved transport headers Helio
+  owns on the wire for its own internal traffic — the
+  `server/discover` era probe and the conforming `tools/list` requests
+  it sends against a modern upstream. Static `upstream.headers` take
+  precedence over Helio's own headers, so an operator-set value would
+  have silently corrupted that internal traffic and drawn a
+  guaranteed `-32020` from a strict server. A config that sets either
+  now fails validation at startup with the existing reserved-header
+  message.
+
+### Fixed
+
+- **Annotation priming and drift baselining now work against
+  `2026-07-28`-only upstreams (#216).** Before its first internal
+  request, Helio probes the upstream once with `server/discover` to
+  learn which MCP revision it speaks. Previously, Helio's internal
+  path spoke only the pre-`2026-07-28` `initialize` handshake: against
+  an upstream that had already dropped it, the spec-mandated `404` +
+  `-32601` was indistinguishable from a dead server, so the annotation
+  cache never primed and the drift baseline was never established —
+  every tool call then evaluated against the built-in annotation
+  defaults (`destructiveHint: true`), so deny rules matched every tool
+  and read-only allow rules matched none. The era is cached per
+  upstream and re-probed after a session drop, so an in-place upstream
+  upgrade is picked up with no restart. This closes the internal path
+  only: traffic relayed from a downstream client still fails against a
+  strict modern-only upstream — regardless of which revision the
+  client itself speaks — until the separately tracked header and
+  version-negotiation work for that path lands.
 
 ### Security
 

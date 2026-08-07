@@ -88,9 +88,14 @@ export interface McpForwarder {
  *
  * `forwardInternal` is used by startup/maintenance paths (e.g. annotation
  * cache priming) that may require transport-specific session handling.
+ * `resetInternalSession` lets those same callers self-heal after a failed
+ * attempt: drop the managed internal session (and any cached era) so the
+ * next internal call re-probes from scratch instead of retrying against
+ * whatever state caused the failure.
  */
 export interface McpForwarderWithInternal extends McpForwarder {
   forwardInternal?(request: McpRequest): Promise<ForwardResult>
+  resetInternalSession?: () => void
 }
 
 // ---------------------------------------------------------------------------

@@ -309,6 +309,7 @@ export class GovernedForwarder implements McpForwarder {
       // An HTTP error is never a usable tools/list, even if the error body
       // happens to contain a result.tools-shaped payload.
       if (result.response.status >= 400) {
+        internal.resetInternalSession?.()
         return {
           success: false,
           toolsCached: this.annotationCache.size,
@@ -317,6 +318,7 @@ export class GovernedForwarder implements McpForwarder {
       }
       const update = this.applyToolDefinitionUpdate(result.response.body, undefined)
       if (!update.updated) {
+        internal.resetInternalSession?.()
         return {
           success: false,
           toolsCached: this.annotationCache.size,
@@ -325,6 +327,12 @@ export class GovernedForwarder implements McpForwarder {
       }
       return { success: true, toolsCached: this.annotationCache.size }
     } catch (error) {
+      // A prime that throws (timeout, network error, expired-session retry
+      // exhausted) leaves the inner forwarder's internal session in an
+      // unknown state — self-heal by dropping it so the next attempt
+      // re-probes from scratch instead of retrying against whatever caused
+      // this failure.
+      internal.resetInternalSession?.()
       return {
         success: false,
         toolsCached: this.annotationCache.size,
@@ -345,9 +353,35 @@ export class GovernedForwarder implements McpForwarder {
     // Intercept tools/list responses to diff tool definitions
     if (request.method === 'tools/list') {
       this.applyToolDefinitionUpdate(result.response.body, request.session)
+      this.clampCacheHints(result.response.body)
     }
 
     return result
+  }
+
+  /**
+   * Clamp an over-long `result.ttlMs` on a `tools/list` response to
+   * `policies.tool_revalidation.max_advertised_ttl` (issue #221, D7).
+   *
+   * Downward-only: a `ttlMs` at or below the cap is left untouched, and a
+   * response with no `ttlMs` never gains one — Helio does not manufacture a
+   * cache hint the upstream never advertised. Non-numeric values are left
+   * alone rather than coerced. `cacheScope` passes through untouched: Helio
+   * baselines and vouches for tool *definitions* only, and its own
+   * `tools/list` view is not caller-varying, so it has no basis to alter a
+   * scope hint the upstream set. No-op when tool revalidation is disabled
+   * (including hand-built `CompiledPolicy` fixtures that omit the field).
+   */
+  private clampCacheHints(responseBody: unknown): void {
+    const rv = this.policy.toolRevalidation
+    if (!rv?.enabled) return
+    if (typeof responseBody !== 'object' || responseBody === null) return
+    const result = (responseBody as Record<string, unknown>)['result']
+    if (typeof result !== 'object' || result === null) return
+    const r = result as Record<string, unknown>
+    if (typeof r['ttlMs'] === 'number' && r['ttlMs'] > rv.maxAdvertisedTtlMs) {
+      r['ttlMs'] = rv.maxAdvertisedTtlMs
+    }
   }
 
   /**

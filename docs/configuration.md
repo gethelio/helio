@@ -49,6 +49,10 @@ session:
 policies:
   default: allow # Default when no rule matches: allow | deny
   flag_destructive: log # Auto-flag destructive tools: log | require_approval
+  tool_revalidation:
+    enabled: true # Proxy-scheduled tools/list revalidation + downward ttlMs clamp
+    interval: 5m # Revalidation cadence (10s minimum)
+    max_advertised_ttl: 5m # Clamp cap on forwarded ttlMs (default: interval)
   dry_run: false # Simulate without forwarding
   hot_reload: true # Watch helio.yaml for changes — set false to pin policy
   rules:
@@ -134,7 +138,7 @@ Connection to the MCP server that Helio proxies.
 
 **Transport options:**
 
-- **`streamable-http`** (default) — MCP Streamable HTTP: the server exposes an HTTP endpoint, and Helio acts as a full session-aware MCP client. It forwards each downstream client's `initialize` handshake and wire `Mcp-Session-Id` transparently, in both directions, and sends `MCP-Protocol-Version` on upstream requests. The wire session id is a transport relay only — it is separate from Helio's [session identity](#session) resolution, and a proxy-resolved identity is never sent upstream as `Mcp-Session-Id` (a session-enforcing upstream would reject an id it did not mint). Responses may be `application/json` or `text/event-stream` (SSE); Helio accepts both, tolerating SSE field lines with or without a space after `:`. For internal session traffic the protocol version comes from the upstream-negotiated `initialize` result; in direct forwarder or library usage, Helio preserves an already-present `mcp-protocol-version` request header. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work with no server-side configuration changes.
+- **`streamable-http`** (default) — MCP Streamable HTTP: the server exposes an HTTP endpoint, and Helio acts as a full session-aware MCP client. It forwards each downstream client's `initialize` handshake and wire `Mcp-Session-Id` transparently, in both directions, and sends `MCP-Protocol-Version` on upstream requests. The wire session id is a transport relay only — it is separate from Helio's [session identity](#session) resolution, and a proxy-resolved identity is never sent upstream as `Mcp-Session-Id` (a session-enforcing upstream would reject an id it did not mint). Responses may be `application/json` or `text/event-stream` (SSE); Helio accepts both, tolerating SSE field lines with or without a space after `:`. For internal session traffic against a legacy upstream, the protocol version comes from the upstream-negotiated `initialize` result; against a modern upstream (see [era detection](#upstream-mcp-era-detection)), internal requests skip the handshake entirely and are tagged `2026-07-28` directly. In direct forwarder or library usage, Helio preserves an already-present `mcp-protocol-version` request header. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work with no server-side configuration changes.
 - **`sse`** — Server-Sent Events transport for older MCP clients. Uses GET for the event stream and POST for messages. The per-stream id Helio mints (the `?sessionId=` query parameter on the POST leg) correlates messages with their stream and doubles as the implicit final fallback for [session identity](#session), so SSE requests never resolve to nothing.
 - **`stdio`** — Spawns the MCP server as a child process and communicates over stdin/stdout. Useful for local servers that don't expose an HTTP endpoint.
 
@@ -163,9 +167,29 @@ upstream:
     Authorization: 'Bearer ${UPSTREAM_TOKEN}'
 ```
 
-Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, and `host` are rejected — Helio owns those.
+Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, `host`, `mcp-method`, and `mcp-name` are rejected — Helio owns those.
 
 On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
+
+#### Upstream MCP era detection
+
+Before its first internal request, Helio probes the upstream once with a `server/discover` call to learn which MCP revision it speaks. The conclusion is logged, one line per probe:
+
+```
+[helio] Upstream MCP era detected: modern (2026-07-28, via server/discover)
+[helio] Upstream MCP era detected: legacy (initialize handshake)
+```
+
+- **modern** — the upstream answered `server/discover` and lists `2026-07-28` among its supported versions. That revision removed the handshake, so Helio holds no upstream session for its own internal traffic and sends no `Mcp-Session-Id` on it.
+- **legacy** — the upstream answered the probe with an ordinary JSON-RPC error (an unimplemented method, say), an empty body, or anything else that is not a modern discovery result. Helio establishes its internal session the way it always has, with `initialize` followed by `notifications/initialized`, and reuses the session id the upstream mints.
+
+The answer is cached per process, so the probe costs one extra round trip per internal session, not per request. Dropping that session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
+
+A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/`5xx` reply — caches no era and surfaces as an ordinary upstream failure; the next attempt probes again. This is deliberate: an auth-gated or briefly unavailable modern upstream must never be recorded as legacy.
+
+A modern refusal is not legacy either. If the upstream rejects the probe with the modern error codes `-32020` (header mismatch) or `-32021` (missing client capability), it has identified itself as a modern server, so Helio does not fall back to `initialize` and caches no era. It reports the refusal — the error text carries the upstream's own message — and probes again on the next attempt, rather than quietly downgrading a server that is newer than the handshake. A `-32022` (unsupported protocol version) response instead identifies a modern upstream that simply does not speak Helio's modern revision, so Helio salvages the session with one legacy `initialize` attempt, reporting both sides' supported versions if that attempt also fails.
+
+Only Helio's own internal traffic is probed and version-tagged. Requests relayed from a downstream MCP client keep today's transport behavior instead: Helio still stamps the legacy `mcp-protocol-version: 2025-06-18` when the client didn't send one and never adds `mcp-method`, so relays to a strict modern-only upstream still fail until the separately tracked header and version-negotiation work for that path lands.
 
 #### Startup annotation cache priming
 
@@ -260,14 +284,32 @@ Like `listen`, the `session` section is compiled into the transports at startup:
 
 Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation, including install-time rules (`policies.install` with `deny_install`) and the [adapter governance API](./adapter-api.md).
 
-| Field              | Type    | Required | Default | Description                                                                                                                                                                                                     |
-| ------------------ | ------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default`          | string  | No       | `allow` | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
-| `flag_destructive` | string  | No       | —       | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
-| `on_tool_drift`    | string  | No       | `block` | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
-| `dry_run`          | boolean | No       | `false` | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
-| `hot_reload`       | boolean | No       | `true`  | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
-| `rules`            | array   | No       | `[]`    | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
+| Field               | Type    | Required | Default               | Description                                                                                                                                                                                                     |
+| ------------------- | ------- | -------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default`           | string  | No       | `allow`               | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
+| `flag_destructive`  | string  | No       | —                     | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
+| `on_tool_drift`     | string  | No       | `block`               | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
+| `tool_revalidation` | object  | No       | enabled-with-defaults | Proxy-scheduled `tools/list` revalidation and downward-only `ttlMs` clamping. Omit to use defaults (enabled, 5m interval, 5m max TTL). See below.                                                               |
+| `dry_run`           | boolean | No       | `false`               | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
+| `hot_reload`        | boolean | No       | `true`                | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
+| `rules`             | array   | No       | `[]`                  | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
+
+`tool_revalidation` fields:
+
+| Field                | Type     | Required | Default    | Description                                                                                                                                                                                               |
+| -------------------- | -------- | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | boolean  | No       | `true`     | Enable proxy-initiated `tools/list` revalidation and `ttlMs` clamping. Set `false` to restore pre-0.12 behavior (no timer, no clamping).                                                                  |
+| `interval`           | duration | No       | `5m`       | Cadence of proxy-initiated `tools/list` revalidation after the first successful annotation-cache prime. Minimum `10s`; lower values are rejected at config load.                                          |
+| `max_advertised_ttl` | duration | No       | `interval` | Downward-only clamp applied to `result.ttlMs` on `tools/list` responses forwarded downstream: lowers a value above the cap, never raises one, and adds nothing when the upstream response has no `ttlMs`. |
+
+```yaml
+policies:
+  on_tool_drift: block
+  tool_revalidation:
+    enabled: true
+    interval: 5m
+    max_advertised_ttl: 5m
+```
 
 Each rule in the `rules` array has the following structure:
 
@@ -625,23 +667,24 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.
 
-| Config path                 | Reloads on save? | Notes                                                                                         |
-| --------------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
-| `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                            |
-| `budgets`                   | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.              |
-| `policies.default`          | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.dry_run`          | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.hot_reload`       | No               | Controls watcher startup behavior; changing it on a running process requires restart.         |
-| `environment`               | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.     |
-| `session.*`                 | No               | Identity resolution is compiled into the transports at startup; changing it requires restart. |
-| `upstream.*`                | No               | Upstream transport/client initialized at startup.                                             |
-| `listen.*`                  | No               | Proxy listener socket bound at startup.                                                       |
-| `dashboard.*`               | No               | Dashboard server/session settings initialized at startup.                                     |
-| `approval.*`                | No               | Router/channels/timeouts initialized at startup.                                              |
-| `audit.*`                   | No               | SQLite store path/settings initialized at startup.                                            |
-| `sdk.*`                     | No               | Sideband listener/token behavior initialized at startup.                                      |
+| Config path                    | Reloads on save? | Notes                                                                                                                                  |
+| ------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `policies.rules`               | Yes              | Recompiled and swapped atomically.                                                                                                     |
+| `budgets`                      | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.                                                       |
+| `policies.default`             | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.flag_destructive`    | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.on_tool_drift`       | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.tool_revalidation.*` | Yes              | Takes effect on the next tick: the timer is retimed, started, or stopped live, and the `ttlMs` clamp applies to the next `tools/list`. |
+| `policies.dry_run`             | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.hot_reload`          | No               | Controls watcher startup behavior; changing it on a running process requires restart.                                                  |
+| `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
+| `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |
+| `upstream.*`                   | No               | Upstream transport/client initialized at startup.                                                                                      |
+| `listen.*`                     | No               | Proxy listener socket bound at startup.                                                                                                |
+| `dashboard.*`                  | No               | Dashboard server/session settings initialized at startup.                                                                              |
+| `approval.*`                   | No               | Router/channels/timeouts initialized at startup.                                                                                       |
+| `audit.*`                      | No               | SQLite store path/settings initialized at startup.                                                                                     |
+| `sdk.*`                        | No               | Sideband listener/token behavior initialized at startup.                                                                               |
 
 When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields.
 

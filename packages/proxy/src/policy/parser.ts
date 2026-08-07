@@ -10,6 +10,7 @@ import type {
   CompiledMatch,
   CompiledPolicy,
   CompiledPolicyRule,
+  CompiledToolRevalidation,
   CompilePoliciesResult,
   InputCondition,
   MetadataCondition,
@@ -37,11 +38,19 @@ export function compilePolicies(config: PoliciesConfig): CompilePoliciesResult {
 
   const rules = config.rules.map((rule, index) => compileRule(rule, index, warnings))
 
+  const rv = config.tool_revalidation
+  const toolRevalidation: CompiledToolRevalidation = {
+    enabled: rv?.enabled ?? true,
+    intervalMs: parseDuration(rv?.interval ?? '5m'),
+    maxAdvertisedTtlMs: parseDuration(rv?.max_advertised_ttl ?? rv?.interval ?? '5m'),
+  }
+
   const policy: CompiledPolicy = {
     defaultAction: config.default,
     flagDestructive: config.flag_destructive,
     ...(config.dry_run && { dryRun: true }),
     ...(config.on_tool_drift && { onToolDrift: config.on_tool_drift }),
+    toolRevalidation,
     rules,
     ...(config.install && { install: compileInstallPolicy(config.install) }),
   }
