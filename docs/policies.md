@@ -889,8 +889,10 @@ policies:
 ## Tool definition drift
 
 Helio baselines every tool's definition — annotations, input/output schema,
-description, title — the first time it sees it (at startup priming or the
-first `tools/list`). The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
+description, title — the first time it sees it. Definitions reach the cache
+three ways: the startup prime, any `tools/list` that passes through from a
+client, and the [scheduled revalidation](#proactive-revalidation) Helio runs
+on its own clock. The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
 for the same tool — for example a tool that was `readOnlyHint: true` when you
 wrote your policy turning destructive, or a description gaining injected
 instructions — Helio marks the tool as **drifted**, writes an audit record
@@ -972,6 +974,44 @@ changes _after_ review so a one-time approval gives no lasting protection.
 **Limitation:** baselines are per-process. A restart re-baselines from
 whatever the upstream currently reports, so review drift audit records before
 restarting.
+
+### Proactive revalidation
+
+Drift is only caught when Helio sees the definition again. Under the MCP
+`2026-07-28` revision an upstream can advertise a cache lifetime for its tool
+list, so a well-behaved client may not re-issue `tools/list` for minutes or
+hours — a definition that changes right after a client caches it would go
+unnoticed until that cache expires. Helio therefore re-checks on its own
+clock instead of waiting for downstream traffic:
+
+```yaml
+policies:
+  on_tool_drift: block
+  tool_revalidation:
+    enabled: true
+    interval: 5m
+    max_advertised_ttl: 5m
+```
+
+This is on by default (`interval: 5m`) — omitting the section gives you the
+same behavior. The first tick lands one interval after the startup prime
+first succeeds; a proxy that has never primed successfully keeps retrying
+with startup backoff instead. Revalidation reuses the same synthetic
+`tools/list` the prime uses, so drift it finds is fingerprinted, audited
+(`policy_decision: tool_drift`), and gated exactly like drift seen on a
+pass-through call. The section is hot-reloadable: enabling, disabling, or
+retiming it takes effect on the next tick, without a restart.
+
+A failed revalidation is a single stderr line, and nothing else changes —
+the last known-good baselines stay in place and the cadence is preserved (no
+backoff, no re-priming storm):
+
+```
+[helio] Tool revalidation failed: upstream unreachable — keeping the last baselines; next attempt in 300000ms
+```
+
+A successful revalidation is silent unless it finds drift, which logs and
+audits through the normal drift path.
 
 **Advertised cache lifetime:** when `policies.tool_revalidation.enabled` is
 true (the default), Helio clamps `result.ttlMs` on outgoing `tools/list`

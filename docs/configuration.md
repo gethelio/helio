@@ -663,23 +663,24 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.
 
-| Config path                 | Reloads on save? | Notes                                                                                         |
-| --------------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
-| `policies.rules`            | Yes              | Recompiled and swapped atomically.                                                            |
-| `budgets`                   | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.              |
-| `policies.default`          | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.flag_destructive` | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.on_tool_drift`    | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.dry_run`          | Yes              | Takes effect immediately on the next request.                                                 |
-| `policies.hot_reload`       | No               | Controls watcher startup behavior; changing it on a running process requires restart.         |
-| `environment`               | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.     |
-| `session.*`                 | No               | Identity resolution is compiled into the transports at startup; changing it requires restart. |
-| `upstream.*`                | No               | Upstream transport/client initialized at startup.                                             |
-| `listen.*`                  | No               | Proxy listener socket bound at startup.                                                       |
-| `dashboard.*`               | No               | Dashboard server/session settings initialized at startup.                                     |
-| `approval.*`                | No               | Router/channels/timeouts initialized at startup.                                              |
-| `audit.*`                   | No               | SQLite store path/settings initialized at startup.                                            |
-| `sdk.*`                     | No               | Sideband listener/token behavior initialized at startup.                                      |
+| Config path                    | Reloads on save? | Notes                                                                                                                                  |
+| ------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `policies.rules`               | Yes              | Recompiled and swapped atomically.                                                                                                     |
+| `budgets`                      | Yes              | Reconciled by name identity — see [budgets](#budgets) for what survives an edit.                                                       |
+| `policies.default`             | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.flag_destructive`    | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.on_tool_drift`       | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.tool_revalidation.*` | Yes              | Takes effect on the next tick: the timer is retimed, started, or stopped live, and the `ttlMs` clamp applies to the next `tools/list`. |
+| `policies.dry_run`             | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.hot_reload`          | No               | Controls watcher startup behavior; changing it on a running process requires restart.                                                  |
+| `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
+| `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |
+| `upstream.*`                   | No               | Upstream transport/client initialized at startup.                                                                                      |
+| `listen.*`                     | No               | Proxy listener socket bound at startup.                                                                                                |
+| `dashboard.*`                  | No               | Dashboard server/session settings initialized at startup.                                                                              |
+| `approval.*`                   | No               | Router/channels/timeouts initialized at startup.                                                                                       |
+| `audit.*`                      | No               | SQLite store path/settings initialized at startup.                                                                                     |
+| `sdk.*`                        | No               | Sideband listener/token behavior initialized at startup.                                                                               |
 
 When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields.
 

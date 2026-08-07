@@ -13,7 +13,8 @@ import { createForwarderFromConfig } from './cli-forwarder.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
-import type { AnnotationCachePrimeResult } from './policy/governed-forwarder.js'
+import { startAnnotationPrimeLoop } from './policy/annotation-prime-loop.js'
+import type { AnnotationPrimeController } from './policy/annotation-prime-loop.js'
 import { AuditStore, AuditWriter, EXPORT_MAX_RECORDS } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
@@ -207,120 +208,6 @@ interface StartOptions {
   noHotReload?: boolean
 }
 
-/** Upper bound to wait for startup cache priming before serving requests. */
-const ANNOTATION_PRIME_INITIAL_WAIT_MS = 1_500
-/** Base delay for background retry/backoff when startup priming fails. */
-const ANNOTATION_PRIME_RETRY_BASE_MS = 1_000
-/** Maximum backoff delay for annotation cache prime retries. */
-const ANNOTATION_PRIME_RETRY_MAX_MS = 30_000
-/** Random jitter added to retry delay to avoid synchronized retries. */
-const ANNOTATION_PRIME_RETRY_JITTER_MS = 250
-
-interface AnnotationPrimeController {
-  stop(): void
-}
-
-function computePrimeRetryDelayMs(attempt: number): number {
-  const exponent = Math.max(0, attempt - 1)
-  const baseDelay = Math.min(
-    ANNOTATION_PRIME_RETRY_MAX_MS,
-    ANNOTATION_PRIME_RETRY_BASE_MS * 2 ** exponent,
-  )
-  const jitter = Math.floor(Math.random() * ANNOTATION_PRIME_RETRY_JITTER_MS)
-  return Math.min(ANNOTATION_PRIME_RETRY_MAX_MS, baseDelay + jitter)
-}
-
-/**
- * Prime the annotation cache during startup, then keep retrying in the
- * background until success. Failures remain fail-closed by policy defaults.
- */
-async function startAnnotationPrimeLoop(
-  governedForwarder: GovernedForwarder,
-): Promise<AnnotationPrimeController> {
-  let stopped = false
-  let primed = false
-  let retryAttempt = 0
-  let retryTimer: ReturnType<typeof setTimeout> | undefined
-
-  const clearRetryTimer = () => {
-    if (!retryTimer) return
-    clearTimeout(retryTimer)
-    retryTimer = undefined
-  }
-
-  const stop = () => {
-    stopped = true
-    clearRetryTimer()
-  }
-
-  const scheduleRetry = () => {
-    if (stopped || primed || retryTimer) return
-    retryAttempt += 1
-    const delayMs = computePrimeRetryDelayMs(retryAttempt)
-    console.error(
-      `[helio] Annotation cache prime retry ${String(retryAttempt)} scheduled in ${String(delayMs)}ms`,
-    )
-    retryTimer = setTimeout(() => {
-      retryTimer = undefined
-      void runPrimeAttempt('retry')
-    }, delayMs)
-    retryTimer.unref()
-  }
-
-  const handlePrimeResult = (phase: 'initial' | 'retry', result: AnnotationCachePrimeResult) => {
-    if (stopped || primed) return
-
-    if (result.success) {
-      primed = true
-      clearRetryTimer()
-      const prefix =
-        phase === 'initial'
-          ? '[helio] Annotation cache primed'
-          : `[helio] Annotation cache primed after retry ${String(retryAttempt)}`
-      console.error(
-        `${prefix}: ${String(result.toolsCached)} tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)`,
-      )
-      return
-    }
-
-    const reason = result.reason ?? 'unknown reason'
-    if (phase === 'initial') {
-      console.error(
-        `[helio] Annotation cache priming failed: ${reason} — undocumented tools will be denied (fail-closed) until priming succeeds`,
-      )
-    } else {
-      console.error(
-        `[helio] Annotation cache prime retry ${String(retryAttempt)} failed: ${reason} — still fail-closed`,
-      )
-    }
-    scheduleRetry()
-  }
-
-  const runPrimeAttempt = async (phase: 'initial' | 'retry') => {
-    const result = await governedForwarder.primeAnnotationCache()
-    handlePrimeResult(phase, result)
-  }
-
-  const initialAttempt = runPrimeAttempt('initial')
-  const initialOutcome = await Promise.race([
-    initialAttempt.then(() => 'completed' as const),
-    new Promise<'timeout'>((resolve) => {
-      setTimeout(() => {
-        resolve('timeout')
-      }, ANNOTATION_PRIME_INITIAL_WAIT_MS).unref()
-    }),
-  ])
-
-  if (initialOutcome === 'timeout') {
-    console.error(
-      `[helio] Annotation cache priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms; continuing startup fail-closed and retrying in background`,
-    )
-    scheduleRetry()
-  }
-
-  return { stop }
-}
-
 async function startCommand(configPath: string, options: StartOptions): Promise<void> {
   let config
   try {
@@ -499,7 +386,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     session,
   })
 
-  const annotationPrime = await startAnnotationPrimeLoop(governedForwarder)
+  const annotationPrime = await startAnnotationPrimeLoop(governedForwarder, policy.toolRevalidation)
 
   // Conditionally create Slack action handler if any Slack channels exist
   const hasSlackChannels = [...channels.values()].some((ch) => ch.type === 'slack')
@@ -708,6 +595,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         // swap — the reload applies all-or-nothing across the file.
         budgetEngine.reconcile(newBudgets)
         governedForwarder.updatePolicy(newPolicy)
+        annotationPrime.reconfigure(newPolicy.toolRevalidation)
         governanceService?.updatePolicy(newPolicy)
         const budgetTotal = newBudgets.length
         console.error(
