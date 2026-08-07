@@ -973,6 +973,20 @@ changes _after_ review so a one-time approval gives no lasting protection.
 whatever the upstream currently reports, so review drift audit records before
 restarting.
 
+**Advertised cache lifetime:** when `policies.tool_revalidation.enabled` is
+true (the default), Helio clamps `result.ttlMs` on outgoing `tools/list`
+responses down to `max_advertised_ttl` before relaying them to the caller —
+downward-only: a `ttlMs` already at or below the cap is left untouched, and
+a response that carries no `ttlMs` never gains one. The clamp applies to
+`tools/list` responses only; nothing else touches the wire body. `cacheScope`
+passes through untouched, on purpose — Helio baselines and vouches for tool
+_definitions_, not for who may see them, and its own `tools/list` view is
+not caller-varying, so it has no basis to alter a scope hint the upstream
+set. This keeps a caller from trusting an upstream-advertised cache TTL for
+longer than Helio itself re-checks that definition for drift. See
+[Configuration Reference](./configuration.md#policies) for the
+`tool_revalidation` schema.
+
 ## See Also
 
 - [Configuration Reference](./configuration.md) — Full `helio.yaml` schema

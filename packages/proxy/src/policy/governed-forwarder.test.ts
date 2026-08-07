@@ -626,6 +626,171 @@ describe('GovernedForwarder', () => {
       expect(prime.toolsCached).toBe(0)
       expect(prime.reason).toBe('upstream unavailable')
     })
+
+    it('resets the inner internal session on every failed prime attempt', async () => {
+      const resetInternalSession = vi.fn()
+      const inner = {
+        forward: vi.fn(),
+        forwardInternal: vi.fn().mockRejectedValue(new Error('boom')),
+        resetInternalSession,
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const result = await gf.primeAnnotationCache()
+
+      expect(result.success).toBe(false)
+      expect(resetInternalSession).toHaveBeenCalledOnce()
+    })
+
+    it('resets the inner internal session when the prime response is an HTTP error', async () => {
+      const resetInternalSession = vi.fn()
+      const inner = {
+        forward: vi.fn(),
+        forwardInternal: vi.fn().mockResolvedValue({
+          response: { status: 400, headers: {}, body: { error: 'session required' } },
+          durationMs: 1,
+        }),
+        resetInternalSession,
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const result = await gf.primeAnnotationCache()
+
+      expect(result.success).toBe(false)
+      expect(resetInternalSession).toHaveBeenCalledOnce()
+    })
+
+    it('resets the inner internal session when the prime payload shape is invalid', async () => {
+      const resetInternalSession = vi.fn()
+      const inner = {
+        forward: vi.fn(),
+        forwardInternal: vi.fn().mockResolvedValue({
+          response: {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: { jsonrpc: '2.0', id: 1, result: { notTools: true } },
+          },
+          durationMs: 1,
+        }),
+        resetInternalSession,
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const result = await gf.primeAnnotationCache()
+
+      expect(result.success).toBe(false)
+      expect(resetInternalSession).toHaveBeenCalledOnce()
+    })
+
+    it('does not reset the inner internal session on a successful prime', async () => {
+      const resetInternalSession = vi.fn()
+      const inner = {
+        forward: vi.fn(),
+        forwardInternal: vi.fn().mockResolvedValue({
+          response: {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: {
+              jsonrpc: '2.0',
+              id: 'helio-prime-annotations',
+              result: { tools: [{ name: 't1', annotations: {} }] },
+            },
+          },
+          durationMs: 1,
+        }),
+        resetInternalSession,
+      }
+      const gf = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+
+      const result = await gf.primeAnnotationCache()
+
+      expect(result.success).toBe(true)
+      expect(resetInternalSession).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('tools/list ttlMs clamp (issue #221)', () => {
+    /** Build a tools/list ForwardResult carrying result-level cache hints. */
+    function toolsListWithHints(hints: Record<string, unknown>): ForwardResult {
+      return successResult({
+        jsonrpc: '2.0',
+        id: 1,
+        result: { tools: [{ name: 't', annotations: {} }], ...hints },
+      })
+    }
+
+    it('clamps ttlMs above max_advertised_ttl and leaves cacheScope untouched', async () => {
+      // compile()'s default tool_revalidation is {enabled:true, interval:5m,
+      // max_advertised_ttl:5m} => maxAdvertisedTtlMs 300_000.
+      const policy = compile({ default: 'allow', rules: [] })
+      const inner = mockForwarder(toolsListWithHints({ ttlMs: 3_600_000, cacheScope: 'public' }))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect(body.result['ttlMs']).toBe(300_000)
+      expect(body.result['cacheScope']).toBe('public')
+    })
+
+    it('leaves a ttlMs already at or below the max untouched', async () => {
+      const policy = compile({ default: 'allow', rules: [] })
+      const inner = mockForwarder(toolsListWithHints({ ttlMs: 60_000 }))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect(body.result['ttlMs']).toBe(60_000)
+    })
+
+    it('never adds a ttlMs key when the upstream response has none', async () => {
+      const policy = compile({ default: 'allow', rules: [] })
+      const inner = mockForwarder(toolsListWithHints({}))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect('ttlMs' in body.result).toBe(false)
+    })
+
+    it('leaves a non-numeric ttlMs untouched', async () => {
+      const policy = compile({ default: 'allow', rules: [] })
+      const inner = mockForwarder(toolsListWithHints({ ttlMs: 'soon' }))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect(body.result['ttlMs']).toBe('soon')
+    })
+
+    it('does not clamp when tool_revalidation is disabled', async () => {
+      const policy = compile({
+        default: 'allow',
+        rules: [],
+        tool_revalidation: { enabled: false, interval: '5m' },
+      })
+      const inner = mockForwarder(toolsListWithHints({ ttlMs: 3_600_000 }))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect(body.result['ttlMs']).toBe(3_600_000)
+    })
+
+    it('does not clamp when the policy fixture omits toolRevalidation entirely', async () => {
+      const policy: CompiledPolicy = { defaultAction: 'allow', rules: [] }
+      const inner = mockForwarder(toolsListWithHints({ ttlMs: 3_600_000 }))
+      const governed = new GovernedForwarder(inner, policy)
+
+      const result = await governed.forward(toolsListRequest())
+
+      const body = result.response.body as { result: Record<string, unknown> }
+      expect(body.result['ttlMs']).toBe(3_600_000)
+    })
   })
 
   describe('actions without runtime dependency', () => {
@@ -6350,6 +6515,36 @@ describe('tool definition drift — detection and audit', () => {
     expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
     const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
     expect(record['policy_decision']).toBe('tool_drift')
+  })
+
+  it('a revalidation-path drift audit record carries session_id null and session_source null', async () => {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 't', annotations: { destructiveHint: false } }]),
+      )
+      .mockResolvedValueOnce(
+        toolsListResult([{ name: 't', annotations: { destructiveHint: true } }]),
+      )
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+    })
+
+    const first = await governed.primeAnnotationCache()
+    expect(first.success).toBe(true)
+    // Swap the fake upstream's tool definition, then prime again — this is
+    // the proxy-scheduled revalidation path (issue #221), not a downstream
+    // client's tools/list, so no session ever accompanies it.
+    const second = await governed.primeAnnotationCache()
+    expect(second.success).toBe(true)
+
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['session_id']).toBeNull()
+    expect(record['session_source']).toBeNull()
+    expect(record['policy_decision']).toBe('tool_drift')
+    expect(record['record_kind']).toBe('drift_event')
   })
 })
 
