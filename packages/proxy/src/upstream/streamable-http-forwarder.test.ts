@@ -1,9 +1,16 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { StreamableHttpForwarder } from './streamable-http-forwarder.js'
 import type { McpRequest } from '../mcp/types.js'
 
 const originalFetch = globalThis.fetch
+
+beforeEach(() => {
+  // Establishing the internal session logs one era-detected line per probe.
+  vi.spyOn(console, 'error').mockImplementation(() => undefined)
+})
+
 afterEach(() => {
+  vi.restoreAllMocks()
   globalThis.fetch = originalFetch
 })
 
@@ -167,6 +174,11 @@ describe('StreamableHttpForwarder', () => {
       const body = JSON.parse(raw) as { method: string }
       const hdrs = (init?.headers ?? {}) as Record<string, string>
 
+      // A legacy upstream: the era probe hits an unimplemented method.
+      if (body.method === 'server/discover') {
+        return Promise.resolve(new Response(null, { status: 202 }))
+      }
+
       if (body.method === 'initialize') {
         initCount += 1
         const sessionId = initCount === 1 ? 'U-1' : 'U-2'
@@ -214,6 +226,10 @@ describe('StreamableHttpForwarder', () => {
       const body = JSON.parse(raw) as { method: string }
       const headers = (init?.headers ?? {}) as Record<string, string>
 
+      // A legacy upstream: the era probe hits an unimplemented method.
+      if (body.method === 'server/discover') {
+        return Promise.resolve(new Response(null, { status: 202 }))
+      }
       if (body.method === 'initialize') {
         return Promise.resolve(
           new Response(

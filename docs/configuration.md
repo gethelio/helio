@@ -167,6 +167,26 @@ Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no reques
 
 On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
 
+#### Upstream MCP era detection
+
+Before its first internal request, Helio probes the upstream once with a `server/discover` call to learn which MCP revision it speaks. The conclusion is logged, one line per probe:
+
+```
+[helio] Upstream MCP era detected: modern (2026-07-28, via server/discover)
+[helio] Upstream MCP era detected: legacy (initialize handshake)
+```
+
+- **modern** — the upstream answered `server/discover` and lists `2026-07-28` among its supported versions. That revision removed the handshake, so Helio holds no upstream session for its own internal traffic and sends no `Mcp-Session-Id` on it.
+- **legacy** — the upstream answered the probe with an ordinary JSON-RPC error (an unimplemented method, say), an empty body, or anything else that is not a modern discovery result. Helio establishes its internal session the way it always has, with `initialize` followed by `notifications/initialized`, and reuses the session id the upstream mints.
+
+The answer is cached per process, so the probe costs one extra round trip per internal session, not per request. Dropping that session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
+
+A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/`5xx` reply — caches no era and surfaces as an ordinary upstream failure; the next attempt probes again. This is deliberate: an auth-gated or briefly unavailable modern upstream must never be recorded as legacy.
+
+A modern refusal is not legacy either. If the upstream rejects the probe with the modern error codes `-32020` (header mismatch) or `-32021` (missing client capability), it has identified itself as a modern server, so Helio does not fall back to `initialize` and caches no era. It reports the refusal — the error text carries the upstream's own message — and probes again on the next attempt, rather than quietly downgrading a server that is newer than the handshake.
+
+Only Helio's own internal traffic is probed and version-tagged. Requests relayed from a downstream MCP client are forwarded exactly as they arrive.
+
 #### Startup annotation cache priming
 
 At startup, Helio sends a synthetic upstream `tools/list` request to warm the tool-annotation cache before serving traffic. This avoids first-request false denials in flows that call `tools/call` before any client-issued `tools/list`, and establishes the per-tool definition baselines used for [drift detection](./policies.md#tool-definition-drift).
