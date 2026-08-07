@@ -3,7 +3,25 @@ import { parseUpstreamResponse } from './response.js'
 import { readSseJsonRpcResponse } from './sse-parse.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
-import { UpstreamSessionManager, HELIO_MCP_PROTOCOL_VERSION } from './upstream-session-manager.js'
+import {
+  UpstreamSessionManager,
+  HELIO_MCP_PROTOCOL_VERSION,
+  HELIO_MCP_MODERN_PROTOCOL_VERSION,
+  buildInternalMeta,
+  type UpstreamEra,
+} from './upstream-session-manager.js'
+
+/**
+ * The session shape `send()` needs: downstream-driven calls (`forward()`)
+ * supply only a transport session id and a protocol version, never an era —
+ * `internalManaged` is false there, so era is never consulted. Only
+ * `forwardInternal()` passes a real `UpstreamSession`, era included.
+ */
+interface SendSession {
+  readonly sessionId: string | undefined
+  readonly protocolVersion: string | undefined
+  readonly era?: UpstreamEra
+}
 
 export interface StreamableHttpForwarderOptions {
   /** The upstream MCP server URL (e.g. "http://localhost:8080/mcp"). */
@@ -57,12 +75,18 @@ export class StreamableHttpForwarder implements McpForwarder {
     // proxy-resolved governance id would be rejected by session-enforcing
     // upstreams that never minted it (issue #218).
     if (request.method === 'initialize') {
-      return this.send(request, request.transportSessionId, /* protocolVersion */ undefined)
+      return this.send(request, {
+        sessionId: request.transportSessionId,
+        protocolVersion: undefined,
+      })
     }
 
     // Downstream-driven and external sessionless callers alike are transparent
     // passthrough: forward whatever session the caller did (or did not) supply.
-    return this.send(request, request.transportSessionId, HELIO_MCP_PROTOCOL_VERSION)
+    return this.send(request, {
+      sessionId: request.transportSessionId,
+      protocolVersion: HELIO_MCP_PROTOCOL_VERSION,
+    })
   }
 
   /**
@@ -72,33 +96,33 @@ export class StreamableHttpForwarder implements McpForwarder {
   async forwardInternal(request: McpRequest): Promise<ForwardResult> {
     const session = await this.sessions.ensureInternalSession()
     try {
-      return await this.send(
-        request,
-        session.sessionId,
-        session.protocolVersion,
-        /* internalManaged */ true,
-      )
+      return await this.send(request, session, /* internalManaged */ true)
     } catch (error) {
       if (error instanceof UpstreamSessionExpiredError) {
         this.sessions.invalidateInternalSession()
         const fresh = await this.sessions.ensureInternalSession()
-        return this.send(
-          request,
-          fresh.sessionId,
-          fresh.protocolVersion,
-          /* internalManaged */ true,
-        )
+        return this.send(request, fresh, /* internalManaged */ true)
       }
       throw error
     }
   }
 
+  /** Drop the managed internal session AND the cached era; next internal call re-probes. */
+  resetInternalSession(): void {
+    this.sessions.invalidateInternalSession()
+  }
+
   private async send(
     request: McpRequest,
-    sessionId: string | undefined,
-    protocolVersion: string | undefined,
+    session: SendSession,
     internalManaged = false,
   ): Promise<ForwardResult> {
+    // Only Helio's own internal traffic is ever synthesized to the modern
+    // (2026-07-28) wire shape — downstream-driven forward() never sets
+    // internalManaged, so relayed client traffic is untouched here (#217/#219
+    // track header/version handling for that path).
+    const modern = internalManaged && session.era === 'modern'
+
     const headers = mergeUpstreamHeaders(
       {
         'content-type': 'application/json',
@@ -107,9 +131,14 @@ export class StreamableHttpForwarder implements McpForwarder {
       request.headers ?? {},
       this.staticHeaders,
     )
-    if (sessionId) headers['mcp-session-id'] = sessionId
-    if (protocolVersion && headers['mcp-protocol-version'] === undefined) {
-      headers['mcp-protocol-version'] = protocolVersion
+    // A modern session never mints or echoes a session id (see
+    // UpstreamSessionManager#modernSession), so this never fires for it.
+    if (session.sessionId) headers['mcp-session-id'] = session.sessionId
+    if (modern) {
+      headers['mcp-method'] = request.method
+      headers['mcp-protocol-version'] = HELIO_MCP_MODERN_PROTOCOL_VERSION
+    } else if (session.protocolVersion && headers['mcp-protocol-version'] === undefined) {
+      headers['mcp-protocol-version'] = session.protocolVersion
     }
 
     const body: Record<string, unknown> = {
@@ -117,7 +146,13 @@ export class StreamableHttpForwarder implements McpForwarder {
       method: request.method,
     }
     if (request.id !== undefined) body['id'] = request.id
-    if (request.params !== undefined) body['params'] = request.params
+    if (modern) {
+      const params = (request.params ?? {}) as Record<string, unknown>
+      const existingMeta = (params['_meta'] ?? {}) as Record<string, unknown>
+      body['params'] = { ...params, _meta: { ...existingMeta, ...buildInternalMeta() } }
+    } else if (request.params !== undefined) {
+      body['params'] = request.params
+    }
 
     const start = performance.now()
     const timeoutSignal = AbortSignal.timeout(this.requestTimeoutMs)
@@ -140,7 +175,7 @@ export class StreamableHttpForwarder implements McpForwarder {
     // does an internal request when the upstream never minted a session
     // (sessionless server): with no session to re-establish, a retry cannot
     // change the outcome, so the raw 404 flows to the prime classifier.
-    if (internalManaged && res.status === 404 && sessionId) {
+    if (internalManaged && res.status === 404 && session.sessionId) {
       await res.text().catch(() => undefined)
       throw new UpstreamSessionExpiredError()
     }

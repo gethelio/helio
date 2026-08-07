@@ -345,4 +345,187 @@ describe('StreamableHttpForwarder', () => {
     // Non-overlapping caller header passes through
     expect(seen['x-trace']).toBe('t1')
   })
+
+  // -------------------------------------------------------------------------
+  // Modern (2026-07-28) internal sends
+  // -------------------------------------------------------------------------
+
+  it('sends conforming modern internal requests (headers + _meta, no session id)', async () => {
+    let seenHeaders: Record<string, string> = {}
+    let seenBody: { method: string; params?: Record<string, unknown> } | undefined
+
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string; params?: Record<string, unknown> }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+
+      if (body.method === 'server/discover') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'helio-era-probe',
+              result: { supportedVersions: ['2026-07-28'] },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+
+      seenHeaders = headers
+      seenBody = body
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 'helio-prime-annotations',
+            result: { tools: [], resultType: 'complete', ttlMs: 60000, cacheScope: 'private' },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forwardInternal(req({ id: 'helio-prime-annotations' }))
+
+    expect(seenHeaders['mcp-method']).toBe('tools/list')
+    expect(seenHeaders['mcp-protocol-version']).toBe('2026-07-28')
+    expect(seenHeaders['mcp-session-id']).toBeUndefined()
+    const meta = seenBody?.params?.['_meta'] as Record<string, unknown> | undefined
+    expect(meta?.['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
+  })
+
+  it('leaves legacy internal requests byte-identical to today', async () => {
+    let seenHeaders: Record<string, string> = {}
+    let seenBody: { method: string; params?: unknown } | undefined
+
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string; params?: unknown }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+
+      // A legacy upstream: the era probe hits an unimplemented method.
+      if (body.method === 'server/discover') {
+        return Promise.resolve(new Response(null, { status: 202 }))
+      }
+      if (body.method === 'initialize') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' },
+            },
+          ),
+        )
+      }
+      if (body.method === 'notifications/initialized') {
+        return Promise.resolve(new Response(null, { status: 202 }))
+      }
+
+      seenHeaders = headers
+      seenBody = body
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forwardInternal(req())
+
+    expect(seenHeaders['mcp-session-id']).toBe('U-1')
+    expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
+    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenBody?.params).toBeUndefined()
+  })
+
+  it('leaves downstream-driven forward() untouched regardless of era', async () => {
+    let seenHeaders: Record<string, string> = {}
+    let seenBody: { method: string; params?: unknown } | undefined
+
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string; params?: unknown }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+
+      if (body.method === 'server/discover') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'helio-era-probe',
+              result: { supportedVersions: ['2026-07-28'] },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+
+      seenHeaders = headers
+      seenBody = body
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    // Prime a modern internal session first, so a cached modern era exists.
+    await fwd.forwardInternal(req({ id: 'prime' }))
+
+    await fwd.forward(req({ transportSessionId: 'S1' }))
+
+    expect(seenHeaders['mcp-session-id']).toBe('S1')
+    expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
+    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenBody?.params).toBeUndefined()
+  })
+
+  it('resetInternalSession() forces a fresh era probe on the next internal request', async () => {
+    let discoverCount = 0
+
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+
+      if (body.method === 'server/discover') {
+        discoverCount += 1
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'helio-era-probe',
+              result: { supportedVersions: ['2026-07-28'] },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forwardInternal(req())
+    expect(discoverCount).toBe(1)
+
+    // Cached: a second internal call does not re-probe.
+    await fwd.forwardInternal(req())
+    expect(discoverCount).toBe(1)
+
+    fwd.resetInternalSession()
+    await fwd.forwardInternal(req())
+    expect(discoverCount).toBe(2)
+  })
 })
