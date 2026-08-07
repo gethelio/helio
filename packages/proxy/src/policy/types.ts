@@ -93,6 +93,13 @@ export interface CompiledLimits {
   readonly maxSpend?: CompiledSpendLimit
 }
 
+/** Compiled tool revalidation settings with durations as milliseconds. */
+export interface CompiledToolRevalidation {
+  readonly enabled: boolean
+  readonly intervalMs: number
+  readonly maxAdvertisedTtlMs: number
+}
+
 /** Policy action types. */
 export type PolicyAction =
   | 'allow'
@@ -159,6 +166,8 @@ export interface CompiledPolicy {
    * at the use site — conservative by default.
    */
   readonly onToolDrift?: 'block' | 'require_approval' | 'log'
+  /** Always set by compilePolicies; absent only in hand-built fixtures (treated as disabled). */
+  readonly toolRevalidation?: CompiledToolRevalidation
   readonly rules: readonly CompiledPolicyRule[]
   /** Install-time policy (issue #13 — deny_install). Undefined ⇒ observational. */
   readonly install?: CompiledInstallPolicy

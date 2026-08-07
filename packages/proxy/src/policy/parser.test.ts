@@ -1259,6 +1259,45 @@ describe('on_tool_drift compilation', () => {
 })
 
 // ---------------------------------------------------------------------------
+// tool_revalidation compilation
+// ---------------------------------------------------------------------------
+
+describe('tool_revalidation compilation', () => {
+  it('compiles tool_revalidation defaults when the config omits the section', () => {
+    const { policy } = compilePolicies({ default: 'allow', dry_run: false, rules: [] })
+    expect(policy.toolRevalidation).toEqual({
+      enabled: true,
+      intervalMs: 300_000,
+      maxAdvertisedTtlMs: 300_000,
+    })
+  })
+  it('max_advertised_ttl defaults to the interval and parses independently when set', () => {
+    const { policy } = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      rules: [],
+      tool_revalidation: { enabled: true, interval: '10m' },
+    })
+    expect(policy.toolRevalidation).toEqual({
+      enabled: true,
+      intervalMs: 600_000,
+      maxAdvertisedTtlMs: 600_000,
+    })
+    const { policy: p2 } = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      rules: [],
+      tool_revalidation: { enabled: false, interval: '5m', max_advertised_ttl: '30s' },
+    })
+    expect(p2.toolRevalidation).toEqual({
+      enabled: false,
+      intervalMs: 300_000,
+      maxAdvertisedTtlMs: 30_000,
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // PolicyParseError
 // ---------------------------------------------------------------------------
 
