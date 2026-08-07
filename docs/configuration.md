@@ -163,7 +163,7 @@ upstream:
     Authorization: 'Bearer ${UPSTREAM_TOKEN}'
 ```
 
-Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, and `host` are rejected — Helio owns those.
+Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, `host`, `mcp-method`, and `mcp-name` are rejected — Helio owns those.
 
 On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
 
@@ -260,14 +260,32 @@ Like `listen`, the `session` section is compiled into the transports at startup:
 
 Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation, including install-time rules (`policies.install` with `deny_install`) and the [adapter governance API](./adapter-api.md).
 
-| Field              | Type    | Required | Default | Description                                                                                                                                                                                                     |
-| ------------------ | ------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default`          | string  | No       | `allow` | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
-| `flag_destructive` | string  | No       | —       | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
-| `on_tool_drift`    | string  | No       | `block` | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
-| `dry_run`          | boolean | No       | `false` | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
-| `hot_reload`       | boolean | No       | `true`  | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
-| `rules`            | array   | No       | `[]`    | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
+| Field               | Type    | Required | Default | Description                                                                                                                                                                                                     |
+| ------------------- | ------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default`           | string  | No       | `allow` | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
+| `flag_destructive`  | string  | No       | —       | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
+| `on_tool_drift`     | string  | No       | `block` | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
+| `tool_revalidation` | object  | No       | —       | Proxy-scheduled `tools/list` revalidation and downward-only `ttlMs` clamping. See below.                                                                                                                        |
+| `dry_run`           | boolean | No       | `false` | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
+| `hot_reload`        | boolean | No       | `true`  | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
+| `rules`             | array   | No       | `[]`    | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
+
+`tool_revalidation` fields:
+
+| Field                | Type     | Required | Default    | Description                                                                                                                                                                                               |
+| -------------------- | -------- | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | boolean  | No       | `true`     | Enable proxy-initiated `tools/list` revalidation and `ttlMs` clamping. Set `false` to restore pre-0.12 behavior (no timer, no clamping).                                                                  |
+| `interval`           | duration | No       | `5m`       | Cadence of proxy-initiated `tools/list` revalidation after the first successful annotation-cache prime. Minimum `10s`; lower values are rejected at config load.                                          |
+| `max_advertised_ttl` | duration | No       | `interval` | Downward-only clamp applied to `result.ttlMs` on `tools/list` responses forwarded downstream: lowers a value above the cap, never raises one, and adds nothing when the upstream response has no `ttlMs`. |
+
+```yaml
+policies:
+  on_tool_drift: block
+  tool_revalidation:
+    enabled: true
+    interval: 5m
+    max_advertised_ttl: 5m
+```
 
 Each rule in the `rules` array has the following structure:
 

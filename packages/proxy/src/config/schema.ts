@@ -48,6 +48,11 @@ const RESERVED_TRANSPORT_HEADERS = new Set([
   'content-type',
   'content-length',
   'host',
+  // Modern (2026-07-28) transport headers the internal forwarders own on the
+  // wire for proxy-initiated requests (era probe, revalidation) — see
+  // upstream-session-manager.ts and streamable-http-forwarder.ts.
+  'mcp-method',
+  'mcp-name',
 ])
 
 const transportSchema = z.enum(['streamable-http', 'sse', 'stdio'])
@@ -434,6 +439,36 @@ const installSchema = z
   .strict()
 
 // ---------------------------------------------------------------------------
+// Tool revalidation (issue #221)
+// ---------------------------------------------------------------------------
+
+/**
+ * Proxy-scheduled tool definition revalidation: a periodic `tools/list`
+ * after the first successful annotation-cache prime, plus a downward-only
+ * clamp on the `ttlMs` a modern upstream advertises on `tools/list`
+ * responses forwarded downstream. Stops drift detection (`on_tool_drift`)
+ * from depending on pass-through client traffic to ever re-list tools.
+ */
+const toolRevalidationSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    interval: durationSchema.default('5m'),
+    // Default: `interval`, applied at compile time (undefined here means
+    // "same as interval" — see PoliciesConfig compilation).
+    max_advertised_ttl: durationSchema.optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (parseDuration(data.interval) < 10_000) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['interval'],
+        message: 'tool_revalidation.interval must be at least 10s',
+      })
+    }
+  })
+
+// ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
 
@@ -458,6 +493,13 @@ const policiesSchema = z
      * don't need the field; undefined is treated as "block".
      */
     on_tool_drift: z.enum(['block', 'require_approval', 'log']).optional(),
+    /**
+     * Proxy-scheduled `tools/list` revalidation and `ttlMs` clamping (issue
+     * #221). Optional; absent ⇒ compiled defaults (enabled: true, interval:
+     * "5m") in `CompiledPolicy`, except in literal `CompiledPolicy` fixtures,
+     * which treat an absent field as disabled — see `compilePolicies`.
+     */
+    tool_revalidation: toolRevalidationSchema.optional(),
     /**
      * Whether `helio start` should watch the config file for changes and
      * reconcile policy state on every save. Defaults to `true` when omitted.
