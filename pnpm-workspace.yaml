@@ -15,7 +15,6 @@ overrides:
   # 1.1.18 / 5.0.9). The 1.x line has a patch now, so it is no longer an ignore.
   'brace-expansion@<1.1.18': 1.1.18
   'brace-expansion@>=3.0.0 <5.0.9': 5.0.9
-  postcss: 8.5.18 # GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849
   'form-data@>=4.0.0 <4.0.6': 4.0.6
   # express-rate-limit (via @modelcontextprotocol/sdk) depends on an EXACT
   # ip-address 10.1.0, so no range resolution can reach the fix.
