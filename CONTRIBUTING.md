@@ -232,10 +232,9 @@ Our audit posture reflects that:
 
 Current ignores (each with no exploit path in our usage, tracked for removal):
 
-| GHSA                  | Package (path)                                                           | Why ignored                                                                                                                                                  | Tracking |
-| --------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
-| `GHSA-frvp-7c67-39w9` | `@hono/node-server` 1.x (via `@modelcontextprotocol/sdk`, dev/test only) | serve-static path traversal; the proxy's production copy is on the patched 2.x line, and the SDK's `^1.19.9` range cannot reach 2.x until the SDK 1.30+ bump | #259     |
-| `GHSA-g7r4-m6w7-qqqr` | esbuild 0.27.4 (via `tsup`/`bundle-require` and `tsx`, build/exec only)  | dev-server file read; none of those tools run the esbuild dev server, and their `^0.27.0` / `~0.27.0` ranges cannot reach the 0.28.1 fix                     | #64      |
+| GHSA                  | Package (path)                                                          | Why ignored                                                                                                                              | Tracking |
+| --------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `GHSA-g7r4-m6w7-qqqr` | esbuild 0.27.4 (via `tsup`/`bundle-require` and `tsx`, build/exec only) | dev-server file read; none of those tools run the esbuild dev server, and their `^0.27.0` / `~0.27.0` ranges cannot reach the 0.28.1 fix | #64      |
 
 ## Issue Labels
 
