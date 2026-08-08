@@ -29,6 +29,11 @@ auditConfig:
     - GHSA-fx2h-pf6j-xcff
     - GHSA-vmh5-mc38-953g
     - GHSA-qwww-vcr4-c8h2
+    # @hono/node-server 1.x via @modelcontextprotocol/sdk (dev-only): the SDK's
+    # ^1.19.9 range cannot reach the 2.x fix line; retire with the SDK 1.30+
+    # bump (#259). Ignore is advisory-wide, so it also masks any future <2.0.5
+    # copy on other paths — do not let it outlive the SDK bump.
+    - GHSA-frvp-7c67-39w9
 
 # Native build scripts approved to run at install (pnpm 11 renamed
 # onlyBuiltDependencies to allowBuilds).
