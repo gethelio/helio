@@ -232,13 +232,10 @@ Our audit posture reflects that:
 
 Current ignores (each with no exploit path in our usage, tracked for removal):
 
-| GHSA                  | Package (path)                                   | Why ignored                                                                                                                                                         | Tracking |
-| --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| `GHSA-gv7w-rqvm-qjhr` | esbuild (via vite, dashboard build)              | dev-server request vuln; not in the shipped bundle                                                                                                                  | #64      |
-| `GHSA-fx2h-pf6j-xcff` | vite (dashboard build)                           | dev-server only; vite is not run in production                                                                                                                      | #64      |
-| `GHSA-vmh5-mc38-953g` | undici (via `jsdom`, test env)                   | SOCKS5 ProxyAgent TLS path, not exercised in tests; no patched undici is compatible with `jsdom@29`'s internal layout                                               | #64      |
-| `GHSA-qwww-vcr4-c8h2` | react-router (dashboard)                         | unstable-RSC-only CSRF per upstream; the dashboard is a client-side SPA importing no `unstable_*`/RSC API, and the fix line (8.x) needs a React peer bump           | #204     |
-| `GHSA-mh99-v99m-4gvg` | brace-expansion 1.x (via eslint's `minimatch@3`) | OOM-DoS on expansion; lint globs are our own trusted config, no patched 1.x exists, and 5.0.8's named CJS export breaks `minimatch@3` (5.x paths upgraded for real) | #205     |
+| GHSA                  | Package (path)                                                           | Why ignored                                                                                                                                                  | Tracking |
+| --------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| `GHSA-frvp-7c67-39w9` | `@hono/node-server` 1.x (via `@modelcontextprotocol/sdk`, dev/test only) | serve-static path traversal; the proxy's production copy is on the patched 2.x line, and the SDK's `^1.19.9` range cannot reach 2.x until the SDK 1.30+ bump | #259     |
+| `GHSA-g7r4-m6w7-qqqr` | esbuild 0.27.4 (via `tsup`/`bundle-require` and `tsx`, build/exec only)  | dev-server file read; none of those tools run the esbuild dev server, and their `^0.27.0` / `~0.27.0` ranges cannot reach the 0.28.1 fix                     | #64      |
 
 ## Issue Labels
 

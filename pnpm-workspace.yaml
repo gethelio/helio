@@ -15,21 +15,26 @@ overrides:
   # 1.1.18 / 5.0.9). The 1.x line has a patch now, so it is no longer an ignore.
   'brace-expansion@<1.1.18': 1.1.18
   'brace-expansion@>=3.0.0 <5.0.9': 5.0.9
-  postcss: 8.5.18 # GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849
   'form-data@>=4.0.0 <4.0.6': 4.0.6
   # express-rate-limit (via @modelcontextprotocol/sdk) depends on an EXACT
   # ip-address 10.1.0, so no range resolution can reach the fix.
   ip-address: 10.3.1 # GHSA-mwp4-54f8-5fhr
 
 # pnpm 11 reads settings from this file only; the package.json "pnpm" field
-# is ignored. The GHSAs below are triaged and tracked (esbuild/vite: #64,
-# react-router RSC: #204).
+# is ignored. The GHSAs below are triaged and tracked (esbuild dev-server:
+# #64, @hono/node-server: #259).
 auditConfig:
   ignoreGhsas:
-    - GHSA-gv7w-rqvm-qjhr
-    - GHSA-fx2h-pf6j-xcff
-    - GHSA-vmh5-mc38-953g
-    - GHSA-qwww-vcr4-c8h2
+    # @hono/node-server 1.x via @modelcontextprotocol/sdk (dev-only): the SDK's
+    # ^1.19.9 range cannot reach the 2.x fix line; retire with the SDK 1.30+
+    # bump (#259). Ignore is advisory-wide, so it also masks any future <2.0.5
+    # copy on other paths — do not let it outlive the SDK bump.
+    - GHSA-frvp-7c67-39w9
+    # esbuild dev-server file read (low, dev-only): only the 0.27.4 instance
+    # (via tsup/bundle-require and tsx) is in range, none of them run the dev
+    # server, and tsup's ^0.27.0 / tsx's ~0.27.0 cannot reach 0.28.1; triage
+    # record on #64.
+    - GHSA-g7r4-m6w7-qqqr
 
 # Native build scripts approved to run at install (pnpm 11 renamed
 # onlyBuiltDependencies to allowBuilds).

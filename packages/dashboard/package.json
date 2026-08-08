@@ -24,7 +24,7 @@
   "dependencies": {
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "react-router": "7.18.0",
+    "react-router": "7.18.2",
     "recharts": "3.8.1"
   },
   "devDependencies": {
@@ -37,7 +37,7 @@
     "jsdom": "29.0.1",
     "tailwindcss": "4.2.2",
     "typescript": "5.9.3",
-    "vite": "6.4.2",
+    "vite": "6.4.3",
     "vitest": "4.1.8"
   }
 }
