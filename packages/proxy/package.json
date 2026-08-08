@@ -46,7 +46,7 @@
     "prepack": "pnpm run check:dashboard-assets"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.28.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@types/better-sqlite3": "7.6.13",
     "@types/js-yaml": "4.0.9",
     "@types/node": "24.13.3",

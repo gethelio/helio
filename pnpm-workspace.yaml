@@ -21,15 +21,9 @@ overrides:
   ip-address: 10.3.1 # GHSA-mwp4-54f8-5fhr
 
 # pnpm 11 reads settings from this file only; the package.json "pnpm" field
-# is ignored. The GHSAs below are triaged and tracked (esbuild dev-server:
-# #64, @hono/node-server: #259).
+# is ignored. The GHSA below is triaged and tracked (esbuild dev-server: #64).
 auditConfig:
   ignoreGhsas:
-    # @hono/node-server 1.x via @modelcontextprotocol/sdk (dev-only): the SDK's
-    # ^1.19.9 range cannot reach the 2.x fix line; retire with the SDK 1.30+
-    # bump (#259). Ignore is advisory-wide, so it also masks any future <2.0.5
-    # copy on other paths — do not let it outlive the SDK bump.
-    - GHSA-frvp-7c67-39w9
     # esbuild dev-server file read (low, dev-only): only the 0.27.4 instance
     # (via tsup/bundle-require and tsx) is in range, none of them run the dev
     # server, and tsup's ^0.27.0 / tsx's ~0.27.0 cannot reach 0.28.1; triage
