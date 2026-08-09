@@ -127,6 +127,27 @@ export class StreamableHttpForwarder implements McpForwarder {
     // tracks relay version negotiation).
     const modern = internalManaged && session.era === 'modern'
 
+    // Compute the exact object that will be assigned to `body['params']`
+    // ONCE, up front, so the standard-headers helper below and the body
+    // assignment further down both read the SAME reference. The modern
+    // branch rewrites params into a brand-new object (spread + injected
+    // `_meta`) rather than forwarding `request.params` verbatim — deriving
+    // the header from `request.params` instead would let an inherited or
+    // non-enumerable `toJSON` on the original (dropped by the spread, since
+    // object spread copies only own-enumerable properties) or a
+    // `_meta`-reading `toJSON` (which only sees `_meta` on the NEW object)
+    // diverge the header from whatever actually gets serialized onto the
+    // wire. In the relay branch `outboundParams` is `request.params`
+    // itself, so behavior there is unchanged.
+    let outboundParams: unknown
+    if (modern) {
+      const params = (request.params ?? {}) as Record<string, unknown>
+      const existingMeta = (params['_meta'] ?? {}) as Record<string, unknown>
+      outboundParams = { ...params, _meta: { ...existingMeta, ...buildInternalMeta() } }
+    } else {
+      outboundParams = request.params
+    }
+
     const headers = mergeUpstreamHeaders(
       {
         'content-type': 'application/json',
@@ -147,7 +168,7 @@ export class StreamableHttpForwarder implements McpForwarder {
     // mirror, never that a caller-supplied value survived the merge above.
     delete headers['mcp-method']
     delete headers['mcp-name']
-    Object.assign(headers, buildStandardRequestHeaders(request.method, request.params))
+    Object.assign(headers, buildStandardRequestHeaders(request.method, outboundParams))
 
     const body: Record<string, unknown> = {
       jsonrpc: request.jsonrpc,
@@ -155,11 +176,9 @@ export class StreamableHttpForwarder implements McpForwarder {
     }
     if (request.id !== undefined) body['id'] = request.id
     if (modern) {
-      const params = (request.params ?? {}) as Record<string, unknown>
-      const existingMeta = (params['_meta'] ?? {}) as Record<string, unknown>
-      body['params'] = { ...params, _meta: { ...existingMeta, ...buildInternalMeta() } }
+      body['params'] = outboundParams
     } else if (request.params !== undefined) {
-      body['params'] = request.params
+      body['params'] = outboundParams
     }
 
     const start = performance.now()
