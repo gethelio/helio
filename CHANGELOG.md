@@ -133,9 +133,9 @@ Maintainer notes:
 - **Upstream forwards of relayed client traffic now carry the spec's
   standard request headers (#217).** Every Streamable HTTP POST Helio
   sends upstream carries `Mcp-Method` mirroring the JSON-RPC method,
-  aside from Helio's own legacy `initialize` handshake (performed
-  against a legacy upstream and deliberately left unstamped), and
-  `tools/call`, `prompts/get`, and `resources/read`
+  aside from Helio's own legacy `initialize`/`notifications/initialized`
+  handshake (performed against a legacy upstream and deliberately left
+  unstamped), and `tools/call`, `prompts/get`, and `resources/read`
   requests also carry `Mcp-Name`, sentinel-encoded when the value needs
   it. Both header values are always derived from the request body Helio
   actually forwards, never from caller-supplied headers. `Mcp-Name` is

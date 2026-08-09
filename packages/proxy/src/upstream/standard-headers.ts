@@ -53,18 +53,44 @@ function extractName(method: string, params: unknown): string | undefined {
   if (!field || typeof params !== 'object' || params === null || Array.isArray(params)) {
     return undefined
   }
-  // Own-enumerable, not just Object.hasOwn: send() forwards params two ways
-  // — `body['params'] = request.params` then JSON.stringify(body) (relay),
-  // and `{ ...params, _meta }` (internal modern) — and both JSON.stringify
-  // and object spread serialize only OWN ENUMERABLE string-keyed properties.
-  // Reading through the prototype chain (plain property access) or through
-  // an own-but-non-enumerable property would let mcp-name claim a value the
-  // forwarded body never contains: Object.hasOwn alone still admits the
-  // non-enumerable case, since it doesn't check enumerability.
-  if (!Object.prototype.propertyIsEnumerable.call(params, field)) {
+
+  // Resolve toJSON before reading anything: send() forwards params via
+  // `body['params'] = request.params` then `JSON.stringify(body)` (relay) —
+  // and JSON.stringify looks up a `toJSON` method on `params` (found
+  // regardless of enumerability or where in the prototype chain it lives)
+  // and serializes ITS RETURN VALUE in place of `params` itself. Reading
+  // straight off the live `params` object would let mcp-name diverge from
+  // what the body actually carries whenever a `toJSON` rewrites or drops
+  // the field. A throwing toJSON makes the real JSON.stringify(body) call
+  // throw too — the request fails regardless — so this helper must not
+  // itself throw; returning undefined here just means no header ships,
+  // never a lying one.
+  let source: unknown = params
+  const maybeToJSON = (params as { toJSON?: unknown }).toJSON
+  if (typeof maybeToJSON === 'function') {
+    try {
+      source = (maybeToJSON as (key: string) => unknown).call(params, 'params')
+    } catch {
+      return undefined
+    }
+  }
+
+  if (typeof source !== 'object' || source === null || Array.isArray(source)) {
     return undefined
   }
-  const raw = (params as Record<string, unknown>)[field]
+
+  // Own-enumerable, not just Object.hasOwn, applied to the RESOLVED source:
+  // JSON.stringify serializes only OWN ENUMERABLE string-keyed properties of
+  // whatever it ends up serializing (`source` here, `params` itself when
+  // there was no toJSON). Reading through the prototype chain (plain
+  // property access) or through an own-but-non-enumerable property would let
+  // mcp-name claim a value the forwarded body never contains: Object.hasOwn
+  // alone still admits the non-enumerable case, since it doesn't check
+  // enumerability.
+  if (!Object.prototype.propertyIsEnumerable.call(source, field)) {
+    return undefined
+  }
+  const raw = (source as Record<string, unknown>)[field]
   return typeof raw === 'string' ? raw : undefined
 }
 

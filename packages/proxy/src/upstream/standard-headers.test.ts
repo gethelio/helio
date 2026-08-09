@@ -328,4 +328,89 @@ describe('buildStandardRequestHeaders', () => {
       })
     })
   })
+
+  describe('params with a toJSON (mcp-name must mirror what JSON.stringify forwards)', () => {
+    it('stamps the toJSON-rewritten name, not the live-object name, on tools/call', () => {
+      const params = {
+        name: 'header-truth',
+        toJSON() {
+          return { name: 'body-lie' }
+        },
+      }
+      // The body Helio actually forwards (`{ params }` mirrors the relay
+      // shape `body['params'] = request.params` before JSON.stringify).
+      expect(JSON.stringify({ params })).toBe('{"params":{"name":"body-lie"}}')
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+        'mcp-name': 'body-lie',
+      })
+    })
+
+    it('omits mcp-name when toJSON drops the name field entirely', () => {
+      const params = {
+        name: 'still-in-header',
+        toJSON() {
+          return {}
+        },
+      }
+      expect(JSON.stringify({ params })).toBe('{"params":{}}')
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+      })
+    })
+
+    it('stamps the name from an inherited toJSON', () => {
+      const params = Object.create({
+        toJSON() {
+          return { name: 'inh' }
+        },
+      }) as Record<string, unknown>
+      params.name = 'own-name-not-used'
+      expect(JSON.stringify({ params })).toBe('{"params":{"name":"inh"}}')
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+        'mcp-name': 'inh',
+      })
+    })
+
+    it('stamps the name from an own non-enumerable toJSON', () => {
+      const params: Record<string, unknown> = { name: 'own-name-not-used' }
+      Object.defineProperty(params, 'toJSON', {
+        value: () => ({ name: 'ne' }),
+        enumerable: false,
+      })
+      expect(JSON.stringify({ params })).toBe('{"params":{"name":"ne"}}')
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+        'mcp-name': 'ne',
+      })
+    })
+
+    it('stamps the toJSON-rewritten uri on resources/read', () => {
+      const params = {
+        uri: 'file:///a',
+        toJSON() {
+          return { uri: 'file:///b' }
+        },
+      }
+      expect(JSON.stringify({ params })).toBe('{"params":{"uri":"file:///b"}}')
+      expect(buildStandardRequestHeaders('resources/read', params)).toEqual({
+        'mcp-method': 'resources/read',
+        'mcp-name': 'file:///b',
+      })
+    })
+
+    it('omits mcp-name and does not throw when toJSON itself throws', () => {
+      const params = {
+        name: 'unreachable',
+        toJSON() {
+          throw new Error('boom')
+        },
+      }
+      expect(() => buildStandardRequestHeaders('tools/call', params)).not.toThrow()
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+      })
+    })
+  })
 })
