@@ -89,7 +89,7 @@ describe('2026-07-28-only ("modern-only") upstream', () => {
     // version header and `_meta` mirror, the fixture would serve it from
     // the lenient version/`_meta` leg instead and this test would still
     // pass. The `_meta` mirror itself is pinned directly at unit level in
-    // `upstream-session-manager.test.ts`.
+    // `streamable-http-forwarder.test.ts`.
     const result = await governedForwarder.primeAnnotationCache()
     expect(result.success).toBe(true)
     expect(result.toolsCached).toBeGreaterThan(0)

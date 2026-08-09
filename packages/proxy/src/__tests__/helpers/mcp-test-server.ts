@@ -322,8 +322,11 @@ export interface ModernOnlyMcpServer {
  * probe/response coverage for the era detector lives in
  * `upstream-session-manager.test.ts`.
  *
- * `initialize` and any other unrecognized method answer `404` + JSON-RPC
- * `-32601`, per the 2026-07-28 removal of the handshake.
+ * Once the standard-headers check passes, `initialize` and any other
+ * unrecognized method answer `404` + JSON-RPC `-32601`, per the
+ * 2026-07-28 removal of the handshake. A header-less `initialize` never
+ * gets that far — it fails the standard-headers check first, with `400`
+ * + JSON-RPC `-32020`.
  */
 export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServer> {
   let tools: Record<string, unknown>[] = [
