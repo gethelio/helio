@@ -170,6 +170,49 @@ describe('buildStandardRequestHeaders', () => {
       })
     })
 
+    it('does not stamp mcp-name from an inherited (prototype-chain) name on tools/call', () => {
+      const params = Object.create({ name: 'spoofed' }) as unknown
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+      })
+    })
+
+    it('does not stamp mcp-name from an inherited (prototype-chain) uri on resources/read', () => {
+      const params = Object.create({ uri: 'file:///x' }) as unknown
+      expect(buildStandardRequestHeaders('resources/read', params)).toEqual({
+        'mcp-method': 'resources/read',
+      })
+    })
+
+    it('does not stamp mcp-name from an own but non-enumerable name on tools/call', () => {
+      const params: Record<string, unknown> = {}
+      Object.defineProperty(params, 'name', { value: 'spoofed', enumerable: false })
+      expect(buildStandardRequestHeaders('tools/call', params)).toEqual({
+        'mcp-method': 'tools/call',
+      })
+    })
+
+    it('still stamps mcp-name from a normal own-enumerable name on tools/call', () => {
+      expect(buildStandardRequestHeaders('tools/call', { name: 'search' })).toEqual({
+        'mcp-method': 'tools/call',
+        'mcp-name': 'search',
+      })
+    })
+
+    it('still stamps mcp-name from a normal own-enumerable uri on resources/read', () => {
+      expect(buildStandardRequestHeaders('resources/read', { uri: 'file:///data.txt' })).toEqual({
+        'mcp-method': 'resources/read',
+        'mcp-name': 'file:///data.txt',
+      })
+    })
+
+    it('still stamps the empty literal when name is own-enumerable and empty', () => {
+      expect(buildStandardRequestHeaders('tools/call', { name: '' })).toEqual({
+        'mcp-method': 'tools/call',
+        'mcp-name': '',
+      })
+    })
+
     it('does not throw and omits mcp-name when the source field is a number', () => {
       expect(buildStandardRequestHeaders('tools/call', { name: 42 })).toEqual({
         'mcp-method': 'tools/call',

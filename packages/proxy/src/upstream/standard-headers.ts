@@ -53,6 +53,17 @@ function extractName(method: string, params: unknown): string | undefined {
   if (!field || typeof params !== 'object' || params === null || Array.isArray(params)) {
     return undefined
   }
+  // Own-enumerable, not just Object.hasOwn: send() forwards params two ways
+  // — `body['params'] = request.params` then JSON.stringify(body) (relay),
+  // and `{ ...params, _meta }` (internal modern) — and both JSON.stringify
+  // and object spread serialize only OWN ENUMERABLE string-keyed properties.
+  // Reading through the prototype chain (plain property access) or through
+  // an own-but-non-enumerable property would let mcp-name claim a value the
+  // forwarded body never contains: Object.hasOwn alone still admits the
+  // non-enumerable case, since it doesn't check enumerability.
+  if (!Object.prototype.propertyIsEnumerable.call(params, field)) {
+    return undefined
+  }
   const raw = (params as Record<string, unknown>)[field]
   return typeof raw === 'string' ? raw : undefined
 }
