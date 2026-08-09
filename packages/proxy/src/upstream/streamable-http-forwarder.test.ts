@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { StreamableHttpForwarder } from './streamable-http-forwarder.js'
+import { MCP_NAME_MAX_BYTES } from './standard-headers.js'
 import type { McpRequest } from '../mcp/types.js'
 
 const originalFetch = globalThis.fetch
@@ -347,6 +348,196 @@ describe('StreamableHttpForwarder', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Standard request headers (issue #217)
+  // -------------------------------------------------------------------------
+
+  it('relayed tools/call carries mcp-method and mcp-name mirroring the body', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: { name: 'get_weather', arguments: {} },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('tools/call')
+    expect(seen['mcp-name']).toBe('get_weather')
+  })
+
+  it('relayed prompts/get carries mcp-method and mcp-name mirroring the body', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'prompts/get',
+        params: { name: 'daily_summary' },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('prompts/get')
+    expect(seen['mcp-name']).toBe('daily_summary')
+  })
+
+  it('relayed resources/read carries mcp-method and mcp-name from params.uri', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'resources/read',
+        params: { uri: 'file:///tmp/notes.txt' },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('resources/read')
+    expect(seen['mcp-name']).toBe('file:///tmp/notes.txt')
+  })
+
+  it('relayed tools/list carries mcp-method and no mcp-name', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(req({ method: 'tools/list', transportSessionId: 'S1' }))
+    expect(seen['mcp-method']).toBe('tools/list')
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('a relayed notification carries mcp-method mirroring its method', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0' }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({ id: undefined, method: 'notifications/initialized', transportSessionId: 'S1' }),
+    )
+    expect(seen['mcp-method']).toBe('notifications/initialized')
+  })
+
+  it('omits mcp-method when a caller-injected value cannot survive the guard', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'héllo',
+        transportSessionId: 'S1',
+        headers: { 'mcp-method': 'lie' },
+      }),
+    )
+    expect(seen['mcp-method']).toBeUndefined()
+  })
+
+  it('omits mcp-name when a caller-injected value has no name-bearing method to attach to', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/list',
+        transportSessionId: 'S1',
+        headers: { 'mcp-name': 'lie' },
+      }),
+    )
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('omits mcp-name when a caller-injected value cannot survive the byte cap', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'resources/read',
+        params: { uri: 'x'.repeat(MCP_NAME_MAX_BYTES + 1) },
+        transportSessionId: 'S1',
+        headers: { 'mcp-name': 'small-lie' },
+      }),
+    )
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('ignores caller-injected mcp-method/mcp-name in favor of the body-true values', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: { name: 'get_weather', arguments: {} },
+        transportSessionId: 'S1',
+        headers: { 'mcp-method': 'lie', 'mcp-name': 'lie' },
+      }),
+    )
+    expect(seen['mcp-method']).toBe('tools/call')
+    expect(seen['mcp-name']).toBe('get_weather')
+  })
+
+  // -------------------------------------------------------------------------
   // Modern (2026-07-28) internal sends
   // -------------------------------------------------------------------------
 
@@ -396,7 +587,7 @@ describe('StreamableHttpForwarder', () => {
     expect(meta?.['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
   })
 
-  it('leaves legacy internal requests byte-identical to today', async () => {
+  it('stamps standard headers on legacy internal requests, otherwise byte-identical to today', async () => {
     let seenHeaders: Record<string, string> = {}
     let seenBody: { method: string; params?: unknown } | undefined
 
@@ -439,11 +630,11 @@ describe('StreamableHttpForwarder', () => {
 
     expect(seenHeaders['mcp-session-id']).toBe('U-1')
     expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
-    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenHeaders['mcp-method']).toBe('tools/list')
     expect(seenBody?.params).toBeUndefined()
   })
 
-  it('leaves downstream-driven forward() untouched regardless of era', async () => {
+  it('stamps standard headers on downstream-driven forward(), but keeps the version header and _meta mirror internal-modern-only', async () => {
     let seenHeaders: Record<string, string> = {}
     let seenBody: { method: string; params?: unknown } | undefined
 
@@ -483,7 +674,7 @@ describe('StreamableHttpForwarder', () => {
 
     expect(seenHeaders['mcp-session-id']).toBe('S1')
     expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
-    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenHeaders['mcp-method']).toBe('tools/list')
     expect(seenBody?.params).toBeUndefined()
   })
 

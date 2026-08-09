@@ -566,6 +566,48 @@ describe('UpstreamSessionManager', () => {
     ).toEqual(['2025-03-26'])
   })
 
+  // -------------------------------------------------------------------------
+  // Standard header ownership (issue #217) — staticHeaders win the merge in
+  // both call sites below, so a lying constructor value would otherwise
+  // override the truthful header Helio owns.
+  // -------------------------------------------------------------------------
+
+  it('era probe POST carries the truthful mcp-method even with lying staticHeaders', async () => {
+    const calls = stubUpstream({
+      'server/discover': () =>
+        jsonRpcResult({ supportedVersions: ['2026-07-28'], capabilities: {} }),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: { 'mcp-method': 'lie', 'mcp-name': 'lie' },
+    })
+
+    await mgr.ensureInternalSession()
+
+    const probe = calls.filter((call) => call.method === 'server/discover')
+    expect(probe.map((call) => call.headers['mcp-method'])).toEqual(['server/discover'])
+    expect(probe[0]?.headers['mcp-name']).toBeUndefined()
+  })
+
+  it('legacy initialize and notifications/initialized carry neither mcp-method nor mcp-name, even with lying staticHeaders', async () => {
+    const calls = stubUpstream({
+      'server/discover': () => new Response(null, { status: 202 }),
+      initialize: legacyInitializeHandler('U-lying-headers'),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: { 'mcp-method': 'lie', 'mcp-name': 'lie' },
+    })
+
+    await mgr.ensureInternalSession()
+
+    for (const method of ['initialize', 'notifications/initialized']) {
+      const call = calls.find((c) => c.method === method)
+      expect(call?.headers['mcp-method']).toBeUndefined()
+      expect(call?.headers['mcp-name']).toBeUndefined()
+    }
+  })
+
   it('reports a timeout with the configured duration when initialize times out', async () => {
     stubUpstream({
       'server/discover': () => new Response(null, { status: 202 }),

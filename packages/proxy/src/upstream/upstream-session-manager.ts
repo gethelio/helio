@@ -200,6 +200,13 @@ export class UpstreamSessionManager {
       {},
       this.staticHeaders,
     )
+    // staticHeaders win the merge above, so a library caller's constructor
+    // headers could otherwise override the probe's own constant with a lie.
+    // The probe is a pure classifier with a fixed method — force the
+    // truthful value back on, rather than routing through the general
+    // standard-headers helper.
+    headers['mcp-method'] = 'server/discover'
+    delete headers['mcp-name']
 
     const probeBody = {
       jsonrpc: '2.0' as const,
@@ -288,6 +295,13 @@ export class UpstreamSessionManager {
       {},
       this.staticHeaders,
     )
+    // Neither this `initialize` POST nor the `notifications/initialized` POST
+    // it feeds (via the `notifyHeaders` clone below) route through send()'s
+    // standard-headers helper, and staticHeaders wins the merge above — so a
+    // library caller's constructor headers could otherwise inject a lie on
+    // both. Absence cannot lie; strip it immediately, before either POST.
+    delete headers['mcp-method']
+    delete headers['mcp-name']
 
     const initBody = {
       jsonrpc: '2.0' as const,

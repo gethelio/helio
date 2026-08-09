@@ -2,6 +2,7 @@ import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mc
 import { parseUpstreamResponse } from './response.js'
 import { readSseJsonRpcResponse } from './sse-parse.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
+import { buildStandardRequestHeaders } from './standard-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import {
   UpstreamSessionManager,
@@ -117,10 +118,13 @@ export class StreamableHttpForwarder implements McpForwarder {
     session: SendSession,
     internalManaged = false,
   ): Promise<ForwardResult> {
-    // Only Helio's own internal traffic is ever synthesized to the modern
-    // (2026-07-28) wire shape — downstream-driven forward() never sets
-    // internalManaged, so relayed client traffic is untouched here (#217/#219
-    // track header/version handling for that path).
+    // Standard request headers — `mcp-method`, and `mcp-name` on the three
+    // name-bearing methods — are stamped on every outbound POST from send(),
+    // relay and internal alike, derived from the request's own body. The
+    // modern (2026-07-28) version header and `_meta` mirror below stay
+    // internal-modern only: downstream-driven forward() never sets
+    // internalManaged, so relayed client traffic never gets those (#219
+    // tracks relay version negotiation).
     const modern = internalManaged && session.era === 'modern'
 
     const headers = mergeUpstreamHeaders(
@@ -135,11 +139,15 @@ export class StreamableHttpForwarder implements McpForwarder {
     // UpstreamSessionManager#modernSession), so this never fires for it.
     if (session.sessionId) headers['mcp-session-id'] = session.sessionId
     if (modern) {
-      headers['mcp-method'] = request.method
       headers['mcp-protocol-version'] = HELIO_MCP_MODERN_PROTOCOL_VERSION
     } else if (session.protocolVersion && headers['mcp-protocol-version'] === undefined) {
       headers['mcp-protocol-version'] = session.protocolVersion
     }
+    // Omission must be authoritative: an absent key means Helio chose not to
+    // mirror, never that a caller-supplied value survived the merge above.
+    delete headers['mcp-method']
+    delete headers['mcp-name']
+    Object.assign(headers, buildStandardRequestHeaders(request.method, request.params))
 
     const body: Record<string, unknown> = {
       jsonrpc: request.jsonrpc,

@@ -104,14 +104,12 @@ Maintainer notes:
   clamping — with `policies.tool_revalidation.enabled: false`.
 - **BREAKING: `upstream.headers` may no longer set `Mcp-Method` or
   `Mcp-Name` (#216).** Both join the reserved transport headers Helio
-  owns on the wire for its own internal traffic — the
-  `server/discover` era probe and the conforming `tools/list` requests
-  it sends against a modern upstream. Static `upstream.headers` take
-  precedence over Helio's own headers, so an operator-set value would
-  have silently corrupted that internal traffic and drawn a
-  guaranteed `-32020` from a strict server. A config that sets either
-  now fails validation at startup with the existing reserved-header
-  message.
+  owns on the wire for every upstream request it sends — internal and
+  relayed alike. Static `upstream.headers` take precedence over
+  Helio's own headers, so an operator-set value would have silently
+  corrupted that traffic and drawn a guaranteed `-32020` from a
+  strict server. A config that sets either now fails validation at
+  startup with the existing reserved-header message.
 
 ### Fixed
 
@@ -130,8 +128,22 @@ Maintainer notes:
   upgrade is picked up with no restart. This closes the internal path
   only: traffic relayed from a downstream client still fails against a
   strict modern-only upstream — regardless of which revision the
-  client itself speaks — until the separately tracked header and
+  client itself speaks — until the separately tracked
   version-negotiation work for that path lands.
+- **Upstream forwards of relayed client traffic now carry the spec's
+  standard request headers (#217).** Every Streamable HTTP POST Helio
+  sends upstream carries `Mcp-Method` mirroring the JSON-RPC method,
+  and `tools/call`, `prompts/get`, and `resources/read` requests also
+  carry `Mcp-Name`, sentinel-encoded when the value needs it. Both
+  header values are always derived from the request body Helio
+  actually forwards, never from caller-supplied headers. `Mcp-Name` is
+  omitted above an 8 KB best-effort cap, and `Mcp-Method` is omitted
+  for method strings that cannot travel safely as a header value,
+  rather than send a value that no longer matches the body. This
+  restores truthful header routing for gateways and observability
+  tooling sitting between Helio and the upstream; relays are still
+  legacy-versioned, so a strict modern-only upstream still rejects
+  them until the separately tracked version-negotiation work lands.
 
 ### Security
 
