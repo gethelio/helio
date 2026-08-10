@@ -2,6 +2,7 @@ import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mc
 import { parseUpstreamResponse } from './response.js'
 import { readSseJsonRpcResponse } from './sse-parse.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
+import { buildStandardRequestHeaders } from './standard-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import {
   UpstreamSessionManager,
@@ -117,11 +118,35 @@ export class StreamableHttpForwarder implements McpForwarder {
     session: SendSession,
     internalManaged = false,
   ): Promise<ForwardResult> {
-    // Only Helio's own internal traffic is ever synthesized to the modern
-    // (2026-07-28) wire shape — downstream-driven forward() never sets
-    // internalManaged, so relayed client traffic is untouched here (#217/#219
-    // track header/version handling for that path).
+    // Standard request headers — `mcp-method`, and `mcp-name` on the three
+    // name-bearing methods — are stamped on every outbound POST from send(),
+    // relay and internal alike, derived from the request's own body. The
+    // modern (2026-07-28) version header and `_meta` mirror below stay
+    // internal-modern only: downstream-driven forward() never sets
+    // internalManaged, so relayed client traffic never gets those (#219
+    // tracks relay version negotiation).
     const modern = internalManaged && session.era === 'modern'
+
+    // Compute the exact object that will be assigned to `body['params']`
+    // ONCE, up front, so the standard-headers helper below and the body
+    // assignment further down both read the SAME reference. The modern
+    // branch rewrites params into a brand-new object (spread + injected
+    // `_meta`) rather than forwarding `request.params` verbatim — deriving
+    // the header from `request.params` instead would let an inherited or
+    // non-enumerable `toJSON` on the original (dropped by the spread, since
+    // object spread copies only own-enumerable properties) or a
+    // `_meta`-reading `toJSON` (which only sees `_meta` on the NEW object)
+    // diverge the header from whatever actually gets serialized onto the
+    // wire. In the relay branch `outboundParams` is `request.params`
+    // itself, so behavior there is unchanged.
+    let outboundParams: unknown
+    if (modern) {
+      const params = (request.params ?? {}) as Record<string, unknown>
+      const existingMeta = (params['_meta'] ?? {}) as Record<string, unknown>
+      outboundParams = { ...params, _meta: { ...existingMeta, ...buildInternalMeta() } }
+    } else {
+      outboundParams = request.params
+    }
 
     const headers = mergeUpstreamHeaders(
       {
@@ -135,11 +160,15 @@ export class StreamableHttpForwarder implements McpForwarder {
     // UpstreamSessionManager#modernSession), so this never fires for it.
     if (session.sessionId) headers['mcp-session-id'] = session.sessionId
     if (modern) {
-      headers['mcp-method'] = request.method
       headers['mcp-protocol-version'] = HELIO_MCP_MODERN_PROTOCOL_VERSION
     } else if (session.protocolVersion && headers['mcp-protocol-version'] === undefined) {
       headers['mcp-protocol-version'] = session.protocolVersion
     }
+    // Omission must be authoritative: an absent key means Helio chose not to
+    // mirror, never that a caller-supplied value survived the merge above.
+    delete headers['mcp-method']
+    delete headers['mcp-name']
+    Object.assign(headers, buildStandardRequestHeaders(request.method, outboundParams))
 
     const body: Record<string, unknown> = {
       jsonrpc: request.jsonrpc,
@@ -147,11 +176,9 @@ export class StreamableHttpForwarder implements McpForwarder {
     }
     if (request.id !== undefined) body['id'] = request.id
     if (modern) {
-      const params = (request.params ?? {}) as Record<string, unknown>
-      const existingMeta = (params['_meta'] ?? {}) as Record<string, unknown>
-      body['params'] = { ...params, _meta: { ...existingMeta, ...buildInternalMeta() } }
+      body['params'] = outboundParams
     } else if (request.params !== undefined) {
-      body['params'] = request.params
+      body['params'] = outboundParams
     }
 
     const start = performance.now()

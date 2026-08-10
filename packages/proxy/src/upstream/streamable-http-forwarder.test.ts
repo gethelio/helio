@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { StreamableHttpForwarder } from './streamable-http-forwarder.js'
+import { MCP_NAME_MAX_BYTES } from './standard-headers.js'
 import type { McpRequest } from '../mcp/types.js'
 
 const originalFetch = globalThis.fetch
@@ -347,6 +348,196 @@ describe('StreamableHttpForwarder', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Standard request headers (issue #217)
+  // -------------------------------------------------------------------------
+
+  it('relayed tools/call carries mcp-method and mcp-name mirroring the body', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: { name: 'get_weather', arguments: {} },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('tools/call')
+    expect(seen['mcp-name']).toBe('get_weather')
+  })
+
+  it('relayed prompts/get carries mcp-method and mcp-name mirroring the body', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'prompts/get',
+        params: { name: 'daily_summary' },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('prompts/get')
+    expect(seen['mcp-name']).toBe('daily_summary')
+  })
+
+  it('relayed resources/read carries mcp-method and mcp-name from params.uri', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'resources/read',
+        params: { uri: 'file:///tmp/notes.txt' },
+        transportSessionId: 'S1',
+      }),
+    )
+    expect(seen['mcp-method']).toBe('resources/read')
+    expect(seen['mcp-name']).toBe('file:///tmp/notes.txt')
+  })
+
+  it('relayed tools/list carries mcp-method and no mcp-name', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(req({ method: 'tools/list', transportSessionId: 'S1' }))
+    expect(seen['mcp-method']).toBe('tools/list')
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('a relayed notification carries mcp-method mirroring its method', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0' }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({ id: undefined, method: 'notifications/initialized', transportSessionId: 'S1' }),
+    )
+    expect(seen['mcp-method']).toBe('notifications/initialized')
+  })
+
+  it('omits mcp-method when a caller-injected value cannot survive the guard', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'héllo',
+        transportSessionId: 'S1',
+        headers: { 'mcp-method': 'lie' },
+      }),
+    )
+    expect(seen['mcp-method']).toBeUndefined()
+  })
+
+  it('omits mcp-name when a caller-injected value has no name-bearing method to attach to', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/list',
+        transportSessionId: 'S1',
+        headers: { 'mcp-name': 'lie' },
+      }),
+    )
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('omits mcp-name when a caller-injected value cannot survive the byte cap', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'resources/read',
+        params: { uri: 'x'.repeat(MCP_NAME_MAX_BYTES + 1) },
+        transportSessionId: 'S1',
+        headers: { 'mcp-name': 'small-lie' },
+      }),
+    )
+    expect(seen['mcp-name']).toBeUndefined()
+  })
+
+  it('ignores caller-injected mcp-method/mcp-name in favor of the body-true values', async () => {
+    let seen: Record<string, string> = {}
+    globalThis.fetch = (_u, init) => {
+      seen = (init?.headers as Record<string, string> | undefined) ?? {}
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: { name: 'get_weather', arguments: {} },
+        transportSessionId: 'S1',
+        headers: { 'mcp-method': 'lie', 'mcp-name': 'lie' },
+      }),
+    )
+    expect(seen['mcp-method']).toBe('tools/call')
+    expect(seen['mcp-name']).toBe('get_weather')
+  })
+
+  // -------------------------------------------------------------------------
   // Modern (2026-07-28) internal sends
   // -------------------------------------------------------------------------
 
@@ -396,7 +587,7 @@ describe('StreamableHttpForwarder', () => {
     expect(meta?.['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
   })
 
-  it('leaves legacy internal requests byte-identical to today', async () => {
+  it('stamps standard headers on legacy internal requests, otherwise byte-identical to today', async () => {
     let seenHeaders: Record<string, string> = {}
     let seenBody: { method: string; params?: unknown } | undefined
 
@@ -439,11 +630,11 @@ describe('StreamableHttpForwarder', () => {
 
     expect(seenHeaders['mcp-session-id']).toBe('U-1')
     expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
-    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenHeaders['mcp-method']).toBe('tools/list')
     expect(seenBody?.params).toBeUndefined()
   })
 
-  it('leaves downstream-driven forward() untouched regardless of era', async () => {
+  it('stamps standard headers on downstream-driven forward(), but keeps the version header and _meta mirror internal-modern-only', async () => {
     let seenHeaders: Record<string, string> = {}
     let seenBody: { method: string; params?: unknown } | undefined
 
@@ -483,8 +674,134 @@ describe('StreamableHttpForwarder', () => {
 
     expect(seenHeaders['mcp-session-id']).toBe('S1')
     expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
-    expect(seenHeaders['mcp-method']).toBeUndefined()
+    expect(seenHeaders['mcp-method']).toBe('tools/list')
     expect(seenBody?.params).toBeUndefined()
+  })
+
+  // -------------------------------------------------------------------------
+  // External review round 3, F1: the modern send() path must derive
+  // mcp-name from the EXACT object it serializes onto the wire, not from
+  // `request.params` — the modern branch rewrites params into a new spread
+  // object (with an injected `_meta`), so a `toJSON` on the original params
+  // that is inherited, non-enumerable, or reads `this._meta` can make the
+  // header and the body disagree if the header is derived from the wrong
+  // object. Each case below primes a modern internal session, then sends a
+  // name-bearing `tools/call` and reads the name back out of the ACTUAL
+  // parsed wire body (never a hard-coded literal) to prove agreement.
+  // -------------------------------------------------------------------------
+
+  /** Prime a modern-era forwarder and capture the next internal send's wire. */
+  async function sendModernToolsCall(
+    params: unknown,
+  ): Promise<{ headers: Record<string, string>; body: { params?: Record<string, unknown> } }> {
+    let seenHeaders: Record<string, string> = {}
+    let seenBody: { params?: Record<string, unknown> } | undefined
+
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const parsed = JSON.parse(raw) as { method: string; params?: Record<string, unknown> }
+      const headers = (init?.headers ?? {}) as Record<string, string>
+
+      if (parsed.method === 'server/discover') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'helio-era-probe',
+              result: { supportedVersions: ['2026-07-28'] },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+
+      if (parsed.method === 'tools/call') {
+        seenHeaders = headers
+        seenBody = parsed
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    // Prime the modern era with an unrelated (name-less) internal call first.
+    await fwd.forwardInternal(req({ id: 'prime' }))
+    await fwd.forwardInternal(req({ id: 2, method: 'tools/call', params }))
+
+    if (!seenBody) throw new Error('tools/call was never observed on the wire')
+    return { headers: seenHeaders, body: seenBody }
+  }
+
+  it('agrees header with body when params has an inherited (prototype) toJSON', async () => {
+    // Object spread copies only OWN enumerable properties, so the inherited
+    // toJSON on `proto` never reaches the outbound spread object.
+    const proto = { toJSON: () => ({ name: 'from-proto' }) }
+    const params = Object.create(proto) as Record<string, unknown>
+    params['name'] = 'own'
+
+    const { headers, body } = await sendModernToolsCall(params)
+    const bodyName = body.params?.['name']
+    expect(typeof bodyName).toBe('string')
+    expect(headers['mcp-name']).toBe(bodyName)
+    // Not copied onto the spread object, so it cannot win either side.
+    expect(bodyName).not.toBe('from-proto')
+    // _meta survives on the wire: no toJSON reached the outbound object, so
+    // serialization is the plain spread object, mirror intact.
+    expect(
+      (body.params?.['_meta'] as Record<string, unknown> | undefined)?.[
+        'io.modelcontextprotocol/protocolVersion'
+      ],
+    ).toBe('2026-07-28')
+  })
+
+  it('agrees header with body when params has an own non-enumerable toJSON', async () => {
+    // Object spread copies only ENUMERABLE own properties, so a
+    // non-enumerable toJSON never reaches the outbound spread object either.
+    const params: Record<string, unknown> = { name: 'live' }
+    Object.defineProperty(params, 'toJSON', {
+      value: () => ({ name: 'hidden' }),
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    })
+
+    const { headers, body } = await sendModernToolsCall(params)
+    const bodyName = body.params?.['name']
+    expect(typeof bodyName).toBe('string')
+    expect(headers['mcp-name']).toBe(bodyName)
+    expect(bodyName).not.toBe('hidden')
+    // _meta survives on the wire: no toJSON reached the outbound object.
+    expect(
+      (body.params?.['_meta'] as Record<string, unknown> | undefined)?.[
+        'io.modelcontextprotocol/protocolVersion'
+      ],
+    ).toBe('2026-07-28')
+  })
+
+  it('agrees header with body when params has an own-enumerable toJSON reading this._meta', async () => {
+    // An own-enumerable toJSON IS copied by the spread (functions are values
+    // like any other), so it runs on the outbound object at serialization
+    // time — with `this` bound to that object, `_meta` included. Because
+    // JSON.stringify substitutes a toJSON's return value for the whole
+    // object, the wire `params` becomes exactly that return value (so the
+    // literal `_meta` key is not itself expected on the wire here — the
+    // name value it produces IS the proof `_meta` was present on `this`
+    // at call time, which is what the header must agree with).
+    const params: Record<string, unknown> = {
+      name: 'ignored',
+      toJSON(this: Record<string, unknown>) {
+        return { name: this['_meta'] ? 'with-meta' : 'no-meta' }
+      },
+    }
+
+    const { headers, body } = await sendModernToolsCall(params)
+    const bodyName = body.params?.['name']
+    expect(bodyName).toBe('with-meta')
+    expect(headers['mcp-name']).toBe(bodyName)
   })
 
   it('resetInternalSession() forces a fresh era probe on the next internal request', async () => {

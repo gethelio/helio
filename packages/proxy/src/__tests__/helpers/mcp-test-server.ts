@@ -279,12 +279,20 @@ const MCP_HEADER_MISMATCH_CODE = -32020
 /** `_meta` key a modern client mirrors its negotiated protocol version under. */
 const MODERN_META_PROTOCOL_VERSION_KEY = 'io.modelcontextprotocol/protocolVersion'
 
+/** A single POST the fixture received, captured for wire-level assertions. */
+interface ReceivedRequest {
+  readonly method: string
+  readonly headers: Record<string, string | string[] | undefined>
+}
+
 /** A running modern-only MCP fixture, with a setter for its `tools/list` set. */
 export interface ModernOnlyMcpServer {
   port: number
   close: () => Promise<void>
   /** Replace the tools/list definition set — drift tests mutate a tool this way. */
   setTools: (tools: readonly Record<string, unknown>[]) => void
+  /** Every POST received so far, in arrival order — lets tests assert the raw wire header values a relay actually sent. */
+  receivedRequests: readonly ReceivedRequest[]
 }
 
 /**
@@ -292,28 +300,33 @@ export interface ModernOnlyMcpServer {
  * revision (issues #216/#221 repro): no `initialize`/`notifications/initialized`
  * handshake, and it never mints or echoes `mcp-session-id`.
  *
- * Strictness is SCOPED, not blanket, so the proxy's still-legacy-shaped
- * downstream relays keep working against this fixture:
- *  - `server/discover` unconditionally REQUIRES the modern
- *    `mcp-protocol-version`/`mcp-method` headers and a matching
+ * Strictness is SCOPED, not blanket:
+ *  - `server/discover` unconditionally REQUIRES the full modern conformance
+ *    check: the `mcp-method`/`mcp-name` header↔body agreement (see
+ *    {@link validateMirroredStandardHeaders}), the `mcp-protocol-version`
+ *    header, and a matching
  *    `params._meta['io.modelcontextprotocol/protocolVersion']` mirror.
- *  - Any OTHER request that carries an `mcp-method` header (today, only
- *    Helio's own internal sends do) gets that same full validation, keyed off
- *    the header's own method name — this is what proves Helio's internal path
- *    conforms.
- *  - Requests with no `mcp-method` header — the proxy's downstream-driven
- *    relays, which do not yet stamp modern headers/version (#217/#219) — are
- *    served leniently. This leg is interim: once #217/#219 land, their own
- *    tests tighten relay conformance and this fixture's lenient leg can be
- *    retired.
+ *  - Every OTHER POST — internal or relayed alike — REQUIRES that same
+ *    `mcp-method`/`mcp-name` header↔body agreement, sentinel decode included.
+ *    The header-less lenient leg this fixture used to have is retired: #217
+ *    landed relay stamping, so a total drop of relay stamping must now fail
+ *    loudly instead of falling through unnoticed. The
+ *    `mcp-protocol-version`/`_meta` half of the check, though, is enforced
+ *    ONLY when the request itself claims the 2026-07-28 version — today's
+ *    downstream-driven relays still negotiate (and therefore send) the
+ *    legacy version, since relay version negotiation (#219) has not landed.
+ *    Once #219 lands, this remaining leniency can retire too.
  * Any validation failure answers `400` + JSON-RPC `-32020`.
  *
  * Deliberately a JSON-only responder (no `text/event-stream` framing) — SSE
  * probe/response coverage for the era detector lives in
  * `upstream-session-manager.test.ts`.
  *
- * `initialize` and any other unrecognized method answer `404` + JSON-RPC
- * `-32601`, per the 2026-07-28 removal of the handshake.
+ * Once the standard-headers check passes, `initialize` and any other
+ * unrecognized method answer `404` + JSON-RPC `-32601`, per the
+ * 2026-07-28 removal of the handshake. A header-less `initialize` never
+ * gets that far — it fails the standard-headers check first, with `400`
+ * + JSON-RPC `-32020`.
  */
 export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServer> {
   let tools: Record<string, unknown>[] = [
@@ -322,7 +335,13 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
       description: 'Report the current server status',
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
+    {
+      name: 'Hello, 世界',
+      description: 'Report status with a non-ASCII display name',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
   ]
+  const receivedRequests: ReceivedRequest[] = []
 
   const httpServer = createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/mcp') {
@@ -349,6 +368,10 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
       const body = parsed as Record<string, unknown>
       const id = (body['id'] ?? null) as string | number | null
       const method = typeof body['method'] === 'string' ? body['method'] : undefined
+      receivedRequests.push({
+        method: method ?? '<non-string-method>',
+        headers: { ...req.headers },
+      })
 
       const respond = (status: number, payload: Record<string, unknown>): void => {
         res.writeHead(status, { 'content-type': 'application/json' })
@@ -363,7 +386,7 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
       }
 
       if (method === 'server/discover') {
-        const mismatch = validateModernRequest(req.headers, body, 'server/discover')
+        const mismatch = validateModernRequest(req.headers, body)
         if (mismatch) {
           respondModernMismatch(mismatch)
           return
@@ -382,12 +405,18 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
         return
       }
 
-      // Scoped strictness (see docstring): only a request that itself carries
-      // an `mcp-method` header — today, only Helio's internal sends — is held
-      // to the full modern conformance check. Header-less relays fall through
-      // untouched.
-      if (typeof req.headers['mcp-method'] === 'string') {
-        const mismatch = validateModernRequest(req.headers, body, method ?? '')
+      // Scoped strictness (see docstring): every other POST — internal or
+      // relayed — is held to the standard-headers agreement unconditionally
+      // (#217 retired the header-less lenient leg). The version/`_meta` half
+      // stays checked only for requests that themselves claim the 2026-07-28
+      // version, since relay version negotiation (#219) has not landed.
+      const standardHeadersMismatch = validateMirroredStandardHeaders(req.headers, body)
+      if (standardHeadersMismatch) {
+        respondModernMismatch(standardHeadersMismatch)
+        return
+      }
+      if (req.headers['mcp-protocol-version'] === MODERN_ONLY_PROTOCOL_VERSION) {
+        const mismatch = validateModernRequest(req.headers, body)
         if (mismatch) {
           respondModernMismatch(mismatch)
           return
@@ -436,22 +465,93 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
         setTools: (next) => {
           tools = next.map((tool) => ({ ...tool }))
         },
+        receivedRequests,
       })
     })
   })
 }
 
+/** Matches the spec's `Mcp-Name` sentinel wrapper: `=?base64?<payload>?=`. */
+const MCP_NAME_SENTINEL_PATTERN = /^=\?base64\?([A-Za-z0-9+/]*={0,2})\?=$/
+
 /**
- * Full modern-conformance check for one request: the `mcp-protocol-version`
- * header, the `params._meta` protocol version mirror, and (for the
- * `mcp-method`-bearing branch) the header matching the JSON-RPC body method.
- * Returns a failure reason, or undefined when everything matches.
+ * Decode a `Mcp-Name` header value if it is sentinel-wrapped (base64 over
+ * UTF-8), otherwise return it unchanged. Implemented independently of
+ * `packages/proxy/src/upstream/standard-headers.ts` on purpose — this
+ * fixture is the other side of the wire agreement, so it must not validate
+ * the encoder against itself.
+ */
+function decodeMcpNameSentinel(value: string): string {
+  const match = MCP_NAME_SENTINEL_PATTERN.exec(value)
+  return match ? Buffer.from(match[1] ?? '', 'base64').toString('utf8') : value
+}
+
+/** The name-bearing param field the spec's `Mcp-Name` header mirrors, per method. */
+const NAME_BEARING_FIELD = new Map<string, 'name' | 'uri'>([
+  ['tools/call', 'name'],
+  ['prompts/get', 'name'],
+  ['resources/read', 'uri'],
+])
+
+/**
+ * Verify the standard-headers wire agreement (issue #217) for ANY POST,
+ * internal or relayed alike: `mcp-method` must be PRESENT and equal the
+ * body's `method` — absence is itself a failure, not a lenient pass-through,
+ * so a total drop of relay stamping fails loudly rather than falling through
+ * unnoticed. `mcp-name` must be PRESENT and (after sentinel-decoding, when
+ * wrapped) byte-for-byte equal the body's name-bearing field on
+ * `tools/call`/`prompts/get`/`resources/read`; on any other method a
+ * PRESENT `mcp-name` is itself a failure ("unexpected mcp-name"), and its
+ * absence is correct. Returns a failure reason, or undefined when everything
+ * agrees.
+ */
+function validateMirroredStandardHeaders(
+  headers: IncomingHttpHeaders,
+  body: Record<string, unknown>,
+): string | undefined {
+  const bodyMethod = typeof body['method'] === 'string' ? body['method'] : undefined
+  const headerMethod = headers['mcp-method']
+  if (typeof headerMethod !== 'string' || headerMethod !== bodyMethod) {
+    return `missing or mismatched mcp-method header (expected ${String(bodyMethod)}, got ${String(headerMethod)})`
+  }
+
+  const nameField = bodyMethod ? NAME_BEARING_FIELD.get(bodyMethod) : undefined
+  const params = body['params']
+  const rawField =
+    nameField && typeof params === 'object' && params !== null
+      ? (params as Record<string, unknown>)[nameField]
+      : undefined
+  const expectedName = typeof rawField === 'string' ? rawField : undefined
+
+  const headerName = headers['mcp-name']
+  if (expectedName === undefined) {
+    return headerName === undefined
+      ? undefined
+      : `unexpected mcp-name header (${String(headerName)}) for a non-name-bearing request`
+  }
+  if (typeof headerName !== 'string') {
+    return `missing mcp-name header (expected ${expectedName})`
+  }
+  const decoded = decodeMcpNameSentinel(headerName)
+  if (decoded !== expectedName) {
+    return `mismatched mcp-name header (expected ${expectedName}, got ${decoded})`
+  }
+  return undefined
+}
+
+/**
+ * Full modern-conformance check for one request: the standard-headers
+ * agreement (delegated to {@link validateMirroredStandardHeaders}), the
+ * `mcp-protocol-version` header, and the `params._meta` protocol version
+ * mirror. Returns a failure reason, or undefined when everything matches.
  */
 function validateModernRequest(
   headers: IncomingHttpHeaders,
   body: Record<string, unknown>,
-  expectedMethod: string,
 ): string | undefined {
+  const standardHeadersMismatch = validateMirroredStandardHeaders(headers, body)
+  if (standardHeadersMismatch) return standardHeadersMismatch
+
   if (headers['mcp-protocol-version'] !== MODERN_ONLY_PROTOCOL_VERSION) {
     return `missing or mismatched mcp-protocol-version header (expected ${MODERN_ONLY_PROTOCOL_VERSION})`
   }
@@ -466,9 +566,6 @@ function validateModernRequest(
       : undefined
   if (metaProtocolVersion !== MODERN_ONLY_PROTOCOL_VERSION) {
     return `missing or mismatched params._meta["${MODERN_META_PROTOCOL_VERSION_KEY}"] mirror`
-  }
-  if (headers['mcp-method'] !== expectedMethod) {
-    return `mcp-method header (${String(headers['mcp-method'])}) does not match request method (${expectedMethod})`
   }
   return undefined
 }

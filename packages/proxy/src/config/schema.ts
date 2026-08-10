@@ -48,8 +48,9 @@ const RESERVED_TRANSPORT_HEADERS = new Set([
   'content-type',
   'content-length',
   'host',
-  // Modern (2026-07-28) transport headers the internal forwarders own on the
-  // wire for proxy-initiated requests (era probe, revalidation) — see
+  // Modern (2026-07-28) transport headers Helio owns on the wire for every
+  // Streamable HTTP POST it sends upstream — relayed client traffic and
+  // proxy-initiated requests (era probe, revalidation) alike — see
   // upstream-session-manager.ts and streamable-http-forwarder.ts.
   'mcp-method',
   'mcp-name',
