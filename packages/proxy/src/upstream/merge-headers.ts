@@ -1,5 +1,5 @@
 /**
- * Merge the three header sources that feed an upstream request, normalising
+ * Merge the three header sources that feed an upstream request, normalizing
  * every name to lower-case so case-only duplicates collapse to one header.
  *
  * Precedence (later wins): base defaults → caller-forwarded → static config.

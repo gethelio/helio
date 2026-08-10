@@ -21,7 +21,7 @@ describe('describeUnreachableUpstream', () => {
   })
 
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH', 'ETIMEDOUT'])(
-    'recognises %s as unreachable',
+    'recognizes %s as unreachable',
     (code) => {
       expect(describeUnreachableUpstream(fetchFailed(code), URL)).toBeInstanceOf(Error)
     },
