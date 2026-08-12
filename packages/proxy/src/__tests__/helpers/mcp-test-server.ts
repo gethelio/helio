@@ -300,32 +300,25 @@ export interface ModernOnlyMcpServer {
  * revision (issues #216/#221 repro): no `initialize`/`notifications/initialized`
  * handshake, and it never mints or echoes `mcp-session-id`.
  *
- * Strictness is SCOPED, not blanket:
- *  - `server/discover` unconditionally REQUIRES the full modern conformance
- *    check: the `mcp-method`/`mcp-name` header↔body agreement (see
- *    {@link validateMirroredStandardHeaders}), the `mcp-protocol-version`
- *    header, and a matching
- *    `params._meta['io.modelcontextprotocol/protocolVersion']` mirror.
- *  - Every OTHER POST — internal or relayed alike — REQUIRES that same
- *    `mcp-method`/`mcp-name` header↔body agreement, sentinel decode included.
- *    The header-less lenient leg this fixture used to have is retired: #217
- *    landed relay stamping, so a total drop of relay stamping must now fail
- *    loudly instead of falling through unnoticed. The
- *    `mcp-protocol-version`/`_meta` half of the check, though, is enforced
- *    ONLY when the request itself claims the 2026-07-28 version — today's
- *    downstream-driven relays still negotiate (and therefore send) the
- *    legacy version, since relay version negotiation (#219) has not landed.
- *    Once #219 lands, this remaining leniency can retire too.
+ * EVERY POST — probe, internal, relayed — is held to the full modern
+ * conformance check unconditionally: the `mcp-method`/`mcp-name` header↔body
+ * agreement (see {@link validateMirroredStandardHeaders}, sentinel decode
+ * included), the `mcp-protocol-version` header, and a matching
+ * `params._meta['io.modelcontextprotocol/protocolVersion']` mirror. The old
+ * claims-2026-07-28 leniency for legacy-versioned relays is retired: relay
+ * version negotiation (#219) made the relay leg era-aware, so everything
+ * Helio sends a modern upstream now carries both halves, and a stamping
+ * drop on any path must fail loudly instead of falling through unnoticed.
  * Any validation failure answers `400` + JSON-RPC `-32020`.
  *
  * Deliberately a JSON-only responder (no `text/event-stream` framing) — SSE
  * probe/response coverage for the era detector lives in
  * `upstream-session-manager.test.ts`.
  *
- * Once the standard-headers check passes, `initialize` and any other
+ * Once the conformance check passes, `initialize` and any other
  * unrecognized method answer `404` + JSON-RPC `-32601`, per the
  * 2026-07-28 removal of the handshake. A header-less `initialize` never
- * gets that far — it fails the standard-headers check first, with `400`
+ * gets that far — it fails the conformance check first, with `400`
  * + JSON-RPC `-32020`.
  */
 export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServer> {
@@ -398,6 +391,9 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
             resultType: 'complete',
             supportedVersions: [MODERN_ONLY_PROTOCOL_VERSION],
             capabilities: { tools: {} },
+            // Optional DiscoverResult field (2026-07-28 schema): exercises
+            // the probe capture that the relay initialize synthesis reuses.
+            instructions: 'Call get_status before anything else.',
             ttlMs: 3_600_000,
             cacheScope: 'public',
           },
@@ -405,22 +401,14 @@ export async function startModernOnlyHttpMcpServer(): Promise<ModernOnlyMcpServe
         return
       }
 
-      // Scoped strictness (see docstring): every other POST — internal or
-      // relayed — is held to the standard-headers agreement unconditionally
-      // (#217 retired the header-less lenient leg). The version/`_meta` half
-      // stays checked only for requests that themselves claim the 2026-07-28
-      // version, since relay version negotiation (#219) has not landed.
-      const standardHeadersMismatch = validateMirroredStandardHeaders(req.headers, body)
-      if (standardHeadersMismatch) {
-        respondModernMismatch(standardHeadersMismatch)
+      // Every POST — internal or relayed — is held to the FULL modern
+      // conformance check unconditionally (see docstring): #217 retired the
+      // header-less lenient leg, and #219's era-aware relay leg retired the
+      // remaining version/`_meta` leniency for legacy-versioned relays.
+      const mismatch = validateModernRequest(req.headers, body)
+      if (mismatch) {
+        respondModernMismatch(mismatch)
         return
-      }
-      if (req.headers['mcp-protocol-version'] === MODERN_ONLY_PROTOCOL_VERSION) {
-        const mismatch = validateModernRequest(req.headers, body)
-        if (mismatch) {
-          respondModernMismatch(mismatch)
-          return
-        }
       }
 
       if (method === 'tools/list') {

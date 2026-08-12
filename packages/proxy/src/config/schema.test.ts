@@ -461,6 +461,94 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Upstream protocol version pin (issue #219)
+  // -------------------------------------------------------------------------
+
+  describe('upstream.protocol_version (issue #219)', () => {
+    it('defaults to auto when omitted', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.upstream.protocol_version).toBe('auto')
+    })
+
+    it.each(['auto', '2025-06-18', '2026-07-28'])('accepts "%s" on streamable-http', (version) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: { url: 'http://localhost:8080', protocol_version: version },
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.upstream.protocol_version).toBe(version)
+    })
+
+    it.each(['2024-11-05', 'latest', 'modern', ''])('rejects unknown value "%s"', (version) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: { url: 'http://localhost:8080', protocol_version: version },
+        }),
+      )
+      expect(result.success).toBe(false)
+    })
+
+    it('rejects 2026-07-28 with transport sse', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            transport: 'sse',
+            protocol_version: '2026-07-28',
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const issue = result.error.issues.find((candidate) =>
+        candidate.path.join('.').includes('protocol_version'),
+      )
+      expect(issue).toBeDefined()
+    })
+
+    it('rejects 2026-07-28 with transport stdio, pointing at #256', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            transport: 'stdio',
+            command: 'node',
+            protocol_version: '2026-07-28',
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const issue = result.error.issues.find((candidate) =>
+        candidate.path.join('.').includes('protocol_version'),
+      )
+      expect(issue).toBeDefined()
+      expect(issue?.message).toContain('#256')
+    })
+
+    it.each([
+      { transport: 'streamable-http' },
+      { transport: 'sse' },
+      { transport: 'stdio', command: 'node' },
+    ])('accepts 2025-06-18 with transport $transport', (upstreamExtras) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'http://localhost:8080',
+            protocol_version: '2025-06-18',
+            ...upstreamExtras,
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Port validation
   // -------------------------------------------------------------------------
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { StreamableHttpForwarder } from './streamable-http-forwarder.js'
 import { MCP_NAME_MAX_BYTES } from './standard-headers.js'
+import { ERA_PROBE_BACKOFF_MS } from './upstream-session-manager.js'
 import type { McpRequest } from '../mcp/types.js'
 
 const originalFetch = globalThis.fetch
@@ -19,6 +20,18 @@ function req(overrides: Partial<McpRequest> = {}): McpRequest {
   return { jsonrpc: '2.0', id: 1, method: 'tools/list', ...overrides }
 }
 
+/**
+ * A forwarder pinned to the legacy era. These tests' subject is legacy-leg
+ * relay behavior; the pin keeps their generic fetch mocks from having to
+ * answer the auto-mode server/discover probe, whose accidental legacy
+ * classification would prove nothing. Era interplay is exercised explicitly
+ * in the issue #219 describes below, and legacy parity under a PROBE-CACHED
+ * era (not just a pin) is proven in the legacy-parity describe.
+ */
+function legacyPinnedForwarder(): StreamableHttpForwarder {
+  return new StreamableHttpForwarder({ url: 'http://up/mcp', protocolVersion: '2025-06-18' })
+}
+
 // ---------------------------------------------------------------------------
 // Base tests (from spec)
 // ---------------------------------------------------------------------------
@@ -31,7 +44,7 @@ describe('StreamableHttpForwarder', () => {
           headers: { 'content-type': 'application/json' },
         }),
       )
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect((response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
@@ -43,7 +56,7 @@ describe('StreamableHttpForwarder', () => {
           headers: { 'content-type': 'text/event-stream' },
         }),
       )
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect((response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
@@ -58,7 +71,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(req({ transportSessionId: 'S1' }))
     expect(seen['mcp-protocol-version']).toBeDefined()
     expect(seen['mcp-session-id']).toBe('S1')
@@ -74,7 +87,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         transportSessionId: 'S1',
@@ -97,7 +110,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
 
     await fwd.forward(req({ session: { id: 'run-a', source: 'header' } }))
     expect(seen['mcp-session-id']).toBeUndefined()
@@ -113,7 +126,7 @@ describe('StreamableHttpForwarder', () => {
           headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-new' },
         }),
       )
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     const { response } = await fwd.forward(
       req({ method: 'initialize', transportSessionId: undefined }),
     )
@@ -134,7 +147,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(req({ method: 'initialize', transportSessionId: undefined }))
     expect(seen['mcp-protocol-version']).toBeUndefined()
     expect(seen['mcp-session-id']).toBeUndefined()
@@ -156,7 +169,7 @@ describe('StreamableHttpForwarder', () => {
           { status: 404, headers: { 'content-type': 'application/json' } },
         ),
       )
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
     expect(response.status).toBe(404)
   })
@@ -310,7 +323,7 @@ describe('StreamableHttpForwarder', () => {
           { headers: { 'content-type': 'text/event-stream' } },
         ),
       )
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     const { response } = await fwd.forward(
       req({ id: undefined, method: 'notifications/progress', transportSessionId: 'S1' }),
     )
@@ -334,6 +347,7 @@ describe('StreamableHttpForwarder', () => {
     const fwd = new StreamableHttpForwarder({
       url: 'http://up/mcp',
       headers: { authorization: 'Bearer cfg' },
+      protocolVersion: '2025-06-18',
     })
     await fwd.forward(
       req({
@@ -361,7 +375,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'tools/call',
@@ -383,7 +397,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'prompts/get',
@@ -405,7 +419,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'resources/read',
@@ -427,7 +441,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(req({ method: 'tools/list', transportSessionId: 'S1' }))
     expect(seen['mcp-method']).toBe('tools/list')
     expect(seen['mcp-name']).toBeUndefined()
@@ -443,7 +457,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({ id: undefined, method: 'notifications/initialized', transportSessionId: 'S1' }),
     )
@@ -460,7 +474,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'héllo',
@@ -481,7 +495,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'tools/list',
@@ -502,7 +516,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'resources/read',
@@ -524,7 +538,7 @@ describe('StreamableHttpForwarder', () => {
         }),
       )
     }
-    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+    const fwd = legacyPinnedForwarder()
     await fwd.forward(
       req({
         method: 'tools/call',
@@ -634,16 +648,21 @@ describe('StreamableHttpForwarder', () => {
     expect(seenBody?.params).toBeUndefined()
   })
 
-  it('stamps standard headers on downstream-driven forward(), but keeps the version header and _meta mirror internal-modern-only', async () => {
+  it('relays with modern semantics under a modern era cached by internal traffic', async () => {
+    // Before issue #219 relays stayed legacy-versioned no matter the era;
+    // now a cached modern era makes the relay leg modern too: version
+    // header stamped, _meta injected, and no wire session id sent upstream.
     let seenHeaders: Record<string, string> = {}
-    let seenBody: { method: string; params?: unknown } | undefined
+    let seenBody: { method: string; params?: Record<string, unknown> } | undefined
+    let probeCount = 0
 
     globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const raw = typeof init?.body === 'string' ? init.body : '{}'
-      const body = JSON.parse(raw) as { method: string; params?: unknown }
+      const body = JSON.parse(raw) as { method: string; params?: Record<string, unknown> }
       const headers = (init?.headers ?? {}) as Record<string, string>
 
       if (body.method === 'server/discover') {
+        probeCount += 1
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -672,10 +691,12 @@ describe('StreamableHttpForwarder', () => {
 
     await fwd.forward(req({ transportSessionId: 'S1' }))
 
-    expect(seenHeaders['mcp-session-id']).toBe('S1')
-    expect(seenHeaders['mcp-protocol-version']).toBe('2025-06-18')
+    expect(probeCount).toBe(1) // the relay reused the cached era
+    expect(seenHeaders['mcp-session-id']).toBeUndefined()
+    expect(seenHeaders['mcp-protocol-version']).toBe('2026-07-28')
     expect(seenHeaders['mcp-method']).toBe('tools/list')
-    expect(seenBody?.params).toBeUndefined()
+    const meta = seenBody?.params?.['_meta'] as Record<string, unknown> | undefined
+    expect(meta?.['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
   })
 
   // -------------------------------------------------------------------------
@@ -845,4 +866,631 @@ describe('StreamableHttpForwarder', () => {
     await fwd.forwardInternal(req())
     expect(discoverCount).toBe(2)
   })
+})
+
+// ---------------------------------------------------------------------------
+// Era-aware relay leg (issue #219)
+// ---------------------------------------------------------------------------
+
+/** One upstream POST the dispatching stub observed. */
+interface RelayCall {
+  readonly method: string
+  readonly headers: Record<string, string>
+  readonly body: Record<string, unknown>
+}
+
+type RelayHandler = (
+  body: Record<string, unknown>,
+  headers: Record<string, string>,
+) => Response | Promise<Response>
+
+/**
+ * Stub `fetch` with a JSON-RPC method dispatcher, recording every call.
+ * Methods without a handler answer `202`-empty.
+ */
+function stubRelayUpstream(handlers: Record<string, RelayHandler>): RelayCall[] {
+  const calls: RelayCall[] = []
+  globalThis.fetch = (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const raw = typeof init?.body === 'string' ? init.body : '{}'
+    const body = JSON.parse(raw) as Record<string, unknown>
+    const headers = { ...((init?.headers ?? {}) as Record<string, string>) }
+    const method = body['method'] as string
+    calls.push({ method, headers, body })
+    const handler = handlers[method]
+    try {
+      return Promise.resolve(handler ? handler(body, headers) : new Response(null, { status: 202 }))
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+  }
+  return calls
+}
+
+function jsonEnvelope(
+  payload: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  })
+}
+
+/** A modern server/discover answer, optionally carrying capture fields. */
+function modernDiscover(extra: Record<string, unknown> = {}): RelayHandler {
+  return () =>
+    jsonEnvelope({
+      jsonrpc: '2.0',
+      id: 'helio-era-probe',
+      result: {
+        resultType: 'complete',
+        supportedVersions: ['2026-07-28'],
+        capabilities: {},
+        ...extra,
+      },
+    })
+}
+
+function okResult(id: unknown = 1): RelayHandler {
+  return () => jsonEnvelope({ jsonrpc: '2.0', id, result: {} })
+}
+
+function callsOf(calls: readonly RelayCall[], method: string): RelayCall[] {
+  return calls.filter((call) => call.method === method)
+}
+
+describe('StreamableHttpForwarder era-aware relay leg (issue #219)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stamps 2026-07-28 and injects a full _meta mirror on a modern relay with no client _meta', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/call': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: { name: 'get_weather', arguments: {} },
+        transportSessionId: 'S1',
+      }),
+    )
+
+    const relay = callsOf(calls, 'tools/call')[0]
+    expect(relay?.headers['mcp-protocol-version']).toBe('2026-07-28')
+    expect(relay?.headers['mcp-method']).toBe('tools/call')
+    expect(relay?.headers['mcp-name']).toBe('get_weather')
+    const params = relay?.body['params'] as Record<string, unknown>
+    const meta = params['_meta'] as Record<string, unknown>
+    expect(meta['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
+    expect(meta['io.modelcontextprotocol/clientCapabilities']).toEqual({})
+    expect(meta['io.modelcontextprotocol/clientInfo']).toEqual({
+      name: 'helio-proxy',
+      version: '0',
+    })
+    expect(params['name']).toBe('get_weather')
+  })
+
+  it("passes a modern client's clientInfo/clientCapabilities through and overrides only protocolVersion", async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/call': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: {
+          name: 'get_weather',
+          arguments: {},
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '2099-01-01',
+            'io.modelcontextprotocol/clientCapabilities': { elicitation: {} },
+            'io.modelcontextprotocol/clientInfo': { name: 'real-client', version: '3.2' },
+          },
+        },
+      }),
+    )
+
+    const meta = (callsOf(calls, 'tools/call')[0]?.body['params'] as Record<string, unknown>)[
+      '_meta'
+    ] as Record<string, unknown>
+    expect(meta['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
+    expect(meta['io.modelcontextprotocol/clientCapabilities']).toEqual({ elicitation: {} })
+    expect(meta['io.modelcontextprotocol/clientInfo']).toEqual({
+      name: 'real-client',
+      version: '3.2',
+    })
+  })
+
+  it('fills only the missing keys on a partial client _meta and keeps custom keys', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/call': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(
+      req({
+        method: 'tools/call',
+        params: {
+          name: 'get_weather',
+          arguments: {},
+          _meta: {
+            'io.modelcontextprotocol/clientInfo': { name: 'real-client', version: '3.2' },
+            'example.com/trace': 'T-1',
+          },
+        },
+      }),
+    )
+
+    const meta = (callsOf(calls, 'tools/call')[0]?.body['params'] as Record<string, unknown>)[
+      '_meta'
+    ] as Record<string, unknown>
+    expect(meta['io.modelcontextprotocol/protocolVersion']).toBe('2026-07-28')
+    expect(meta['io.modelcontextprotocol/clientCapabilities']).toEqual({})
+    expect(meta['io.modelcontextprotocol/clientInfo']).toEqual({
+      name: 'real-client',
+      version: '3.2',
+    })
+    expect(meta['example.com/trace']).toBe('T-1')
+  })
+
+  it('derives mcp-name from the exact merged outbound object (wire truth)', async () => {
+    // An own-enumerable toJSON survives the merge spread and runs on the
+    // OUTBOUND object at serialization time, _meta included; the header must
+    // agree with what that toJSON actually put on the wire.
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/call': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const params: Record<string, unknown> = {
+      name: 'ignored',
+      toJSON(this: Record<string, unknown>) {
+        return { name: this['_meta'] ? 'with-meta' : 'no-meta' }
+      },
+    }
+    await fwd.forward(req({ method: 'tools/call', params }))
+
+    const relay = callsOf(calls, 'tools/call')[0]
+    const bodyName = (relay?.body['params'] as Record<string, unknown>)['name']
+    expect(bodyName).toBe('with-meta')
+    expect(relay?.headers['mcp-name']).toBe(bodyName)
+  })
+
+  it.each([
+    ['array', [1, 2, 3]],
+    ['primitive', 42],
+  ])('refuses %s params proxy-side on the modern leg without fetching', async (_kind, params) => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await expect(fwd.forward(req({ method: 'tools/call', params }))).rejects.toThrow(
+      /^helio refused to forward: /,
+    )
+    expect(callsOf(calls, 'tools/call')).toHaveLength(0)
+  })
+
+  it.each([
+    ['array', [1, 2, 3]],
+    ['primitive', 42],
+  ])('forwards %s params verbatim on the legacy leg', async (_kind, params) => {
+    let seenParams: unknown
+    stubRelayUpstream({
+      'tools/call': (body) => {
+        seenParams = body['params']
+        return jsonEnvelope({ jsonrpc: '2.0', id: 1, result: {} })
+      },
+    })
+    const fwd = legacyPinnedForwarder()
+
+    await fwd.forward(req({ method: 'tools/call', params }))
+
+    expect(seenParams).toEqual(params)
+  })
+
+  it('synthesizes the initialize result from the captured DiscoverResult and never forwards it', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover({
+        capabilities: { tools: {}, prompts: {} },
+        instructions: 'Use the search tool before the fetch tool.',
+      }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(
+      req({ method: 'initialize', id: 7, transportSessionId: undefined }),
+    )
+
+    expect(callsOf(calls, 'initialize')).toHaveLength(0) // upstream never sees it
+    expect(response.status).toBe(200)
+    expect(response.headers['mcp-session-id']).toBeUndefined()
+    expect(response.body).toEqual({
+      jsonrpc: '2.0',
+      id: 7,
+      result: {
+        protocolVersion: '2025-06-18',
+        capabilities: { tools: {}, prompts: {} },
+        serverInfo: { name: 'helio-proxy', version: '0' },
+        instructions: 'Use the search tool before the fetch tool.',
+      },
+    })
+  })
+
+  it('falls back to { tools: {} } and no instructions when nothing was captured (modern pin)', async () => {
+    const calls = stubRelayUpstream({})
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp', protocolVersion: '2026-07-28' })
+
+    const { response } = await fwd.forward(req({ method: 'initialize', id: 1 }))
+
+    expect(calls).toHaveLength(0) // pin: no probe, and initialize never forwarded
+    const result = (response.body as { result: Record<string, unknown> }).result
+    expect(result['capabilities']).toEqual({ tools: {} })
+    expect(result['protocolVersion']).toBe('2025-06-18')
+    expect('instructions' in result).toBe(false)
+  })
+
+  it('swallows notifications/initialized on the modern leg with the minimal success envelope', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(
+      req({ id: undefined, method: 'notifications/initialized', transportSessionId: 'S1' }),
+    )
+
+    expect(callsOf(calls, 'notifications/initialized')).toHaveLength(0)
+    expect(response.body).toEqual({ jsonrpc: '2.0' })
+  })
+
+  it('relays other notifications on the modern leg', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'notifications/progress': () => new Response(null, { status: 202 }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(req({ id: undefined, method: 'notifications/progress', params: {} }))
+
+    expect(callsOf(calls, 'notifications/progress')).toHaveLength(1)
+  })
+
+  it('never sends the wire Mcp-Session-Id upstream on a modern relay, however it arrived', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/list': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(
+      req({ transportSessionId: 'S1', headers: { 'mcp-session-id': 'S1-injected' } }),
+    )
+
+    const relay = callsOf(calls, 'tools/list')[0]
+    expect(relay?.headers['mcp-session-id']).toBeUndefined()
+  })
+
+  it('strips the response mcp-session-id on the modern leg (JSON branch)', async () => {
+    stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/list': () =>
+        jsonEnvelope({ jsonrpc: '2.0', id: 1, result: {} }, 200, { 'mcp-session-id': 'U-evil' }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
+
+    expect(response.headers['mcp-session-id']).toBeUndefined()
+    expect(response.headers['content-type']).toContain('application/json')
+  })
+
+  it('strips the response mcp-session-id on the modern leg (SSE branch)', async () => {
+    stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/list': () =>
+        new Response('event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream', 'mcp-session-id': 'U-evil' },
+        }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
+
+    expect(response.headers['mcp-session-id']).toBeUndefined()
+    expect(response.headers['content-type']).toContain('text/event-stream')
+  })
+
+  it('strips the response mcp-session-id on the modern leg (SSE notification sub-branch)', async () => {
+    // The id-less notification path copies all upstream headers verbatim
+    // and returns before the id-matched SSE read — the strip must cover it
+    // too, or a non-conformant modern upstream's session echo would leak
+    // through the route allowlist on relayed notifications.
+    stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'notifications/progress': () =>
+        new Response('event: message\ndata: {"jsonrpc":"2.0","method":"notifications/other"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream', 'mcp-session-id': 'U-evil' },
+        }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(
+      req({ id: undefined, method: 'notifications/progress', params: {} }),
+    )
+
+    expect(response.headers['mcp-session-id']).toBeUndefined()
+    expect(response.headers['content-type']).toContain('text/event-stream')
+    expect(response.body).toEqual({ jsonrpc: '2.0' })
+  })
+
+  it('heals a misclassified-legacy era via a relayed initialize 404, re-probing only after the window (issue #219)', async () => {
+    vi.useFakeTimers()
+    let probes = 0
+    const calls = stubRelayUpstream({
+      'server/discover': (body, headers) => {
+        probes += 1
+        // A transient non-JSON 200 misclassifies the modern-only upstream
+        // as legacy; every later probe answers the truth.
+        if (probes === 1) {
+          return new Response('warming up', {
+            status: 200,
+            headers: { 'content-type': 'text/plain' },
+          })
+        }
+        return modernDiscover()(body, headers)
+      },
+      // The modern-only upstream answers the retired handshake with 404.
+      initialize: () => new Response(null, { status: 404 }),
+      'tools/list': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    // Probe misclassifies legacy; the relayed initialize is forwarded
+    // verbatim and 404s. The failed response still flows to the client.
+    const first = await fwd.forward(req({ method: 'initialize', id: 1 }))
+    expect(first.response.status).toBe(404)
+    expect(callsOf(calls, 'initialize')).toHaveLength(1)
+
+    // The 404 falsified the legacy era: cleared + backoff armed. Relays
+    // inside the window presume legacy WITHOUT probing.
+    await fwd.forward(req({ method: 'tools/list', transportSessionId: 'S1' }))
+    expect(probes).toBe(1)
+
+    // The FIRST relay after the window re-probes and goes modern — all
+    // without any internal/establish() traffic.
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+    await fwd.forward(req({ method: 'tools/list', transportSessionId: 'S1' }))
+    expect(probes).toBe(2)
+    const healed = callsOf(calls, 'tools/list')[1]
+    expect(healed?.headers['mcp-protocol-version']).toBe('2026-07-28')
+    expect(
+      ((healed?.body['params'] as Record<string, unknown>)['_meta'] as Record<string, unknown>)[
+        'io.modelcontextprotocol/protocolVersion'
+      ],
+    ).toBe('2026-07-28')
+  })
+
+  it('heals a misclassified-legacy era via a modern-only error code on any relayed method (issue #219)', async () => {
+    vi.useFakeTimers()
+    let probes = 0
+    let toolCalls = 0
+    const calls = stubRelayUpstream({
+      'server/discover': (body, headers) => {
+        probes += 1
+        if (probes === 1) {
+          return new Response('warming up', {
+            status: 200,
+            headers: { 'content-type': 'text/plain' },
+          })
+        }
+        return modernDiscover()(body, headers)
+      },
+      'tools/call': () => {
+        toolCalls += 1
+        if (toolCalls === 1) {
+          return jsonEnvelope({
+            jsonrpc: '2.0',
+            id: 1,
+            error: {
+              code: -32020,
+              message: 'HeaderMismatch: missing MCP-Protocol-Version 2026-07-28',
+            },
+          })
+        }
+        return jsonEnvelope({ jsonrpc: '2.0', id: 1, result: {} })
+      },
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    // Legacy-presumed relay rejected with a modern-only code: the error
+    // still flows to the client, the era clears, the backoff arms.
+    const first = await fwd.forward(
+      req({ method: 'tools/call', params: { name: 't', arguments: {} } }),
+    )
+    expect((first.response.body as { error?: { code: number } }).error?.code).toBe(-32020)
+
+    // Inside the window: legacy presumed, no probe.
+    await fwd.forward(req({ method: 'tools/list' }))
+    expect(probes).toBe(1)
+
+    // After the window: re-probe, modern, and the same call now conforms.
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+    await fwd.forward(req({ method: 'tools/call', params: { name: 't', arguments: {} } }))
+    expect(probes).toBe(2)
+    expect(callsOf(calls, 'tools/call')[1]?.headers['mcp-protocol-version']).toBe('2026-07-28')
+  })
+
+  it('refuses a non-header-safe method proxy-side on the modern leg without fetching', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await expect(fwd.forward(req({ method: 'héllo' }))).rejects.toThrow(
+      /^helio refused to forward: .*Mcp-Method/,
+    )
+    expect(calls.filter((call) => call.method !== 'server/discover')).toHaveLength(0)
+  })
+
+  it('refuses an over-cap name proxy-side on the modern leg without fetching', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await expect(
+      fwd.forward(
+        req({ method: 'resources/read', params: { uri: 'x'.repeat(MCP_NAME_MAX_BYTES + 1) } }),
+      ),
+    ).rejects.toThrow(/^helio refused to forward: .*Mcp-Name/)
+    expect(callsOf(calls, 'resources/read')).toHaveLength(0)
+  })
+
+  it('keeps the non-string-name omission an omission on the modern leg', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'tools/call': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    await fwd.forward(req({ method: 'tools/call', params: { name: 42, arguments: {} } }))
+
+    const relay = callsOf(calls, 'tools/call')[0]
+    expect(relay?.headers['mcp-method']).toBe('tools/call')
+    expect(relay?.headers['mcp-name']).toBeUndefined()
+  })
+
+  it('proceeds legacy end-to-end when the probe fails (per-request presumption)', async () => {
+    const calls = stubRelayUpstream({
+      'server/discover': () => new Response('unauthorized', { status: 401 }),
+      'tools/list': okResult(),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(req({ transportSessionId: 'S1' }))
+
+    expect((response.body as { result: unknown }).result).toEqual({})
+    const relay = callsOf(calls, 'tools/list')[0]
+    expect(relay?.headers['mcp-protocol-version']).toBe('2025-06-18')
+    expect(relay?.headers['mcp-session-id']).toBe('S1')
+    expect(relay?.body['params']).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Legacy-leg parity (issue #219): the full legacy send shape, proven under an
+// explicit pin AND under a probe-cached legacy era — by construction, not by
+// a generic mock's accidental classification.
+// ---------------------------------------------------------------------------
+
+describe('StreamableHttpForwarder legacy-leg parity (issue #219)', () => {
+  interface LegacyArm {
+    readonly name: string
+    readonly build: () => { fwd: StreamableHttpForwarder; calls: RelayCall[] }
+    readonly expectedProbes: number
+  }
+
+  const arms: LegacyArm[] = [
+    {
+      name: 'explicit 2025-06-18 pin',
+      build: () => {
+        const calls = stubRelayUpstream({
+          'tools/call': () =>
+            jsonEnvelope({ jsonrpc: '2.0', id: 1, result: {} }, 200, { 'mcp-session-id': 'U-1' }),
+          initialize: () =>
+            jsonEnvelope(
+              { jsonrpc: '2.0', id: 9, result: { protocolVersion: '2025-06-18' } },
+              200,
+              {
+                'mcp-session-id': 'U-minted',
+              },
+            ),
+        })
+        return {
+          fwd: new StreamableHttpForwarder({ url: 'http://up/mcp', protocolVersion: '2025-06-18' }),
+          calls,
+        }
+      },
+      expectedProbes: 0,
+    },
+    {
+      name: 'probe-cached legacy era (intentional 202-empty discover)',
+      build: () => {
+        const calls = stubRelayUpstream({
+          // INTENTIONAL legacy classification: the SDK unknown-method shape.
+          'server/discover': () => new Response(null, { status: 202 }),
+          'tools/call': () =>
+            jsonEnvelope({ jsonrpc: '2.0', id: 1, result: {} }, 200, { 'mcp-session-id': 'U-1' }),
+          initialize: () =>
+            jsonEnvelope(
+              { jsonrpc: '2.0', id: 9, result: { protocolVersion: '2025-06-18' } },
+              200,
+              {
+                'mcp-session-id': 'U-minted',
+              },
+            ),
+        })
+        return { fwd: new StreamableHttpForwarder({ url: 'http://up/mcp' }), calls }
+      },
+      expectedProbes: 1,
+    },
+  ]
+
+  it.each(arms.map((arm) => [arm.name, arm] as const))(
+    'sends the full legacy relay shape under %s',
+    async (_name, arm) => {
+      const { fwd, calls } = arm.build()
+
+      const params = { name: 'get_weather', arguments: { city: 'Berlin' } }
+      const { response } = await fwd.forward(
+        req({
+          method: 'tools/call',
+          params,
+          transportSessionId: 'S1',
+          headers: { 'x-trace': 't1' },
+        }),
+      )
+
+      const relay = callsOf(calls, 'tools/call')[0]
+      expect(relay?.headers['mcp-protocol-version']).toBe('2025-06-18')
+      expect(relay?.headers['mcp-session-id']).toBe('S1')
+      expect(relay?.headers['mcp-method']).toBe('tools/call')
+      expect(relay?.headers['mcp-name']).toBe('get_weather')
+      expect(relay?.headers['x-trace']).toBe('t1')
+      // Params forwarded verbatim: no _meta injection on the legacy leg.
+      expect(relay?.body['params']).toEqual(params)
+      // The upstream session echo relays downstream untouched.
+      expect(response.headers['mcp-session-id']).toBe('U-1')
+      expect(callsOf(calls, 'server/discover')).toHaveLength(arm.expectedProbes)
+    },
+  )
+
+  it.each(arms.map((arm) => [arm.name, arm] as const))(
+    'forwards initialize verbatim with no version stamp under %s',
+    async (_name, arm) => {
+      const { fwd, calls } = arm.build()
+
+      const { response } = await fwd.forward(
+        req({ method: 'initialize', id: 9, params: { protocolVersion: '2025-03-26' } }),
+      )
+
+      const relay = callsOf(calls, 'initialize')[0]
+      expect(relay?.headers['mcp-protocol-version']).toBeUndefined()
+      expect(relay?.headers['mcp-session-id']).toBeUndefined()
+      expect(relay?.body['params']).toEqual({ protocolVersion: '2025-03-26' })
+      expect(response.headers['mcp-session-id']).toBe('U-minted')
+    },
+  )
 })

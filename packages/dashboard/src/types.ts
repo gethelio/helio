@@ -29,6 +29,12 @@ export interface AuditRecord {
   readonly session_id: string | null
   /** Identity strategy that produced session_id (issue #218), or null. */
   readonly session_source: string | null
+  /**
+   * The client's verbatim MCP-Protocol-Version wire claim (issue #219) —
+   * the client's claim, not the upstream era, and not validated. Null when
+   * the request carried no header or the record has no MCP wire.
+   */
+  readonly protocol_version: string | null
   readonly agent_id: string | null
   readonly environment: string | null
   readonly tool_name: string
@@ -242,6 +248,8 @@ export interface ActionEvent {
   readonly session_id: string | null
   /** Identity strategy that produced session_id (issue #218), or null. */
   readonly session_source: string | null
+  /** The client's verbatim MCP-Protocol-Version wire claim (issue #219), or null. */
+  readonly protocol_version: string | null
   readonly agent_id: string | null
   readonly environment: string | null
   readonly timestamp: string

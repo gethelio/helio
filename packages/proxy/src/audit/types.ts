@@ -82,6 +82,14 @@ export interface AuditRecord {
    * `match.metadata.*` (#13) and the dashboard metadata columns (#16).
    */
   readonly metadata: Record<string, unknown> | null
+  /**
+   * The client's verbatim MCP-Protocol-Version wire claim on the inbound
+   * request (issue #219) — the CLIENT'S claim, not the upstream era, and not
+   * a validated fact. Recorded uncapped: truncation would manufacture a
+   * false claim in an audit record. Null when the request carried no header
+   * and on records with no MCP wire (drift events, sideband records).
+   */
+  readonly protocol_version: string | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
 }

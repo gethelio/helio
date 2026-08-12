@@ -24,7 +24,17 @@ export async function createForwarderFromConfig(config: HelioConfig): Promise<Bu
         url: config.upstream.url,
         headers: config.upstream.headers,
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+        protocolVersion: config.upstream.protocol_version,
       })
+      if (config.upstream.protocol_version !== 'auto') {
+        // A pin is never probed, so no era-detected line will ever appear;
+        // this line is the operator's confirmation the pin took effect.
+        // eslint-disable-next-line no-console -- operator-visible startup detail
+        console.error(
+          `[helio] Upstream MCP protocol version pinned: ` +
+            `${config.upstream.protocol_version} (upstream.protocol_version)`,
+        )
+      }
       await http.connect()
       return { forwarder: http, close: () => http.close() }
     }

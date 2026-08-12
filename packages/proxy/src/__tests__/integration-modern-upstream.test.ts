@@ -79,27 +79,20 @@ describe('2026-07-28-only ("modern-only") upstream', () => {
   })
 
   it('primes against a 2026-07-28-only upstream and evaluates annotations from real definitions', async () => {
-    // `mcp-method` presence+agreement is unconditional on every POST the
-    // fixture sees, so it proves nothing distinctly "internal" by itself.
-    // What IS internal-path-specific here: the era probe (server/discover)
-    // pins the full `mcp-method`/`mcp-protocol-version`/`_meta` triple
-    // unconditionally, and this prime's tools/list reaches that same
-    // version/`_meta` check only because the internal path currently sends
-    // `mcp-protocol-version: 2026-07-28` — if it stopped stamping the
-    // version header and `_meta` mirror, the fixture would serve it from
-    // the lenient version/`_meta` leg instead and this test would still
-    // pass. The `_meta` mirror itself is pinned directly at unit level in
-    // `streamable-http-forwarder.test.ts`.
+    // The fixture holds EVERY POST to the full modern conformance check —
+    // `mcp-method`/`mcp-name` agreement, the version header, and the `_meta`
+    // mirror — unconditionally since the era-aware relay leg (issue #219)
+    // retired its last leniency, so a prime that stopped stamping any half
+    // would fail here loudly. The `_meta` merge semantics are pinned
+    // directly at unit level in `streamable-http-forwarder.test.ts`.
     const result = await governedForwarder.primeAnnotationCache()
     expect(result.success).toBe(true)
     expect(result.toolsCached).toBeGreaterThan(0)
 
-    // Relays now stamp `mcp-method`/`mcp-name` on every outbound POST (issue
-    // #217), and the fixture requires them, with header<->body agreement, on
-    // every POST it receives — internal or relayed alike. Only the
-    // `mcp-protocol-version`/`_meta` half of the fixture's strict check stays
-    // lenient for legacy-versioned relays, until relay version negotiation
-    // (#219) lands.
+    // Relays stamp `mcp-method`/`mcp-name` on every outbound POST (issue
+    // #217) and, era-aware since issue #219, the modern version header and
+    // `_meta` mirror too — the fixture's unconditional check accepts nothing
+    // less.
     const { body } = await sendMcpRequest(proxyUrl, 'tools/call', {
       name: 'get_status',
       arguments: {},
@@ -153,6 +146,69 @@ describe('2026-07-28-only ("modern-only") upstream', () => {
       .filter((req) => req.method === 'tools/call')
       .at(-1)
     expect(relayedCall?.headers['mcp-name']).toBe('=?base64?SGVsbG8sIOS4lueVjA==?=')
+  })
+
+  it('bridges a legacy client end-to-end: initialize synthesized, confirmation swallowed, calls relayed modern (issue #219)', async () => {
+    const seenBefore = upstream?.receivedRequests.length ?? 0
+
+    // 1. initialize is answered by Helio's synthesis — the modern upstream
+    //    would 404 the retired handshake, so it must never see it. The
+    //    capabilities and instructions come from the fixture's own
+    //    DiscoverResult, captured at probe time; serverInfo is Helio's.
+    const init = await sendMcpRequest(
+      proxyUrl,
+      'initialize',
+      {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'legacy-client', version: '1' },
+      },
+      'init-1',
+    )
+    expect(init.status).toBe(200)
+    // The bridge keeps the downstream sessionless: no session id is minted.
+    expect(init.headers.get('mcp-session-id')).toBeNull()
+    expect(init.body['id']).toBe('init-1')
+    expect(init.body['result']).toEqual({
+      protocolVersion: '2025-06-18',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'helio-proxy', version: '0' },
+      instructions: 'Call get_status before anything else.',
+    })
+
+    // 2. The confirmation notification is swallowed: the modern upstream
+    //    removed it and must never see it either.
+    const notify = await fetch(proxyUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    })
+    expect(notify.status).toBe(202)
+
+    // 3. The legacy client's ordinary calls relay in the modern wire shape.
+    const list = await sendMcpRequest(proxyUrl, 'tools/list', undefined, 'list-1')
+    expect(list.body['error']).toBeUndefined()
+    const call = await sendMcpRequest(
+      proxyUrl,
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      'call-1',
+    )
+    expect(call.body['error']).toBeUndefined()
+
+    const seen = upstream?.receivedRequests ?? []
+    expect(seen.length).toBeGreaterThan(seenBefore)
+    // Neither handshake method ever reached the upstream...
+    expect(seen.filter((req) => req.method === 'initialize')).toHaveLength(0)
+    expect(seen.filter((req) => req.method === 'notifications/initialized')).toHaveLength(0)
+    // ...and every POST Helio has sent it — probe, internal prime, relays —
+    // carried the modern version header and no session id. (The `_meta`
+    // mirror on each is proven by the fixture's own unconditional
+    // conformance check having answered 200.)
+    for (const received of seen) {
+      expect(received.headers['mcp-protocol-version']).toBe('2026-07-28')
+      expect(received.headers['mcp-session-id']).toBeUndefined()
+    }
   })
 
   it("rejects a raw POST to the fixture when mcp-method is missing or mismatched (issue #217's regression net)", async () => {

@@ -216,6 +216,41 @@ describe('streamable-http transport', () => {
     expect(forwarder.calls[0]?.transportSessionId).toBeUndefined()
   })
 
+  it('captures the raw MCP-Protocol-Version header verbatim onto the forwarded request (issue #219)', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    await postMcp(
+      app,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'MCP-Protocol-Version': '2026-07-28' },
+    )
+
+    expect(forwarder.calls[0]?.protocolVersion).toBe('2026-07-28')
+  })
+
+  it('captures a non-version header value verbatim — validation is not this layer', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    await postMcp(
+      app,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { 'mcp-protocol-version': 'not-a-version' },
+    )
+
+    expect(forwarder.calls[0]?.protocolVersion).toBe('not-a-version')
+  })
+
+  it('leaves protocolVersion undefined when the header is absent', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    await postMcp(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
+
+    expect(forwarder.calls[0]?.protocolVersion).toBeUndefined()
+  })
+
   it('passes downstream request abort signal to forwarder', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)

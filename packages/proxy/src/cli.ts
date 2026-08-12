@@ -273,6 +273,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         approval_status: record.approval_status,
         session_id: record.session_id,
         session_source: record.session_source,
+        protocol_version: record.protocol_version,
         agent_id: record.agent_id,
         environment: record.environment,
         timestamp: record.timestamp,

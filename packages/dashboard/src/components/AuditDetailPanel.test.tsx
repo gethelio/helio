@@ -13,6 +13,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     timestamp: '2025-01-15T10:00:00.000Z',
     session_id: 'sess-abc-1234567890',
     session_source: 'header',
+    protocol_version: null,
     agent_id: null,
     environment: null,
     tool_name: 'send_email',
@@ -325,6 +326,33 @@ describe('AuditDetailPanel', () => {
     expect(rendered.length).toBeLessThanOrEqual(4096 + 4)
     expect(rendered).toContain('\u2026')
     expect(screen.getByText('Input payload preview is truncated for readability.')).toBeTruthy()
+  })
+})
+
+describe('AuditDetailPanel protocol section (issue #219)', () => {
+  it('renders the client protocol claim when present', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord({ protocol_version: '2026-07-28' })}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Protocol')).toBeTruthy()
+    expect(screen.getByText('2026-07-28')).toBeTruthy()
+  })
+
+  it('omits the protocol section when the record carries no claim', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord({ protocol_version: null })}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText('Protocol')).toBeNull()
   })
 })
 

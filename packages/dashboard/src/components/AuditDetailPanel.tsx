@@ -125,6 +125,14 @@ export function AuditDetailPanel({
                 )}
               </DetailSection>
 
+              {/* Client protocol claim (issue #219): the inbound wire header,
+                  verbatim — the client's claim, not the upstream era. */}
+              {selectedRecord.protocol_version && (
+                <DetailSection label="Protocol">
+                  <span className="font-mono text-xs">{selectedRecord.protocol_version}</span>
+                </DetailSection>
+              )}
+
               {/* Input parameters */}
               <DetailSection label="Input Parameters">
                 <pre className="max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word rounded bg-gray-50 p-2 text-xs">

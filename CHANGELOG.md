@@ -32,9 +32,9 @@ Maintainer notes:
   minted per-stream id remains an implicit final fallback. The section
   is optional — an absent `session:` validates and uses the defaults —
   and is restart-required at the hot-reload boundary. Audit records,
-  the CSV export (as a trailing column), and the dashboard's new
-  Session detail section carry `session_source`, the strategy that
-  produced each record's id.
+  the CSV export (appended), and the dashboard's new Session detail
+  section carry `session_source`, the strategy that produced each
+  record's id.
 - **Proxy-scheduled tool definition revalidation (#221).** A new
   `policies.tool_revalidation` config section (`enabled` default
   `true`, `interval` default `5m`, 10s floor) runs Helio's own
@@ -48,6 +48,27 @@ Maintainer notes:
   response carrying no `ttlMs` never gains one. `tool_revalidation`
   reconfigures live on hot reload: enabling, disabling, or retiming
   the cadence takes effect on the next tick without a restart.
+- **MCP protocol version negotiation for relayed traffic (#219).** The
+  relay leg now speaks the upstream's detected MCP era instead of
+  always the legacy revision. Against a modern (`2026-07-28`) upstream,
+  relayed requests carry the modern version header and the
+  spec-required `_meta` mirror (a modern client's own
+  `clientCapabilities`/`clientInfo` declarations pass through), the
+  wire `Mcp-Session-Id` is never sent upstream, and the retired
+  `initialize` handshake is bridged: Helio synthesizes the legacy
+  result locally from the upstream's own `server/discover` answer and
+  swallows the confirmation notification, so legacy clients keep
+  working unchanged — sessionless, as the legacy spec permits. Against
+  a legacy upstream the relay leg is byte-for-byte what it was. A new
+  `upstream.protocol_version` setting (`auto` | `2025-06-18` |
+  `2026-07-28`, default `auto`) pins the era for deployments the probe
+  cannot classify, such as a modern-only upstream gated behind
+  per-client credentials. The audit trail gains a nullable
+  `protocol_version` column recording each inbound request's verbatim
+  `MCP-Protocol-Version` claim — appended to the CSV export as the new
+  trailing column, and covered by the same pre-0.12 clean break as
+  `session_source`: Helio refuses to start on a local audit DB missing
+  it and prints the delete-these-files instructions.
 
 ### Changed
 
@@ -125,11 +146,9 @@ Maintainer notes:
   defaults (`destructiveHint: true`), so deny rules matched every tool
   and read-only allow rules matched none. The era is cached per
   upstream and re-probed after a session drop, so an in-place upstream
-  upgrade is picked up with no restart. This closes the internal path
-  only: traffic relayed from a downstream client still fails against a
-  strict modern-only upstream — regardless of which revision the
-  client itself speaks — until the separately tracked
-  version-negotiation work for that path lands.
+  upgrade is picked up with no restart. This closed the internal path
+  first; relay version negotiation (#219, under Added) extends the
+  same era conclusion to relayed client traffic in this release.
 - **Upstream forwards of relayed client traffic now carry the spec's
   standard request headers (#217).** Every Streamable HTTP POST Helio
   sends upstream carries `Mcp-Method` mirroring the JSON-RPC method,
@@ -143,9 +162,12 @@ Maintainer notes:
   method strings that cannot travel safely as a header value, rather
   than send a value that no longer matches the body. This restores
   truthful header routing for gateways and observability tooling sitting
-  between Helio and the upstream; relays are still legacy-versioned, so
-  a strict modern-only upstream still rejects them until the separately
-  tracked version-negotiation work lands.
+  between Helio and the upstream. With relay version negotiation (#219,
+  under Added), relays against a modern upstream carry the modern
+  protocol version too, and on that leg the two omission fallbacks
+  become proxy-side refusals with a clear error — against a `2026-07-28`
+  upstream a missing header is a guaranteed rejection, no longer a
+  harmless fallback.
 
 ### Security
 
