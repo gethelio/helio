@@ -39,6 +39,7 @@ function makeConfig(upstreamUrl: string): HelioConfig {
     upstream: {
       url: upstreamUrl,
       transport: 'streamable-http',
+      protocol_version: 'auto',
       connect_timeout: '10s',
       request_timeout: '30s',
       forward_headers: [],

@@ -58,10 +58,20 @@ const RESERVED_TRANSPORT_HEADERS = new Set([
 
 const transportSchema = z.enum(['streamable-http', 'sse', 'stdio'])
 
+/**
+ * Upstream MCP protocol version pin (issue #219). `auto` probes the upstream
+ * era via `server/discover` and caches the classification; a dated pin skips
+ * the probe entirely, in both directions — it exists for deployments the
+ * probe cannot classify (e.g. per-client Authorization pass-through, where
+ * the probe 401s forever while relays succeed).
+ */
+const protocolVersionSchema = z.enum(['auto', '2025-06-18', '2026-07-28'])
+
 const upstreamSchema = z
   .object({
     url: z.string(),
     transport: transportSchema.default('streamable-http'),
+    protocol_version: protocolVersionSchema.default('auto'),
     command: z.string().optional(),
     args: z.array(z.string()).optional(),
     connect_timeout: durationSchema.default('10s'),
@@ -75,6 +85,21 @@ const upstreamSchema = z
     path: ['command'],
   })
   .superRefine((data, ctx) => {
+    // The modern pin only makes sense on Streamable HTTP: the SSE upstream
+    // transport is the deprecated legacy transport and will never be modern,
+    // and stdio modern-era support is tracked separately (#256).
+    if (data.protocol_version === '2026-07-28' && data.transport !== 'streamable-http') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['protocol_version'],
+        message:
+          data.transport === 'stdio'
+            ? 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+              'stdio modern-era support is tracked in #256.'
+            : 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+              'the SSE upstream transport is the deprecated legacy transport.',
+      })
+    }
     for (const [index, header] of data.forward_headers.entries()) {
       if (!header.toLowerCase().startsWith('x-')) {
         ctx.addIssue({
