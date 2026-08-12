@@ -191,7 +191,13 @@ A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/
 
 A modern refusal is not legacy either. If the upstream rejects the probe with the modern error codes `-32020` (header mismatch) or `-32021` (missing client capability), it has identified itself as a modern server, so Helio does not fall back to `initialize` and caches no era. It reports the refusal — the error text carries the upstream's own message — and probes again on the next attempt, rather than quietly downgrading a server that is newer than the handshake. A `-32022` (unsupported protocol version) response instead identifies a modern upstream that simply does not speak Helio's modern revision, so Helio salvages the session with one legacy `initialize` attempt, reporting both sides' supported versions if that attempt also fails.
 
-A dated `protocol_version` pin removes this machinery entirely: the pinned era is a constant — never probed, never cached, never cleared — and Helio logs the pin once at startup instead of a detection line. Deployments the probe cannot classify should pin. The common case is a modern-only upstream gated behind per-client `Authorization` pass-through: the probe carries only `upstream.headers` and is refused forever, while relayed requests carry each client's own credentials and succeed.
+A dated `protocol_version` pin removes this machinery entirely: the pinned era is a constant — never probed, never cached, never cleared — and Helio logs the pin once at startup instead of a detection line:
+
+```
+[helio] Upstream MCP protocol version pinned: 2026-07-28 (upstream.protocol_version)
+```
+
+Deployments the probe cannot classify should pin. The common case is a modern-only upstream gated behind per-client `Authorization` pass-through: the probe carries only `upstream.headers` and is refused forever, while relayed requests carry each client's own credentials and succeed.
 
 Relayed client traffic is version-tagged by the same era conclusion. Against a legacy upstream the relay leg is exactly what it always was: requests forward verbatim, `mcp-protocol-version: 2025-06-18` is stamped when the client didn't send one, and the wire `Mcp-Session-Id` relays in both directions. Against a modern upstream the relay leg takes the 2026-07-28 wire shape: every relayed POST is stamped `mcp-protocol-version: 2026-07-28` — including over a value a library caller preset, a preservation that survives only on the legacy leg — and carries the spec-required `_meta` mirror, merged per key: the protocol version is always Helio's, while a modern client's own `clientCapabilities` and `clientInfo` declarations pass through untouched and Helio's identity fills them in for legacy clients. Modern servers neither mint nor honor session ids, so the wire `Mcp-Session-Id` is never sent upstream, and a non-conformant upstream's `mcp-session-id` response header is stripped before the response reaches the client.
 

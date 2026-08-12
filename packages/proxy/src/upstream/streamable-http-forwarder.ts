@@ -171,7 +171,7 @@ export class StreamableHttpForwarder implements McpForwarder {
   }
 
   /**
-   * D5 relay-side falsification door: a legacy-leg relay whose answer only a
+   * The relay-side era falsification door (issue #219): a legacy-leg relay whose answer only a
    * modern server gives clears the cached legacy era (the manager no-ops on
    * pins, uncached eras, and cached modern). The response still flows to the
    * client unchanged — no in-place retry.

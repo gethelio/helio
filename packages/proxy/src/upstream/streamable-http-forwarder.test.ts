@@ -1211,7 +1211,7 @@ describe('StreamableHttpForwarder era-aware relay leg (issue #219)', () => {
     expect(response.headers['content-type']).toContain('text/event-stream')
   })
 
-  it('heals a misclassified-legacy era via a relayed initialize 404, re-probing only after the window (R1 F1)', async () => {
+  it('heals a misclassified-legacy era via a relayed initialize 404, re-probing only after the window (issue #219)', async () => {
     vi.useFakeTimers()
     let probes = 0
     const calls = stubRelayUpstream({
@@ -1258,7 +1258,7 @@ describe('StreamableHttpForwarder era-aware relay leg (issue #219)', () => {
     ).toBe('2026-07-28')
   })
 
-  it('heals a misclassified-legacy era via a modern-only error code on any relayed method (R1 F1)', async () => {
+  it('heals a misclassified-legacy era via a modern-only error code on any relayed method (issue #219)', async () => {
     vi.useFakeTimers()
     let probes = 0
     let toolCalls = 0

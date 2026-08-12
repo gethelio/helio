@@ -941,7 +941,7 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(discoverCallsOf(calls)).toHaveLength(2)
   })
 
-  it('joins an in-flight probe after backoff expiry instead of presuming legacy alongside it (R1 F2)', async () => {
+  it('joins an in-flight probe after backoff expiry instead of presuming legacy alongside it (issue #219)', async () => {
     vi.useFakeTimers()
     const gate = deferredResponse()
     let probes = 0
@@ -972,7 +972,7 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(discoverCallsOf(calls)).toHaveLength(2)
   })
 
-  it('join-on-throw returns the legacy presumption and never starts a second probe (R2 F3)', async () => {
+  it('join-on-throw returns the legacy presumption and never starts a second probe (issue #219)', async () => {
     const gate = deferredResponse()
     const calls = stubUpstream({
       'server/discover': () => gate.promise,
@@ -992,7 +992,7 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(discoverCallsOf(calls)).toHaveLength(1)
   })
 
-  it('clears the era and arms the backoff when the legacy fast path initialize fails, throttling the relay-driven loop to the window (R4 F1)', async () => {
+  it('clears the era and arms the backoff when the legacy fast path initialize fails, throttling the relay-driven loop to the window (issue #219)', async () => {
     vi.useFakeTimers()
     const calls = stubUpstream({
       'server/discover': () => new Response(null, { status: 202 }),
@@ -1032,7 +1032,7 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(discoverCallsOf(calls)).toHaveLength(3)
   })
 
-  it('falsification clears cached legacy, arms the backoff, and throttles even a successful re-probe (R2 F2)', async () => {
+  it('falsification clears cached legacy, arms the backoff, and throttles even a successful re-probe (issue #219)', async () => {
     vi.useFakeTimers()
     const calls = stubUpstream({
       'server/discover': () => new Response(null, { status: 202 }),
@@ -1145,7 +1145,7 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(mgr.getDiscoverCapture()).toBeUndefined()
   })
 
-  it('invalidateInternalSession() drops the capture without arming the backoff (R5 N2)', async () => {
+  it('invalidateInternalSession() drops the capture without arming the backoff (issue #219)', async () => {
     const calls = stubUpstream({
       'server/discover': modernDiscoverHandler({ instructions: 'be gentle' }),
     })
