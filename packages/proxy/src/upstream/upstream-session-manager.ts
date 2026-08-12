@@ -21,6 +21,15 @@ const ERA_PROBE_REQUEST_ID = 'helio-era-probe'
 const MCP_HEADER_MISMATCH_CODE = -32020
 const MCP_MISSING_CLIENT_CAPABILITY_CODE = -32021
 const MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE = -32022
+/**
+ * The same three codes as a set, for consumers that only need "is this a
+ * code no legacy server emits" (the relay-side era falsification door).
+ */
+export const MCP_MODERN_ONLY_ERROR_CODES: ReadonlySet<number> = new Set([
+  MCP_HEADER_MISMATCH_CODE,
+  MCP_MISSING_CLIENT_CAPABILITY_CODE,
+  MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE,
+])
 
 /** Which MCP revision an upstream speaks, decided by the `server/discover` probe. */
 export type UpstreamEra = 'modern' | 'legacy'

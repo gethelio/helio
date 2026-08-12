@@ -94,36 +94,54 @@ function extractName(method: string, params: unknown): string | undefined {
   return typeof raw === 'string' ? raw : undefined
 }
 
+/**
+ * True iff `method` fits the visible-ASCII token set `Mcp-Method` can carry.
+ *
+ * This guard exists to stop a header from silently lying about the body, not
+ * merely to avoid a thrown fetch error. Verified empirically on Node 24:
+ * undici trims leading/trailing whitespace from header values without
+ * erroring (`' padded '` arrives as `'padded'`, a mismatch a strict
+ * validator rejects and a routing intermediary can silently mis-trust
+ * instead), and Latin-1-range non-ASCII (e.g. `héllo`, 0xE9) transmits
+ * unthrown as a raw Latin-1 byte that a UTF-8-decoding server reads as
+ * mojibake. Only characters above 0xFF and CR/LF/NUL throw a TypeError, so
+ * narrowing this to "whatever doesn't throw" would let both cases back in.
+ * The spec defines sentinel encoding for `Mcp-Name` only — there is no
+ * encoded form for `Mcp-Method` — so the only spec-conformant options are
+ * stamp-verbatim or omit (legacy leg) / refuse proxy-side (modern leg,
+ * where omission is a guaranteed upstream rejection).
+ */
+export function isHeaderSafeMethod(method: string): boolean {
+  return /^[\x21-\x7E]+$/.test(method)
+}
+
+/**
+ * The wire-ready `Mcp-Name` value for this request, sentinel-encoded when
+ * needed, or undefined when the method bears no string name. The modern
+ * leg's cap refusal reads the same bytes this stamps, so the two can never
+ * disagree.
+ */
+export function encodedNameValue(method: string, params: unknown): string | undefined {
+  const name = extractName(method, params)
+  if (name === undefined) return undefined
+  return needsSentinelEncoding(name) ? encodeSentinelValue(name) : name
+}
+
 export function buildStandardRequestHeaders(
   method: string,
   params: unknown,
 ): Record<string, string> {
-  // The guard below exists to stop a header from silently lying about the
-  // body, not merely to avoid a thrown fetch error. Verified empirically on
-  // Node 24: undici trims leading/trailing whitespace from header values
-  // without erroring (`' padded '` arrives as `'padded'`, a mismatch a
-  // strict validator rejects and a routing intermediary can silently
-  // mis-trust instead), and Latin-1-range non-ASCII (e.g. `héllo`, 0xE9)
-  // transmits unthrown as a raw Latin-1 byte that a UTF-8-decoding server
-  // reads as mojibake. Only characters above 0xFF and CR/LF/NUL throw a
-  // TypeError, so narrowing this to "whatever doesn't throw" would let both
-  // cases back in. The spec defines sentinel encoding for `Mcp-Name` only —
-  // there is no encoded form for `Mcp-Method` — so the only spec-conformant
-  // options are stamp-verbatim or omit; omitting here (rather than throwing)
-  // preserves today's forwardability for methods outside the visible-ASCII
-  // token set.
-  if (!/^[\x21-\x7E]+$/.test(method)) {
+  // Omission (rather than throwing) preserves today's forwardability for
+  // methods outside the visible-ASCII token set — see isHeaderSafeMethod.
+  if (!isHeaderSafeMethod(method)) {
     return {}
   }
 
   const headers: Record<string, string> = { 'mcp-method': method }
 
-  const name = extractName(method, params)
-  if (name !== undefined) {
-    const value = needsSentinelEncoding(name) ? encodeSentinelValue(name) : name
-    if (Buffer.byteLength(value) <= MCP_NAME_MAX_BYTES) {
-      headers['mcp-name'] = value
-    }
+  const value = encodedNameValue(method, params)
+  if (value !== undefined && Buffer.byteLength(value) <= MCP_NAME_MAX_BYTES) {
+    headers['mcp-name'] = value
   }
 
   return headers

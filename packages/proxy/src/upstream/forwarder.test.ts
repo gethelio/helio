@@ -4,6 +4,11 @@ import type { McpRequest } from '../mcp/types.js'
 
 /* eslint-disable @typescript-eslint/no-deprecated -- compatibility tests cover deprecated alias behavior */
 
+// Every construction pins protocol_version to the legacy era: this suite's
+// subject is legacy-leg relay behavior, and the pin keeps its generic fetch
+// mocks from having to answer the auto-mode server/discover probe (issue
+// #219). Era interplay is covered in streamable-http-forwarder.test.ts.
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -86,7 +91,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('sends a POST to the configured upstream URL', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream:8080/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream:8080/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest())
 
@@ -96,7 +104,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('sets content-type to application/json', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest())
 
@@ -106,6 +117,7 @@ describe('UpstreamForwarder', () => {
   it('includes static headers from constructor', async () => {
     const forwarder = new UpstreamForwarder({
       url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
       headers: { 'x-api-key': 'secret-key' },
     })
 
@@ -115,7 +127,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('forwards transportSessionId as Mcp-Session-Id header', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ transportSessionId: 'sess-42' }))
 
@@ -123,7 +138,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('does not set Mcp-Session-Id when transportSessionId is absent', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ transportSessionId: undefined }))
 
@@ -134,7 +152,10 @@ describe('UpstreamForwarder', () => {
     // The FastMCP-corruption regression: a session-enforcing legacy upstream
     // 400/404s any id it did not mint, so proxy-resolved identity must stay
     // out of the transport relay.
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ session: { id: 'run-a', source: 'header' } }))
 
@@ -142,7 +163,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('forwards per-request headers from McpRequest.headers', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ headers: { authorization: 'Bearer tok123' } }))
 
@@ -152,6 +176,7 @@ describe('UpstreamForwarder', () => {
   it('static config headers override caller-forwarded headers', async () => {
     const forwarder = new UpstreamForwarder({
       url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
       headers: { Authorization: 'Bearer static-token' },
     })
 
@@ -162,7 +187,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('omits session fields and headers from the JSON-RPC body', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(
       makeRequest({
@@ -180,7 +208,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('omits id from body when undefined', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ id: undefined }))
 
@@ -189,7 +220,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('includes params in body when present', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await forwarder.forward(makeRequest({ method: 'tools/call', params: { name: 'get_weather' } }))
 
@@ -199,7 +233,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('returns durationMs in ForwardResult', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     const result = await forwarder.forward(makeRequest())
     expect(result.durationMs).toBeGreaterThanOrEqual(0)
@@ -209,7 +246,10 @@ describe('UpstreamForwarder', () => {
     restore()
     globalThis.fetch = () => Promise.reject(new Error('network failure'))
 
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await expect(forwarder.forward(makeRequest())).rejects.toThrow('network failure')
   })
@@ -224,7 +264,10 @@ describe('UpstreamForwarder', () => {
       return Promise.reject(wrapper)
     }
 
-    const forwarder = new UpstreamForwarder({ url: 'http://localhost:8080/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://localhost:8080/mcp',
+      protocolVersion: '2025-06-18',
+    })
 
     await expect(forwarder.forward(makeRequest())).rejects.toThrow(
       /Upstream MCP server at http:\/\/localhost:8080\/mcp is unreachable \(ECONNREFUSED\) — is it running\?/,
@@ -232,7 +275,10 @@ describe('UpstreamForwarder', () => {
   })
 
   it('uses a composed request signal when downstream signal is present', async () => {
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
     const controller = new AbortController()
     await forwarder.forward(makeRequest({ signal: controller.signal }))
     expect(calls[0]?.signal).toBeInstanceOf(AbortSignal)
@@ -248,7 +294,10 @@ describe('UpstreamForwarder', () => {
 
     const controller = new AbortController()
     controller.abort()
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
     await expect(forwarder.forward(makeRequest({ signal: controller.signal }))).rejects.toThrow(
       'request aborted by downstream client',
     )
@@ -261,7 +310,11 @@ describe('UpstreamForwarder', () => {
       timeoutError.name = 'TimeoutError'
       return Promise.reject(timeoutError)
     }
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp', requestTimeoutMs: 1234 })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      requestTimeoutMs: 1234,
+      protocolVersion: '2025-06-18',
+    })
     await expect(forwarder.forward(makeRequest())).rejects.toThrow(
       'upstream request timed out after 1234ms',
     )
@@ -295,7 +348,10 @@ describe('UpstreamForwarder', () => {
       globalThis.fetch = original
     }
 
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
     const result = await forwarder.forward(makeRequest())
     expect((result.response.body as { result: unknown }).result).toEqual({ tools: [] })
   })
@@ -309,7 +365,10 @@ describe('UpstreamForwarder', () => {
     calls = capture.calls
     restore = capture.restore
 
-    const forwarder = new UpstreamForwarder({ url: 'http://upstream/mcp' })
+    const forwarder = new UpstreamForwarder({
+      url: 'http://upstream/mcp',
+      protocolVersion: '2025-06-18',
+    })
     const result = await forwarder.forward(makeRequest())
 
     expect(result.response.status).toBe(200)
