@@ -101,6 +101,9 @@ export function createStreamableHttpRoute(
       params,
       session,
       transportSessionId,
+      // The client's protocol claim, verbatim — audit evidence, not a
+      // validated fact (inbound agreement validation is a separate concern).
+      protocolVersion: c.req.header('mcp-protocol-version'),
       headers: forwardHeaders,
       signal: c.req.raw.signal,
     }

@@ -11,6 +11,7 @@ const baseRecord: ActionEvent = {
   approval_status: null,
   session_id: 'sess-12345678901234',
   session_source: 'header',
+  protocol_version: null,
   agent_id: null,
   environment: null,
   timestamp: new Date().toISOString(),
@@ -103,6 +104,7 @@ describe('ActionCard', () => {
       upstream_http_status: null,
       upstream_latency_ms: null,
       block_reason: null,
+      protocol_version: null,
       created_at: new Date().toISOString(),
       metadata: { channel_id: 'C1', sender_id: 'U1' },
     }
@@ -131,6 +133,7 @@ describe('ActionCard', () => {
       upstream_http_status: null,
       upstream_latency_ms: null,
       block_reason: null,
+      protocol_version: null,
       created_at: new Date().toISOString(),
       metadata: null,
     }

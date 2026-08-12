@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
   record_kind       TEXT NOT NULL DEFAULT 'tool_call',
   origin            TEXT NOT NULL DEFAULT 'mcp',
   metadata          TEXT,
+  protocol_version  TEXT,
   created_at        TEXT NOT NULL
 );
 `
@@ -97,14 +98,14 @@ INSERT INTO audit_records (
   approved_by, upstream_response, upstream_error, upstream_latency_ms,
   upstream_http_status,
   total_duration_ms, approval_wait_ms, proxy_compute_ms,
-  flagged_destructive, dry_run, record_kind, origin, metadata, created_at
+  flagged_destructive, dry_run, record_kind, origin, metadata, protocol_version, created_at
 ) VALUES (
   @id, @timestamp, @session_id, @session_source, @agent_id, @environment, @tool_name, @tool_input,
   @policy_decision, @block_reason, @matched_rule, @matched_rule_index, @evidence_chain, @approval_status,
   @approved_by, @upstream_response, @upstream_error, @upstream_latency_ms,
   @upstream_http_status,
   @total_duration_ms, @approval_wait_ms, @proxy_compute_ms,
-  @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @created_at
+  @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @protocol_version, @created_at
 )
 `
 
@@ -122,6 +123,9 @@ const REQUIRED_AUDIT_COLUMNS = [
   // Deliberately listed (issue #218): pre-0.12 local DBs fail fast with the
   // documented delete-these-files message — the pre-1.0 clean-break policy.
   'session_source',
+  // Same clean break, same unreleased cycle (issue #219): released users see
+  // ONE break, at v0.12.0.
+  'protocol_version',
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -156,6 +160,7 @@ interface RawAuditRow {
   record_kind: string
   origin: string
   metadata: string | null
+  protocol_version: string | null
   created_at: string
 }
 
@@ -196,6 +201,7 @@ function deserializeRow(row: RawAuditRow): AuditRecord {
     record_kind: row.record_kind as AuditRecord['record_kind'],
     origin: row.origin,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
+    protocol_version: row.protocol_version,
     created_at: row.created_at,
   }
 }
@@ -479,6 +485,7 @@ export class AuditStore {
       record_kind: record.record_kind,
       origin: record.origin,
       metadata: record.metadata ? JSON.stringify(record.metadata) : null,
+      protocol_version: record.protocol_version,
       created_at: now,
     })
 

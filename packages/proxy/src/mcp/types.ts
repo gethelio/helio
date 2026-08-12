@@ -58,6 +58,14 @@ export interface McpRequest extends JsonRpcRequest {
   session?: ResolvedSession
   /** Verbatim Mcp-Session-Id from the wire. Transport relay ONLY — never governance. */
   transportSessionId?: string
+  /**
+   * The client's verbatim MCP-Protocol-Version wire claim (issue #219) —
+   * captured raw, with no validation or normalization, for the audit trail.
+   * It is the CLIENT'S claim, not the upstream era and not a checked fact.
+   * Streamable HTTP only: the header postdates the deprecated SSE transport,
+   * and stdio has no headers, so both leave it unset.
+   */
+  protocolVersion?: string
   /** Per-request headers to forward to upstream (e.g. Authorization, X-* headers). */
   headers?: Record<string, string>
   /** Abort signal tied to the downstream client request lifecycle. */

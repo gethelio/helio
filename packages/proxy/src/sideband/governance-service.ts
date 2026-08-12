@@ -1853,6 +1853,8 @@ export class GovernanceService {
       record_kind: args.recordKind,
       origin: args.origin,
       metadata: args.metadata,
+      // The sideband has no MCP wire, so no protocol claim exists.
+      protocol_version: null,
     }
 
     // Enforcement decisions and approvals go on the priority flush queue; plain

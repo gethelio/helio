@@ -926,6 +926,22 @@ describe('GovernedForwarder', () => {
       writer.close()
     })
 
+    it('records the client protocol_version claim verbatim on tool-call records (issue #219)', async () => {
+      const inner = mockForwarder()
+      const policy = compile({ default: 'allow', rules: [] })
+      const { store, writer } = createAuditWriter()
+      const governed = new GovernedForwarder(inner, policy, { auditWriter: writer })
+
+      await governed.forward({ ...toolsCallRequest('get_weather'), protocolVersion: '2026-07-28' })
+      await governed.forward(toolsCallRequest('get_weather', {}, 2))
+
+      writer.flush()
+      const { records } = store.list({}, { order: 'asc' })
+      expect(records.map((record) => record.protocol_version)).toEqual(['2026-07-28', null])
+
+      writer.close()
+    })
+
     it('writes audit record for denied tool calls', async () => {
       const inner = mockForwarder()
       const policy = compile({
@@ -1506,6 +1522,7 @@ describe('GovernedForwarder', () => {
         id: 1,
         method: 'tools/call',
         params: { arguments: { to: 'ops@example.com' }, custom: 'field' },
+        protocolVersion: '2026-07-28',
       }
       await governed.forward(request)
 
@@ -1514,6 +1531,8 @@ describe('GovernedForwarder', () => {
       const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
       expect(record['policy_decision']).toBe('rejected')
       expect(record['block_reason']).toBe('missing_tool_name')
+      // The rejection record still evidences the client's wire claim.
+      expect(record['protocol_version']).toBe('2026-07-28')
       expect(record['tool_name']).toBe('<nameless>')
       // Raw params are nested under raw_params, losslessly and uniformly.
       expect(record['tool_input']).toEqual({
@@ -6462,6 +6481,8 @@ describe('tool definition drift — detection and audit', () => {
     const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
     expect(record['policy_decision']).toBe('tool_drift')
     expect(record['tool_name']).toBe('send_email')
+    // Drift is a cache event, not a request: no protocol claim to record.
+    expect(record['protocol_version']).toBeNull()
     expect(record['evidence_chain']).toMatchObject({
       tool_drift: {
         changes: [
