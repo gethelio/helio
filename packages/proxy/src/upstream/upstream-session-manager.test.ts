@@ -1145,6 +1145,112 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(mgr.getDiscoverCapture()).toBeUndefined()
   })
 
+  it('does not let a failing internal initialize wipe a modern era cached by a fresher relay probe', async () => {
+    // The external-review race: probe 1 misclassifies a warming-up
+    // modern-only upstream as legacy (non-JSON 200) and establish() enters
+    // initialize, held in flight. Era is uncached and no probe is in
+    // flight, so a relay starts probe 2, which classifies modern and caches
+    // it. When the held initialize then fails, the internal door must
+    // no-op: it falsifies only a cached LEGACY classification, and a cached
+    // modern era is never cleared automatically.
+    const initGate = deferredResponse()
+    let probes = 0
+    const calls = stubUpstream({
+      'server/discover': (body, headers) => {
+        probes += 1
+        if (probes === 1) {
+          return new Response('warming up', {
+            status: 200,
+            headers: { 'content-type': 'text/plain' },
+          })
+        }
+        return modernDiscoverHandler({ instructions: 'survives the race' })(body, headers)
+      },
+      initialize: () => initGate.promise,
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const establishment = mgr.ensureInternalSession()
+    await vi.waitFor(() => {
+      expect(methodsOf(calls)).toContain('initialize')
+    })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(mgr.getDiscoverCapture()).toEqual({
+      capabilities: {},
+      instructions: 'survives the race',
+    })
+
+    initGate.resolve(new Response('not found', { status: 404 }))
+    await expect(establishment).rejects.toThrow(/initialize failed/)
+
+    // The modern conclusion and its capture survive, nothing was armed,
+    // and no clear was logged.
+    expect(eraClearedLines()).toHaveLength(0)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(mgr.getDiscoverCapture()).toEqual({
+      capabilities: {},
+      instructions: 'survives the race',
+    })
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+  })
+
+  it('a relay joining an establish-started probe caches a legacy classification before initialize settles', async () => {
+    const discoverGate = deferredResponse()
+    const initGate = deferredResponse()
+    const calls = stubUpstream({
+      'server/discover': () => discoverGate.promise,
+      initialize: () => initGate.promise,
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const establishment = mgr.ensureInternalSession() // starts the probe, held
+    const joiner = mgr.resolveRelayEra() // must join it
+    discoverGate.resolve(new Response(null, { status: 202 })) // classifies legacy
+
+    await expect(joiner).resolves.toBe('legacy')
+    // The joiner cached the classification: a second relay arriving while
+    // the initialize is still in flight reads the cache instead of opening
+    // the uncached-era window and starting a second probe.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    initGate.resolve(
+      new Response(
+        JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+        { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 'U-1' } },
+      ),
+    )
+    await expect(establishment).resolves.toMatchObject({ sessionId: 'U-1', era: 'legacy' })
+    // One classification, one era-detected line — the joiner's cache and
+    // the proven initialize agree.
+    expect(loggedLines.filter((line) => /era detected: legacy/.test(line))).toHaveLength(1)
+  })
+
+  it('a relay joining a relay-started probe leaves one cached conclusion and one probe', async () => {
+    const gate = deferredResponse()
+    const calls = stubUpstream({
+      'server/discover': () => gate.promise,
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const starter = mgr.resolveRelayEra()
+    const joiner = mgr.resolveRelayEra()
+    gate.resolve(
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: 'helio-era-probe',
+        result: { supportedVersions: ['2026-07-28'], capabilities: {} },
+      }),
+    )
+
+    await expect(starter).resolves.toBe('modern')
+    await expect(joiner).resolves.toBe('modern')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+    expect(loggedLines.filter((line) => /era detected: modern/.test(line))).toHaveLength(1)
+  })
+
   it('invalidateInternalSession() drops the capture without arming the backoff (issue #219)', async () => {
     const calls = stubUpstream({
       'server/discover': modernDiscoverHandler({ instructions: 'be gentle' }),

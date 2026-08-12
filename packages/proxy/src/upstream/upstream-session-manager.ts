@@ -184,6 +184,12 @@ export class UpstreamSessionManager {
       // can never coexist with legacy-presumed siblings in the same burst.
       try {
         const outcome = await joined
+        // Cache like the starter (idempotent when the starter already did):
+        // an establish()-started probe defers legacy caching to its own
+        // initialize, so without this a joined relay would leave the era
+        // uncached for the whole initialize window and the next relay would
+        // start a second probe.
+        this.cacheRelayClassification(outcome)
         return outcome.era
       } catch {
         // The shared attempt's own failure already armed the backoff; a
@@ -205,12 +211,18 @@ export class UpstreamSessionManager {
   }
 
   /**
-   * Relay-side falsification door: a relayed response just contradicted a
-   * cached legacy era (a modern-only JSON-RPC code on any method, or a
-   * 404/-32601 answer to a relayed initialize). No-ops unless the cached era
-   * is 'legacy': a cached modern era is never cleared automatically — no
-   * reliable legacy-rejection signal exists, and recovery from an upstream
-   * downgrade is pin-or-restart.
+   * The falsification door, shared by both sides: a signal just
+   * contradicted a cached LEGACY era — a relayed response only a modern
+   * server gives (a modern-only JSON-RPC code on any method, a 404/-32601
+   * answer to a relayed initialize), or the internal initialize failing
+   * against the classification that promised it would work. No-ops unless
+   * the cached era is 'legacy': a cached modern era is never cleared
+   * automatically — no reliable legacy-rejection signal exists, recovery
+   * from an upstream downgrade is pin-or-restart, and during the
+   * probe-to-initialize window a fresher relay probe may already have
+   * re-classified the upstream as modern, in which case an initialize
+   * failure is evidence against the STALE legacy classification, not
+   * against that newer conclusion.
    */
   clearFalsifiedLegacyEra(door: string): void {
     if (this.era !== 'legacy') return
@@ -329,10 +341,12 @@ export class UpstreamSessionManager {
     } catch (error) {
       // Internal-side falsification door: a CACHED legacy era whose own
       // initialize just failed was a wrong classification, cleared and
-      // throttled through the same helper the relay door uses. On a fresh
-      // establishment nothing is cached and the helper no-ops, keeping
-      // today's behavior.
-      this.clearEraAndArmBackoff('internal initialize failed against the cached legacy era')
+      // throttled through the SAME guarded door the relay side uses — it
+      // no-ops on a fresh establishment (nothing cached) and on a cached
+      // MODERN era, which a fresher relay probe may have concluded while
+      // this initialize was in flight and which must never be cleared
+      // automatically.
+      this.clearFalsifiedLegacyEra('internal initialize failed against the cached legacy era')
       if (unsupportedModernVersions) {
         throw new Error(
           `upstream is a modern MCP server supporting [${unsupportedModernVersions.join(', ')}] ` +

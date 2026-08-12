@@ -1211,6 +1211,30 @@ describe('StreamableHttpForwarder era-aware relay leg (issue #219)', () => {
     expect(response.headers['content-type']).toContain('text/event-stream')
   })
 
+  it('strips the response mcp-session-id on the modern leg (SSE notification sub-branch)', async () => {
+    // The id-less notification path copies all upstream headers verbatim
+    // and returns before the id-matched SSE read — the strip must cover it
+    // too, or a non-conformant modern upstream's session echo would leak
+    // through the route allowlist on relayed notifications.
+    stubRelayUpstream({
+      'server/discover': modernDiscover(),
+      'notifications/progress': () =>
+        new Response('event: message\ndata: {"jsonrpc":"2.0","method":"notifications/other"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream', 'mcp-session-id': 'U-evil' },
+        }),
+    })
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+    const { response } = await fwd.forward(
+      req({ id: undefined, method: 'notifications/progress', params: {} }),
+    )
+
+    expect(response.headers['mcp-session-id']).toBeUndefined()
+    expect(response.headers['content-type']).toContain('text/event-stream')
+    expect(response.body).toEqual({ jsonrpc: '2.0' })
+  })
+
   it('heals a misclassified-legacy era via a relayed initialize 404, re-probing only after the window (issue #219)', async () => {
     vi.useFakeTimers()
     let probes = 0
