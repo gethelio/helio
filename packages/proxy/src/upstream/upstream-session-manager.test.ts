@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
-import { UpstreamSessionManager } from './upstream-session-manager.js'
+import { UpstreamSessionManager, ERA_PROBE_BACKOFF_MS } from './upstream-session-manager.js'
 
 const originalFetch = globalThis.fetch
 const loggedLines: string[] = []
@@ -30,12 +30,16 @@ interface UpstreamCall {
   readonly body: RecordedBody
 }
 
-type UpstreamHandler = (body: RecordedBody, headers: Record<string, string>) => Response
+type UpstreamHandler = (
+  body: RecordedBody,
+  headers: Record<string, string>,
+) => Response | Promise<Response>
 
 /**
  * Stub `fetch` with a JSON-RPC method dispatcher, recording every call.
  * Methods without a handler answer `202`-empty (a real SDK unknown-method
- * shape). A handler that throws simulates a fetch-level failure.
+ * shape). A handler that throws simulates a fetch-level failure; a handler
+ * returning a promise keeps the request in flight until it settles.
  */
 function stubUpstream(handlers: Record<string, UpstreamHandler>): UpstreamCall[] {
   const calls: UpstreamCall[] = []
@@ -737,5 +741,427 @@ describe('UpstreamSessionManager', () => {
     await expect(mgr.ensureInternalSession()).rejects.toThrow(
       /notifications\/initialized SSE response timed out after 25ms/i,
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Relay era resolution (issue #219): pins, resolveRelayEra(), the two-sided
+// re-probe rule, and the probe-time DiscoverResult capture.
+// ---------------------------------------------------------------------------
+
+/** A resolvable/rejectable gate for holding a probe in flight. */
+function deferredResponse() {
+  let resolve!: (value: Response) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<Response>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function modernDiscoverHandler(extra: Record<string, unknown> = {}): UpstreamHandler {
+  return () =>
+    jsonRpcResult({
+      resultType: 'complete',
+      supportedVersions: ['2026-07-28'],
+      capabilities: {},
+      ttlMs: 3_600_000,
+      cacheScope: 'public',
+      ...extra,
+    })
+}
+
+function discoverCallsOf(calls: readonly UpstreamCall[]): UpstreamCall[] {
+  return calls.filter((call) => call.method === 'server/discover')
+}
+
+function eraClearedLines(): string[] {
+  return loggedLines.filter((line) => /Upstream MCP era cleared/.test(line))
+}
+
+describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('pinned modern skips the probe in establish() and mints the handshakeless session', async () => {
+    const calls = stubUpstream({})
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      protocolVersion: '2026-07-28',
+    })
+
+    const session = await mgr.ensureInternalSession()
+
+    expect(session).toEqual({ sessionId: undefined, protocolVersion: '2026-07-28', era: 'modern' })
+    expect(calls).toHaveLength(0)
+    expect(loggedLines.filter((line) => /era detected/.test(line))).toHaveLength(0)
+  })
+
+  it('pinned legacy skips the probe in establish() and goes straight to initialize', async () => {
+    const calls = stubUpstream({ initialize: legacyInitializeHandler('U-pinned') })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      protocolVersion: '2025-06-18',
+    })
+
+    const session = await mgr.ensureInternalSession()
+
+    expect(session).toEqual({ sessionId: 'U-pinned', protocolVersion: '2025-06-18', era: 'legacy' })
+    expect(methodsOf(calls)).toEqual(['initialize', 'notifications/initialized'])
+    expect(loggedLines.filter((line) => /era detected/.test(line))).toHaveLength(0)
+  })
+
+  it.each([
+    ['2026-07-28', 'modern'],
+    ['2025-06-18', 'legacy'],
+  ] as const)('resolveRelayEra() returns the %s pin without probing', async (pin, era) => {
+    const calls = stubUpstream({})
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      protocolVersion: pin,
+    })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe(era)
+
+    expect(calls).toHaveLength(0)
+  })
+
+  it('probes once, caches modern, and returns the cached era on later calls', async () => {
+    const calls = stubUpstream({ 'server/discover': modernDiscoverHandler() })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+  })
+
+  it('caches legacy from probe classification alone, never running initialize', async () => {
+    const calls = stubUpstream({
+      'server/discover': () => new Response(null, { status: 202 }),
+      initialize: legacyInitializeHandler('U-never-used'),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+  })
+
+  it('caches legacy from the -32022 salvage classification (action semantics)', async () => {
+    const calls = stubUpstream({
+      'server/discover': () =>
+        jsonRpcError(
+          {
+            code: -32022,
+            message: 'UnsupportedProtocolVersionError',
+            data: { supported: ['2027-01-01'], requested: '2026-07-28' },
+          },
+          400,
+        ),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+  })
+
+  it('shares one in-flight probe between resolveRelayEra() and establish()', async () => {
+    const calls = stubUpstream({ 'server/discover': modernDiscoverHandler() })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const [era, session] = await Promise.all([mgr.resolveRelayEra(), mgr.ensureInternalSession()])
+
+    expect(era).toBe('modern')
+    expect(session.era).toBe('modern')
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+    expect(loggedLines.filter((line) => /era detected: modern/.test(line))).toHaveLength(1)
+  })
+
+  it('coalesces concurrent relay callers onto a single probe', async () => {
+    const calls = stubUpstream({ 'server/discover': modernDiscoverHandler() })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const eras = await Promise.all([
+      mgr.resolveRelayEra(),
+      mgr.resolveRelayEra(),
+      mgr.resolveRelayEra(),
+    ])
+
+    expect(eras).toEqual(['modern', 'modern', 'modern'])
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+  })
+
+  it('presumes legacy on probe failure, caches nothing, and heals on the first relay after the window', async () => {
+    vi.useFakeTimers()
+    let probes = 0
+    const calls = stubUpstream({
+      'server/discover': (body, headers) => {
+        probes += 1
+        if (probes === 1) return new Response('unauthorized', { status: 401 })
+        return modernDiscoverHandler()(body, headers)
+      },
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+
+    // Inside the window relays presume legacy without waiting or probing.
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS - 1)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    // The FIRST relay after the window re-probes: heal latency <= the window.
+    vi.advanceTimersByTime(2)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+  })
+
+  it('treats a modern-refusal probe (-32020) as probe failure on the relay path: legacy presumed, backoff armed', async () => {
+    vi.useFakeTimers()
+    const calls = stubUpstream({
+      'server/discover': () => jsonRpcError({ code: -32020, message: 'HeaderMismatch' }, 400),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+  })
+
+  it('joins an in-flight probe after backoff expiry instead of presuming legacy alongside it (R1 F2)', async () => {
+    vi.useFakeTimers()
+    const gate = deferredResponse()
+    let probes = 0
+    const calls = stubUpstream({
+      'server/discover': () => {
+        probes += 1
+        if (probes === 1) return new Response('unauthorized', { status: 401 })
+        return gate.promise
+      },
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy') // arms the backoff
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+
+    const starter = mgr.resolveRelayEra() // starts probe 2, held in flight
+    const joiner = mgr.resolveRelayEra() // must JOIN it, not presume legacy
+    gate.resolve(
+      jsonResponse({
+        jsonrpc: '2.0',
+        id: 'helio-era-probe',
+        result: { supportedVersions: ['2026-07-28'], capabilities: {} },
+      }),
+    )
+
+    await expect(starter).resolves.toBe('modern')
+    await expect(joiner).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+  })
+
+  it('join-on-throw returns the legacy presumption and never starts a second probe (R2 F3)', async () => {
+    const gate = deferredResponse()
+    const calls = stubUpstream({
+      'server/discover': () => gate.promise,
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    const starter = mgr.resolveRelayEra()
+    const joiner = mgr.resolveRelayEra()
+    gate.reject(new Error('socket hang up'))
+
+    await expect(starter).resolves.toBe('legacy')
+    await expect(joiner).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    // The shared attempt's failure armed the backoff for later callers too.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+  })
+
+  it('clears the era and arms the backoff when the legacy fast path initialize fails, throttling the relay-driven loop to the window (R4 F1)', async () => {
+    vi.useFakeTimers()
+    const calls = stubUpstream({
+      'server/discover': () => new Response(null, { status: 202 }),
+      initialize: () => new Response('boom', { status: 500 }),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    // A relay probe caches legacy without a proven initialize...
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(methodsOf(calls)).toEqual(['server/discover'])
+
+    // ...the cached era feeds establish()'s fast path (no re-probe), whose
+    // initialize fails: the internal door clears AND arms.
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(/initialize failed/)
+    expect(methodsOf(calls)).toEqual(['server/discover', 'initialize'])
+    expect(eraClearedLines()).toHaveLength(1)
+
+    // Relays inside the window presume legacy WITHOUT probing: the loop is
+    // throttled to the window, not the relay request rate.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(methodsOf(calls)).toEqual(['server/discover', 'initialize'])
+
+    // establish() alone stays backoff-free: the prime cadence may probe
+    // within the window.
+    await expect(mgr.ensureInternalSession()).rejects.toThrow(/initialize failed/)
+    expect(methodsOf(calls)).toEqual([
+      'server/discover',
+      'initialize',
+      'server/discover',
+      'initialize',
+    ])
+
+    // The FIRST relay after the window re-probes.
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(3)
+  })
+
+  it('falsification clears cached legacy, arms the backoff, and throttles even a successful re-probe (R2 F2)', async () => {
+    vi.useFakeTimers()
+    const calls = stubUpstream({
+      'server/discover': () => new Response(null, { status: 202 }),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    mgr.clearFalsifiedLegacyEra('relayed initialize was answered with HTTP 404')
+    expect(eraClearedLines()).toHaveLength(1)
+    expect(eraClearedLines()[0]).toContain('relayed initialize was answered with HTTP 404')
+
+    // Falsify -> re-probe is throttled to the window, NOT every-request.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+
+    // After the window one successful re-probe re-caches...
+    vi.advanceTimersByTime(ERA_PROBE_BACKOFF_MS + 1)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+
+    // ...and a second falsification restarts the throttled cycle.
+    mgr.clearFalsifiedLegacyEra('relayed response carried modern-only JSON-RPC error -32020')
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+    expect(eraClearedLines()).toHaveLength(2)
+  })
+
+  it('falsification no-ops on a cached modern era', async () => {
+    const calls = stubUpstream({ 'server/discover': modernDiscoverHandler() })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    mgr.clearFalsifiedLegacyEra('should never clear modern')
+
+    expect(eraClearedLines()).toHaveLength(0)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+  })
+
+  it('falsification no-ops on an uncached era and arms nothing', async () => {
+    const calls = stubUpstream({ 'server/discover': modernDiscoverHandler() })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    mgr.clearFalsifiedLegacyEra('nothing cached yet')
+
+    expect(eraClearedLines()).toHaveLength(0)
+    // Nothing was armed: the next relay probes immediately.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(1)
+  })
+
+  it('falsification no-ops under a pin', async () => {
+    const calls = stubUpstream({})
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      protocolVersion: '2025-06-18',
+    })
+
+    mgr.clearFalsifiedLegacyEra('pins are never cleared')
+
+    expect(eraClearedLines()).toHaveLength(0)
+    await expect(mgr.resolveRelayEra()).resolves.toBe('legacy')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('captures DiscoverResult capabilities and instructions on modern classification', async () => {
+    stubUpstream({
+      'server/discover': modernDiscoverHandler({
+        capabilities: { tools: {}, prompts: {} },
+        instructions: 'Use the search tool before the fetch tool.',
+      }),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+
+    expect(mgr.getDiscoverCapture()).toEqual({
+      capabilities: { tools: {}, prompts: {} },
+      instructions: 'Use the search tool before the fetch tool.',
+    })
+  })
+
+  it('leaves the capture fields empty when the fresh DiscoverResult lacks them', async () => {
+    stubUpstream({
+      'server/discover': () => jsonRpcResult({ supportedVersions: ['2026-07-28'] }),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+
+    expect(mgr.getDiscoverCapture()).toEqual({ capabilities: undefined, instructions: undefined })
+  })
+
+  it('holds no capture under a modern pin', async () => {
+    stubUpstream({})
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      protocolVersion: '2026-07-28',
+    })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    await mgr.ensureInternalSession()
+
+    expect(mgr.getDiscoverCapture()).toBeUndefined()
+  })
+
+  it('invalidateInternalSession() drops the capture without arming the backoff (R5 N2)', async () => {
+    const calls = stubUpstream({
+      'server/discover': modernDiscoverHandler({ instructions: 'be gentle' }),
+    })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(mgr.getDiscoverCapture()).toBeDefined()
+
+    mgr.invalidateInternalSession()
+
+    expect(mgr.getDiscoverCapture()).toBeUndefined()
+    expect(eraClearedLines()).toHaveLength(0)
+    // Invalidation is session lifecycle, not falsification: no backoff, the
+    // next relay re-probes (and re-captures) immediately.
+    await expect(mgr.resolveRelayEra()).resolves.toBe('modern')
+    expect(discoverCallsOf(calls)).toHaveLength(2)
+    expect(mgr.getDiscoverCapture()).toEqual({ capabilities: {}, instructions: 'be gentle' })
   })
 })

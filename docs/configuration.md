@@ -191,6 +191,14 @@ A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/
 
 A modern refusal is not legacy either. If the upstream rejects the probe with the modern error codes `-32020` (header mismatch) or `-32021` (missing client capability), it has identified itself as a modern server, so Helio does not fall back to `initialize` and caches no era. It reports the refusal — the error text carries the upstream's own message — and probes again on the next attempt, rather than quietly downgrading a server that is newer than the handshake. A `-32022` (unsupported protocol version) response instead identifies a modern upstream that simply does not speak Helio's modern revision, so Helio salvages the session with one legacy `initialize` attempt, reporting both sides' supported versions if that attempt also fails.
 
+A dated `protocol_version` pin removes this machinery entirely: the pinned era is a constant — never probed, never cached, never cleared — and Helio logs the pin once at startup instead of a detection line. Deployments the probe cannot classify should pin. The common case is a modern-only upstream gated behind per-client `Authorization` pass-through: the probe carries only `upstream.headers` and is refused forever, while relayed requests carry each client's own credentials and succeed.
+
+In `auto` mode, a cached era conclusion that the upstream itself contradicts is dropped rather than kept: if the `initialize` handshake fails against an upstream Helio had concluded was legacy, the cached era is cleared and re-probing is throttled for 30 seconds, with one log line naming what falsified the conclusion:
+
+```
+[helio] Upstream MCP era cleared: internal initialize failed against the cached legacy era; relays presume legacy and re-probing is throttled for 30s
+```
+
 Only Helio's own internal traffic is probed and version-tagged. Requests relayed from a downstream MCP client now carry the same standard request headers (`Mcp-Method`, and `Mcp-Name` on the name-bearing methods), but they stay legacy-versioned: Helio still stamps `mcp-protocol-version: 2025-06-18` when the client didn't send one, until the separately tracked version negotiation work lands. A strict modern-only upstream therefore still rejects a relayed request — on the protocol version now, no longer on missing headers.
 
 #### Startup annotation cache priming

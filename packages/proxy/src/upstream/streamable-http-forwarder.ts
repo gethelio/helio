@@ -6,7 +6,7 @@ import { buildStandardRequestHeaders } from './standard-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import {
   UpstreamSessionManager,
-  HELIO_MCP_PROTOCOL_VERSION,
+  HELIO_MCP_LEGACY_PROTOCOL_VERSION,
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
   buildInternalMeta,
   type UpstreamEra,
@@ -86,7 +86,7 @@ export class StreamableHttpForwarder implements McpForwarder {
     // passthrough: forward whatever session the caller did (or did not) supply.
     return this.send(request, {
       sessionId: request.transportSessionId,
-      protocolVersion: HELIO_MCP_PROTOCOL_VERSION,
+      protocolVersion: HELIO_MCP_LEGACY_PROTOCOL_VERSION,
     })
   }
 

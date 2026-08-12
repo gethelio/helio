@@ -2,10 +2,18 @@ import { mergeUpstreamHeaders } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
 
-/** Protocol version Helio offers when it owns the upstream session. */
-export const HELIO_MCP_PROTOCOL_VERSION = '2025-06-18'
+/** The legacy leg's protocol offer — one of the two revisions Helio speaks. */
+export const HELIO_MCP_LEGACY_PROTOCOL_VERSION = '2025-06-18'
 /** MCP revision Helio speaks to a modern upstream (no initialize handshake). */
 export const HELIO_MCP_MODERN_PROTOCOL_VERSION = '2026-07-28'
+/**
+ * Throttle on era re-probing, armed by a probe failure and by both
+ * falsified-era clears (relay falsification and the internal initialize
+ * failure). Relays presume legacy inside the window without waiting; the
+ * first relay after it re-probes. `establish()` alone is backoff-free — its
+ * callers retry on the prime loop's own cadence.
+ */
+export const ERA_PROBE_BACKOFF_MS = 30_000
 const MAX_SSE_SCAN_BYTES = 256 * 1024
 /** JSON-RPC id of the era probe, matched when its reply arrives SSE-framed. */
 const ERA_PROBE_REQUEST_ID = 'helio-era-probe'
@@ -16,6 +24,23 @@ const MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE = -32022
 
 /** Which MCP revision an upstream speaks, decided by the `server/discover` probe. */
 export type UpstreamEra = 'modern' | 'legacy'
+
+/**
+ * `upstream.protocol_version`: `auto` probes and caches; a dated pin is a
+ * constant — never probed, never cached, never cleared.
+ */
+export type UpstreamProtocolVersionPin = 'auto' | '2025-06-18' | '2026-07-28'
+
+/**
+ * DiscoverResult fields captured at probe time on a modern classification,
+ * consumed by the relay leg's initialize synthesis. Cleared with the era it
+ * came from; every modern classification re-captures from its own fresh
+ * result.
+ */
+export interface DiscoverCapture {
+  readonly capabilities?: Record<string, unknown>
+  readonly instructions?: string
+}
 
 /** A live upstream session Helio established for its own sessionless requests. */
 export interface UpstreamSession {
@@ -28,6 +53,7 @@ export interface UpstreamSessionManagerOptions {
   url: string
   staticHeaders: Record<string, string>
   requestTimeoutMs?: number
+  protocolVersion?: UpstreamProtocolVersionPin
 }
 
 /** Standard modern `_meta` for Helio-internal requests. */
@@ -47,7 +73,11 @@ export function buildInternalMeta(): Record<string, unknown> {
  * server's real nature into the error message if that initialize also fails.
  */
 type EraProbeOutcome =
-  | { readonly era: 'modern' }
+  | {
+      readonly era: 'modern'
+      readonly capabilities?: Record<string, unknown>
+      readonly instructions?: string
+    }
   | { readonly era: 'legacy'; readonly unsupportedModernVersions?: readonly string[] }
 
 /**
@@ -84,14 +114,19 @@ export class UpstreamSessionManager {
   private readonly url: string
   private readonly staticHeaders: Record<string, string>
   private readonly requestTimeoutMs: number
+  private readonly pin: UpstreamProtocolVersionPin
   private internal: UpstreamSession | undefined
   private era: UpstreamEra | undefined
+  private capture: DiscoverCapture | undefined
   private inflight: Promise<UpstreamSession> | undefined
+  private inflightProbe: Promise<EraProbeOutcome> | undefined
+  private probeBackoffUntil = 0
 
   constructor(options: UpstreamSessionManagerOptions) {
     this.url = options.url
     this.staticHeaders = options.staticHeaders
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
+    this.pin = options.protocolVersion ?? 'auto'
   }
 
   /** Return the internal session, establishing it once if needed. */
@@ -111,11 +146,141 @@ export class UpstreamSessionManager {
 
   /**
    * Drop the cached internal session and era so the next call re-probes.
-   * Does not cancel any in-flight establishment.
+   * Does not cancel any in-flight establishment. Every era wipe drops the
+   * probe-time DiscoverResult capture with it; invalidation is session
+   * lifecycle, not falsification, so it must NOT arm the probe backoff.
    */
   invalidateInternalSession(): void {
     this.internal = undefined
     this.era = undefined
+    this.capture = undefined
+  }
+
+  /**
+   * Resolve the era a relayed request should be sent under. Evaluated in a
+   * strict total order: pin, cached era, join an in-flight probe, backoff
+   * presumption, start a probe. A probe failure never fails the relay — the
+   * request proceeds under a per-request legacy presumption, preserving
+   * today's behavior for deployments the probe cannot classify (for example
+   * per-client Authorization pass-through, where the probe is refused
+   * forever while relays carry the client's own credentials and succeed).
+   */
+  async resolveRelayEra(): Promise<UpstreamEra> {
+    const pinned = this.pinnedEra()
+    if (pinned) return pinned
+    if (this.era) return this.era
+    const joined = this.inflightProbe
+    if (joined) {
+      // Joining precedes the backoff check so a post-backoff in-flight probe
+      // can never coexist with legacy-presumed siblings in the same burst.
+      try {
+        const outcome = await joined
+        return outcome.era
+      } catch {
+        // The shared attempt's own failure already armed the backoff; a
+        // join-failure must never bypass that window and start a second
+        // probe.
+        return 'legacy'
+      }
+    }
+    if (Date.now() < this.probeBackoffUntil) return 'legacy'
+    try {
+      const outcome = await this.sharedProbe()
+      this.cacheRelayClassification(outcome)
+      return outcome.era
+    } catch {
+      // sharedProbe() noted the failure time; presume legacy for this
+      // request only, caching nothing.
+      return 'legacy'
+    }
+  }
+
+  /**
+   * Relay-side falsification door: a relayed response just contradicted a
+   * cached legacy era (a modern-only JSON-RPC code on any method, or a
+   * 404/-32601 answer to a relayed initialize). No-ops unless the cached era
+   * is 'legacy': a cached modern era is never cleared automatically — no
+   * reliable legacy-rejection signal exists, and recovery from an upstream
+   * downgrade is pin-or-restart.
+   */
+  clearFalsifiedLegacyEra(door: string): void {
+    if (this.era !== 'legacy') return
+    this.clearEraAndArmBackoff(door)
+  }
+
+  /** Probe-captured DiscoverResult fields for the relay initialize synthesis. */
+  getDiscoverCapture(): DiscoverCapture | undefined {
+    return this.capture
+  }
+
+  /** The era a non-auto pin dictates; undefined in auto mode. */
+  private pinnedEra(): UpstreamEra | undefined {
+    if (this.pin === HELIO_MCP_MODERN_PROTOCOL_VERSION) return 'modern'
+    if (this.pin === HELIO_MCP_LEGACY_PROTOCOL_VERSION) return 'legacy'
+    return undefined
+  }
+
+  /**
+   * One in-flight `server/discover` per manager, shared by `establish()` and
+   * `resolveRelayEra()` — whichever asks first starts it, later callers
+   * join. A failure notes its time, arming the relay-path backoff, then
+   * rethrows for the consumer's own handling.
+   */
+  private sharedProbe(): Promise<EraProbeOutcome> {
+    this.inflightProbe ??= this.probeEra()
+      .catch((error: unknown) => {
+        this.probeBackoffUntil = Date.now() + ERA_PROBE_BACKOFF_MS
+        throw error
+      })
+      .finally(() => {
+        this.inflightProbe = undefined
+      })
+    return this.inflightProbe
+  }
+
+  /**
+   * Relay-path caching: the probe classification alone settles the era.
+   * Caching 'legacy' without a proven initialize is what makes
+   * `establish()`'s legacy fast path live; the two-sided re-probe rule
+   * (`clearFalsifiedLegacyEra()` and the internal initialize catch) heals a
+   * wrong conclusion.
+   */
+  private cacheRelayClassification(outcome: EraProbeOutcome): void {
+    if (outcome.era === 'modern') {
+      this.cacheModernClassification(outcome)
+      return
+    }
+    this.setEra('legacy')
+  }
+
+  /** Every modern classification re-captures from its own fresh DiscoverResult. */
+  private cacheModernClassification(outcome: {
+    readonly capabilities?: Record<string, unknown>
+    readonly instructions?: string
+  }): void {
+    this.capture = { capabilities: outcome.capabilities, instructions: outcome.instructions }
+    this.setEra('modern')
+  }
+
+  /**
+   * Falsified-classification clear: any cleared era means the classification
+   * was just contradicted, so re-probing is throttled no matter which door
+   * noticed. No-ops under a pin and on uncached eras; drops the probe-time
+   * DiscoverResult capture with the era it came from; emits exactly one
+   * operator line per clear.
+   */
+  private clearEraAndArmBackoff(door: string): void {
+    if (this.pinnedEra()) return
+    if (this.era === undefined) return
+    this.era = undefined
+    this.capture = undefined
+    this.probeBackoffUntil = Date.now() + ERA_PROBE_BACKOFF_MS
+    // eslint-disable-next-line no-console -- operator-visible era lifecycle detail
+    console.error(
+      `[helio] Upstream MCP era cleared: ${door}; ` +
+        `relays presume legacy and re-probing is throttled for ` +
+        `${String(ERA_PROBE_BACKOFF_MS / 1000)}s`,
+    )
   }
 
   /** Convert a fetch failure into an actionable error for the given step. */
@@ -130,11 +295,15 @@ export class UpstreamSessionManager {
   }
 
   private async establish(): Promise<UpstreamSession> {
+    // A pinned era is a constant: never probed, never cached, never cleared.
+    const pinned = this.pinnedEra()
+    if (pinned === 'modern') return this.modernSession()
+    if (pinned === 'legacy') return this.legacyInitialize()
     if (this.era === 'modern') return this.modernSession()
     if (this.era === 'legacy') return this.legacyInitializeCachingEra(undefined)
-    const probe = await this.probeEra()
+    const probe = await this.sharedProbe()
     if (probe.era === 'modern') {
-      this.setEra('modern')
+      this.cacheModernClassification(probe)
       return this.modernSession()
     }
     return this.legacyInitializeCachingEra(probe.unsupportedModernVersions)
@@ -149,6 +318,12 @@ export class UpstreamSessionManager {
       this.setEra('legacy')
       return session
     } catch (error) {
+      // Internal-side falsification door: a CACHED legacy era whose own
+      // initialize just failed was a wrong classification, cleared and
+      // throttled through the same helper the relay door uses. On a fresh
+      // establishment nothing is cached and the helper no-ops, keeping
+      // today's behavior.
+      this.clearEraAndArmBackoff('internal initialize failed against the cached legacy era')
       if (unsupportedModernVersions) {
         throw new Error(
           `upstream is a modern MCP server supporting [${unsupportedModernVersions.join(', ')}] ` +
@@ -162,6 +337,9 @@ export class UpstreamSessionManager {
 
   /** Single owner of era assignment and of the era-detected log line. */
   private setEra(era: UpstreamEra): void {
+    // Idempotent: two consumers of one shared probe may both record the same
+    // conclusion, and the second assignment must not re-log it.
+    if (this.era === era) return
     this.era = era
     // eslint-disable-next-line no-console -- operator-visible startup detail
     console.error(
@@ -308,7 +486,7 @@ export class UpstreamSessionManager {
       id: 0,
       method: 'initialize',
       params: {
-        protocolVersion: HELIO_MCP_PROTOCOL_VERSION,
+        protocolVersion: HELIO_MCP_LEGACY_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: 'helio-proxy', version: '0' },
       },
@@ -588,7 +766,22 @@ function classifyProbeResult(envelope: Record<string, unknown>): EraProbeOutcome
     return { era: 'legacy' }
   }
   const versions = readStringArray(supportedVersions)
-  if (versions.includes(HELIO_MCP_MODERN_PROTOCOL_VERSION)) return { era: 'modern' }
+  if (versions.includes(HELIO_MCP_MODERN_PROTOCOL_VERSION)) {
+    // Capture the DiscoverResult fields the relay initialize synthesis
+    // reuses. Absent fields stay absent — a fresh result without them must
+    // not inherit a stale capture.
+    const record = result as Record<string, unknown>
+    const capabilities = record['capabilities']
+    const instructions = record['instructions']
+    return {
+      era: 'modern',
+      capabilities:
+        typeof capabilities === 'object' && capabilities !== null && !Array.isArray(capabilities)
+          ? (capabilities as Record<string, unknown>)
+          : undefined,
+      instructions: typeof instructions === 'string' ? instructions : undefined,
+    }
+  }
   // A modern server speaking none of Helio's versions: one initialize attempt
   // salvages the dual-era case, and its failure names both sides' versions.
   return { era: 'legacy', unsupportedModernVersions: versions }
@@ -611,10 +804,10 @@ function extractJsonRpcErrorMessage(payload: Record<string, unknown>): string | 
 function extractNegotiatedProtocolVersion(payload: Record<string, unknown>): string {
   const result = payload['result']
   if (typeof result !== 'object' || result === null) {
-    return HELIO_MCP_PROTOCOL_VERSION
+    return HELIO_MCP_LEGACY_PROTOCOL_VERSION
   }
   const protocolVersion = (result as Record<string, unknown>)['protocolVersion']
   return typeof protocolVersion === 'string' && protocolVersion.trim()
     ? protocolVersion
-    : HELIO_MCP_PROTOCOL_VERSION
+    : HELIO_MCP_LEGACY_PROTOCOL_VERSION
 }
