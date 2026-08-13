@@ -274,6 +274,47 @@ where something in front of Helio (a reverse proxy, service mesh, or embedding
 host) injects an `Origin` the operator needs to name. Like the rest of
 `listen`, changing it requires a restart; it is not applied by hot reload.
 
+#### Inbound header/body agreement
+
+`POST /mcp` validates the MCP 2026-07-28 standard request headers against the
+JSON-RPC body (issue #226). The check has two tiers, selected by the
+`MCP-Protocol-Version` header:
+
+- **Modern claim** — the header value normalizes to exactly `2026-07-28`
+  (duplicated all-modern values count; a mixed or malformed value does not).
+  Requests must carry an `Mcp-Method` equal to the body's `method`, an
+  `Mcp-Name` matching the body's `params.name` (`tools/call`, `prompts/get`)
+  or `params.uri` (`resources/read`) when that field is a string, and a
+  `params._meta["io.modelcontextprotocol/protocolVersion"]` mirror equal to
+  `2026-07-28`. Notifications (no JSON-RPC `id` member) have no presence
+  requirements — the revision leaves notification-POST headers undefined —
+  but any marker they do carry must agree.
+- **Everything else** (no claim, a legacy claim, or an unrecognized value) —
+  nothing is required to be present, but a present `Mcp-Method` or `Mcp-Name`
+  must still agree with the body. The `_meta` mirror is deliberately not
+  examined on this tier: a modern client's leftover mirror under a legacy
+  header is exactly what a version-downgrading relay (including Helio's own
+  legacy relay leg) legitimately produces.
+
+So two request classes are rejected that were accepted before: a request
+claiming `MCP-Protocol-Version: 2026-07-28` without the required headers and
+mirror, and a request whose present `Mcp-Method` or `Mcp-Name` disagrees with
+the body even with no version claim at all. Fully conformant modern clients
+and legacy clients (which send neither header) are unaffected. A rejection is
+HTTP 400 with JSON-RPC error `-32020`; notifications and `id: null` envelopes
+receive an error body with the `id` member omitted. Sentinel-encoded
+(`=?base64?…?=`) `Mcp-Name` values are decoded before comparison. Every
+rejection is recorded in the [audit trail](./audit.md#header-mismatch-rejections)
+under `block_reason: header_mismatch`.
+
+There is no configuration surface for this check — the spec assigns it as a
+MUST to whoever processes the body, and a knob that turns it off would
+silently disable a governance control. A client that hard-codes the modern
+version claim but cannot send the standard headers should send a legacy
+`MCP-Protocol-Version` value or a fully conformant modern request; Helio's
+governance evaluates the parsed body either way. The `/sse` transport
+predates the standard request headers and is not validated.
+
 ### environment
 
 | Field         | Type   | Required | Default | Description                                                                                                                                                                            |

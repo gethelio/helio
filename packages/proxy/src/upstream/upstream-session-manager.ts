@@ -24,6 +24,12 @@ const MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE = -32022
 /**
  * The same three codes as a set, for consumers that only need "is this a
  * code no legacy server emits" (the relay-side era falsification door).
+ * Since issue #226 a legacy-era HELIO can emit -32020 from its own inbound
+ * door — but that door cannot be tripped through a conforming Helio relay
+ * (both legs stamp mcp-method/mcp-name from the exact serialized body, and
+ * the door's `_meta`-mirror rule fires only under a modern version claim,
+ * which the legacy leg never sends), so a -32020 on a relayed response
+ * remains genuine evidence about the upstream.
  */
 export const MCP_MODERN_ONLY_ERROR_CODES: ReadonlySet<number> = new Set([
   HEADER_MISMATCH,

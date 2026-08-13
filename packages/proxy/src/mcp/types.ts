@@ -68,10 +68,14 @@ export interface McpRequest extends JsonRpcRequest {
   transportSessionId?: string
   /**
    * The client's verbatim MCP-Protocol-Version wire claim (issue #219) —
-   * captured raw, with no validation or normalization, for the audit trail.
-   * It is the CLIENT'S claim, not the upstream era and not a checked fact.
-   * Streamable HTTP only: the header postdates the deprecated SSE transport,
-   * and stdio has no headers, so both leave it unset.
+   * captured raw, with no normalization, for the audit trail. It is the
+   * CLIENT'S claim, not the upstream era. Since issue #226 the
+   * streamable-http route validates header/body agreement before
+   * forwarding, so on a FORWARDED request a claim of `2026-07-28` has
+   * passed the agreement door; tier-2 claims (legacy, unknown, malformed)
+   * and notification claims remain unvalidated as captured. Streamable
+   * HTTP only: the header postdates the deprecated SSE transport, and
+   * stdio has no headers, so both leave it unset.
    */
   protocolVersion?: string
   /** Per-request headers to forward to upstream (e.g. Authorization, X-* headers). */
