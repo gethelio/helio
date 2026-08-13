@@ -48,6 +48,37 @@ export function encodeSentinelValue(value: string): string {
   return `${SENTINEL_PREFIX}${Buffer.from(value, 'utf8').toString('base64')}${SENTINEL_SUFFIX}`
 }
 
+/**
+ * The strict sentinel grammar the receiving side accepts: base64 chars with
+ * up to two trailing `=` padding chars, nothing else. Anything looser would
+ * decode values the encoder never produces.
+ */
+const SENTINEL_DECODE_PATTERN = /^=\?base64\?([A-Za-z0-9+/]*={0,2})\?=$/
+
+/**
+ * Decode a wire header value the way a receiving 2026-07-28 server does: a
+ * strict sentinel match decodes its base64 payload as UTF-8, anything else —
+ * including a malformed sentinel lookalike — is compared as the literal
+ * value. That literal fallback is what a conformant encoder implies: any body
+ * value that merely LOOKS like the sentinel must itself be sentinel-wrapped
+ * on the wire (`needsSentinelEncoding`). Node's base64 decode never throws
+ * and tolerates missing padding — one-sided leniency, not a disagreement,
+ * since the encoder always pads.
+ */
+export function decodeSentinelValue(value: string): string {
+  const match = SENTINEL_DECODE_PATTERN.exec(value)
+  return match ? Buffer.from(match[1] ?? '', 'base64').toString('utf8') : value
+}
+
+/**
+ * The name-bearing params field `Mcp-Name` mirrors for `method`, or
+ * undefined when the method bears none. An accessor so the Map itself (and
+ * its `__proto__`-safety rationale) stays private.
+ */
+export function nameBearingField(method: string): 'name' | 'uri' | undefined {
+  return NAME_SOURCE_FIELD.get(method)
+}
+
 function extractName(method: string, params: unknown): string | undefined {
   const field = NAME_SOURCE_FIELD.get(method)
   if (!field || typeof params !== 'object' || params === null || Array.isArray(params)) {

@@ -14,6 +14,14 @@ export const INVALID_PARAMS = -32602
 /** JSON-RPC internal error — unexpected server-side failure. */
 export const INTERNAL_ERROR = -32603
 
+/**
+ * MCP 2026-07-28 HeaderMismatch — a standard request header
+ * (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing when
+ * required or disagrees with the body field it mirrors. Emitted by Helio's
+ * own inbound door (issue #226) and by modern upstream servers.
+ */
+export const HEADER_MISMATCH = -32020
+
 // ---------------------------------------------------------------------------
 // JSON-RPC types
 // ---------------------------------------------------------------------------
@@ -70,6 +78,35 @@ export interface McpRequest extends JsonRpcRequest {
   headers?: Record<string, string>
   /** Abort signal tied to the downstream client request lifecycle. */
   signal?: AbortSignal
+}
+
+/**
+ * An inbound request rejected by the header/body agreement door (issue
+ * #226), as protocol facts: what the body said, what the headers claimed,
+ * and why they disagree. Deliberately camelCase and transport-free (no Hono
+ * types, no audit field names) — the audit-record mapping lives solely in
+ * `buildHeaderMismatchAuditRecord` on the audit side.
+ */
+export interface HeaderMismatchRejection {
+  /** Human-readable mismatch reason; echoed values are display-capped. */
+  readonly reason: string
+  /** The body's JSON-RPC method. */
+  readonly method: string
+  /** The body's params, verbatim as parsed. */
+  readonly params?: unknown
+  /**
+   * The body's name-bearing string field (`params.name` / `params.uri`),
+   * when the method defines one and the body carries a string value.
+   */
+  readonly bodyName?: string
+  /** The client's verbatim MCP-Protocol-Version wire claim, if any. */
+  readonly protocolVersion?: string
+  /** The inbound marker headers that were present, verbatim as received. */
+  readonly headers: Readonly<Record<string, string>>
+  /** Proxy-resolved governance session identity, when a strategy matched. */
+  readonly session?: ResolvedSession
+  /** Time from route-handler entry to rejection, in milliseconds. */
+  readonly durationMs: number
 }
 
 /** The response returned by an MCP forwarder. */

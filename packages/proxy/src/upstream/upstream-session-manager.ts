@@ -1,3 +1,4 @@
+import { HEADER_MISMATCH } from '../mcp/types.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
@@ -18,7 +19,6 @@ const MAX_SSE_SCAN_BYTES = 256 * 1024
 /** JSON-RPC id of the era probe, matched when its reply arrives SSE-framed. */
 const ERA_PROBE_REQUEST_ID = 'helio-era-probe'
 /** JSON-RPC error codes only a 2026-07-28 server emits. */
-const MCP_HEADER_MISMATCH_CODE = -32020
 const MCP_MISSING_CLIENT_CAPABILITY_CODE = -32021
 const MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE = -32022
 /**
@@ -26,10 +26,13 @@ const MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE = -32022
  * code no legacy server emits" (the relay-side era falsification door).
  */
 export const MCP_MODERN_ONLY_ERROR_CODES: ReadonlySet<number> = new Set([
-  MCP_HEADER_MISMATCH_CODE,
+  HEADER_MISMATCH,
   MCP_MISSING_CLIENT_CAPABILITY_CODE,
   MCP_UNSUPPORTED_PROTOCOL_VERSION_CODE,
 ])
+
+/** `params._meta` key a modern client mirrors its protocol version under. */
+export const MCP_META_PROTOCOL_VERSION_KEY = 'io.modelcontextprotocol/protocolVersion'
 
 /** Which MCP revision an upstream speaks, decided by the `server/discover` probe. */
 export type UpstreamEra = 'modern' | 'legacy'
@@ -68,7 +71,7 @@ export interface UpstreamSessionManagerOptions {
 /** Standard modern `_meta` for Helio-internal requests. */
 export function buildInternalMeta(): Record<string, unknown> {
   return {
-    'io.modelcontextprotocol/protocolVersion': HELIO_MCP_MODERN_PROTOCOL_VERSION,
+    [MCP_META_PROTOCOL_VERSION_KEY]: HELIO_MCP_MODERN_PROTOCOL_VERSION,
     'io.modelcontextprotocol/clientCapabilities': {},
     'io.modelcontextprotocol/clientInfo': { name: 'helio-proxy', version: '0' },
   }
@@ -764,7 +767,7 @@ function classifyProbeError(envelope: Record<string, unknown>): EraProbeOutcome 
     }
   }
 
-  if (code === MCP_HEADER_MISMATCH_CODE || code === MCP_MISSING_CLIENT_CAPABILITY_CODE) {
+  if (code === HEADER_MISMATCH || code === MCP_MISSING_CLIENT_CAPABILITY_CODE) {
     // A modern server that refused our probe: Helio's conformance bug or the
     // server's policy. Falling back to initialize would only mask it.
     throw new Error(
