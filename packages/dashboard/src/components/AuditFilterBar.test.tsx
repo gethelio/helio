@@ -200,6 +200,17 @@ describe('AuditFilterBar', () => {
     expect(screen.getByRole('option', { name: 'Install Denied' })).toBeTruthy()
   })
 
+  it('exposes a Header Mismatch block-reason option and applies its filter value (#226)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    const option = screen.getByRole('option', { name: 'Header Mismatch' })
+    expect(option.getAttribute('value')).toBe('header_mismatch')
+    const select = option.closest('select')
+    if (!select) throw new Error('Header Mismatch option not inside a select')
+    fireEvent.change(select, { target: { value: 'header_mismatch' } })
+    expect(setFilter).toHaveBeenCalledWith('reason', 'header_mismatch')
+  })
+
   it('renders an origin free-text input and a record-kind select, calling setFilter (#16)', () => {
     const setFilter = vi.fn()
     renderBar({ setFilter })

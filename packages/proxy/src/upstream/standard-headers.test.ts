@@ -3,6 +3,8 @@ import {
   buildStandardRequestHeaders,
   needsSentinelEncoding,
   encodeSentinelValue,
+  decodeSentinelValue,
+  nameBearingField,
   MCP_NAME_MAX_BYTES,
 } from './standard-headers.js'
 
@@ -76,6 +78,96 @@ describe('encodeSentinelValue', () => {
 
   it('encodes the minimal overlapping sentinel', () => {
     expect(encodeSentinelValue('=?base64?=')).toBe('=?base64?PT9iYXNlNjQ/PQ==?=')
+  })
+})
+
+describe('decodeSentinelValue', () => {
+  it('returns a plain value unchanged', () => {
+    expect(decodeSentinelValue('us-west1')).toBe('us-west1')
+  })
+
+  it('returns the empty string unchanged', () => {
+    expect(decodeSentinelValue('')).toBe('')
+  })
+
+  // Spec Value Encoding example, matching the fixture's own vector.
+  it('decodes a sentinel-wrapped multi-byte UTF-8 value', () => {
+    expect(decodeSentinelValue('=?base64?SGVsbG8sIOS4lueVjA==?=')).toBe('Hello, 世界')
+  })
+
+  it('decodes sentinel-wrapped edge whitespace', () => {
+    expect(decodeSentinelValue('=?base64?IHBhZGRlZCA=?=')).toBe(' padded ')
+  })
+
+  it('returns a malformed sentinel lookalike as the literal value', () => {
+    expect(decodeSentinelValue('=?base64?!!!?=')).toBe('=?base64?!!!?=')
+  })
+
+  it('returns a sentinel with an interior padding char as the literal value', () => {
+    expect(decodeSentinelValue('=?base64?a=b?=')).toBe('=?base64?a=b?=')
+  })
+
+  it('returns a sentinel with three padding chars as the literal value', () => {
+    expect(decodeSentinelValue('=?base64?YQ===?=')).toBe('=?base64?YQ===?=')
+  })
+
+  it('decodes the empty payload to the empty string', () => {
+    expect(decodeSentinelValue('=?base64??=')).toBe('')
+  })
+
+  it('tolerates missing base64 padding (one-sided leniency; the encoder always pads)', () => {
+    expect(decodeSentinelValue('=?base64?SGVsbG8sIOS4lueVjA?=')).toBe('Hello, 世界')
+  })
+
+  it('round-trips every value class the encoder wraps', () => {
+    for (const value of [
+      ' padded ',
+      '=?base64?literal?=',
+      '=?base64?=',
+      'Hello, 世界',
+      '',
+      'a\nb',
+    ]) {
+      expect(decodeSentinelValue(encodeSentinelValue(value))).toBe(value)
+    }
+  })
+
+  it('round-trips a literal value through the wire convention (encode only when needed)', () => {
+    for (const value of ['us-west1', 'a b', 'a\tb', 'get_status']) {
+      const wire = needsSentinelEncoding(value) ? encodeSentinelValue(value) : value
+      expect(decodeSentinelValue(wire)).toBe(value)
+    }
+  })
+})
+
+describe('nameBearingField', () => {
+  it('maps tools/call to params.name', () => {
+    expect(nameBearingField('tools/call')).toBe('name')
+  })
+
+  it('maps prompts/get to params.name', () => {
+    expect(nameBearingField('prompts/get')).toBe('name')
+  })
+
+  it('maps resources/read to params.uri', () => {
+    expect(nameBearingField('resources/read')).toBe('uri')
+  })
+
+  it('returns undefined for a non-name-bearing method', () => {
+    expect(nameBearingField('tools/list')).toBeUndefined()
+  })
+
+  // Map semantics preserved: no Object.prototype key leaks through.
+  it('returns undefined for __proto__', () => {
+    expect(nameBearingField('__proto__')).toBeUndefined()
+  })
+
+  it('returns undefined for constructor', () => {
+    expect(nameBearingField('constructor')).toBeUndefined()
+  })
+
+  it('returns undefined for hasOwnProperty', () => {
+    expect(nameBearingField('hasOwnProperty')).toBeUndefined()
   })
 })
 

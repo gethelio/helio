@@ -13,6 +13,7 @@ import {
   UpstreamSessionManager,
   HELIO_MCP_LEGACY_PROTOCOL_VERSION,
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
+  MCP_META_PROTOCOL_VERSION_KEY,
   MCP_MODERN_ONLY_ERROR_CODES,
   buildInternalMeta,
   type UpstreamEra,
@@ -275,7 +276,7 @@ export class StreamableHttpForwarder implements McpForwarder {
         ...params,
         _meta: {
           ...existingMeta,
-          'io.modelcontextprotocol/protocolVersion': HELIO_MCP_MODERN_PROTOCOL_VERSION,
+          [MCP_META_PROTOCOL_VERSION_KEY]: HELIO_MCP_MODERN_PROTOCOL_VERSION,
           'io.modelcontextprotocol/clientCapabilities':
             clientCapabilities !== undefined
               ? clientCapabilities

@@ -492,6 +492,12 @@ const NAME_BEARING_FIELD = new Map<string, 'name' | 'uri'>([
  * PRESENT `mcp-name` is itself a failure ("unexpected mcp-name"), and its
  * absence is correct. Returns a failure reason, or undefined when everything
  * agrees.
+ *
+ * This is an OUTBOUND test double policing Helio's own stamping discipline,
+ * deliberately STRICTER than the spec (the unexpected-mcp-name rule has no
+ * spec MUST behind it). Helio's production inbound door is
+ * `transport/header-body-agreement.ts` (issue #226), which does not copy
+ * that rule and stays independent of this fixture on purpose.
  */
 function validateMirroredStandardHeaders(
   headers: IncomingHttpHeaders,

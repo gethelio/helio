@@ -69,6 +69,7 @@ const BLOCK_REASON_FILTERS: ReadonlyArray<{ label: string; value: string | null 
   { label: 'Shutdown Cancelled', value: 'shutdown_cancelled' },
   { label: 'Install Denied', value: 'install_denied' },
   { label: 'Missing Tool Name', value: 'missing_tool_name' },
+  { label: 'Header Mismatch', value: 'header_mismatch' },
   { label: 'Rate Limited', value: 'rate_limited' },
   { label: 'Spend Limited', value: 'spend_limited' },
   { label: 'Budget Exceeded', value: 'budget_exceeded' },

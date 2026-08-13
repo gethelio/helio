@@ -171,6 +171,30 @@ Maintainer notes:
 
 ### Security
 
+- **The streamable-http inbound door now enforces MCP 2026-07-28
+  header/body agreement (#226).** A `POST /mcp` whose standard request
+  headers disagree with the JSON-RPC body is refused with HTTP 400 and
+  JSON-RPC `-32020` before any policy evaluation, and every rejection
+  is written to the audit trail as `policy_decision: rejected` with
+  `block_reason: header_mismatch`, preserving the lying header values
+  verbatim. Two request classes that Helio previously accepted are
+  rejected after upgrading: (1) a request claiming
+  `MCP-Protocol-Version: 2026-07-28` WITHOUT the required `Mcp-Method`
+  header and `params._meta` protocol-version mirror — the bare-claim
+  shape Helio itself accepted and forwarded until now; a client in this
+  class should send a legacy `MCP-Protocol-Version` value or a fully
+  conformant modern request, since Helio's governance reads the body
+  either way; and (2) a request carrying an `Mcp-Method` or `Mcp-Name`
+  header that DISAGREES with the body — rejected even with no version
+  claim at all, so a client, test rig, or intermediary that already
+  stamps those headers wrongly breaks regardless of version. Fully
+  conformant modern clients and legacy clients (which send neither
+  header) are unaffected, as are chained Helio deployments: the
+  `_meta` mirror is examined only under a modern version claim, so the
+  legacy relay leg's stamp-over-verbatim-body shape passes untouched.
+  There is no configuration surface — the spec assigns the check as a
+  MUST to whoever processes the body, and a knob that turns it off
+  would silently disable a governance control.
 - **The MCP transports now validate the `Origin` header (#213).** Any
   request to `/mcp` or `/sse` carrying an `Origin` not listed in the new
   `listen.allowed_origins` setting is refused with `403` and a JSON-RPC

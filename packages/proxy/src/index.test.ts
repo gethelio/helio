@@ -28,6 +28,7 @@ describe('proxy', () => {
     // Audit
     expect(proxy.AuditStore).toBeTypeOf('function')
     expect(proxy.AuditWriter).toBeTypeOf('function')
+    expect(proxy.buildHeaderMismatchAuditRecord).toBeTypeOf('function')
 
     // Approvals
     expect(proxy.ApprovalQueue).toBeTypeOf('function')

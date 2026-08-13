@@ -140,7 +140,7 @@ Connection to the MCP server that Helio proxies.
 
 **Transport options:**
 
-- **`streamable-http`** (default) — MCP Streamable HTTP: the server exposes an HTTP endpoint, and Helio acts as a full session-aware MCP client. Against a legacy upstream it forwards each downstream client's `initialize` handshake and wire `Mcp-Session-Id` transparently, in both directions, and sends `MCP-Protocol-Version` on upstream requests; against a modern (2026-07-28) upstream the relay leg takes the modern wire shape instead — see [era detection](#upstream-mcp-era-detection). Every upstream POST also carries `Mcp-Method` mirroring the request's JSON-RPC `method`, aside from Helio's own legacy `initialize` handshake (the internal `initialize`/`notifications/initialized` pair it performs against a legacy upstream, which is deliberately left unstamped), and `Mcp-Name` mirroring `params.name` (`tools/call`, `prompts/get`) or `params.uri` (`resources/read`), with values encoded per the spec when needed. The wire session id is a transport relay only — it is separate from Helio's [session identity](#session) resolution, and a proxy-resolved identity is never sent upstream as `Mcp-Session-Id` (a session-enforcing upstream would reject an id it did not mint). Responses may be `application/json` or `text/event-stream` (SSE); Helio accepts both, tolerating SSE field lines with or without a space after `:`. For internal session traffic against a legacy upstream, the protocol version comes from the upstream-negotiated `initialize` result; against a modern upstream, internal requests skip the handshake entirely and are tagged `2026-07-28` directly. In direct forwarder or library usage on the legacy leg, Helio preserves an already-present `mcp-protocol-version` request header; on the modern leg the header is always Helio's own `2026-07-28`. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work with no server-side configuration changes.
+- **`streamable-http`** (default) — MCP Streamable HTTP: the server exposes an HTTP endpoint, and Helio acts as a full session-aware MCP client. Against a legacy upstream it forwards each downstream client's `initialize` handshake and wire `Mcp-Session-Id` transparently, in both directions, and sends `MCP-Protocol-Version` on upstream requests; against a modern (2026-07-28) upstream the relay leg takes the modern wire shape instead — see [era detection](#upstream-mcp-era-detection). Every upstream POST also carries `Mcp-Method` mirroring the request's JSON-RPC `method`, aside from Helio's own legacy `initialize` handshake (the internal `initialize`/`notifications/initialized` pair it performs against a legacy upstream, which is deliberately left unstamped), and `Mcp-Name` mirroring `params.name` (`tools/call`, `prompts/get`) or `params.uri` (`resources/read`), with values encoded per the spec when needed. The same headers are validated on the inbound boundary: a request claiming `MCP-Protocol-Version: 2026-07-28` must carry an agreeing `Mcp-Method` (plus `Mcp-Name` when the body has a name-bearing field) and the `params._meta` protocol-version mirror, and a present `Mcp-Method` or `Mcp-Name` must agree with the body under any version claim, with sentinel-encoded values decoded before comparison; a disagreement is rejected with HTTP 400 and JSON-RPC error `-32020` before any policy evaluation. The wire session id is a transport relay only — it is separate from Helio's [session identity](#session) resolution, and a proxy-resolved identity is never sent upstream as `Mcp-Session-Id` (a session-enforcing upstream would reject an id it did not mint). Responses may be `application/json` or `text/event-stream` (SSE); Helio accepts both, tolerating SSE field lines with or without a space after `:`. For internal session traffic against a legacy upstream, the protocol version comes from the upstream-negotiated `initialize` result; against a modern upstream, internal requests skip the handshake entirely and are tagged `2026-07-28` directly. In direct forwarder or library usage on the legacy leg, Helio preserves an already-present `mcp-protocol-version` request header; on the modern leg the header is always Helio's own `2026-07-28`. Session-enforcing servers (e.g. FastMCP, the official MCP SDKs) work with no server-side configuration changes.
 - **`sse`** — Server-Sent Events transport for older MCP clients. Uses GET for the event stream and POST for messages. The per-stream id Helio mints (the `?sessionId=` query parameter on the POST leg) correlates messages with their stream and doubles as the implicit final fallback for [session identity](#session), so SSE requests never resolve to nothing.
 - **`stdio`** — Spawns the MCP server as a child process and communicates over stdin/stdout. Useful for local servers that don't expose an HTTP endpoint.
 
@@ -273,6 +273,61 @@ preflight even for an allowlisted origin. The setting exists for deployments
 where something in front of Helio (a reverse proxy, service mesh, or embedding
 host) injects an `Origin` the operator needs to name. Like the rest of
 `listen`, changing it requires a restart; it is not applied by hot reload.
+
+#### Inbound header/body agreement
+
+`POST /mcp` validates the MCP 2026-07-28 standard request headers against the
+JSON-RPC body (issue #226). The check has two tiers, selected by the
+`MCP-Protocol-Version` header:
+
+- **Modern claim** — the header value normalizes to exactly `2026-07-28`
+  (duplicated all-modern values count; a mixed or malformed value does not).
+  Requests must carry an `Mcp-Method` equal to the body's `method`, an
+  `Mcp-Name` matching the body's `params.name` (`tools/call`, `prompts/get`)
+  or `params.uri` (`resources/read`) when that field is a string, and a
+  `params._meta["io.modelcontextprotocol/protocolVersion"]` mirror equal to
+  `2026-07-28`. Notifications (no JSON-RPC `id` member) have no presence
+  requirements — the revision leaves notification-POST headers undefined —
+  but any marker they do carry must agree.
+- **Everything else** (no claim, a legacy claim, or an unrecognized value) —
+  nothing is required to be present, but a present `Mcp-Method` or `Mcp-Name`
+  must still agree with the body. The `_meta` mirror is deliberately not
+  examined on this tier: a modern client's leftover mirror under a legacy
+  header is exactly what a version-downgrading relay (including Helio's own
+  legacy relay leg) legitimately produces.
+
+So two request classes are rejected that were accepted before: a request
+claiming `MCP-Protocol-Version: 2026-07-28` without the required headers and
+mirror, and a request whose present `Mcp-Method` or `Mcp-Name` disagrees with
+the body even with no version claim at all. Fully conformant modern clients
+and legacy clients (which send neither header) are unaffected. A rejection is
+HTTP 400 with JSON-RPC error `-32020` for the whole class — including a
+MISSING mirror on a modern-claim request, a stated deviation from the spec's
+own `-32602` for a missing required `_meta` field (`-32602` predates the
+revision, so `-32020` is the unambiguous dual-era signal). Notifications and
+`id: null` envelopes receive an error body with the `id` member omitted.
+Sentinel-encoded (`=?base64?…?=`) `Mcp-Name` values are decoded before
+comparison. Every rejection is recorded in the
+[audit trail](./audit.md#header-mismatch-rejections) under
+`block_reason: header_mismatch`.
+
+For library embeddings, `createApp` accepts an `onHeaderMismatch` callback
+(`CreateAppOptions`, exported from `@gethelio/proxy`) invoked once per
+rejected request with the rejection evidence (`HeaderMismatchRejection`);
+`helio start` composes it with `buildHeaderMismatchAuditRecord` (also
+exported) and the audit writer's `pushImmediate` to produce the record shape
+documented in the audit reference. Pass your configured `environment` label
+as the builder's second argument — omitting it records `environment: null`
+on mismatch rows while your governed records carry the label. Without the
+callback the request is still rejected; no record is written.
+
+There is no configuration surface for this check — the spec assigns it as a
+MUST to whoever processes the body, and a knob that turns it off would
+silently disable a governance control. A client that hard-codes the modern
+version claim but cannot send the standard headers should send a legacy
+`MCP-Protocol-Version` value or a fully conformant modern request; Helio's
+governance evaluates the parsed body either way. The `/sse` transport
+predates the standard request headers and is not validated.
 
 ### environment
 

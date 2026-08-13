@@ -15,7 +15,12 @@ import { GovernedForwarder } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
 import { startAnnotationPrimeLoop } from './policy/annotation-prime-loop.js'
 import type { AnnotationPrimeController } from './policy/annotation-prime-loop.js'
-import { AuditStore, AuditWriter, EXPORT_MAX_RECORDS } from './audit/index.js'
+import {
+  AuditStore,
+  AuditWriter,
+  EXPORT_MAX_RECORDS,
+  buildHeaderMismatchAuditRecord,
+} from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
 import {
@@ -397,6 +402,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
 
   const app = createApp(config, governedForwarder, {
     slackActionApp,
+    onHeaderMismatch: (rejection) => {
+      auditWriter.pushImmediate(buildHeaderMismatchAuditRecord(rejection, config.environment))
+    },
   })
   const handle = startServer(app, config)
 

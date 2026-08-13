@@ -48,6 +48,14 @@ describe('outcome helpers', () => {
     ).toBe('rejected')
   })
 
+  it('renders a header-mismatch rejection as rejected, never falling through to allow', () => {
+    // Regression: an unpinned block_reason with policy_decision 'rejected'
+    // hits the fallthrough and renders as Allow — the exact hazard #226 pins.
+    expect(
+      deriveDisplayOutcome({ policy_decision: 'rejected', block_reason: 'header_mismatch' }),
+    ).toBe('rejected')
+  })
+
   it('derives dry_run with highest priority', () => {
     expect(
       deriveDisplayOutcome({

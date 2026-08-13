@@ -220,10 +220,18 @@ describe('streamable-http transport', () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)
 
+    // A conformant modern request: since #226 a bare claim is rejected at
+    // the agreement door, so the capture is asserted on the shape that
+    // forwards. The capture itself is still the verbatim header value.
     await postMcp(
       app,
-      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
-      { 'MCP-Protocol-Version': '2026-07-28' },
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+        params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } },
+      },
+      { 'MCP-Protocol-Version': '2026-07-28', 'Mcp-Method': 'tools/list' },
     )
 
     expect(forwarder.calls[0]?.protocolVersion).toBe('2026-07-28')
@@ -569,6 +577,218 @@ describe('streamable-http transport', () => {
     await postMcp(app, { jsonrpc: '2.0', id: 1, method: 'tools/list' })
 
     expect(forwarder.calls[0]?.headers).toBeUndefined()
+  })
+
+  describe('inbound header/body agreement (issue #226)', () => {
+    const MIRROR_KEY = 'io.modelcontextprotocol/protocolVersion'
+    const conformantModernBody = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      params: { _meta: { [MIRROR_KEY]: '2026-07-28' } },
+    }
+
+    it('rejects with HTTP 400, code -32020, and the request id echoed', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { ...conformantModernBody, id: 7 },
+        { 'MCP-Protocol-Version': '2026-07-28' },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as JsonRpcResponse
+      expect(json.error?.code).toBe(-32020)
+      expect(json.id).toBe(7)
+      expect(json.error?.message).toContain('missing mcp-method')
+      expect(forwarder.calls).toHaveLength(0)
+    })
+
+    it('rejects a mismatched notification with 400 and NO id member, before the fork', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { 'Mcp-Method': 'tools/call' },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as Record<string, unknown>
+      expect(json['error']).toMatchObject({ code: -32020 })
+      expect(Object.hasOwn(json, 'id')).toBe(false)
+      // Rejection precedes the notification fork: never forwarded, not 202'd.
+      expect(forwarder.calls).toHaveLength(0)
+    })
+
+    it('rejects an id: null request as a REQUEST (presence enforced) with an id-less error body', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { ...conformantModernBody, id: null },
+        { 'MCP-Protocol-Version': '2026-07-28' },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as Record<string, unknown>
+      expect(json['error']).toMatchObject({ code: -32020 })
+      // The 2026-07-28 error shape does not permit id: null — the member is
+      // omitted. Presence classification still treated it as a request.
+      expect(Object.hasOwn(json, 'id')).toBe(false)
+      expect(forwarder.calls).toHaveLength(0)
+    })
+
+    it('normalizes a trailing-comma claim to modern at the route (tokenizer is not inlined)', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(app, conformantModernBody, {
+        'MCP-Protocol-Version': '2026-07-28,',
+      })
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as JsonRpcResponse
+      expect(json.error?.code).toBe(-32020)
+      expect(forwarder.calls).toHaveLength(0)
+    })
+
+    it('forwards a fully conformant modern request', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(app, conformantModernBody, {
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': 'tools/list',
+      })
+
+      expect(res.status).toBe(200)
+      expect(forwarder.calls).toHaveLength(1)
+      expect(forwarder.calls[0]?.protocolVersion).toBe('2026-07-28')
+    })
+
+    it('rejects a lying mcp-method with no version claim at all (tier 2)', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_status' } },
+        { 'Mcp-Method': 'tools/list' },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as JsonRpcResponse
+      expect(json.error?.code).toBe(-32020)
+      expect(json.id).toBe(3)
+      expect(forwarder.calls).toHaveLength(0)
+    })
+
+    it('leaves a legacy request with no markers untouched', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_status' } },
+        { 'MCP-Protocol-Version': '2025-06-18' },
+      )
+
+      expect(res.status).toBe(200)
+      expect(forwarder.calls).toHaveLength(1)
+    })
+
+    it('invokes the rejection recorder with the full evidence payload', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const onHeaderMismatch = vi.fn()
+      const app = mountRoute(forwarder, { onHeaderMismatch })
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'transfer_funds' } },
+        { 'Mcp-Name': 'list_orders', 'x-helio-session-id': 'run-a' },
+      )
+
+      expect(res.status).toBe(400)
+      expect(onHeaderMismatch).toHaveBeenCalledTimes(1)
+      const rejection = onHeaderMismatch.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(rejection['method']).toBe('tools/call')
+      expect(rejection['params']).toEqual({ name: 'transfer_funds' })
+      expect(rejection['bodyName']).toBe('transfer_funds')
+      expect(rejection['protocolVersion']).toBeUndefined()
+      expect(rejection['headers']).toEqual({ 'mcp-name': 'list_orders' })
+      expect(rejection['session']).toEqual({ id: 'run-a', source: 'header' })
+      expect(rejection['reason']).toContain('mismatched mcp-name')
+      expect(typeof rejection['durationMs']).toBe('number')
+    })
+
+    it('preserves the raw version claim on the recorder payload', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const onHeaderMismatch = vi.fn()
+      const app = mountRoute(forwarder, { onHeaderMismatch })
+
+      await postMcp(app, conformantModernBody, {
+        'MCP-Protocol-Version': '2026-07-28, 2026-07-28',
+      })
+
+      const rejection = onHeaderMismatch.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(rejection['protocolVersion']).toBe('2026-07-28, 2026-07-28')
+      expect(rejection['headers']).toEqual({
+        'mcp-protocol-version': '2026-07-28, 2026-07-28',
+      })
+    })
+
+    it('does not invoke the recorder on a passing request', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const onHeaderMismatch = vi.fn()
+      const app = mountRoute(forwarder, { onHeaderMismatch })
+
+      const res = await postMcp(app, conformantModernBody, {
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': 'tools/list',
+      })
+
+      expect(res.status).toBe(200)
+      expect(onHeaderMismatch).not.toHaveBeenCalled()
+    })
+
+    it('display-caps a huge body-derived echo in the response message', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+      const hugeName = 'n'.repeat(300)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: hugeName } },
+        { 'Mcp-Name': 'short' },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as JsonRpcResponse
+      expect(json.error?.message).toContain('truncated')
+      expect(json.error?.message).not.toContain(hugeName)
+    })
+
+    it('display-caps a huge header-derived echo in the response message', async () => {
+      const forwarder = createMockForwarder(okResponse)
+      const app = mountRoute(forwarder)
+      const hugeHeader = 'h'.repeat(300)
+
+      const res = await postMcp(
+        app,
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'short' } },
+        { 'Mcp-Name': hugeHeader },
+      )
+
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as JsonRpcResponse
+      expect(json.error?.message).toContain('truncated')
+      expect(json.error?.message).not.toContain(hugeHeader)
+    })
   })
 
   describe('origin validation (issue #213)', () => {

@@ -71,6 +71,12 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       // rejection apart from a rule-matched deny. Pinned before the
       // policy_decision fallthrough.
       return 'rejected'
+    case 'header_mismatch':
+      // Inbound header/body agreement rejection (issue #226). The same
+      // fail-closed structural class as missing_tool_name; pinned here
+      // because the fallthrough below renders any unpinned rejected record
+      // as Allow.
+      return 'rejected'
     default:
       break
   }

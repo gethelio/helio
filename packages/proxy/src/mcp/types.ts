@@ -14,6 +14,21 @@ export const INVALID_PARAMS = -32602
 /** JSON-RPC internal error — unexpected server-side failure. */
 export const INTERNAL_ERROR = -32603
 
+/**
+ * MCP 2026-07-28 HeaderMismatch — a standard request header disagrees with
+ * the body field it mirrors, or is missing when required. Emitted by modern
+ * upstream servers and by Helio's own inbound door (issue #226). Helio's
+ * door never requires the `MCP-Protocol-Version` header itself (an absent,
+ * legacy, or malformed claim selects the agreement-only tier); its
+ * missing-required cases are `Mcp-Method`, `Mcp-Name`, and the
+ * `params._meta` protocol-version mirror, all under a modern claim only.
+ * DEVIATION, stated: for a MISSING mirror the spec's own code is -32602
+ * (missing required `_meta` field); Helio deliberately uses -32020 for the
+ * whole agreement class, per issue #226 — -32602 predates the revision and
+ * is ambiguous as a dual-era signal, so do not "fix" this back.
+ */
+export const HEADER_MISMATCH = -32020
+
 // ---------------------------------------------------------------------------
 // JSON-RPC types
 // ---------------------------------------------------------------------------
@@ -60,16 +75,49 @@ export interface McpRequest extends JsonRpcRequest {
   transportSessionId?: string
   /**
    * The client's verbatim MCP-Protocol-Version wire claim (issue #219) —
-   * captured raw, with no validation or normalization, for the audit trail.
-   * It is the CLIENT'S claim, not the upstream era and not a checked fact.
-   * Streamable HTTP only: the header postdates the deprecated SSE transport,
-   * and stdio has no headers, so both leave it unset.
+   * captured raw, with no normalization, for the audit trail. It is the
+   * CLIENT'S claim, not the upstream era. Since issue #226 the
+   * streamable-http route validates header/body agreement before
+   * forwarding, so on a FORWARDED request a claim of `2026-07-28` has
+   * passed the agreement door; tier-2 claims (legacy, unknown, malformed)
+   * and notification claims remain unvalidated as captured. Streamable
+   * HTTP only: the header postdates the deprecated SSE transport, and
+   * stdio has no headers, so both leave it unset.
    */
   protocolVersion?: string
   /** Per-request headers to forward to upstream (e.g. Authorization, X-* headers). */
   headers?: Record<string, string>
   /** Abort signal tied to the downstream client request lifecycle. */
   signal?: AbortSignal
+}
+
+/**
+ * An inbound request rejected by the header/body agreement door (issue
+ * #226), as protocol facts: what the body said, what the headers claimed,
+ * and why they disagree. Deliberately camelCase and transport-free (no Hono
+ * types, no audit field names) — the audit-record mapping lives solely in
+ * `buildHeaderMismatchAuditRecord` on the audit side.
+ */
+export interface HeaderMismatchRejection {
+  /** Human-readable mismatch reason; echoed values are display-capped. */
+  readonly reason: string
+  /** The body's JSON-RPC method. */
+  readonly method: string
+  /** The body's params, verbatim as parsed. */
+  readonly params?: unknown
+  /**
+   * The body's name-bearing string field (`params.name` / `params.uri`),
+   * when the method defines one and the body carries a string value.
+   */
+  readonly bodyName?: string
+  /** The client's verbatim MCP-Protocol-Version wire claim, if any. */
+  readonly protocolVersion?: string
+  /** The inbound marker headers that were present, verbatim as received. */
+  readonly headers: Readonly<Record<string, string>>
+  /** Proxy-resolved governance session identity, when a strategy matched. */
+  readonly session?: ResolvedSession
+  /** Time from route-handler entry to rejection, in milliseconds. */
+  readonly durationMs: number
 }
 
 /** The response returned by an MCP forwarder. */
