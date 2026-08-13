@@ -15,23 +15,45 @@ import type { ManagedServer } from './helpers/test-utils.js'
 // fixture through production wiring. No internal priming runs first, so the
 // first relay is also what triggers the era probe.
 
-/** A modern client's POST: sessionless, version-claiming, identity-carrying. */
+/** The name-bearing params field a 2026-07-28 client mirrors onto Mcp-Name. */
+const NAME_BEARING_FIELD: Record<string, 'name' | 'uri'> = {
+  'tools/call': 'name',
+  'prompts/get': 'name',
+  'resources/read': 'uri',
+}
+
+/**
+ * A modern client's POST: sessionless, version-claiming, identity-carrying,
+ * and fully conformant to the 2026-07-28 header/body agreement — Mcp-Method,
+ * Mcp-Name on name-bearing methods, and the params._meta protocol-version
+ * mirror. A bare version claim is rejected at the inbound door since #226;
+ * the bare-claim rejection itself is covered by the header-agreement
+ * integration suite.
+ */
 async function sendModernClientRequest(
   baseUrl: string,
   method: string,
-  params?: unknown,
+  params?: Record<string, unknown>,
   id: number | string = 1,
 ): Promise<{ status: number; headers: Headers; body: Record<string, unknown> }> {
-  const payload: Record<string, unknown> = { jsonrpc: '2.0', id, method }
-  if (params !== undefined) payload['params'] = params
+  const mergedParams: Record<string, unknown> = {
+    ...params,
+    _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' },
+  }
+  const payload: Record<string, unknown> = { jsonrpc: '2.0', id, method, params: mergedParams }
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'mcp-protocol-version': '2026-07-28',
+    'mcp-method': method,
+    'x-helio-session-id': 'modern-run-1',
+  }
+  const nameField = NAME_BEARING_FIELD[method]
+  const nameValue = nameField === undefined ? undefined : mergedParams[nameField]
+  if (typeof nameValue === 'string') headers['mcp-name'] = nameValue
   const res = await fetch(baseUrl, {
     method: 'POST',
     body: JSON.stringify(payload),
-    headers: {
-      'content-type': 'application/json',
-      'mcp-protocol-version': '2026-07-28',
-      'x-helio-session-id': 'modern-run-1',
-    },
+    headers,
   })
   const body = (await res.json()) as Record<string, unknown>
   return { status: res.status, headers: res.headers, body }

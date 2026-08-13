@@ -6,7 +6,7 @@ import { createStreamableHttpRoute } from './transport/streamable-http.js'
 import { createSseRoute } from './transport/sse.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
 import type { HelioConfig } from './config/index.js'
-import type { McpForwarder } from './mcp/types.js'
+import type { HeaderMismatchRejection, McpForwarder } from './mcp/types.js'
 
 /** Handle returned by `startServer` for lifecycle management. */
 export interface ServerHandle {
@@ -125,6 +125,13 @@ function createServerHandle(server: ServerType): ServerHandle {
 export interface CreateAppOptions {
   /** Slack interactive action handler (mounted at /slack/actions). */
   slackActionApp?: Hono
+  /**
+   * Recorder for inbound header/body agreement rejections (issue #226) on
+   * the streamable-http route. Enforcement does not depend on it — with no
+   * recorder the request is still rejected and no record is written (the
+   * library-embedding posture `missing_tool_name` also takes).
+   */
+  onHeaderMismatch?: (rejection: HeaderMismatchRejection) => void
 }
 
 /**
@@ -152,7 +159,12 @@ export function createApp(
   // MCP Streamable HTTP transport
   app.route(
     '/mcp',
-    createStreamableHttpRoute(forwarder, { forwardHeadersAllowlist, allowedOrigins, session }),
+    createStreamableHttpRoute(forwarder, {
+      forwardHeadersAllowlist,
+      allowedOrigins,
+      session,
+      onHeaderMismatch: options?.onHeaderMismatch,
+    }),
   )
 
   // MCP SSE transport (for older clients)

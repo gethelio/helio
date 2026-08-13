@@ -1,7 +1,13 @@
 import { Hono } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import { PARSE_ERROR, INVALID_REQUEST, makeJsonRpcError } from '../mcp/types.js'
-import type { McpForwarder, McpRequest } from '../mcp/types.js'
+import {
+  PARSE_ERROR,
+  INVALID_REQUEST,
+  HEADER_MISMATCH,
+  makeJsonRpcError,
+  makeJsonRpcErrorWithoutId,
+} from '../mcp/types.js'
+import type { HeaderMismatchRejection, McpForwarder, McpRequest } from '../mcp/types.js'
 import { parseJsonRpcRequest } from '../mcp/validation.js'
 import {
   DEFAULT_SESSION_IDENTITY,
@@ -11,6 +17,7 @@ import {
 } from '../mcp/session-resolver.js'
 import { isJsonContentType } from './content-type.js'
 import { buildForwardHeaders } from './forward-headers.js'
+import { validateHeaderBodyAgreement } from './header-body-agreement.js'
 import { createOriginGuard } from './origin-guard.js'
 import { normalizeUpstreamOutcome } from './response-normalizer.js'
 
@@ -27,6 +34,13 @@ export interface StreamableHttpRouteOptions {
   readonly allowedOrigins?: readonly string[]
   /** Compiled session identity chain (issue #218). Default: the schema default chain. */
   readonly session?: CompiledSessionIdentity
+  /**
+   * Called once per request the header/body agreement door rejects (issue
+   * #226), with the evidence an audit record needs. Fire-and-forget from the
+   * route's perspective; the composition (see `cli.ts`) buffers via the
+   * audit writer's `pushImmediate`.
+   */
+  readonly onHeaderMismatch?: (rejection: HeaderMismatchRejection) => void
 }
 
 /**
@@ -50,6 +64,8 @@ export function createStreamableHttpRoute(
   app.use('*', createOriginGuard(options.allowedOrigins ?? []))
 
   app.post('/', async (c) => {
+    const handlerStart = performance.now()
+
     // Require JSON content type
     if (!isJsonContentType(c.req.header('content-type'))) {
       return c.json(
@@ -91,6 +107,47 @@ export function createStreamableHttpRoute(
       sessionIdentity,
     )
 
+    // The client's protocol claim, verbatim — audit evidence. The recorded
+    // value is the RAW header, untouched by the agreement door's tier
+    // normalization below.
+    const protocolVersion = c.req.header('mcp-protocol-version')
+
+    // Header/body agreement (issue #226): after envelope validation and
+    // session resolution (so the rejection record carries the resolved
+    // identity), before the notification fork and any forwarding — the
+    // rejection precedes policy evaluation entirely.
+    const agreement = validateHeaderBodyAgreement({
+      method,
+      id,
+      params,
+      headers: {
+        'mcp-method': c.req.header('mcp-method'),
+        'mcp-name': c.req.header('mcp-name'),
+        'mcp-protocol-version': protocolVersion,
+      },
+    })
+    if (!agreement.ok) {
+      options.onHeaderMismatch?.({
+        reason: agreement.reason,
+        method,
+        params,
+        ...(agreement.evidence.bodyName !== undefined && { bodyName: agreement.evidence.bodyName }),
+        ...(protocolVersion !== undefined && { protocolVersion }),
+        headers: agreement.evidence.headers,
+        ...(session !== undefined && { session }),
+        durationMs: performance.now() - handlerStart,
+      })
+      // The 2026-07-28 error shape does not permit `id: null`, so both a
+      // notification and an explicit `id: null` envelope get an id-less
+      // error body. Response shape only — for the agreement check itself,
+      // `id: null` was classified as a request.
+      const errorBody =
+        id === undefined || id === null
+          ? makeJsonRpcErrorWithoutId(HEADER_MISMATCH, agreement.reason)
+          : makeJsonRpcError(id, HEADER_MISMATCH, agreement.reason)
+      return c.json(errorBody, 400)
+    }
+
     const forwardHeaders = buildForwardHeaders(c.req.raw.headers, forwardHeaderAllowlist)
 
     // Build MCP request
@@ -101,9 +158,7 @@ export function createStreamableHttpRoute(
       params,
       session,
       transportSessionId,
-      // The client's protocol claim, verbatim — audit evidence, not a
-      // validated fact (inbound agreement validation is a separate concern).
-      protocolVersion: c.req.header('mcp-protocol-version'),
+      protocolVersion,
       headers: forwardHeaders,
       signal: c.req.raw.signal,
     }
