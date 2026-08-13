@@ -316,8 +316,10 @@ For library embeddings, `createApp` accepts an `onHeaderMismatch` callback
 rejected request with the rejection evidence (`HeaderMismatchRejection`);
 `helio start` composes it with `buildHeaderMismatchAuditRecord` (also
 exported) and the audit writer's `pushImmediate` to produce the record shape
-documented in the audit reference. Without the callback the request is still
-rejected; no record is written.
+documented in the audit reference. Pass your configured `environment` label
+as the builder's second argument — omitting it records `environment: null`
+on mismatch rows while your governed records carry the label. Without the
+callback the request is still rejected; no record is written.
 
 There is no configuration surface for this check — the spec assigns it as a
 MUST to whoever processes the body, and a knob that turns it off would
