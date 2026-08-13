@@ -60,7 +60,14 @@ export type {
   ResolveApprovalInput,
   AdapterLivenessEntry,
 } from './sideband/governance-service.js'
-export { AuditStore, AuditWriter, EXPORT_MAX_RECORDS, LIST_MAX_PAGE_SIZE } from './audit/index.js'
+export {
+  AuditStore,
+  AuditWriter,
+  EXPORT_MAX_RECORDS,
+  LIST_MAX_PAGE_SIZE,
+  buildHeaderMismatchAuditRecord,
+} from './audit/index.js'
+export type { HeaderMismatchRejection } from './mcp/types.js'
 export type {
   AuditRecord,
   AuditQueryFilters,

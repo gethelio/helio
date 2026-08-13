@@ -301,11 +301,23 @@ claiming `MCP-Protocol-Version: 2026-07-28` without the required headers and
 mirror, and a request whose present `Mcp-Method` or `Mcp-Name` disagrees with
 the body even with no version claim at all. Fully conformant modern clients
 and legacy clients (which send neither header) are unaffected. A rejection is
-HTTP 400 with JSON-RPC error `-32020`; notifications and `id: null` envelopes
-receive an error body with the `id` member omitted. Sentinel-encoded
-(`=?base64?…?=`) `Mcp-Name` values are decoded before comparison. Every
-rejection is recorded in the [audit trail](./audit.md#header-mismatch-rejections)
-under `block_reason: header_mismatch`.
+HTTP 400 with JSON-RPC error `-32020` for the whole class — including a
+MISSING mirror on a modern-claim request, a stated deviation from the spec's
+own `-32602` for a missing required `_meta` field (`-32602` predates the
+revision, so `-32020` is the unambiguous dual-era signal). Notifications and
+`id: null` envelopes receive an error body with the `id` member omitted.
+Sentinel-encoded (`=?base64?…?=`) `Mcp-Name` values are decoded before
+comparison. Every rejection is recorded in the
+[audit trail](./audit.md#header-mismatch-rejections) under
+`block_reason: header_mismatch`.
+
+For library embeddings, `createApp` accepts an `onHeaderMismatch` callback
+(`CreateAppOptions`, exported from `@gethelio/proxy`) invoked once per
+rejected request with the rejection evidence (`HeaderMismatchRejection`);
+`helio start` composes it with `buildHeaderMismatchAuditRecord` (also
+exported) and the audit writer's `pushImmediate` to produce the record shape
+documented in the audit reference. Without the callback the request is still
+rejected; no record is written.
 
 There is no configuration surface for this check — the spec assigns it as a
 MUST to whoever processes the body, and a knob that turns it off would

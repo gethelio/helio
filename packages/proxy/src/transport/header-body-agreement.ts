@@ -23,6 +23,11 @@
  *   relayed `-32020` into the upstream era falsification machinery of the
  *   Helio in front (see the #226 plan, R1 F1).
  *
+ * Every rejection in the class uses -32020, including a MISSING `_meta`
+ * mirror on a modern-claim request — a stated deviation from the spec,
+ * whose own code for a missing required `_meta` field is -32602 (see the
+ * `HEADER_MISMATCH` JSDoc in `mcp/types.ts` for why).
+ *
  * Pure functions only — no Hono types; the streamable-http route owns the
  * HTTP surface (400 + JSON-RPC -32020) and the audit recorder.
  */
