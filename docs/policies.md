@@ -362,7 +362,7 @@ Rate limits use a **sliding window** algorithm to track calls per key. Configure
 **Key scoping:**
 
 - `tool` (default) — One shared limit per tool name, across all sessions.
-- `session` — Each MCP session has its own independent limit.
+- `session` — Each resolved [session identity](./configuration.md#session) has its own independent limit.
 - `sender_id` — One limit per adapter-supplied `sender_id` (host-enforced path). Requires the SDK sideband (`sdk.enabled: true`) — Helio **rejects** the config otherwise, since a sender-keyed limit is meaningless without a sender. On the MCP path (which has no sender) it falls back to `tool` with a one-time warning.
 - `agent` — Currently unsupported on MCP requests; Helio logs a warning and falls back to `tool`.
 
@@ -665,6 +665,42 @@ A gated call made before its dependencies have succeeded is denied with `reason:
 ```
 
 `action` reports the effective decision: the dependency gate denies the call before the rule's `allow` applies.
+
+## Stateless Protocol, Stateful Governance
+
+The `2026-07-28` MCP revision removed protocol-level sessions: no `initialize`
+handshake, no `Mcp-Session-Id` header, no server-held conversation state. It is
+tempting to read that as "stateful governance is obsolete." The opposite is true, and
+the reason matters when you evaluate what a governance layer can actually enforce.
+
+The spec did not abolish cross-call state. It relocated it: servers that need state
+across calls are told to use explicit, server-minted handles passed as ordinary tool
+arguments. That is a sound pattern for application state. The model can see the handle
+and thread it between tools, which is exactly what makes multi-step workflows
+composable.
+
+It is an unsound pattern for governance state. A budget key the model can see is a
+budget key the model can change. If a cumulative spend limit were keyed by a handle the
+agent carries in its own context, the agent could drop it, swap it, or start over with
+a fresh one, and the limit would reset to zero each time. The same applies to
+[evidence requirements](#evidence-requirements) and
+[dependency chains](#dependency-chains): a prerequisite the model attests to itself is
+no prerequisite at all.
+
+Helio holds governance state in the proxy, outside the protocol and outside the
+agent's context. [Session identity](./configuration.md#session) is resolved by the
+proxy, never from tool arguments the model can rewrite, and it keys the session-scoped
+[rate limits](#rate-limits), [spend limits](#spend-limits),
+[budgets](#cross-tool-spend-budgets), evidence, and dependency state described above.
+None of that depends on the protocol's session machinery, so the `2026-07-28`
+revision changes how Helio talks to upstream servers (see
+[era detection](./configuration.md#upstream-mcp-era-detection)) without changing what
+it can enforce.
+
+The distinction is structural. A governance layer that holds no state of its own
+cannot make a cumulative cross-call constraint mean anything: no running budget, no
+dependency chain, no evidence grounding. The protocol shed its state so servers can
+scale. The governor keeps its own so that limits keep meaning something.
 
 ## Feedback Messages
 
