@@ -175,8 +175,11 @@ export function makeJsonRpcError(
  * Build a JSON-RPC 2.0 error response with the `id` member omitted entirely.
  *
  * The MCP 2026-07-28 error-response type declares `id` as optional and does
- * not permit `null`, so rejections issued before any request is parsed (no
- * id exists yet) must leave the member out rather than emit `id: null`.
+ * not permit `null`, so omission is the conforming shape whenever no usable
+ * `string | number` request id exists: pre-parse door rejections (before a
+ * body is parsed) and post-parse failures with no extractable id (invalid
+ * envelopes, notifications, explicit `id: null`). With a usable id in hand,
+ * use `makeJsonRpcError` and echo it instead.
  */
 export function makeJsonRpcErrorWithoutId(code: number, message: string): JsonRpcResponse {
   return {
