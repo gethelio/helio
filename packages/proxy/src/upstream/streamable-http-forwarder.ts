@@ -1,4 +1,8 @@
 import type { McpForwarder, McpRequest, ForwardResult, McpResponse } from '../mcp/types.js'
+import {
+  HELIO_MCP_LEGACY_PROTOCOL_VERSION,
+  HELIO_MCP_MODERN_PROTOCOL_VERSION,
+} from '../mcp/protocol-version.js'
 import { parseUpstreamResponse } from './response.js'
 import { readSseJsonRpcResponse } from './sse-parse.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
@@ -11,8 +15,6 @@ import {
 import { describeUnreachableUpstream } from './connection-error.js'
 import {
   UpstreamSessionManager,
-  HELIO_MCP_LEGACY_PROTOCOL_VERSION,
-  HELIO_MCP_MODERN_PROTOCOL_VERSION,
   MCP_META_PROTOCOL_VERSION_KEY,
   MCP_MODERN_ONLY_ERROR_CODES,
   buildInternalMeta,

@@ -1,12 +1,11 @@
 import { HEADER_MISMATCH } from '../mcp/types.js'
+import {
+  HELIO_MCP_LEGACY_PROTOCOL_VERSION,
+  HELIO_MCP_MODERN_PROTOCOL_VERSION,
+} from '../mcp/protocol-version.js'
 import { mergeUpstreamHeaders } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
-
-/** The legacy leg's protocol offer — one of the two revisions Helio speaks. */
-export const HELIO_MCP_LEGACY_PROTOCOL_VERSION = '2025-06-18'
-/** MCP revision Helio speaks to a modern upstream (no initialize handshake). */
-export const HELIO_MCP_MODERN_PROTOCOL_VERSION = '2026-07-28'
 /**
  * Throttle on era re-probing, armed by a probe failure and by both
  * falsified-era clears (relay falsification and the internal initialize

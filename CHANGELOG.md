@@ -179,6 +179,14 @@ Maintainer notes:
   shape sanctions omission as the no-id form, so validators built on it
   now accept these 4xx bodies. HTTP statuses, error codes, and messages
   are unchanged.
+- **The synthesized dry-run result now carries `resultType` (#227).**
+  MCP `2026-07-28` requires every result to declare a `resultType`,
+  and the dry-run response is the one result Helio manufactures
+  without an upstream round-trip. When the client's validated
+  `MCP-Protocol-Version` claim is `2026-07-28`, that result now
+  carries `resultType: "complete"`. Clients on `2025-06-18`, and
+  clients on transports that predate the header (SSE, stdio), receive
+  the same result without the field, byte-for-byte as before.
 
 ### Security
 

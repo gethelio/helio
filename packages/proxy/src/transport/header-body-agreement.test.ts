@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { isModernProtocolClaim } from '../mcp/protocol-version.js'
 import {
-  isModernProtocolClaim,
   validateHeaderBodyAgreement,
   type HeaderBodyAgreementInput,
 } from './header-body-agreement.js'
