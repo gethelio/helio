@@ -670,7 +670,7 @@ Emergency force-approval. Both `approved_by` and `reason` are required. The reso
 
 #### GET /api/evidence/:session_id
 
-Get the full evidence + context + completed-tools state for a single MCP session. Unknown session IDs return an empty state (not a 404) so that dashboard pages can render cleanly on first load.
+Get the full evidence + context + completed-tools state for a single resolved [session identity](./configuration.md#session). Unknown session IDs return an empty state (not a 404) so that dashboard pages can render cleanly on first load.
 
 **Response (200):**
 

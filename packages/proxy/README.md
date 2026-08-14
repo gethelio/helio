@@ -311,6 +311,15 @@ Every tool call recorded: timestamp, agent identity, tool name, inputs, policy d
 
 ## How Helio Compares
 
+The `2026-07-28` MCP revision made the protocol itself stateless: no handshake, no
+protocol-level sessions, cross-call state carried as handles the model passes between
+tools. That pattern works for application state and fails for governance state,
+because a budget key the model can see is a budget key the model can change. Helio
+keeps session identity, budgets, and evidence in the proxy, outside the agent's
+context, which is why those controls still mean something after the protocol
+stopped tracking sessions. See
+[stateless protocol, stateful governance](https://github.com/gethelio/helio/blob/main/docs/policies.md#stateless-protocol-stateful-governance).
+
 |                                              | Helio                                    | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
 | -------------------------------------------- | ---------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |
 | **What it governs**                          | Per-call actions with cross-call state   | Which tools/MCPs are reachable | App-level authorization decisions | Agent permissions inside one platform | Agent behavior inside one framework |

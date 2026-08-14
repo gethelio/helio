@@ -314,7 +314,7 @@ sdk:
 - `better-sqlite3` (and `esbuild`) native builds are approved via `allowBuilds` in `pnpm-workspace.yaml` — no manual rebuild needed. `pnpm-workspace.yaml` also pins a few transitive `overrides` and the audit ignore list (`auditConfig.ignoreGhsas`).
 - CI runs on the Node version in `.nvmrc` and Python 3.12; the E2E Python SDK test does `pip install ./packages/python-sdk`.
 - The proxy depends on the official `@modelcontextprotocol/sdk` pinned to an exact version (`devDependencies` in `packages/proxy`) — monitor it for breaking changes.
-- Session identity is resolved by the proxy (`session.identity`, issue #218): the `x-helio-session-id` header by default, the legacy `Mcp-Session-Id` during the deprecation window. The resolved id keys evidence/dependency state and session-scoped limits/budgets; the wire `Mcp-Session-Id` is relayed to the upstream verbatim and never replaced.
+- Session identity is resolved by the proxy (`session.identity`, issue #218): the `x-helio-session-id` header by default, the legacy `Mcp-Session-Id` during the deprecation window. The resolved id keys evidence/dependency state and session-scoped limits/budgets; the wire `Mcp-Session-Id` is relayed upstream on the legacy leg only; against a modern upstream it is never sent.
 - The name "Helio" comes from Helios, the Greek Titan god of the Sun.
 
 ## Post-v1 Roadmap
