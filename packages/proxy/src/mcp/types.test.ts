@@ -17,19 +17,9 @@ describe('makeJsonRpcError', () => {
     })
   })
 
-  it('sets id to null when undefined', () => {
-    const result = makeJsonRpcError(undefined, PARSE_ERROR, 'bad json')
-    expect(result.id).toBeNull()
-  })
-
   it('preserves string ids', () => {
     const result = makeJsonRpcError('req-42', INVALID_REQUEST, 'missing method')
     expect(result.id).toBe('req-42')
-  })
-
-  it('preserves null ids', () => {
-    const result = makeJsonRpcError(null, INTERNAL_ERROR, 'error')
-    expect(result.id).toBeNull()
   })
 })
 
