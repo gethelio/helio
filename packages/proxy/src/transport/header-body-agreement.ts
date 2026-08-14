@@ -32,11 +32,12 @@
  * HTTP surface (400 + JSON-RPC -32020) and the audit recorder.
  */
 
-import { decodeSentinelValue, nameBearingField } from '../upstream/standard-headers.js'
 import {
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
-  MCP_META_PROTOCOL_VERSION_KEY,
-} from '../upstream/upstream-session-manager.js'
+  isModernProtocolClaim,
+} from '../mcp/protocol-version.js'
+import { decodeSentinelValue, nameBearingField } from '../upstream/standard-headers.js'
+import { MCP_META_PROTOCOL_VERSION_KEY } from '../upstream/upstream-session-manager.js'
 
 /** Everything the agreement check reads, already extracted from the wire. */
 export interface HeaderBodyAgreementInput {
@@ -71,25 +72,6 @@ export interface HeaderMismatchEvidence {
 export type HeaderBodyAgreementResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: string; readonly evidence: HeaderMismatchEvidence }
-
-/**
- * True iff the raw `MCP-Protocol-Version` value is the modern claim, under
- * the pinned tier tokenizer: split on `,`, trim each token with
- * `String.prototype.trim` — deliberately NOT an RFC-OWS `[ \t]` trim, so
- * exotic Unicode padding (NBSP and friends) cannot dodge the presence
- * profile — drop empty tokens, and require at least one remaining token
- * with every one exactly `2026-07-28`. Duplicated headers arrive
- * comma-joined, so an all-modern duplicate is still the modern claim while
- * a mixed duplicate is not.
- */
-export function isModernProtocolClaim(rawValue: string | undefined): boolean {
-  if (rawValue === undefined) return false
-  const tokens = rawValue
-    .split(',')
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0)
-  return tokens.length > 0 && tokens.every((token) => token === HELIO_MCP_MODERN_PROTOCOL_VERSION)
-}
 
 /** Longest echoed value in a rejection reason; the audit record carries the full truth. */
 const DISPLAY_CAP_CHARS = 256

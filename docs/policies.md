@@ -313,10 +313,13 @@ Returns a synthetic response showing what would have happened:
         "type": "text",
         "text": "{\"dry_run\":true,\"would_forward\":true,\"policy_decision\":\"allow\",\"matched_rule\":null,\"evidence_satisfied\":true,\"limits_ok\":true}"
       }
-    ]
+    ],
+    "resultType": "complete"
   }
 }
 ```
+
+Clients on MCP `2025-06-18`, and clients on transports that predate the `MCP-Protocol-Version` header (SSE, stdio), receive the same result without the `resultType` field.
 
 ## Install-Time Policy (`deny_install`)
 

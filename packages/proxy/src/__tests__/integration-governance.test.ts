@@ -92,6 +92,26 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+interface McpPostResult {
+  status: number
+  body: Record<string, unknown>
+}
+
+/** Raw JSON-RPC POST with caller-controlled headers (for door-passing modern requests). */
+async function postJson(
+  url: string,
+  payload: Record<string, unknown>,
+  headers: Record<string, string> = {},
+): Promise<McpPostResult> {
+  const res = await fetch(url, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers: { 'content-type': 'application/json', ...headers },
+  })
+  const body = (await res.json()) as Record<string, unknown>
+  return { status: res.status, body }
+}
+
 // ---------------------------------------------------------------------------
 // Suite 1: Full pipeline with 5+ rules
 // ---------------------------------------------------------------------------
@@ -606,6 +626,52 @@ describe('dry-run mode', () => {
       proxy.auditWriter.flush()
       const { records } = proxy.auditStore.list({ dry_run: true })
       expect(records).toHaveLength(1)
+    } finally {
+      await proxy.close()
+    }
+  })
+
+  it('stamps resultType: complete on the dry-run result for a door-passing modern request', async () => {
+    const proxy = createGovernedProxyWithAudit({
+      default: 'allow',
+      dry_run: true,
+      rules: [],
+    })
+
+    const MODERN = '2026-07-28'
+    const MIRROR_KEY = 'io.modelcontextprotocol/protocolVersion'
+
+    try {
+      const { status, body } = await postJson(
+        proxy.url,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'get_weather',
+            arguments: { city: 'London' },
+            _meta: { [MIRROR_KEY]: MODERN },
+          },
+        },
+        {
+          'mcp-protocol-version': MODERN,
+          'mcp-method': 'tools/call',
+          'mcp-name': 'get_weather',
+        },
+      )
+
+      expect(status).toBe(200)
+      expect(body['error']).toBeUndefined()
+      const result = body['result'] as Record<string, unknown>
+      expect(result['resultType']).toBe('complete')
+
+      // The stamp must not disturb the dry-run payload itself.
+      const content = result['content'] as Array<{ type: string; text: string }>
+      const payload = JSON.parse((content[0] ?? { text: '{}' }).text) as Record<string, unknown>
+      expect(payload['dry_run']).toBe(true)
+      expect(payload['would_forward']).toBe(true)
+      expect(payload['policy_decision']).toBe('allow')
     } finally {
       await proxy.close()
     }

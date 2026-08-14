@@ -7,6 +7,7 @@ import type {
   McpResponse,
 } from '../mcp/types.js'
 import { INTERNAL_ERROR, INVALID_PARAMS } from '../mcp/types.js'
+import { isModernProtocolClaim } from '../mcp/protocol-version.js'
 import type { CompiledPolicy } from './types.js'
 import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
@@ -1916,6 +1917,11 @@ export class GovernedForwarder implements McpForwarder {
       id: request.id ?? null,
       result: {
         content: [{ type: 'text', text: JSON.stringify(payload) }],
+        // `resultType` is REQUIRED on every 2026-07-28 result; earlier
+        // revisions never defined it, so the field rides on the client's
+        // validated wire claim — the same tokenizer the #226 door uses for
+        // its tier decision, keeping the two verdicts in agreement.
+        ...(isModernProtocolClaim(request.protocolVersion) ? { resultType: 'complete' } : {}),
       },
     }
     const response: McpResponse = {

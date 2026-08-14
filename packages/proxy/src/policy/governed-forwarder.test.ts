@@ -6440,6 +6440,104 @@ describe('GovernedForwarder', () => {
         expect(payload['dry_run']).toBe(true)
       })
     })
+
+    describe('resultType (MCP 2026-07-28)', () => {
+      /** Extract the JSON-RPC result object from a synthetic ForwardResult. */
+      function mcpResultFromResult(result: ForwardResult): Record<string, unknown> {
+        const body = result.response.body as Record<string, unknown>
+        return body['result'] as Record<string, unknown>
+      }
+
+      it('stamps resultType: complete under global dry_run for a modern claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({ dry_run: true, default: 'allow', rules: [] })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward({
+          ...toolsCallRequest('get_weather'),
+          protocolVersion: '2026-07-28',
+        })
+
+        expect(mcpResultFromResult(result)['resultType']).toBe('complete')
+
+        // The stamp must not disturb the dry-run payload itself.
+        const payload = dryRunPayloadFromResult(result)
+        expect(payload['dry_run']).toBe(true)
+        expect(payload['would_forward']).toBe(true)
+        expect(payload['policy_decision']).toBe('allow')
+      })
+
+      it('stamps resultType: complete under per-rule dry_run for a modern claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({
+          default: 'allow',
+          rules: [{ name: 'shadow-all', match: { tool: '*' }, action: 'dry_run' }],
+        })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward({
+          ...toolsCallRequest('send_email'),
+          protocolVersion: '2026-07-28',
+        })
+
+        expect(mcpResultFromResult(result)['resultType']).toBe('complete')
+
+        const payload = dryRunPayloadFromResult(result)
+        expect(payload['dry_run']).toBe(true)
+        expect(payload['would_forward']).toBe(false)
+        expect(payload['policy_decision']).toBe('dry_run')
+        expect(payload['matched_rule']).toBe('shadow-all')
+      })
+
+      it('omits resultType when the request carries no protocol claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({ dry_run: true, default: 'allow', rules: [] })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward(toolsCallRequest('get_weather'))
+
+        expect('resultType' in mcpResultFromResult(result)).toBe(false)
+      })
+
+      it('omits resultType for a legacy 2025-06-18 claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({ dry_run: true, default: 'allow', rules: [] })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward({
+          ...toolsCallRequest('get_weather'),
+          protocolVersion: '2025-06-18',
+        })
+
+        expect('resultType' in mcpResultFromResult(result)).toBe(false)
+      })
+
+      it('stamps resultType for a comma-joined all-modern duplicate claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({ dry_run: true, default: 'allow', rules: [] })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward({
+          ...toolsCallRequest('get_weather'),
+          protocolVersion: '2026-07-28, 2026-07-28',
+        })
+
+        expect(mcpResultFromResult(result)['resultType']).toBe('complete')
+      })
+
+      it('omits resultType for a malformed claim', async () => {
+        const inner = mockForwarder()
+        const policy = compile({ dry_run: true, default: 'allow', rules: [] })
+        const governed = new GovernedForwarder(inner, policy)
+
+        const result = await governed.forward({
+          ...toolsCallRequest('get_weather'),
+          protocolVersion: 'latest',
+        })
+
+        expect('resultType' in mcpResultFromResult(result)).toBe(false)
+      })
+    })
   })
 })
 
