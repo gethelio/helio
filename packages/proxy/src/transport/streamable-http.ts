@@ -69,7 +69,7 @@ export function createStreamableHttpRoute(
     // Require JSON content type
     if (!isJsonContentType(c.req.header('content-type'))) {
       return c.json(
-        makeJsonRpcError(null, INVALID_REQUEST, 'Content-Type must be application/json'),
+        makeJsonRpcErrorWithoutId(INVALID_REQUEST, 'Content-Type must be application/json'),
         415,
       )
     }
@@ -79,13 +79,20 @@ export function createStreamableHttpRoute(
     try {
       body = await c.req.json()
     } catch {
-      return c.json(makeJsonRpcError(null, PARSE_ERROR, 'invalid JSON'), 400)
+      return c.json(makeJsonRpcErrorWithoutId(PARSE_ERROR, 'invalid JSON'), 400)
     }
 
     // Validate JSON-RPC envelope
     const parsedRequest = parseJsonRpcRequest(body)
     if (!parsedRequest.success) {
-      return c.json(makeJsonRpcError(parsedRequest.id, INVALID_REQUEST, parsedRequest.message), 400)
+      // Echo a usable id; `id: null` means none was extractable, so the body
+      // takes the id-omitting shape. `=== null` deliberately — a truthiness
+      // check would swallow the usable falsy ids 0 and ''.
+      const errorBody =
+        parsedRequest.id === null
+          ? makeJsonRpcErrorWithoutId(INVALID_REQUEST, parsedRequest.message)
+          : makeJsonRpcError(parsedRequest.id, INVALID_REQUEST, parsedRequest.message)
+      return c.json(errorBody, 400)
     }
 
     const id = parsedRequest.request.id

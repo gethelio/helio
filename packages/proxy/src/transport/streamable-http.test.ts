@@ -316,6 +316,7 @@ describe('streamable-http transport', () => {
     expect(res.status).toBe(415)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
     expect(forwarder.calls).toHaveLength(0)
   })
 
@@ -375,6 +376,8 @@ describe('streamable-http transport', () => {
     })
 
     expect(res.status).toBe(415)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(Object.hasOwn(json, 'id')).toBe(false)
     expect(forwarder.calls).toHaveLength(0)
   })
 
@@ -391,6 +394,7 @@ describe('streamable-http transport', () => {
     expect(res.status).toBe(400)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32700)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
     expect(forwarder.calls).toHaveLength(0)
   })
 
@@ -404,18 +408,60 @@ describe('streamable-http transport', () => {
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32600)
     expect(json.error?.message).toContain('jsonrpc')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
-  it('returns -32600 for missing method field', async () => {
+  it('omits id for an invalid envelope carrying an explicit null id', async () => {
     const forwarder = createMockForwarder(okResponse)
     const app = mountRoute(forwarder)
 
-    const res = await postMcp(app, { jsonrpc: '2.0', id: 1 })
+    const res = await postMcp(app, { id: null, method: 'tools/list' })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
+  })
+
+  it('returns -32600 for missing method field and echoes the request id', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await postMcp(app, { jsonrpc: '2.0', id: 5 })
 
     expect(res.status).toBe(400)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32600)
     expect(json.error?.message).toContain('method')
+    expect(json.id).toBe(5)
+  })
+
+  // Guards the `=== null` arm of the envelope rejection: a truthiness rewrite
+  // typechecks identically but would route these falsy-but-usable ids into the
+  // id-omitting branch instead of echoing them.
+  it.each([0, ''])('echoes the falsy request id %j on an invalid envelope', async (id) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await postMcp(app, { jsonrpc: '2.0', id })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(true)
+    expect(json.id).toBe(id)
+  })
+
+  it('omits id when the request id has an invalid type', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await postMcp(app, { jsonrpc: '2.0', id: {}, method: 'tools/list' })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   it('returns -32600 for batch requests (arrays)', async () => {
@@ -431,6 +477,19 @@ describe('streamable-http transport', () => {
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32600)
     expect(json.error?.message).toContain('batch')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
+  })
+
+  it('omits id for a non-object JSON body', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const res = await postMcp(app, 'hi')
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   it('returns -32603 when forwarder throws', async () => {
