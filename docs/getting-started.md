@@ -157,7 +157,7 @@ For requests that pass JSON-RPC ingress validation at `/mcp`, Helio always retur
 - Valid upstream JSON-RPC responses pass through unchanged at the body layer.
 - Upstream forwarding failures and non-JSON-RPC upstream payloads are normalized to:
   `{"jsonrpc":"2.0","id":<request-id>,"error":{"code":-32603,"message":"...","data":{"failure_class":"..."}}}`
-- HTTP ingress validation errors (for example malformed JSON or wrong `Content-Type`) still return transport HTTP errors such as `400` or `415`.
+- HTTP ingress validation errors (for example malformed JSON or wrong `Content-Type`) still return transport HTTP errors such as `400` or `415`. Their JSON-RPC error bodies omit the `id` member when no request id was readable, per the MCP 2026-07-28 error shape; when the invalid envelope carried a usable id, it is echoed.
 
 ## Step 5: Open the Dashboard
 

@@ -158,15 +158,20 @@ export interface McpForwarderWithInternal extends McpForwarder {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a well-formed JSON-RPC 2.0 error response. */
+/**
+ * Build a well-formed JSON-RPC 2.0 error response echoing a usable request
+ * id. The id parameter is deliberately narrower than `JsonRpcResponse.id`:
+ * this helper cannot emit `id: null`, so a caller with no usable id must
+ * use `makeJsonRpcErrorWithoutId` instead of passing null through.
+ */
 export function makeJsonRpcError(
-  id: string | number | null | undefined,
+  id: string | number,
   code: number,
   message: string,
 ): JsonRpcResponse {
   return {
     jsonrpc: '2.0',
-    id: id ?? null,
+    id,
     error: { code, message },
   }
 }
@@ -175,8 +180,11 @@ export function makeJsonRpcError(
  * Build a JSON-RPC 2.0 error response with the `id` member omitted entirely.
  *
  * The MCP 2026-07-28 error-response type declares `id` as optional and does
- * not permit `null`, so rejections issued before any request is parsed (no
- * id exists yet) must leave the member out rather than emit `id: null`.
+ * not permit `null`, so omission is the conforming shape whenever no usable
+ * `string | number` request id exists: pre-parse door rejections (before a
+ * body is parsed) and post-parse failures with no extractable id (invalid
+ * envelopes, notifications, explicit `id: null`). With a usable id in hand,
+ * use `makeJsonRpcError` and echo it instead.
  */
 export function makeJsonRpcErrorWithoutId(code: number, message: string): JsonRpcResponse {
   return {

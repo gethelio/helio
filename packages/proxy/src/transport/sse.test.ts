@@ -267,6 +267,7 @@ describe('SSE transport', () => {
     expect(res.status).toBe(404)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.message).toContain('unknown session')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
     expect(forwarder.calls).toHaveLength(0)
   })
 
@@ -283,6 +284,7 @@ describe('SSE transport', () => {
     expect(res.status).toBe(400)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.message).toContain('sessionId')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   it('returns 415 when Content-Type is not application/json', async () => {
@@ -300,6 +302,8 @@ describe('SSE transport', () => {
     })
 
     expect(res.status).toBe(415)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   // See the matching case in streamable-http.test.ts: a CORS-safelisted
@@ -365,6 +369,7 @@ describe('SSE transport', () => {
     expect(res.status).toBe(400)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32700)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   it('returns -32600 for invalid JSON-RPC', async () => {
@@ -380,6 +385,43 @@ describe('SSE transport', () => {
     expect(res.status).toBe(400)
     const json = (await res.json()) as JsonRpcResponse
     expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(false)
+  })
+
+  it('echoes the request id on an invalid envelope', async () => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const res = await postSse(app, sessionId, { jsonrpc: '2.0', id: 5 })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(json.id).toBe(5)
+  })
+
+  // Guards the `=== null` arm of the envelope rejection: a truthiness rewrite
+  // typechecks identically but would route these falsy-but-usable ids into the
+  // id-omitting branch instead of echoing them.
+  it.each([0, ''])('echoes the falsy request id %j on an invalid envelope', async (id) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const res = await postSse(app, sessionId, { jsonrpc: '2.0', id })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(true)
+    expect(json.id).toBe(id)
   })
 
   it('emits normalized JSON-RPC error event when forwarder throws', async () => {
@@ -515,6 +557,7 @@ describe('SSE transport — stale session sweeper', () => {
     expect(stale.status).toBe(404)
     const json = (await stale.json()) as JsonRpcResponse
     expect(json.error?.message).toContain('unknown session')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
   })
 
   it('keeps sessions alive while activity refreshes lastActivity', async () => {

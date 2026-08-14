@@ -168,6 +168,17 @@ Maintainer notes:
   become proxy-side refusals with a clear error — against a `2026-07-28`
   upstream a missing header is a guaranteed rejection, no longer a
   harmless fallback.
+- **Transport ingress rejections no longer emit `id: null` (#234).**
+  Pre-parse rejections on `/mcp` and `/sse` — wrong `Content-Type`,
+  malformed JSON, and a missing or unknown SSE session — and
+  envelope-invalid bodies with no usable request id now omit the
+  JSON-RPC `id` member entirely, matching the shape the Origin guard
+  and the header/body agreement door already emit. An invalid envelope
+  that does carry a usable `string` or `number` id still has it echoed.
+  No MCP revision ever permitted a null id; the `2026-07-28` error
+  shape sanctions omission as the no-id form, so validators built on it
+  now accept these 4xx bodies. HTTP statuses, error codes, and messages
+  are unchanged.
 
 ### Security
 

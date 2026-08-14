@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { makeJsonRpcError, PARSE_ERROR, INVALID_REQUEST, INTERNAL_ERROR } from './types.js'
+import {
+  makeJsonRpcError,
+  makeJsonRpcErrorWithoutId,
+  PARSE_ERROR,
+  INVALID_REQUEST,
+  INTERNAL_ERROR,
+} from './types.js'
 
 describe('makeJsonRpcError', () => {
   it('builds a valid JSON-RPC error response', () => {
@@ -11,19 +17,24 @@ describe('makeJsonRpcError', () => {
     })
   })
 
-  it('sets id to null when undefined', () => {
-    const result = makeJsonRpcError(undefined, PARSE_ERROR, 'bad json')
-    expect(result.id).toBeNull()
-  })
-
   it('preserves string ids', () => {
     const result = makeJsonRpcError('req-42', INVALID_REQUEST, 'missing method')
     expect(result.id).toBe('req-42')
   })
+})
 
-  it('preserves null ids', () => {
-    const result = makeJsonRpcError(null, INTERNAL_ERROR, 'error')
-    expect(result.id).toBeNull()
+describe('makeJsonRpcErrorWithoutId', () => {
+  it('builds a valid JSON-RPC error response', () => {
+    const result = makeJsonRpcErrorWithoutId(INVALID_REQUEST, 'origin not allowed')
+    expect(result).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32600, message: 'origin not allowed' },
+    })
+  })
+
+  it('omits the id member entirely', () => {
+    const result = makeJsonRpcErrorWithoutId(PARSE_ERROR, 'bad json')
+    expect(Object.hasOwn(result, 'id')).toBe(false)
   })
 })
 
