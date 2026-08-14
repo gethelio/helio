@@ -633,3 +633,157 @@ describe('SSE transport — stale session sweeper', () => {
     })
   })
 })
+
+describe('SSE transport — concurrent session cap (issue #232)', () => {
+  const okResponse: McpResponse = {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+    body: { jsonrpc: '2.0', id: 1, result: { tools: [] } },
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function openStream(app: Hono): Promise<{ res: Response; sessionId: string }> {
+    const res = await app.request('/sse')
+    const events = await readSseEvents(res, 1)
+    return { res, sessionId: extractSessionId(events[0]?.data ?? '') }
+  }
+
+  function capLogLines(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('at session cap'))
+  }
+
+  it('admits streams up to the cap and refuses past it without minting', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 3 })
+
+    const streams = [await openStream(app), await openStream(app), await openStream(app)]
+    for (const { res, sessionId } of streams) {
+      expect(res.status).toBe(200)
+      expect(sessionId).not.toBe('')
+    }
+
+    const refused = await app.request('/sse')
+    expect(refused.status).toBe(503)
+    expect(refused.headers.get('content-type')).not.toContain('text/event-stream')
+    expect(await refused.json()).toEqual({ error: 'session capacity reached' })
+
+    // The refused GET minted nothing: all three live sessions still work.
+    for (const { sessionId } of streams) {
+      const postRes = await postSse(app, sessionId, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+      })
+      expect(postRes.status).toBe(202)
+    }
+    errorSpy.mockRestore()
+  })
+
+  it('never evicts a live session under refusal pressure', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 3 })
+
+    const oldest = await openStream(app)
+    await openStream(app)
+    await openStream(app)
+
+    for (let i = 0; i < 5; i++) {
+      const refused = await app.request('/sse')
+      expect(refused.status).toBe(503)
+    }
+
+    // The OLDEST stream survived — refuse-new evicted nobody (LRU would
+    // have dropped it).
+    const postRes = await postSse(app, oldest.sessionId, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    })
+    expect(postRes.status).toBe(202)
+    errorSpy.mockRestore()
+  })
+
+  it('frees capacity when the sweeper reclaims stale sessions', async () => {
+    vi.useFakeTimers()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 3 })
+
+    await openStream(app)
+    await openStream(app)
+    await openStream(app)
+
+    const refused = await app.request('/sse')
+    expect(refused.status).toBe(503)
+
+    // Advance well past the 90s stale threshold. Sweep fires every 60s.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+
+    const admitted = await app.request('/sse')
+    expect(admitted.status).toBe(200)
+    expect(admitted.headers.get('content-type')).toBe('text/event-stream')
+    const events = await readSseEvents(admitted, 1)
+    expect(events[0]?.event).toBe('endpoint')
+    errorSpy.mockRestore()
+  })
+
+  it('bounds refusal logging to one line per time window with a cumulative count', async () => {
+    vi.useFakeTimers()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 3 })
+
+    await openStream(app)
+    await openStream(app)
+    await openStream(app)
+
+    // First refusal logs immediately.
+    const first = await app.request('/sse')
+    expect(first.status).toBe(503)
+    expect(capLogLines(errorSpy)).toHaveLength(1)
+
+    // Further refusals inside the same window are suppressed regardless of
+    // count — the bound is time-based, not per-N.
+    for (let i = 0; i < 5; i++) {
+      const refused = await app.request('/sse')
+      expect(refused.status).toBe(503)
+    }
+    expect(capLogLines(errorSpy)).toHaveLength(1)
+
+    // Advancing exactly one window stays far below the sweeper's first
+    // evicting tick (entries are not yet 90s idle at 10s), so the next GET
+    // is still a refusal — and it carries the one summary line for the
+    // window, with the cumulative count (1 + 5 + 1 = 7).
+    await vi.advanceTimersByTimeAsync(10_000)
+    const afterWindow = await app.request('/sse')
+    expect(afterWindow.status).toBe(503)
+    const lines = capLogLines(errorSpy)
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('7 refusals')
+    errorSpy.mockRestore()
+  })
+
+  it('refuses with plain JSON that is not a JSON-RPC envelope', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 1 })
+
+    await openStream(app)
+
+    const refused = await app.request('/sse')
+    expect(refused.status).toBe(503)
+    expect(refused.headers.get('content-type')).toContain('application/json')
+    const json = (await refused.json()) as Record<string, unknown>
+    expect(typeof json['error']).toBe('string')
+    expect(Object.hasOwn(json, 'id')).toBe(false)
+    expect(Object.hasOwn(json, 'jsonrpc')).toBe(false)
+    errorSpy.mockRestore()
+  })
+})

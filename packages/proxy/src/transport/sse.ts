@@ -32,6 +32,31 @@ const MCP_SESSION_HEADER = 'mcp-session-id'
 const STALE_THRESHOLD_MS = 90_000
 const SWEEP_INTERVAL_MS = 60_000
 
+// Concurrent-session cap (issue #232). The Origin guard cannot gate the
+// Origin-less GET, so the session map's bound must be an invariant Helio
+// owns rather than a property of client disconnect behavior or front-end
+// topology. This is a concurrency invariant, not a memory SLA: it
+// guarantees the map never exceeds a fixed entry count. Realistic legacy
+// deployments run tens of concurrent streams, not thousands (modern
+// clients use the sessionless /mcp transport). Hardcoded on purpose: the
+// SSE path is frozen for bug fixes only (#224), and a knob that raises or
+// disables the cap silently disables a governance control.
+//
+// Do NOT add a periodic keepalive/heartbeat write to the downstream /sse
+// stream. lastActivity is refreshed only on successful writes, so a
+// held-open unproven session goes idle and is swept within
+// STALE_THRESHOLD_MS + SWEEP_INTERVAL_MS; a heartbeat would refresh it
+// forever and let held-open connections pin the cap indefinitely.
+const MAX_CONCURRENT_SESSIONS = 1024
+
+// Cap-refusal log window. Deliberately time-based, unlike the origin
+// guard's count-based cadence (#238 tracks the shared policy): that shape
+// is safe there only because it fires on Origin-BEARING requests, which
+// #213 already 403s, whereas the cap refusal fires on the Origin-less GET
+// an attacker actually sends, so a per-count summary would scale log
+// volume with flood rate. One line per window does not.
+const REFUSAL_LOG_WINDOW_MS = 10_000
+
 interface SseSession {
   writer: WritableStreamDefaultWriter<Uint8Array>
   lastActivity: number
@@ -45,6 +70,12 @@ export interface SseRouteOptions {
   readonly allowedOrigins?: readonly string[]
   /** Compiled session identity chain (issue #218). Default: the schema default chain. */
   readonly session?: CompiledSessionIdentity
+  /**
+   * @internal Test seam for the concurrent-session cap (issue #232), so
+   * tests need not mint 1024 real streams. Not wired to config — the cap
+   * is a hardcoded invariant (see MAX_CONCURRENT_SESSIONS).
+   */
+  readonly maxConcurrentSessions?: number
 }
 
 const ssePostQuerySchema = z.object({
@@ -67,6 +98,23 @@ export function createSseRoute(forwarder: McpForwarder, options: SseRouteOptions
   const app = new Hono()
   const forwardHeaderAllowlist = options.forwardHeadersAllowlist ?? []
   const sessionIdentity = options.session ?? DEFAULT_SESSION_IDENTITY
+  const maxConcurrentSessions = options.maxConcurrentSessions ?? MAX_CONCURRENT_SESSIONS
+
+  // Time-based cap-refusal throttle: the first refusal logs immediately,
+  // then at most one summary per window carrying the cumulative count.
+  let refusalCount = 0
+  let lastRefusalLogAt: number | null = null
+
+  const logRefusal = (): void => {
+    refusalCount += 1
+    const now = Date.now()
+    if (lastRefusalLogAt !== null && now - lastRefusalLogAt < REFUSAL_LOG_WINDOW_MS) return
+    lastRefusalLogAt = now
+    // eslint-disable-next-line no-console -- operational error logging
+    console.error(
+      `[helio] /sse at session cap (${String(maxConcurrentSessions)}); refusing new streams (${String(refusalCount)} refusals so far).`,
+    )
+  }
 
   // Hono runs middleware in registration order — the guard must stay above
   // the handlers or it never runs for matched requests.
@@ -100,6 +148,17 @@ export function createSseRoute(forwarder: McpForwarder, options: SseRouteOptions
 
   // SSE connection — client establishes the event stream
   app.get('/', (c) => {
+    // Refuse-new at the cap, never evict: an established stream is a
+    // governed agent's response channel, and evicting one would hand a
+    // flooding attacker a lever to drop legitimate live streams. The
+    // refusal is an HTTP-level capacity condition (no request was parsed),
+    // so the body is plain JSON, not a JSON-RPC envelope, and mints
+    // nothing — no id, no stream, no map entry.
+    if (sessions.size >= maxConcurrentSessions) {
+      logRefusal()
+      return c.json({ error: 'session capacity reached' }, 503)
+    }
+
     const sessionId = randomUUID()
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
     const writer = writable.getWriter()

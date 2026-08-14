@@ -190,6 +190,18 @@ Maintainer notes:
 
 ### Security
 
+- **The legacy `/sse` transport now caps concurrent sessions (#232).**
+  A `GET /sse` past the fixed global cap (1024 concurrent sessions) is
+  refused with HTTP `503` and a plain JSON body and mints nothing, so
+  an Origin-less `GET` flood (the residual the `Origin` guard cannot
+  gate) can no longer grow the session map without bound. The cap
+  refuses new streams only and never drops an established stream;
+  slots free when a client disconnects or an idle session is swept.
+  Refusal logging is time-bounded to one line per window regardless of
+  flood rate. There is no configuration surface: no realistic
+  single-proxy legacy deployment runs more than 1024 concurrent SSE
+  streams, and a knob that raises or disables the cap would silently
+  disable a governance control.
 - **The streamable-http inbound door now enforces MCP 2026-07-28
   header/body agreement (#226).** A `POST /mcp` whose standard request
   headers disagree with the JSON-RPC body is refused with HTTP 400 and
