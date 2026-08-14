@@ -259,9 +259,13 @@ regardless, and its value is still the attacker's hostname, so the request
 is refused. Stream establishment on
 `GET /sse` is the residual: a browser omits `Origin` on a same-origin `GET`
 (including from a rebound page) and on a no-cors `GET` such as an `<img>`
-load, so neither can be gated here. A cross-origin `EventSource` or cors-mode
-`fetch` does send `Origin` and is refused. Closing the Origin-less path needs
-`Host` validation, tracked in issue #231.
+load, so neither can be gated here. The session such a `GET` mints is now
+bounded: `/sse` caps concurrent sessions globally and refuses new streams
+with `503` past the cap, never dropping a live stream, so the residual is
+bounded stream establishment rather than unbounded minting. A cross-origin
+`EventSource` or cors-mode `fetch` does send `Origin` and is refused.
+Closing the Origin-less path completely still needs `Host` validation,
+tracked in issue #231.
 
 Entries are matched exactly and must be serialized `http(s)` origins in
 `URL.origin` form: lowercase host, no trailing slash, no path, and no default
