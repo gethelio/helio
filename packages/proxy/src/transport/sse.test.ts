@@ -404,6 +404,26 @@ describe('SSE transport', () => {
     expect(json.id).toBe(5)
   })
 
+  // Guards the `=== null` arm of the envelope rejection: a truthiness rewrite
+  // typechecks identically but would route these falsy-but-usable ids into the
+  // id-omitting branch instead of echoing them.
+  it.each([0, ''])('echoes the falsy request id %j on an invalid envelope', async (id) => {
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder)
+
+    const sseRes = await app.request('/sse')
+    const events = await readSseEvents(sseRes, 1)
+    const sessionId = extractSessionId(events[0]?.data ?? '')
+
+    const res = await postSse(app, sessionId, { jsonrpc: '2.0', id })
+
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as JsonRpcResponse
+    expect(json.error?.code).toBe(-32600)
+    expect(Object.hasOwn(json, 'id')).toBe(true)
+    expect(json.id).toBe(id)
+  })
+
   it('emits normalized JSON-RPC error event when forwarder throws', async () => {
     const forwarder = createThrowingForwarder()
     const app = mountRoute(forwarder)
