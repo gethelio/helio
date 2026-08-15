@@ -205,6 +205,122 @@ describe('SseUpstreamForwarder', () => {
     expect(mock.receivedHeaders[1]?.['mcp-session-id']).toBe('wire-77')
   })
 
+  it('strips caller-supplied mcp-method and mcp-name from the request POST', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    // Mixed-case Mcp-Name proves the strip runs after the merge lower-cases names.
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'mcp-method': 'lie', 'Mcp-Name': 'lie-name' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['mcp-method']).toBeUndefined()
+    expect(mock.receivedHeaders[0]?.['mcp-name']).toBeUndefined()
+    expect(mock.receivedBodies[0]).toMatchObject({ method: 'tools/list' })
+  })
+
+  it('strips caller-supplied mcp-method and mcp-name from the notification POST', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      method: 'notifications/ping',
+      headers: { 'mcp-method': 'lie', 'Mcp-Name': 'lie-name' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['mcp-method']).toBeUndefined()
+    expect(mock.receivedHeaders[0]?.['mcp-name']).toBeUndefined()
+  })
+
+  it('never sends a caller-supplied mcp-session-id header', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'mcp-session-id': 'caller-forged' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['mcp-session-id']).toBeUndefined()
+  })
+
+  it('sends transportSessionId even when a caller mcp-session-id header is present', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      transportSessionId: 'wire-real',
+      headers: { 'mcp-session-id': 'caller-forged' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['mcp-session-id']).toBe('wire-real')
+  })
+
+  it('passes legitimate caller and static headers through untouched', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { 'x-static': 'from-config' },
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { authorization: 'Bearer tok', 'x-trace': 'abc' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['authorization']).toBe('Bearer tok')
+    expect(mock.receivedHeaders[0]?.['x-trace']).toBe('abc')
+    expect(mock.receivedHeaders[0]?.['x-static']).toBe('from-config')
+    expect(mock.receivedHeaders[0]?.['content-type']).toBe('application/json')
+  })
+
+  it('passes a caller-supplied mcp-protocol-version through', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    // Pins that the strip covers only mcp-method/mcp-name/mcp-session-id:
+    // mcp-protocol-version is a passthrough of a caller value, NOT Helio
+    // stamping — stripping it here would make this deprecated leg stricter
+    // than the streamable legacy leg, which documentedly preserves a
+    // caller-preset value. Any surviving value pins the behavior; the
+    // specific string is incidental.
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'mcp-protocol-version': '2026-07-28' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['mcp-protocol-version']).toBe('2026-07-28')
+  })
+
   it('rejects forward when not connected', async () => {
     forwarder = new SseUpstreamForwarder({ url: 'http://127.0.0.1:1/' })
 

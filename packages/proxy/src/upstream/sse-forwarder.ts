@@ -132,6 +132,15 @@ export class SseUpstreamForwarder implements McpForwarder {
       this.staticHeaders,
     )
 
+    // Omission must be authoritative: the message POST never carries
+    // mcp-method or mcp-name (they postdate this deprecated transport), and
+    // the wire session id may only come from transportSessionId below — a
+    // caller-supplied value of any of the three must not survive the merge
+    // (issues #264, #218).
+    delete headers['mcp-method']
+    delete headers['mcp-name']
+    delete headers['mcp-session-id']
+
     // Only the verbatim transport session id reaches the wire — never a
     // proxy-resolved governance id (issue #218).
     if (request.transportSessionId) {

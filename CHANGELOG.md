@@ -187,6 +187,13 @@ Maintainer notes:
   carries `resultType: "complete"`. Clients on `2025-06-18`, and
   clients on transports that predate the header (SSE, stdio), receive
   the same result without the field, byte-for-byte as before.
+- **The deprecated SSE upstream forwarder no longer forwards
+  caller-supplied `mcp-method`/`mcp-name` headers (#264).** The message
+  POST sends neither header (both postdate the transport), and a
+  caller-supplied `mcp-session-id` never reaches the wire — that header
+  is sent only from the transport relay field. No network path could
+  plant these headers; the gap was reachable only through direct
+  library use of the forwarder.
 
 ### Security
 
