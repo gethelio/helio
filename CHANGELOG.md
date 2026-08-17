@@ -4,7 +4,7 @@ All notable changes to Helio are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and Helio follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The
-proxy (`@gethelio/proxy`), Python SDK (`helio` on PyPI), and Docker image
+proxy (`@gethelio/proxy`), Python SDK (`helio-client` on PyPI), and Docker image
 (`ghcr.io/gethelio/helio`) are released together under a single version — the git tag.
 The dashboard workspace package (`@gethelio/dashboard`) is bundled into the proxy and
 not published separately.
@@ -18,6 +18,65 @@ Maintainer notes:
   security posture, and breaking changes).
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-08-17
+
+### Breaking changes
+
+- **BREAKING: unresolved session identity now fails closed (#218).**
+  Under the default `session.on_unresolved: deny`, a request that
+  engages a session-keyed rate limit, spend limit, or budget — or an
+  evidence/dependency rule — without resolvable identity is denied
+  with the new `block_reason: session_unresolved` (evidence rules keep
+  `policy_denied`) instead of silently pooling into a shared `unknown`
+  bucket. Requests governed only by `key: tool`/`global` controls are
+  unaffected, and dry-run reports a named `session_unresolved: true`
+  marker instead of denying. One-line restore of the pre-0.12 pooling:
+  `session.on_unresolved: anonymous` (evidence/dependency rules still
+  require identity under both modes). The same policy applies to the
+  adapter sideband's `session_id`. Bucket continuity is preserved for
+  well-formed ids (non-empty after trimming, at most 256 chars): legacy
+  ids key the same buckets byte-for-byte, so persisted budget pots
+  carry over, while over-long, empty, or whitespace-only ids — which
+  previously keyed buckets literally — now resolve as unresolved. The
+  evidence/dependency deny message changed to name the configured
+  identity strategies, and the SDK sideband's evidence and context
+  writes reject whitespace-only session ids with 400 (such a write
+  could never be read back).
+- **BREAKING: pre-0.12 local audit databases fail fast at startup
+  (#218).** The audit schema gains a `session_source` column through
+  the documented pre-1.0 clean-break mechanism: Helio refuses to start
+  on an old local DB and prints the delete-these-files instructions.
+- **BREAKING: TypeScript API changes for direct embedders (#218).**
+  `McpRequest.sessionId` splits into `session` (the proxy-resolved
+  identity with its source) and `transportSessionId` (the verbatim
+  wire `Mcp-Session-Id`, relayed upstream unchanged — a proxy-resolved
+  id is never sent upstream, which session-enforcing upstreams would
+  reject). `BudgetEngine.peekAll`/`recordAll` now accept only
+  gate-branded charges obtained via `gateBudgetCharges`; runtime
+  behavior is unchanged. On `/sse`, the minted stream id is no longer
+  sent upstream as `Mcp-Session-Id`, and an explicit identity header
+  on the POST leg now overrides the stream identity.
+- **BREAKING: the supported Node.js floor is now 24 (#241).** The
+  `engines` field moves from `>=22` to `>=24` across the workspace.
+  Installs on Node 22 or older now surface an engine mismatch: npm and
+  pnpm print an unsupported-engine warning and continue, while Yarn
+  and `engine-strict` setups refuse outright. Either way, Node 22 is
+  no longer tested or supported. Node 22 entered Maintenance LTS in
+  October 2025 and receives security fixes only; Node 24 has been
+  Active LTS since the same month. The toolchain moves with the floor:
+  CI, the Docker image (now built on `node:24-slim`), and the build
+  target all run Node 24, so the supported floor is the tested floor.
+  Upgrade the host runtime to Node 24 before taking this release; no
+  configuration or API changes are required.
+- **BREAKING: `upstream.headers` may no longer set `Mcp-Method` or
+  `Mcp-Name` (#216).** Both join the reserved transport headers Helio
+  owns on the wire for every Streamable HTTP request it sends —
+  internal and relayed alike. Static `upstream.headers` take precedence
+  over Helio's own headers, so an operator-set value would have
+  silently corrupted that traffic and drawn a guaranteed `-32020` from
+  a strict server. A config that sets either now fails validation at
+  startup with the existing reserved-header message.
 
 ### Added
 
@@ -72,65 +131,11 @@ Maintainer notes:
 
 ### Changed
 
-- **BREAKING: unresolved session identity now fails closed (#218).**
-  Under the default `session.on_unresolved: deny`, a request that
-  engages a session-keyed rate limit, spend limit, or budget — or an
-  evidence/dependency rule — without resolvable identity is denied
-  with the new `block_reason: session_unresolved` (evidence rules keep
-  `policy_denied`) instead of silently pooling into a shared `unknown`
-  bucket. Requests governed only by `key: tool`/`global` controls are
-  unaffected, and dry-run reports a named `session_unresolved: true`
-  marker instead of denying. One-line restore of the pre-0.12 pooling:
-  `session.on_unresolved: anonymous` (evidence/dependency rules still
-  require identity under both modes). The same policy applies to the
-  adapter sideband's `session_id`. Bucket continuity is preserved for
-  well-formed ids (non-empty after trimming, at most 256 chars): legacy
-  ids key the same buckets byte-for-byte, so persisted budget pots
-  carry over, while over-long, empty, or whitespace-only ids — which
-  previously keyed buckets literally — now resolve as unresolved. The
-  evidence/dependency deny message changed to name the configured
-  identity strategies, and the SDK sideband's evidence and context
-  writes reject whitespace-only session ids with 400 (such a write
-  could never be read back).
-- **BREAKING: pre-0.12 local audit databases fail fast at startup
-  (#218).** The audit schema gains a `session_source` column through
-  the documented pre-1.0 clean-break mechanism: Helio refuses to start
-  on an old local DB and prints the delete-these-files instructions.
-- **BREAKING: TypeScript API changes for direct embedders (#218).**
-  `McpRequest.sessionId` splits into `session` (the proxy-resolved
-  identity with its source) and `transportSessionId` (the verbatim
-  wire `Mcp-Session-Id`, relayed upstream unchanged — a proxy-resolved
-  id is never sent upstream, which session-enforcing upstreams would
-  reject). `BudgetEngine.peekAll`/`recordAll` now accept only
-  gate-branded charges obtained via `gateBudgetCharges`; runtime
-  behavior is unchanged. On `/sse`, the minted stream id is no longer
-  sent upstream as `Mcp-Session-Id`, and an explicit identity header
-  on the POST leg now overrides the stream identity.
-- **BREAKING: the supported Node.js floor is now 24 (#241).** The
-  `engines` field moves from `>=22` to `>=24` across the workspace.
-  Installs on Node 22 or older now surface an engine mismatch: npm and
-  pnpm print an unsupported-engine warning and continue, while Yarn
-  and `engine-strict` setups refuse outright. Either way, Node 22 is
-  no longer tested or supported. Node 22 entered Maintenance LTS in
-  October 2025 and receives security fixes only; Node 24 has been
-  Active LTS since the same month. The toolchain moves with the floor:
-  CI, the Docker image (now built on `node:24-slim`), and the build
-  target all run Node 24, so the supported floor is the tested floor.
-  Upgrade the host runtime to Node 24 before taking this release; no
-  configuration or API changes are required.
 - **Default posture:** the proxy now issues its own `tools/list` to
   the upstream every 5 minutes and clamps a forwarded `tools/list`
   response's numeric `ttlMs` down to `max_advertised_ttl` by default.
   Restore the pre-0.12 behavior — no proxy-initiated revalidation, no
   clamping — with `policies.tool_revalidation.enabled: false`.
-- **BREAKING: `upstream.headers` may no longer set `Mcp-Method` or
-  `Mcp-Name` (#216).** Both join the reserved transport headers Helio
-  owns on the wire for every Streamable HTTP request it sends —
-  internal and relayed alike. Static `upstream.headers` take precedence
-  over Helio's own headers, so an operator-set value would have
-  silently corrupted that traffic and drawn a guaranteed `-32020` from
-  a strict server. A config that sets either now fails validation at
-  startup with the existing reserved-header message.
 
 ### Fixed
 
@@ -923,7 +928,7 @@ Helio's first public release.
   feed (Server-Sent Events), approvals queue with live countdowns, a
   searchable / filterable / paginated audit log, rate & spend limit gauges, and
   analytics charts.
-- **Sideband API + Python SDK.** `helio` on PyPI — a thin client (under 500 lines)
+- **Sideband API + Python SDK.** `helio-client` on PyPI — a thin client (under 500 lines)
   that reports evidence and context to the proxy over a localhost-only,
   bearer-protected sideband. The SDK never makes governance decisions.
 - **CLI.** `helio init` (scaffold a commented `helio.yaml`), `helio start`,
@@ -962,7 +967,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/gethelio/helio/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/gethelio/helio/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/gethelio/helio/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/gethelio/helio/compare/v0.9.0...v0.10.0
