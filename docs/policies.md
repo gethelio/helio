@@ -235,7 +235,7 @@ The request is blocked immediately. No upstream request is made. The response is
 }
 ```
 
-The `data` object also carries `rule_index` and `policy_reason`; the fields shown above are the ones an agent typically acts on.
+The `data` object also carries `rule_index` and `policy_reason`; the fields shown above are the ones an agent typically acts on. Detect a denial by keying on `data.blocked` and `data.reason`, not on the numeric error code: `-32001` predates the MCP `2026-07-28` error-code allocation policy and is retained as grandfathered, and receivers must not assume meaning for this code.
 
 ### require_approval
 
