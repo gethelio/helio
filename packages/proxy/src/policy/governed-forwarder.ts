@@ -59,7 +59,16 @@ import { buildSessionUnresolvedFeedback } from '../feedback/self-repair.js'
 import { DEFAULT_SESSION_IDENTITY } from '../mcp/session-resolver.js'
 import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 
-/** Custom JSON-RPC error code for policy denials. */
+/**
+ * Custom JSON-RPC error code for policy denials.
+ *
+ * Allocated before MCP 2026-07-28 partitioned the implementation-defined
+ * error range. That revision places -32000 to -32019 in a legacy sub-range:
+ * new codes must not be allocated there, and receivers must not assume any
+ * specific meaning for this code. Kept as grandfathered (issue #235
+ * ruling); the durable denial contract for clients is the error's data
+ * payload (blocked, reason, rule), never this number.
+ */
 const POLICY_DENIED = -32001
 
 /** Options for constructing a GovernedForwarder. */
