@@ -321,7 +321,9 @@ export class RateLimiter {
    * (`config.ruleIndex`): a reorder that shifts a rate rule's index evicts
    * its old-index bucket instead of leaving an orphan no rule reads again —
    * or worse, letting whatever rule now sits at that index adopt another
-   * rule's accrued calls. Un-suffixed keys keep the tuple-anywhere match.
+   * rule's accrued calls. Un-suffixed keys keep the tuple-anywhere match,
+   * but only against index-less configs — a caller that passes only indexed
+   * configs (as the proxy does) evicts every un-suffixed bucket, fail-closed.
    *
    * This is the compare-and-evict semantic that replaces the old `reset()`
    * call on every hot-reload, which wiped all state even when the matching

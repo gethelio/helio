@@ -412,7 +412,9 @@ export class SpendLimiter {
    * reorder that shifts a spend rule's index evicts its old-index bucket
    * instead of leaving an orphan no rule reads again — or worse, letting
    * whatever rule now sits at that index adopt another rule's accrued spend.
-   * Un-suffixed keys keep the tuple-anywhere match.
+   * Un-suffixed keys keep the tuple-anywhere match, but only against
+   * index-less configs — a caller that passes only indexed configs (as the
+   * proxy does) evicts every un-suffixed bucket, fail-closed.
    *
    * Currency is part of the tuple because a USD→EUR switch is a meaningful
    * policy change — the same numeric limit buys a different amount of real

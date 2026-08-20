@@ -6509,6 +6509,37 @@ describe('GovernedForwarder', () => {
         rateLimiter.close()
       })
 
+      it('dry-run rate peek is not influenced by the un-suffixed bucket', async () => {
+        const inner = mockForwarder()
+        const policy = compile({
+          dry_run: true,
+          default: 'allow',
+          rules: [
+            {
+              name: 'throttle-weather',
+              match: { tool: 'get_weather' },
+              action: 'rate_limit',
+              limits: { max_calls: 2, window: '1h' },
+            },
+          ],
+        })
+        const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+        const governed = new GovernedForwarder(inner, policy, { rateLimiter })
+
+        // The negative half of the suffixed-peek contract: an exhausted
+        // UN-suffixed bucket (a key no door builds) must not turn the report
+        // pessimistic — a peek that reads both keys would fail here.
+        rateLimiter.record({ key: 'tool:get_weather', maxCalls: 2, windowMs: 3_600_000 })
+        rateLimiter.record({ key: 'tool:get_weather', maxCalls: 2, windowMs: 3_600_000 })
+
+        const result = await governed.forward(toolsCallRequest('get_weather'))
+        const payload = dryRunPayloadFromResult(result)
+        expect(payload['would_forward']).toBe(true)
+        expect(payload['limits_ok']).toBe(true)
+
+        rateLimiter.close()
+      })
+
       it('peeks spend limiter without consuming budget', async () => {
         const inner = mockForwarder()
         const policy = compile({
