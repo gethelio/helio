@@ -1585,11 +1585,12 @@ export class GovernanceService {
         sessionUnresolved?: true
       }
     | undefined {
-    const limits = decision.matchedRule?.limits
-    if (!this.rateLimiter || !limits?.maxCalls || !limits.windowMs) {
+    const matchedRule = decision.matchedRule
+    const limits = matchedRule?.limits
+    if (!this.rateLimiter || !matchedRule || !limits?.maxCalls || !limits.windowMs) {
       return { allowed: true }
     }
-    let key: string
+    let baseKey: string
     if (limits.key === 'session') {
       const gate = gateSession(sessionId, this.session.onUnresolved)
       if (!gate.ok) {
@@ -1597,10 +1598,11 @@ export class GovernanceService {
         return { allowed: false, sessionUnresolved: true }
       }
       if (gate.anonymous) warnAnonymousPoolingOnce()
-      key = sessionLimitKey(gate.session)
+      baseKey = sessionLimitKey(gate.session)
     } else {
-      key = buildLimitKey(limits.key, toolName, senderId)
+      baseKey = buildLimitKey(limits.key, toolName, senderId)
     }
+    const key = ruleBucketKey(baseKey, matchedRule.index)
     const peek = this.rateLimiter.peek({
       key,
       maxCalls: limits.maxCalls,

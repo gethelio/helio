@@ -244,7 +244,7 @@ Current state of every active rate-limit and spend-limit bucket. Returns empty a
 {
   "rate_limits": [
     {
-      "key": "tool:send_email",
+      "key": "tool:send_email:rule:0",
       "current": 12,
       "limit": 50,
       "window_ms": 60000,
@@ -267,7 +267,7 @@ Current state of every active rate-limit and spend-limit bucket. Returns empty a
 - `rate_limits[].current` — calls consumed in the current window.
 - `rate_limits[].reset_at_ms` — epoch ms at which the oldest recorded call ages out of the sliding window and `current` drops. The bucket does not reset wholesale.
 - `spend_limits[].current_spend` — total spend in the current window in `currency`.
-- `spend_limits[].key` — carries a `:rule:<index>` suffix naming the `spend_limit` rule that owns the bucket; two spend rules sharing a scope track separately. Rate keys are unsuffixed.
+- `rate_limits[].key` and `spend_limits[].key` — both carry a `:rule:<index>` suffix naming the rule that owns the bucket; two rules sharing a scope track separately.
 
 **Raw-shape endpoint:** this is an RPC-style view.
 

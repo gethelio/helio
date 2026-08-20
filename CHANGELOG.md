@@ -19,6 +19,20 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Fixed
+
+- Two `rate_limit` rules sharing a key scope (for example, two
+  session-keyed rules) no longer pool their calls into one bucket with
+  last-write-wins config: rate bucket keys now carry a `:rule:<index>`
+  suffix naming the owning rule, exactly as spend bucket keys have since
+  0.10.0. The suffixed keys are what `GET /api/limits`, `limit_warning`
+  events, and rate-limit deny messages now show. Rate state is
+  in-memory, so the relabel is automatic on upgrade — the restart
+  starts fresh buckets under the new keys. Operator note: a sender that
+  exercises several sender-keyed rate rules now occupies one slot in
+  the 50,000-key sender registry per exercised rule bucket rather than
+  one slot total.
+
 ## [0.12.0] - 2026-08-17
 
 ### Breaking changes

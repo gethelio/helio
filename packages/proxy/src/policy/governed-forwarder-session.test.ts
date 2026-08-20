@@ -241,10 +241,11 @@ describe('session-keyed limits under on_unresolved: anonymous (issue #218)', () 
     await governed.forward(toolsCall('send_email'))
 
     expect(inner.forward).toHaveBeenCalledTimes(2)
-    // Bucket-key equality with the pre-change format: the literal unknown pot.
+    // Anonymous identities pool into the literal unknown pot, discriminated
+    // by the owning rule like every session bucket.
     const states = rateLimiter.listKeyStates()
     expect(states).toHaveLength(1)
-    expect(states[0]?.key).toBe('session:unknown')
+    expect(states[0]?.key).toBe('session:unknown:rule:0')
     expect(states[0]?.current).toBe(2)
     expect(errorSpy).toHaveBeenCalledTimes(1)
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('unknown'))
@@ -388,7 +389,7 @@ describe('#215 regression: distinct identities get distinct buckets on the MCP d
       .listKeyStates()
       .map((state) => state.key)
       .sort()
-    expect(keys).toEqual(['session:client-a', 'session:client-b'])
+    expect(keys).toEqual(['session:client-a:rule:0', 'session:client-b:rule:0'])
   })
 
   it('keeps distinct budget pots per identity', async () => {

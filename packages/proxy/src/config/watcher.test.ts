@@ -935,15 +935,15 @@ policies:
       data: Record<string, unknown>
     }
     expect(blockedError.data['reason']).toBe('rate_limited')
-    expect(rateLimiter.getKeyState('tool:send_email')?.current).toBe(2)
+    expect(rateLimiter.getKeyState('tool:send_email:rule:0')?.current).toBe(2)
 
     // Simulate `vim :w` no-op — rewrite the same config byte-for-byte. The
     // watcher fires; reconcile sees the same (maxCalls=2, window=60s) tuple
-    // and leaves the bucket intact.
+    // at the same rule index and leaves the bucket intact.
     await writeFile(configPath, rateLimitYaml(2))
     await wait(500)
 
-    expect(rateLimiter.getKeyState('tool:send_email')?.current).toBe(2)
+    expect(rateLimiter.getKeyState('tool:send_email:rule:0')?.current).toBe(2)
     const stillBlocked = await governed.forward(toolsCall('send_email', 4))
     const stillBlockedError = (stillBlocked.response.body as Record<string, unknown>)['error'] as {
       data: Record<string, unknown>
@@ -995,7 +995,7 @@ policies:
     await writeFile(configPath, rateLimitYaml(5))
     await wait(500)
 
-    expect(rateLimiter.getKeyState('tool:send_email')).toBeUndefined()
+    expect(rateLimiter.getKeyState('tool:send_email:rule:0')).toBeUndefined()
     const result = await governed.forward(toolsCall('send_email', 3))
     expect(result.response.status).toBe(200)
 
