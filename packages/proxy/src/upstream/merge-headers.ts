@@ -7,8 +7,11 @@
  * a downstream client cannot clobber an operator-provided credential such as
  * `Authorization`.
  *
- * Note: `Mcp-Session-Id` is applied by the forwarder after this merge and is
- * not passed through here.
+ * Note: reserved names such as `Mcp-Session-Id` pass through this fold
+ * like any other key. Stripping them is each caller's own business: the
+ * Streamable HTTP send() and the SSE message POSTs delete
+ * `mcp-session-id` after the merge, then stamp their own value only
+ * when a session id exists.
  */
 export function mergeUpstreamHeaders(
   base: Record<string, string>,

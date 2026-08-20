@@ -154,6 +154,93 @@ describe('StreamableHttpForwarder', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Issue #288: a caller-supplied mcp-session-id merged from McpRequest
+  // headers (or constructor statics) must never ship on the legacy leg —
+  // the wire value comes only from the transport relay field (relayed) or
+  // the manager-minted session (internal).
+  // -------------------------------------------------------------------------
+
+  describe('legacy-leg caller-supplied mcp-session-id (issue #288)', () => {
+    it('never forwards a caller-supplied mcp-session-id on a legacy relay with no transport id', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { 'mcp-session-id': 'caller-forged' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['mcp-session-id']).toBeUndefined()
+    })
+
+    it('never forwards a caller-supplied Mcp-Session-Id whatever its key casing', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { 'Mcp-Session-Id': 'caller-forged-cased' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['mcp-session-id']).toBeUndefined()
+      // Pin (green pre-fix): the merge lower-cases every key, so a cased
+      // duplicate can never ship alongside the lower-cased one.
+      expect(relay?.headers['Mcp-Session-Id']).toBeUndefined()
+    })
+
+    it('never forwards a constructor static-header mcp-session-id on the legacy leg', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = new StreamableHttpForwarder({
+        url: 'http://up/mcp',
+        protocolVersion: '2025-06-18',
+        headers: { 'mcp-session-id': 'static-forged' },
+      })
+
+      await fwd.forward(req())
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['mcp-session-id']).toBeUndefined()
+    })
+
+    it('still sends the transport session id when a caller header rode the same request', async () => {
+      // Characterization pin (green pre-fix): the transport relay id wins
+      // over caller residue, so any residue clear must run before the
+      // transport stamp or this pin flips.
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(
+        req({ transportSessionId: 'S1', headers: { 'mcp-session-id': 'caller-forged' } }),
+      )
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['mcp-session-id']).toBe('S1')
+    })
+
+    it('never forwards a caller-supplied mcp-session-id on an internal send to a sessionless legacy upstream', async () => {
+      // The sessionless fixture is load-bearing: a minting upstream's id
+      // would be stamped over the caller residue at the send site and mask
+      // the leak. The establish also needs a 2xx on notifications/initialized
+      // or it throws before send() ever runs; the explicit 202 handler
+      // documents that dependency (the stub's default answer is 202 too).
+      const calls = stubRelayUpstream({
+        'server/discover': () =>
+          jsonEnvelope({
+            jsonrpc: '2.0',
+            id: 'helio-era-probe',
+            error: { code: -32601, message: 'Method not found' },
+          }),
+        initialize: () =>
+          jsonEnvelope({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+        'notifications/initialized': () => new Response(null, { status: 202 }),
+        'tools/list': okResult(),
+      })
+      const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+      await fwd.forwardInternal(req({ headers: { 'mcp-session-id': 'caller-forged' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['mcp-session-id']).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Regression 2: passthrough 404 surfaces as raw response (no throw)
   // -------------------------------------------------------------------------
 

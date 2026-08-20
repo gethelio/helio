@@ -21,6 +21,15 @@ Maintainer notes:
 
 ### Fixed
 
+- The Streamable HTTP forwarder no longer forwards a caller-supplied
+  `mcp-session-id` on its request sends. Merge residue from caller
+  headers and constructor static headers alike is now cleared on every
+  send, relayed and internal, before the wire value is stamped, so the
+  id those sends carry comes only from the transport relay field
+  (relayed traffic) or the session id the upstream minted for Helio's
+  managed session (internal traffic). No network path could plant the
+  header; the gap was reachable only through direct library use of the
+  forwarder.
 - Two `rate_limit` rules sharing a key scope (for example, two
   session-keyed rules) no longer pool their calls into one bucket with
   last-write-wins config: rate bucket keys now carry a `:rule:<index>`
