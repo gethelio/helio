@@ -327,6 +327,11 @@ export class StreamableHttpForwarder implements McpForwarder {
       request.headers ?? {},
       this.staticHeaders,
     )
+    // Omission must be authoritative here too: the wire session id comes
+    // only from the transport relay or the managed session (issue #218),
+    // never from a caller-forwarded or constructor-static value that
+    // survived the merge above (issue #288).
+    delete headers['mcp-session-id']
     // An internal modern session never mints or echoes a session id (see
     // UpstreamSessionManager#modernSession) and modern relays pass
     // sessionId: undefined, so this never fires on a modern send.
