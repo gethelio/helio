@@ -10,7 +10,8 @@
  * Note: reserved names such as `Mcp-Session-Id` pass through this fold
  * like any other key. Stripping them is each caller's own business: the
  * Streamable HTTP send() and the SSE message POSTs delete
- * `mcp-session-id` after the merge and then stamp the value they own.
+ * `mcp-session-id` after the merge, then stamp their own value only
+ * when a session id exists.
  */
 export function mergeUpstreamHeaders(
   base: Record<string, string>,

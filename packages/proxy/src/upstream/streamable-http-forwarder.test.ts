@@ -216,8 +216,9 @@ describe('StreamableHttpForwarder', () => {
     it('never forwards a caller-supplied mcp-session-id on an internal send to a sessionless legacy upstream', async () => {
       // The sessionless fixture is load-bearing: a minting upstream's id
       // would be stamped over the caller residue at the send site and mask
-      // the leak. The 202 on notifications/initialized is load-bearing too —
-      // without it the legacy establish throws before send() ever runs.
+      // the leak. The establish also needs a 2xx on notifications/initialized
+      // or it throws before send() ever runs; the explicit 202 handler
+      // documents that dependency (the stub's default answer is 202 too).
       const calls = stubRelayUpstream({
         'server/discover': () =>
           jsonEnvelope({
