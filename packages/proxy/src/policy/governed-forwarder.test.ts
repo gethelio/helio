@@ -3487,13 +3487,13 @@ describe('GovernedForwarder', () => {
       const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
 
       await governed.forward(toolsCallRequest('get_weather', {}, 1))
-      expect(limiter.getKeyState('tool:get_weather')?.current).toBe(1)
+      expect(limiter.getKeyState('tool:get_weather:rule:0')?.current).toBe(1)
 
       // Hot-reload: drop the rate limit rule entirely.
       const emptyPolicy = compile({ default: 'allow', rules: [] })
       governed.updatePolicy(emptyPolicy)
 
-      expect(limiter.getKeyState('tool:get_weather')).toBeUndefined()
+      expect(limiter.getKeyState('tool:get_weather:rule:0')).toBeUndefined()
     })
 
     it('uses feedback.message from rule when present', async () => {
@@ -3516,6 +3516,161 @@ describe('GovernedForwarder', () => {
       const result = await governed.forward(toolsCallRequest('get_weather', {}, 2))
       const error = errorFromResult(result)
       expect(error.message).toBe('Slow down, please.')
+    })
+
+    it('two rate rules sharing a session scope keep separate buckets (issue #159)', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createRateLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'search_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h', key: 'session' },
+          },
+          {
+            match: { tool: 'expensive_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
+
+      for (let i = 0; i < 5; i++) {
+        const allowed = await governed.forward(toolsCallWithSession('search_web', 'abc'))
+        expect(allowed.response.status).toBe(200)
+      }
+
+      // First-ever expensive_* call: its own bucket is empty, so it forwards.
+      // Under the shared session:abc bucket the five search calls would fill
+      // the 5-call window and deny it — the collision this fixes.
+      const result = await governed.forward(toolsCallWithSession('expensive_op', 'abc'))
+      expect(result.response.status).toBe(200)
+      expect(inner.forward).toHaveBeenCalledTimes(6)
+
+      const states = new Map(limiter.listKeyStates().map((state) => [state.key, state]))
+      expect(states.get('session:abc:rule:0')?.current).toBe(5)
+      expect(states.get('session:abc:rule:0')?.limit).toBe(100)
+      expect(states.get('session:abc:rule:0')?.window_ms).toBe(3_600_000)
+      expect(states.get('session:abc:rule:1')?.current).toBe(1)
+      expect(states.get('session:abc:rule:1')?.limit).toBe(5)
+      expect(states.get('session:abc:rule:1')?.window_ms).toBe(60_000)
+    })
+
+    it('an allowed short-window record does not erase the long-window rule log', async () => {
+      // record() drops timestamps older than the RECORDING rule's window
+      // before appending. Clocked so a shared bucket cannot pass: at t=0
+      // three search calls; +61s (outside 1m, inside 1h) one ALLOWED
+      // expensive call. A shared session:abc bucket would end at current 1 —
+      // the three search timestamps erased by the 1m filter.
+      const inner = mockForwarder()
+      const { limiter, advance } = createRateLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'search_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h', key: 'session' },
+          },
+          {
+            match: { tool: 'expensive_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
+
+      for (let i = 0; i < 3; i++) {
+        await governed.forward(toolsCallWithSession('search_web', 'abc'))
+      }
+      advance(61_000)
+      const result = await governed.forward(toolsCallWithSession('expensive_op', 'abc'))
+      expect(result.response.status).toBe(200)
+
+      // Load-bearing: rule 0 keeps its three timestamps.
+      expect(limiter.getKeyState('session:abc:rule:0')?.current).toBe(3)
+      expect(limiter.getKeyState('session:abc:rule:1')?.current).toBe(1)
+    })
+
+    it('tool-scoped rate buckets carry the owning rule index', async () => {
+      const inner = mockForwarder()
+      const { limiter } = createRateLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 3, window: '1m', key: 'tool' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
+
+      await governed.forward(toolsCallRequest('get_weather', {}, 1))
+
+      const keys = limiter.listKeyStates().map((state) => state.key)
+      expect(keys).toEqual(['tool:get_weather:rule:0'])
+    })
+
+    it('updatePolicy reconciles rate buckets by owning rule index', async () => {
+      // Reordered rules with DIFFERENT tuples: index-aware reconcile must
+      // evict the shifted bucket. (An identical-tuple swap keeps both
+      // buckets and exchanges accrued counts — the documented reconcile
+      // caveat, deliberately not this test.)
+      const inner = mockForwarder()
+      const { limiter } = createRateLimiter()
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'search_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h', key: 'session' },
+          },
+          {
+            match: { tool: 'expensive_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, { rateLimiter: limiter })
+
+      for (let i = 0; i < 3; i++) {
+        await governed.forward(toolsCallWithSession('search_web', 'abc'))
+      }
+      expect(limiter.getKeyState('session:abc:rule:0')?.current).toBe(3)
+
+      // Swap the two rules: search_* now sits at index 1, same tuple.
+      const swapped = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'expensive_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+          {
+            match: { tool: 'search_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 100, window: '1h', key: 'session' },
+          },
+        ],
+      })
+      governed.updatePolicy(swapped)
+
+      // Index 0 now carries 5/1m, not the bucket's 100/1h — evicted. The
+      // next search call relands on rule:1: the behavioral relanding, not
+      // key absence, proves the eviction.
+      expect(limiter.getKeyState('session:abc:rule:0')).toBeUndefined()
+      const result = await governed.forward(toolsCallWithSession('search_web', 'abc'))
+      expect(result.response.status).toBe(200)
+      expect(limiter.getKeyState('session:abc:rule:1')?.current).toBe(1)
     })
   })
 
@@ -3644,7 +3799,7 @@ describe('GovernedForwarder', () => {
 
       expect(inner.forward).not.toHaveBeenCalled()
       expect(errorFromResult(result).data['reason']).toBe('budget_exceeded')
-      expect(rateLimiter.getKeyState('tool:stripe_charge')).toBeUndefined()
+      expect(rateLimiter.getKeyState('tool:stripe_charge:rule:0')).toBeUndefined()
     })
 
     it('does not consume rule spend buckets when the budget gate denies', async () => {
@@ -4776,7 +4931,7 @@ describe('GovernedForwarder', () => {
       expect(inner.forward).not.toHaveBeenCalled()
       expect(errorFromResult(result).data['failure_class']).toBe('budget_ledger_write_failed')
       expect(engine.listStates().flatMap((s) => s.buckets)).toEqual([])
-      expect(limiter.getKeyState('tool:stripe_charge')).toBeUndefined()
+      expect(limiter.getKeyState('tool:stripe_charge:rule:0')).toBeUndefined()
 
       auditWriter.flush()
       const record = auditStore.list().records[0]
@@ -4969,7 +5124,7 @@ describe('GovernedForwarder', () => {
       // Call 2 (small amount, no breach) consumes the slot during the wait.
       const second = await governed.forward(toolsCallRequest('stripe_charge', { amount: 1 }, 2))
       expect(second.response.status).toBe(200)
-      expect(limiter.getKeyState('tool:stripe_charge')?.current).toBe(1)
+      expect(limiter.getKeyState('tool:stripe_charge:rule:0')?.current).toBe(1)
 
       approvalRouter.approve(ticket.id, 'alice')
       const result = await pending
@@ -4978,7 +5133,7 @@ describe('GovernedForwarder', () => {
       // truthfully, exactly like an approved budget overage.
       expect(result.response.status).toBe(200)
       expect(inner.forward).toHaveBeenCalledTimes(2)
-      expect(limiter.getKeyState('tool:stripe_charge')?.current).toBe(2)
+      expect(limiter.getKeyState('tool:stripe_charge:rule:0')?.current).toBe(2)
 
       // The next unapproved call is blocked by the exhausted counter.
       const third = await governed.forward(toolsCallRequest('stripe_charge', { amount: 1 }, 3))
@@ -6310,14 +6465,77 @@ describe('GovernedForwarder', () => {
         expect(payload['would_forward']).toBe(true)
         expect(payload['limits_ok']).toBe(true)
 
-        // Verify budget was not consumed — a real check should still succeed
+        // Verify budget was not consumed — a real check against the bucket
+        // the door peeks (the rule-suffixed key) should still succeed
         const realCheck = rateLimiter.check({
-          key: 'tool:get_weather',
+          key: 'tool:get_weather:rule:0',
           maxCalls: 2,
           windowMs: 3_600_000,
         })
         expect(realCheck.allowed).toBe(true)
         expect(realCheck.current).toBe(1)
+
+        rateLimiter.close()
+      })
+
+      it('dry-run rate peek reads the rule-suffixed bucket', async () => {
+        const inner = mockForwarder()
+        const policy = compile({
+          dry_run: true,
+          default: 'allow',
+          rules: [
+            {
+              name: 'throttle-weather',
+              match: { tool: 'get_weather' },
+              action: 'rate_limit',
+              limits: { max_calls: 2, window: '1h' },
+            },
+          ],
+        })
+        const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+        const governed = new GovernedForwarder(inner, policy, { rateLimiter })
+
+        // Pre-load the SUFFIXED bucket to its limit. The peek must read this
+        // bucket — an empty un-suffixed tool:get_weather must not make the
+        // report optimistic.
+        rateLimiter.record({ key: 'tool:get_weather:rule:0', maxCalls: 2, windowMs: 3_600_000 })
+        rateLimiter.record({ key: 'tool:get_weather:rule:0', maxCalls: 2, windowMs: 3_600_000 })
+
+        const result = await governed.forward(toolsCallRequest('get_weather'))
+        const payload = dryRunPayloadFromResult(result)
+        expect(payload['would_forward']).toBe(false)
+        expect(payload['limits_ok']).toBe(false)
+
+        rateLimiter.close()
+      })
+
+      it('dry-run rate peek is not influenced by the un-suffixed bucket', async () => {
+        const inner = mockForwarder()
+        const policy = compile({
+          dry_run: true,
+          default: 'allow',
+          rules: [
+            {
+              name: 'throttle-weather',
+              match: { tool: 'get_weather' },
+              action: 'rate_limit',
+              limits: { max_calls: 2, window: '1h' },
+            },
+          ],
+        })
+        const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+        const governed = new GovernedForwarder(inner, policy, { rateLimiter })
+
+        // The negative half of the suffixed-peek contract: an exhausted
+        // UN-suffixed bucket (a key no door builds) must not turn the report
+        // pessimistic — a peek that reads both keys would fail here.
+        rateLimiter.record({ key: 'tool:get_weather', maxCalls: 2, windowMs: 3_600_000 })
+        rateLimiter.record({ key: 'tool:get_weather', maxCalls: 2, windowMs: 3_600_000 })
+
+        const result = await governed.forward(toolsCallRequest('get_weather'))
+        const payload = dryRunPayloadFromResult(result)
+        expect(payload['would_forward']).toBe(true)
+        expect(payload['limits_ok']).toBe(true)
 
         rateLimiter.close()
       })

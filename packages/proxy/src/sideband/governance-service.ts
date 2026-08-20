@@ -38,7 +38,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
-import { spendBucketKey } from '../policy/spend-limiter.js'
+import { ruleBucketKey } from '../policy/bucket-key.js'
 import type { BudgetEngine, BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
 import {
   gateSession,
@@ -1585,11 +1585,12 @@ export class GovernanceService {
         sessionUnresolved?: true
       }
     | undefined {
-    const limits = decision.matchedRule?.limits
-    if (!this.rateLimiter || !limits?.maxCalls || !limits.windowMs) {
+    const matchedRule = decision.matchedRule
+    const limits = matchedRule?.limits
+    if (!this.rateLimiter || !matchedRule || !limits?.maxCalls || !limits.windowMs) {
       return { allowed: true }
     }
-    let key: string
+    let baseKey: string
     if (limits.key === 'session') {
       const gate = gateSession(sessionId, this.session.onUnresolved)
       if (!gate.ok) {
@@ -1597,10 +1598,11 @@ export class GovernanceService {
         return { allowed: false, sessionUnresolved: true }
       }
       if (gate.anonymous) warnAnonymousPoolingOnce()
-      key = sessionLimitKey(gate.session)
+      baseKey = sessionLimitKey(gate.session)
     } else {
-      key = buildLimitKey(limits.key, toolName, senderId)
+      baseKey = buildLimitKey(limits.key, toolName, senderId)
     }
+    const key = ruleBucketKey(baseKey, matchedRule.index)
     const peek = this.rateLimiter.peek({
       key,
       maxCalls: limits.maxCalls,
@@ -1649,7 +1651,7 @@ export class GovernanceService {
     } else {
       baseKey = buildLimitKey(maxSpend.key, toolName, senderId)
     }
-    const key = spendBucketKey(baseKey, decision.matchedRule.index)
+    const key = ruleBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, args ?? {})
     if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount) || rawAmount < 0) {
       // Invalid amount — terminal block (mirrors the MCP invalid-amount deny).

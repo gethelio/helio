@@ -9,6 +9,8 @@
 // timer, close() for graceful teardown.
 // ---------------------------------------------------------------------------
 
+import { parseRuleIndex } from './bucket-key.js'
+
 /** Options for constructing a RateLimiter. */
 export interface RateLimiterOptions {
   /** Clock function for testable time. Defaults to `Date.now`. */
@@ -308,25 +310,44 @@ export class RateLimiter {
    * Reconcile bucket state against a new policy's limit configuration.
    *
    * Walks every existing bucket and checks whether its last-seen
-   * `{ maxCalls, windowMs }` tuple still appears anywhere in `validConfigs`.
+   * `{ maxCalls, windowMs }` tuple still appears in `validConfigs`.
    * Buckets whose config is still present are left untouched — counters and
    * elapsed-window progress are preserved across hot-reloads. Buckets whose
    * config is gone (rule changed or removed) are evicted so the next check
    * lazy-creates a fresh bucket under the new config.
    *
+   * Keys built by `ruleBucketKey` (bucket-key.ts) carry the owning rule's
+   * index, and for those the tuple must match at THAT index
+   * (`config.ruleIndex`): a reorder that shifts a rate rule's index evicts
+   * its old-index bucket instead of leaving an orphan no rule reads again —
+   * or worse, letting whatever rule now sits at that index adopt another
+   * rule's accrued calls. Un-suffixed keys keep the tuple-anywhere match,
+   * but only against index-less configs — a caller that passes only indexed
+   * configs (as the proxy does) evicts every un-suffixed bucket, fail-closed.
+   *
    * This is the compare-and-evict semantic that replaces the old `reset()`
    * call on every hot-reload, which wiped all state even when the matching
    * rule was unchanged.
    */
-  reconcile(validConfigs: Iterable<{ maxCalls: number; windowMs: number }>): void {
+  reconcile(
+    validConfigs: Iterable<{ maxCalls: number; windowMs: number; ruleIndex?: number }>,
+  ): void {
     const valid = new Set<string>()
+    const byIndex = new Map<number, string>()
     for (const config of validConfigs) {
-      valid.add(`${String(config.maxCalls)}|${String(config.windowMs)}`)
+      const tuple = `${String(config.maxCalls)}|${String(config.windowMs)}`
+      if (config.ruleIndex === undefined) {
+        valid.add(tuple)
+      } else {
+        byIndex.set(config.ruleIndex, tuple)
+      }
     }
 
     for (const [key, bucket] of this.buckets) {
       const tuple = `${String(bucket.maxCalls)}|${String(bucket.windowMs)}`
-      if (!valid.has(tuple)) {
+      const ruleIndex = parseRuleIndex(key)
+      const survives = ruleIndex === undefined ? valid.has(tuple) : byIndex.get(ruleIndex) === tuple
+      if (!survives) {
         this.buckets.delete(key)
       }
     }

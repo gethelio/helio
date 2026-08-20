@@ -265,7 +265,7 @@ describe('GovernanceService.evaluate', () => {
     service.evaluate(evalInput())
     service.evaluate(evalInput())
     // Three evaluates, zero consumption — the bucket is still empty.
-    expect(rateLimiter?.getKeyState('tool:send')).toBeUndefined()
+    expect(rateLimiter?.getKeyState('tool:send:rule:0')).toBeUndefined()
   })
 
   it('returns rate_limited terminally when peek is over the limit', () => {
@@ -281,8 +281,9 @@ describe('GovernanceService.evaluate', () => {
       ],
     })
     const { service, rateLimiter, records } = makeService({ policy, withLimiters: true })
-    // Pre-fill the bucket so peek is over the limit.
-    rateLimiter?.record({ key: 'tool:send', maxCalls: 1, windowMs: 60_000 })
+    // Pre-fill the bucket the door peeks (the rule-suffixed key) so peek is
+    // over the limit.
+    rateLimiter?.record({ key: 'tool:send:rule:0', maxCalls: 1, windowMs: 60_000 })
     const res = service.evaluate(evalInput())
     expect(res.body['decision']).toBe('rate_limited')
     expect(records.at(-1)?.record.block_reason).toBe('rate_limited')
@@ -495,13 +496,13 @@ describe('GovernanceService.audit', () => {
 
     const a1 = service.audit(auditInput(id), 'hash-1')
     expect(a1.status).toBe(201)
-    expect(rateLimiter?.getKeyState('tool:send')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('tool:send:rule:0')?.current).toBe(1)
 
     // Identical replay — idempotent, no double consumption.
     const a2 = service.audit(auditInput(id), 'hash-1')
     expect(a2.status).toBe(200)
     expect(a2.body['already_finalized']).toBe(true)
-    expect(rateLimiter?.getKeyState('tool:send')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('tool:send:rule:0')?.current).toBe(1)
   })
 
   it('returns 409 evaluation_conflict on a different payload for a finalized id', () => {
@@ -530,7 +531,7 @@ describe('GovernanceService.audit', () => {
     const ev = service.evaluate(evalInput())
     const id = ev.body['evaluation_id'] as string
     service.audit(auditInput(id, { status: 'not_executed' }), 'h')
-    expect(rateLimiter?.getKeyState('tool:send')).toBeUndefined()
+    expect(rateLimiter?.getKeyState('tool:send:rule:0')).toBeUndefined()
   })
 
   it('returns 404 for an unknown evaluation id', () => {
@@ -754,8 +755,8 @@ describe('GovernanceService — sender_id keyed limits', () => {
   it('keys the rate bucket by sender_id, not tool', () => {
     const { service, rateLimiter } = makeService({ policy: rateBySender, withLimiters: true })
     consume(service, 'U1')
-    expect(rateLimiter?.getKeyState('sender:U1')?.current).toBe(1)
-    expect(rateLimiter?.getKeyState('tool:send')).toBeUndefined()
+    expect(rateLimiter?.getKeyState('sender:U1:rule:0')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('tool:send:rule:0')).toBeUndefined()
   })
 
   it('gives different senders independent buckets', () => {
@@ -775,7 +776,7 @@ describe('GovernanceService — sender_id keyed limits', () => {
     const ev = service.evaluate(evalInput({ metadata: null }))
     const id = ev.body['evaluation_id'] as string
     service.audit(auditInput(id), 'h')
-    expect(rateLimiter?.getKeyState('sender:unknown')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('sender:unknown:rule:0')?.current).toBe(1)
   })
 })
 
@@ -870,6 +871,51 @@ describe('GovernanceService — sender-key cardinality registry', () => {
 
     // A new sender at cap triggers a lazy prune of the dead U1 key → admitted.
     expect(service.evaluate(evalSender('U2')).status).toBe(200)
+  })
+
+  it('two sender-keyed rate rules give one sender two buckets and two registry slots', () => {
+    const twoSenderRules = compile({
+      default: 'allow',
+      rules: [
+        {
+          match: { tool: 'send_a' },
+          action: 'rate_limit',
+          limits: { max_calls: 5, window: '1m', key: 'sender_id' },
+        },
+        {
+          match: { tool: 'send_b' },
+          action: 'rate_limit',
+          limits: { max_calls: 5, window: '1m', key: 'sender_id' },
+        },
+      ],
+    })
+    const { service, rateLimiter } = makeService({
+      policy: twoSenderRules,
+      withLimiters: true,
+      maxSenderKeys: 2,
+    })
+
+    const run = (tool: string, sender: string) => {
+      const ev = service.evaluate(
+        evalInput({ tool: { name: tool }, metadata: { sender_id: sender } }),
+      )
+      expect(ev.status).toBe(200)
+      service.audit(auditInput(ev.body['evaluation_id'] as string), 'h')
+    }
+
+    // One sender exercising both rules gets one bucket per owning rule.
+    run('send_a', 'U1')
+    run('send_b', 'U1')
+    expect(rateLimiter?.getKeyState('sender:U1:rule:0')?.current).toBe(1)
+    expect(rateLimiter?.getKeyState('sender:U1:rule:1')?.current).toBe(1)
+
+    // Both suffixed keys are sender-scoped for the cardinality registry:
+    // they fill the 2-slot cap, so a new sender key fails closed.
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'send_a' }, metadata: { sender_id: 'U2' } }),
+    )
+    expect(res.status).toBe(503)
+    expect(res.body['error']).toBe('limit_capacity_exhausted')
   })
 })
 
@@ -2415,6 +2461,39 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     expect(harness.service.audit(auditInput(id), 'h').status).toBe(201)
   })
 
+  it('commits the rate plan into the rule-suffixed key through a break-glass flip', () => {
+    // The rate plan freezes its key at /evaluate; a budget breach then flips
+    // the allow to require_approval. The /audit commit after approval must
+    // land in exactly the frozen rule-suffixed key.
+    const policy = compile({
+      default: 'allow',
+      rules: [
+        {
+          name: 'rl',
+          match: { tool: 'stripe_*' },
+          action: 'rate_limit',
+          limits: { max_calls: 5, window: '60s' },
+        },
+      ],
+    })
+    const harness = makeService({
+      policy,
+      withApprovals: true,
+      withLimiters: true,
+      budgets: [bgBudget()],
+    })
+    const { approval, id } = breachTicket(harness)
+
+    harness.service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'alice' })
+    expect(harness.service.audit(auditInput(id), 'h').status).toBe(201)
+
+    expect(harness.rateLimiter?.getKeyState('tool:stripe_charge:rule:0')?.current).toBe(1)
+    // Nothing landed anywhere else — the frozen plan carried the suffix.
+    expect(harness.rateLimiter?.listKeyStates().map((state) => state.key)).toEqual([
+      'tool:stripe_charge:rule:0',
+    ])
+  })
+
   it('approved + success commits the breach as approved_overage, the rest as spend', () => {
     const rows: Array<Record<string, unknown>> = []
     const harness = makeService({
@@ -3244,8 +3323,9 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
 
   it('reports an exhausted rate rule: would_forward false, limits_ok false, snapshot present', () => {
     const { service, rateLimiter } = makeService({ policy: rateRule, withLimiters: true })
-    rateLimiter?.record({ key: 'session:s1', maxCalls: 2, windowMs: 60_000 })
-    rateLimiter?.record({ key: 'session:s1', maxCalls: 2, windowMs: 60_000 })
+    // Exhaust the bucket the dry-run peek reads: the rule-suffixed key.
+    rateLimiter?.record({ key: 'session:s1:rule:0', maxCalls: 2, windowMs: 60_000 })
+    rateLimiter?.record({ key: 'session:s1:rule:0', maxCalls: 2, windowMs: 60_000 })
     const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
     expect(res.body['decision']).toBe('dry_run') // never rate_limited under dry-run
     const dryRun = res.body['dry_run'] as Record<string, unknown>
@@ -3366,8 +3446,10 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
     // U9 gets a LIVE bucket so a slot it reserved could not be pruned away:
     // the registry drops any key with neither a pending plan nor a bucket,
     // and dry-run peeks materialize neither, so without this the cap could
-    // never fill and the assertions below would prove nothing.
-    rateLimiter?.record({ key: 'sender:U9', maxCalls: 2, windowMs: 60_000 })
+    // never fill and the assertions below would prove nothing. The key uses
+    // the rule-suffixed format the door builds — the registry counts it as
+    // sender-scoped by its sender: prefix, suffix and all.
+    rateLimiter?.record({ key: 'sender:U9:rule:0', maxCalls: 2, windowMs: 60_000 })
     // Three DISTINCT sender keys under a capacity of 1: were dry-run to
     // reserve, U9 would hold the only slot and U1 would 503 with
     // limit_capacity_exhausted.
@@ -3379,7 +3461,7 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
       expect(res.body['decision']).toBe('dry_run')
     }
     // Pure peeks never materialize buckets.
-    expect(rateLimiter?.getKeyState('sender:U1')).toBeUndefined()
+    expect(rateLimiter?.getKeyState('sender:U1:rule:0')).toBeUndefined()
     // Terminal at /evaluate: a follow-up /audit reports finalized_by evaluate,
     // proving no pending entry was stored.
     const evalId = (
@@ -3514,7 +3596,7 @@ describe('GovernanceService — terminal audit rows are immune to response mutat
       policy: rateRule(false, 1),
       withLimiters: true,
     })
-    rateLimiter?.record({ key: 'session:s1', maxCalls: 1, windowMs: 60_000 })
+    rateLimiter?.record({ key: 'session:s1:rule:0', maxCalls: 1, windowMs: 60_000 })
     const res = service.evaluate(evalInput({ tool: { name: 'send_email' }, session_id: 's1' }))
     expect(res.body['decision']).toBe('rate_limited') // terminal at /evaluate
 
@@ -3621,7 +3703,7 @@ describe('session identity (issue #218)', () => {
     const id = res.body['evaluation_id'] as string
     service.audit(auditInput(id), 'h')
 
-    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:run-a'])
+    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:run-a:rule:0'])
   })
 
   it('pools into session:unknown under anonymous mode', () => {
@@ -3636,7 +3718,9 @@ describe('session identity (issue #218)', () => {
     const id = res.body['evaluation_id'] as string
     service.audit(auditInput(id), 'h')
 
-    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual(['session:unknown'])
+    expect(rateLimiter?.listKeyStates().map((state) => state.key)).toEqual([
+      'session:unknown:rule:0',
+    ])
   })
 
   it('treats a whitespace-only session_id as no identity for evidence rules', () => {

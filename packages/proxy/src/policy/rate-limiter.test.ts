@@ -378,6 +378,76 @@ describe('RateLimiter', () => {
 
       expect(limiter.getKeyState('tool:a')?.current).toBe(1)
     })
+
+    it('evicts a rule-suffixed bucket when its index no longer carries a matching tuple', () => {
+      const { limiter } = createLimiter()
+
+      // Rate rule at index 0 accrued state; a rule inserted above it moves it
+      // to index 1 on reload. The old-index bucket must not linger as an
+      // orphan (nothing reads it again) nor be adopted by whatever rule now
+      // sits at index 0.
+      limiter.check({ key: 'tool:send_email:rule:0', maxCalls: 10, windowMs: 60_000 })
+
+      limiter.reconcile([{ maxCalls: 10, windowMs: 60_000, ruleIndex: 1 }])
+
+      expect(limiter.getKeyState('tool:send_email:rule:0')).toBeUndefined()
+    })
+
+    it('preserves a rule-suffixed bucket when the same index keeps the same tuple', () => {
+      const { limiter } = createLimiter()
+
+      limiter.check({ key: 'tool:pay:rule:2', maxCalls: 10, windowMs: 60_000 })
+
+      limiter.reconcile([{ maxCalls: 10, windowMs: 60_000, ruleIndex: 2 }])
+
+      expect(limiter.getKeyState('tool:pay:rule:2')?.current).toBe(1)
+    })
+
+    it('evicts a rule-suffixed bucket when the rule at its index changed tuple', () => {
+      const { limiter } = createLimiter()
+
+      // Two rate rules with different tuples are swapped: the bucket at
+      // rule:0 must not be inherited by the rule that now sits at index 0.
+      limiter.check({ key: 'session:abc:rule:0', maxCalls: 100, windowMs: 3_600_000 })
+
+      limiter.reconcile([
+        { maxCalls: 5, windowMs: 60_000, ruleIndex: 0 },
+        { maxCalls: 100, windowMs: 3_600_000, ruleIndex: 1 },
+      ])
+
+      expect(limiter.getKeyState('session:abc:rule:0')).toBeUndefined()
+    })
+
+    it('matches suffixed buckets by index even when another index has the tuple', () => {
+      const { limiter } = createLimiter()
+
+      limiter.check({ key: 'tool:pay:rule:0', maxCalls: 10, windowMs: 60_000 })
+      limiter.check({ key: 'tool:mail:rule:1', maxCalls: 3, windowMs: 10_000 })
+
+      // Index 0 keeps its tuple; index 1's tuple moved to index 2.
+      limiter.reconcile([
+        { maxCalls: 10, windowMs: 60_000, ruleIndex: 0 },
+        { maxCalls: 3, windowMs: 10_000, ruleIndex: 2 },
+      ])
+
+      expect(limiter.getKeyState('tool:pay:rule:0')?.current).toBe(1)
+      expect(limiter.getKeyState('tool:mail:rule:1')).toBeUndefined()
+    })
+
+    it('preserves an un-suffixed bucket on a tuple-anywhere match', () => {
+      const { limiter } = createLimiter()
+
+      // Keys not built by the rule composer keep the tuple-anywhere match:
+      // index-less configs form their candidate set.
+      limiter.check({ key: 'tool:legacy', maxCalls: 10, windowMs: 60_000 })
+
+      limiter.reconcile([
+        { maxCalls: 10, windowMs: 60_000 },
+        { maxCalls: 5, windowMs: 30_000, ruleIndex: 0 },
+      ])
+
+      expect(limiter.getKeyState('tool:legacy')?.current).toBe(1)
+    })
   })
 
   describe('close', () => {

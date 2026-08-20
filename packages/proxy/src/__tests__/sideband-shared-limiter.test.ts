@@ -60,12 +60,16 @@ describe('sideband ↔ MCP shared rate limiter', () => {
     })
     expect(ev.body['decision']).toBe('allow')
     service.audit({ evaluation_id: ev.body['evaluation_id'] as string, status: 'success' }, 'h')
-    expect(rateLimiter.getKeyState('tool:send')?.current).toBe(1)
+    expect(rateLimiter.getKeyState('tool:send:rule:0')?.current).toBe(1)
 
     // 2) MCP tools/call consumes slot 2 of 2 — allowed.
     const first = await forwarder.forward(toolsCall('send'))
     expect(isBlocked(first)).toBe(false)
-    expect(rateLimiter.getKeyState('tool:send')?.current).toBe(2)
+    expect(rateLimiter.getKeyState('tool:send:rule:0')?.current).toBe(2)
+
+    // Key agreement is load-bearing: both doors composed the exact string
+    // tool:send:rule:0 against the one limiter — one bucket, not two.
+    expect(rateLimiter.listKeyStates().map((state) => state.key)).toEqual(['tool:send:rule:0'])
 
     // 3) MCP tools/call now over the shared budget — blocked.
     const second = await forwarder.forward(toolsCall('send'))
@@ -112,10 +116,10 @@ describe('sideband ↔ MCP shared rate limiter', () => {
     expect(runFor('U1')).toBe('allow')
     expect(runFor('U1')).toBe('allow')
     expect(runFor('U1')).toBe('rate_limited')
-    expect(rateLimiter.getKeyState('sender:U1')?.current).toBe(2)
+    expect(rateLimiter.getKeyState('sender:U1:rule:0')?.current).toBe(2)
 
     expect(runFor('U2')).toBe('allow')
-    expect(rateLimiter.getKeyState('sender:U2')?.current).toBe(1)
+    expect(rateLimiter.getKeyState('sender:U2:rule:0')?.current).toBe(1)
 
     rateLimiter.close()
     service.close()

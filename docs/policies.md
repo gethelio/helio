@@ -366,6 +366,8 @@ Rate limits use a **sliding window** algorithm to track calls per key. Configure
 - `sender_id` — One limit per adapter-supplied `sender_id` (host-enforced path). Requires the SDK sideband (`sdk.enabled: true`) — Helio **rejects** the config otherwise, since a sender-keyed limit is meaningless without a sender. On the MCP path (which has no sender) it falls back to `tool` with a one-time warning.
 - `agent` — Currently unsupported on MCP requests; Helio logs a warning and falls back to `tool`.
 
+Scopes are per rule: each `rate_limit` rule tracks its own bucket within its scope (bucket keys carry a `:rule:<index>` suffix), so two rules sharing `key: session` never pool their counts — the same discrimination spend limits use.
+
 **Important behaviors:**
 
 - Blocked calls **do not consume** a rate limit slot. Any call that passes the limiter check consumes a slot, even if the later upstream call fails.

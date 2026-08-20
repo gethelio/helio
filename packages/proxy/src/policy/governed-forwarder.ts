@@ -42,7 +42,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
-import { spendBucketKey } from './spend-limiter.js'
+import { ruleBucketKey } from './bucket-key.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 import type { CompiledApproval } from './types.js'
@@ -98,7 +98,8 @@ export interface GovernedForwarderOptions {
 /**
  * Phase-1 outcome: what an action branch decided, minus the forward itself.
  * `commitRuleLimit` records a peeked rate/spend rule counter and runs at the
- * forward site, in the same tick as the peek.
+ * forward site. Peek and record share one event-loop tick only when no await
+ * sits between them; a budget break-glass approval wait is such an await.
  */
 interface ActionGateBase {
   approvalOutcome?: ApprovalOutcome
@@ -258,11 +259,17 @@ export class GovernedForwarder implements McpForwarder {
     }
 
     if (this.rateLimiter) {
-      const rateConfigs: Array<{ maxCalls: number; windowMs: number }> = []
+      const rateConfigs: Array<{ maxCalls: number; windowMs: number; ruleIndex: number }> = []
       for (const rule of policy.rules) {
         const limits = rule.limits
         if (limits?.maxCalls !== undefined && limits.windowMs !== undefined) {
-          rateConfigs.push({ maxCalls: limits.maxCalls, windowMs: limits.windowMs })
+          rateConfigs.push({
+            maxCalls: limits.maxCalls,
+            windowMs: limits.windowMs,
+            // Rate bucket keys are rule-discriminated (ruleBucketKey), so
+            // reconcile must match tuples at the owning rule's index.
+            ruleIndex: rule.index,
+          })
         }
       }
       this.rateLimiter.reconcile(rateConfigs)
@@ -282,7 +289,7 @@ export class GovernedForwarder implements McpForwarder {
             limit: maxSpend.limit,
             currency: maxSpend.currency,
             windowMs: maxSpend.windowMs,
-            // Spend bucket keys are rule-discriminated (spendBucketKey), so
+            // Spend bucket keys are rule-discriminated (ruleBucketKey), so
             // reconcile must match tuples at the owning rule's index.
             ruleIndex: rule.index,
           })
@@ -1261,9 +1268,10 @@ export class GovernedForwarder implements McpForwarder {
   ): ActionGateResult {
     // Caller guarantees this.rateLimiter is defined
     const limiter = this.rateLimiter as RateLimiter
-    const limits = decision.matchedRule?.limits
+    const matchedRule = decision.matchedRule
+    const limits = matchedRule?.limits
 
-    if (!limits?.maxCalls || !limits.windowMs) {
+    if (!matchedRule || !limits?.maxCalls || !limits.windowMs) {
       const result = this.makePolicyMisconfiguredResult(
         request,
         decision,
@@ -1277,7 +1285,7 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    let key: string
+    let baseKey: string
     if (limits.key === 'session') {
       const sessionKey = this.gateSessionLimitKey(request)
       if (sessionKey === null) {
@@ -1287,19 +1295,22 @@ export class GovernedForwarder implements McpForwarder {
           approvalWaitMs: 0,
         }
       }
-      key = sessionKey
+      baseKey = sessionKey
     } else {
-      key = this.buildLimitKey(limits.key, toolName)
+      baseKey = this.buildLimitKey(limits.key, toolName)
     }
+    const key = ruleBucketKey(baseKey, matchedRule.index)
     const params = { key, maxCalls: limits.maxCalls, windowMs: limits.windowMs }
     // Peek at the gate; record at the forward site (commitRuleLimit) so a call
-    // a later gate blocks never consumes the counter. Peek → record stays in
-    // one event-loop tick on this path, so no concurrent call can interleave.
+    // a later gate blocks never consumes the counter. Peek and record share
+    // one event-loop tick only when no await sits between them — a budget
+    // break-glass approval wait does, letting a concurrent call consume the
+    // peeked slot; the approved call then records truthfully over the limit.
     const rateLimitResult = limiter.peek(params)
 
     if (!rateLimitResult.allowed) {
       const feedback = buildRateLimitedFeedback(decision, rateLimitResult)
-      const message = decision.matchedRule?.feedback?.message ?? `Rate limit exceeded for ${key}`
+      const message = matchedRule.feedback?.message ?? `Rate limit exceeded for ${key}`
       return {
         proceed: false,
         result: makeErrorResult(request, POLICY_DENIED, message, { ...feedback }),
@@ -1357,7 +1368,7 @@ export class GovernedForwarder implements McpForwarder {
       baseKey = this.buildLimitKey(maxSpend.key, toolName)
     }
     // Extract the monetary amount from tool arguments
-    const key = spendBucketKey(baseKey, decision.matchedRule.index)
+    const key = ruleBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, toolArguments ?? {})
     if (typeof rawAmount !== 'number') {
       // eslint-disable-next-line no-console -- Intentional operational warning
@@ -1463,17 +1474,17 @@ export class GovernedForwarder implements McpForwarder {
             decision.matchedRule.limits.windowMs
           ) {
             const limits = decision.matchedRule.limits
-            const key =
+            const baseKey =
               limits.key === 'session'
                 ? this.gateSessionLimitKey(request)
                 : this.buildLimitKey(limits.key, toolName)
-            if (key === null) {
+            if (baseKey === null) {
               wouldForward = false
               limitsOk = false
               sessionUnresolved = true
             } else {
               const peekResult = this.rateLimiter.peek({
-                key,
+                key: ruleBucketKey(baseKey, decision.matchedRule.index),
                 maxCalls: decision.matchedRule.limits.maxCalls,
                 windowMs: decision.matchedRule.limits.windowMs,
               })
@@ -1511,7 +1522,7 @@ export class GovernedForwarder implements McpForwarder {
                 sessionUnresolved = true
               } else {
                 const peekResult = this.spendLimiter.peek({
-                  key: spendBucketKey(baseKey, decision.matchedRule.index),
+                  key: ruleBucketKey(baseKey, decision.matchedRule.index),
                   amount: rawAmount,
                   limit: maxSpend.limit,
                   windowMs: maxSpend.windowMs,
