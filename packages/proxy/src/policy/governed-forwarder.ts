@@ -42,7 +42,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
-import { spendBucketKey } from './spend-limiter.js'
+import { ruleBucketKey } from './bucket-key.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 import type { CompiledApproval } from './types.js'
@@ -282,7 +282,7 @@ export class GovernedForwarder implements McpForwarder {
             limit: maxSpend.limit,
             currency: maxSpend.currency,
             windowMs: maxSpend.windowMs,
-            // Spend bucket keys are rule-discriminated (spendBucketKey), so
+            // Spend bucket keys are rule-discriminated (ruleBucketKey), so
             // reconcile must match tuples at the owning rule's index.
             ruleIndex: rule.index,
           })
@@ -1357,7 +1357,7 @@ export class GovernedForwarder implements McpForwarder {
       baseKey = this.buildLimitKey(maxSpend.key, toolName)
     }
     // Extract the monetary amount from tool arguments
-    const key = spendBucketKey(baseKey, decision.matchedRule.index)
+    const key = ruleBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, toolArguments ?? {})
     if (typeof rawAmount !== 'number') {
       // eslint-disable-next-line no-console -- Intentional operational warning
@@ -1511,7 +1511,7 @@ export class GovernedForwarder implements McpForwarder {
                 sessionUnresolved = true
               } else {
                 const peekResult = this.spendLimiter.peek({
-                  key: spendBucketKey(baseKey, decision.matchedRule.index),
+                  key: ruleBucketKey(baseKey, decision.matchedRule.index),
                   amount: rawAmount,
                   limit: maxSpend.limit,
                   windowMs: maxSpend.windowMs,

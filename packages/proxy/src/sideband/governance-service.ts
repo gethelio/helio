@@ -38,7 +38,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
-import { spendBucketKey } from '../policy/spend-limiter.js'
+import { ruleBucketKey } from '../policy/bucket-key.js'
 import type { BudgetEngine, BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
 import {
   gateSession,
@@ -1649,7 +1649,7 @@ export class GovernanceService {
     } else {
       baseKey = buildLimitKey(maxSpend.key, toolName, senderId)
     }
-    const key = spendBucketKey(baseKey, decision.matchedRule.index)
+    const key = ruleBucketKey(baseKey, decision.matchedRule.index)
     const rawAmount = resolvePath(maxSpend.field, args ?? {})
     if (typeof rawAmount !== 'number' || !Number.isFinite(rawAmount) || rawAmount < 0) {
       // Invalid amount — terminal block (mirrors the MCP invalid-amount deny).

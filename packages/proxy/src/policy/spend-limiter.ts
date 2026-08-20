@@ -10,6 +10,8 @@
 // close() for graceful teardown.
 // ---------------------------------------------------------------------------
 
+import { parseRuleIndex } from './bucket-key.js'
+
 /** Options for constructing a SpendLimiter. */
 export interface SpendLimiterOptions {
   /** Clock function for testable time. Defaults to `Date.now`. */
@@ -69,23 +71,6 @@ export interface SpendLimitKeyState {
   readonly window_ms: number
   readonly reset_at_ms: number
 }
-
-/**
- * Compose a spend bucket key discriminated by the matched rule's index.
- *
- * Two spend_limit rules sharing a scope (e.g. two session-keyed rules) must
- * not share a bucket — the shared key had last-write-wins config and no
- * currency guard. The suffix — not a prefix — keeps the sideband's
- * `sender:`-prefixed cardinality accounting working. Both doors MUST build
- * spend keys through this function: they feed the same limiter instance, so
- * key-format agreement is load-bearing (issue #14 groundwork).
- */
-export function spendBucketKey(baseKey: string, ruleIndex: number): string {
-  return `${baseKey}:rule:${String(ruleIndex)}`
-}
-
-/** Parse the rule index out of a key built by {@link spendBucketKey}. */
-const RULE_SUFFIX_RE = /:rule:(\d+)$/
 
 /** A single spend entry: timestamp + amount. */
 interface SpendEntry {
@@ -422,8 +407,8 @@ export class SpendLimiter {
    * whose config is gone (rule changed or removed) are evicted so the next
    * check lazy-creates a fresh bucket under the new config.
    *
-   * Keys built by {@link spendBucketKey} carry the owning rule's index, and
-   * for those the tuple must match at THAT index (`config.ruleIndex`): a
+   * Keys built by `ruleBucketKey` (bucket-key.ts) carry the owning rule's
+   * index, and for those the tuple must match at THAT index (`config.ruleIndex`): a
    * reorder that shifts a spend rule's index evicts its old-index bucket
    * instead of leaving an orphan no rule reads again — or worse, letting
    * whatever rule now sits at that index adopt another rule's accrued spend.
@@ -456,8 +441,8 @@ export class SpendLimiter {
 
     for (const [key, bucket] of this.buckets) {
       const tuple = `${String(bucket.limit)}|${bucket.currency}|${String(bucket.windowMs)}`
-      const suffix = RULE_SUFFIX_RE.exec(key)
-      const survives = suffix ? byIndex.get(Number(suffix[1])) === tuple : valid.has(tuple)
+      const ruleIndex = parseRuleIndex(key)
+      const survives = ruleIndex === undefined ? valid.has(tuple) : byIndex.get(ruleIndex) === tuple
       if (!survives) {
         this.buckets.delete(key)
       }
