@@ -1,0 +1,78 @@
+# Rate Limits configuration
+#
+# Bound repeated calls with sliding-window tracking. See README.md for
+# runnable examples and notes about each key scope.
+
+version: '1'
+
+upstream:
+  url: 'http://localhost:8080/mcp'
+  transport: streamable-http
+
+listen:
+  port: 3000
+  host: '127.0.0.1'
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
+  allow_open_mode: true
+
+policies:
+  default: allow
+  rules:
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive operations are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request manual action.'
+
+    # Per-tool limit: all get_weather calls share one bucket, across sessions.
+    - name: limit-weather-lookups
+      match:
+        tool: 'get_weather'
+      action: rate_limit
+      limits:
+        max_calls: 3
+        window: 1m
+        key: tool
+      feedback:
+        message: 'Weather lookup rate limit exceeded.'
+        suggestion: 'Wait for the current window to reset before retrying.'
+
+    # Agent-scoped shape: accepted by the config parser today. MCP requests do
+    # not currently carry agent identity, so Helio warns and falls back to the
+    # tool bucket at runtime. Use key: session for isolation available today.
+    - name: limit-email-by-agent
+      match:
+        tool: 'send_email'
+      action: rate_limit
+      limits:
+        max_calls: 2
+        window: 5m
+        key: agent
+      feedback:
+        message: 'Email send rate limit exceeded.'
+        suggestion: 'Wait for the current window to reset before retrying.'
+
+    - name: allow-reads
+      match:
+        annotations:
+          readOnlyHint: true
+      action: allow
+
+approval:
+  timeout: 300s
+  default_on_timeout: deny
+  channels:
+    - type: dashboard
+
+audit:
+  storage: sqlite
+  path: ./helio-audit.db
+  retention: 90d
+  include_responses: true
