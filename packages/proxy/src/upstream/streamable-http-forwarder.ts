@@ -327,6 +327,14 @@ export class StreamableHttpForwarder implements McpForwarder {
       request.headers ?? {},
       this.staticHeaders,
     )
+    // The truthful value must be authoritative: send() serializes the body
+    // itself, so the wire content-type always describes those bytes — a
+    // caller-forwarded or constructor-static value must not override the
+    // base the merge seeded (issue #287). A caller-supplied content-length
+    // never transmits (undici stalls the request instead of sending a lied
+    // length); dropping it lets undici compute the truthful length.
+    headers['content-type'] = 'application/json'
+    delete headers['content-length']
     // Omission must be authoritative here too: the wire session id comes
     // only from the transport relay or the managed session (issue #218),
     // never from a caller-forwarded or constructor-static value that
