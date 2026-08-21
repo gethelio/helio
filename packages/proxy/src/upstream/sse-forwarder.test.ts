@@ -277,6 +277,103 @@ describe('SseUpstreamForwarder', () => {
     expect(mock.receivedHeaders[0]?.['mcp-session-id']).toBe('wire-real')
   })
 
+  it('re-stamps application/json over a caller-supplied content-type on the request POST', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'content-type': 'text/evil' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['content-type']).toBe('application/json')
+  })
+
+  it('re-stamps application/json over a caller-supplied content-type on the notification POST', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      method: 'notifications/ping',
+      headers: { 'content-type': 'text/evil' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['content-type']).toBe('application/json')
+  })
+
+  it('re-stamps application/json over a constructor static-header content-type', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { 'content-type': 'text/plain' },
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+    })
+
+    expect(mock.receivedHeaders[0]?.['content-type']).toBe('application/json')
+  })
+
+  it('re-stamps application/json whatever the caller content-type key casing', async () => {
+    // Mirrors the mixed-case pin above: the re-stamp runs after the merge
+    // lower-cases names, so a cased key cannot dodge it.
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'Content-Type': 'text/evil' },
+    })
+
+    expect(mock.receivedHeaders[0]?.['content-type']).toBe('application/json')
+  })
+
+  it('drops a caller-supplied content-length so the wire carries the computed truthful length', async () => {
+    mock = createMockSseServer()
+    // The 1500ms pin is load-bearing: pre-fix, undici honors the caller's
+    // content-length promise and the POST never transmits, so the run must
+    // die as this forwarder's own named timeout rejection — not Vitest's
+    // generic 5s test timeout. Real time on purpose: AbortSignal.timeout
+    // ignores fake timers.
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      requestTimeoutMs: 1500,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { 'content-length': '5' },
+    })
+
+    // The stub keeps parsed JSON only; stringify of the parsed body is
+    // byte-identical to the wire body for this envelope, so the truthful
+    // computed length is recoverable from it.
+    expect(mock.receivedHeaders[0]?.['content-length']).toBe(
+      String(Buffer.byteLength(JSON.stringify(mock.receivedBodies[0]))),
+    )
+  })
+
   it('passes legitimate caller and static headers through untouched', async () => {
     mock = createMockSseServer()
     forwarder = new SseUpstreamForwarder({

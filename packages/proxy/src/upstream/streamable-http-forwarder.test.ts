@@ -241,6 +241,102 @@ describe('StreamableHttpForwarder', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Issue #287: send() serializes the JSON-RPC body itself, so the wire
+  // content-type must always describe those bytes — a caller-forwarded or
+  // constructor-static value must never override the truthful base. A
+  // caller-supplied content-length is dropped alongside: the key never
+  // transmits (undici stalls the request until the timeout instead), so
+  // deleting it lets undici compute the truthful length. The SSE suite
+  // characterizes that wire behavior live; these mocks see the merged map.
+  // -------------------------------------------------------------------------
+
+  describe('send-leg caller-supplied content-type and content-length (issue #287)', () => {
+    it('re-stamps application/json over a caller-supplied content-type on a legacy relay', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { 'content-type': 'text/evil' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-type']).toBe('application/json')
+    })
+
+    it('re-stamps application/json whatever the caller key casing', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { 'Content-Type': 'text/evil' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-type']).toBe('application/json')
+    })
+
+    it('re-stamps application/json on a modern relay without disturbing the protocol stamp', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = new StreamableHttpForwarder({
+        url: 'http://up/mcp',
+        protocolVersion: '2026-07-28',
+      })
+
+      await fwd.forward(req({ headers: { 'content-type': 'text/evil' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-type']).toBe('application/json')
+      expect(relay?.headers['mcp-protocol-version']).toBe('2026-07-28')
+    })
+
+    it('re-stamps application/json on an internal send', async () => {
+      // Same sessionless legacy fixture as the #288 internal test above: the
+      // establish needs a 2xx on notifications/initialized or it throws
+      // before send() ever runs.
+      const calls = stubRelayUpstream({
+        'server/discover': () =>
+          jsonEnvelope({
+            jsonrpc: '2.0',
+            id: 'helio-era-probe',
+            error: { code: -32601, message: 'Method not found' },
+          }),
+        initialize: () =>
+          jsonEnvelope({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+        'notifications/initialized': () => new Response(null, { status: 202 }),
+        'tools/list': okResult(),
+      })
+      const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+      await fwd.forwardInternal(req({ headers: { 'content-type': 'text/evil' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-type']).toBe('application/json')
+    })
+
+    it('re-stamps application/json over a constructor static-header content-type on the send', async () => {
+      // Asserts the send leg only — the manager legs' static values are
+      // issue #302's business.
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = new StreamableHttpForwarder({
+        url: 'http://up/mcp',
+        protocolVersion: '2025-06-18',
+        headers: { 'content-type': 'text/plain' },
+      })
+
+      await fwd.forward(req())
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-type']).toBe('application/json')
+    })
+
+    it('drops a caller-supplied content-length from the send', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { 'content-length': '5' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['content-length']).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Regression 2: passthrough 404 surfaces as raw response (no throw)
   // -------------------------------------------------------------------------
 
