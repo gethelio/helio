@@ -30,6 +30,16 @@ Maintainer notes:
   managed session (internal traffic). No network path could plant the
   header; the gap was reachable only through direct library use of the
   forwarder.
+- Both HTTP upstream forwarders now keep the `Content-Type` on their
+  sends truthful: the Streamable HTTP forwarder on its request sends
+  and the SSE forwarder on the message POSTs re-stamp
+  `application/json` after the header merge, so a caller-supplied or
+  constructor-static value can no longer mislabel the JSON body Helio
+  itself serialized. A caller-supplied `Content-Length` is dropped on
+  the same sends so the computed wire length is truthful (previously
+  such a request never transmitted and stalled until the request
+  timeout). No network path could plant either header; the gap was
+  reachable only through direct library use of the forwarders.
 - Two `rate_limit` rules sharing a key scope (for example, two
   session-keyed rules) no longer pool their calls into one bucket with
   last-write-wins config: rate bucket keys now carry a `:rule:<index>`

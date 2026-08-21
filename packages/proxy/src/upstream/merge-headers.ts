@@ -11,7 +11,10 @@
  * like any other key. Stripping them is each caller's own business: the
  * Streamable HTTP send() and the SSE message POSTs delete
  * `mcp-session-id` after the merge, then stamp their own value only
- * when a session id exists.
+ * when a session id exists. The same two send paths also re-stamp
+ * `content-type: application/json` over whatever survived the fold and
+ * drop a merged `content-length`, so the wire always describes the body
+ * they themselves serialize.
  */
 export function mergeUpstreamHeaders(
   base: Record<string, string>,

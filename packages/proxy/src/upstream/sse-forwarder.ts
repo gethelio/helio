@@ -132,6 +132,16 @@ export class SseUpstreamForwarder implements McpForwarder {
       this.staticHeaders,
     )
 
+    // The truthful value must be authoritative: both message POSTs below
+    // serialize the body themselves, so the wire content-type always
+    // describes those bytes — a caller-forwarded or constructor-static
+    // value must not override the base the merge seeded (issue #287). This
+    // is a re-stamp, not a strip. A caller-supplied content-length never
+    // transmits (undici stalls the request instead of sending a lied
+    // length); dropping it lets undici compute the truthful length.
+    headers['content-type'] = 'application/json'
+    delete headers['content-length']
+
     // Omission must be authoritative: the message POST never carries
     // mcp-method or mcp-name (they postdate this deprecated transport), and
     // the wire session id may only come from transportSessionId below — a

@@ -402,7 +402,8 @@ describe('SseUpstreamForwarder', () => {
     })
     await forwarder.connect()
 
-    // Pins that the strip covers only mcp-method/mcp-name/mcp-session-id:
+    // Pins that the strip covers only mcp-method/mcp-name/mcp-session-id
+    // (content-type is a re-stamp and content-length a drop, not strips):
     // mcp-protocol-version is a passthrough of a caller value, NOT Helio
     // stamping — stripping it here would make this deprecated leg stricter
     // than the streamable legacy leg, which documentedly preserves a
