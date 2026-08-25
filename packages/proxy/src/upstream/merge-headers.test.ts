@@ -8,12 +8,8 @@ describe('mergeUpstreamHeaders', () => {
   })
 
   it('forwarded headers override base defaults', () => {
-    const merged = mergeUpstreamHeaders(
-      { accept: 'application/json' },
-      { accept: 'text/plain' },
-      {},
-    )
-    expect(merged['accept']).toBe('text/plain')
+    const merged = mergeUpstreamHeaders({ 'x-trace': 'base' }, { 'x-trace': 'caller' }, {})
+    expect(merged['x-trace']).toBe('caller')
   })
 
   it('static headers win over caller-forwarded headers (case-insensitive)', () => {

@@ -5,7 +5,7 @@ import {
 } from '../mcp/protocol-version.js'
 import { parseUpstreamResponse } from './response.js'
 import { readSseJsonRpcResponse } from './sse-parse.js'
-import { mergeUpstreamHeaders } from './merge-headers.js'
+import { mergeUpstreamHeaders, UPSTREAM_POST_ACCEPT } from './merge-headers.js'
 import {
   buildStandardRequestHeaders,
   encodedNameValue,
@@ -322,7 +322,7 @@ export class StreamableHttpForwarder implements McpForwarder {
     const headers = mergeUpstreamHeaders(
       {
         'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
+        accept: UPSTREAM_POST_ACCEPT,
       },
       request.headers ?? {},
       this.staticHeaders,
@@ -335,6 +335,11 @@ export class StreamableHttpForwarder implements McpForwarder {
     // length); dropping it lets undici compute the truthful length.
     headers['content-type'] = 'application/json'
     delete headers['content-length']
+    // The accept is authoritative the same way: it advertises the two
+    // response framings send() itself parses, and a caller-forwarded or
+    // constructor-static value could only misadvertise that, never extend
+    // it (issue #304).
+    headers['accept'] = UPSTREAM_POST_ACCEPT
     // Omission must be authoritative here too: the wire session id comes
     // only from the transport relay or the managed session (issue #218),
     // never from a caller-forwarded or constructor-static value that
