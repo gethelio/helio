@@ -19,6 +19,20 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **BREAKING: `upstream.headers` may no longer set `Accept` (#304).**
+  The value joins the reserved transport headers Helio owns on the
+  wire: on the HTTP upstream legs it advertises Helio's own response
+  parsing, so an operator-set value could only misadvertise it, never
+  extend it. Such an override can break the SSE connect outright
+  (HTTP 406 from a config that validated cleanly) and can make the
+  era probe's reply unparseable or non-classifiable, driving a
+  wrong-era legacy handshake attempt against a modern upstream. A
+  config that sets it now fails validation at startup with the
+  existing reserved-header message; the migration is deleting the
+  line.
+
 ### Fixed
 
 - The Streamable HTTP forwarder no longer forwards a caller-supplied
@@ -51,6 +65,17 @@ Maintainer notes:
   exercises several sender-keyed rate rules now occupies one slot in
   the 50,000-key sender registry per exercised rule bucket rather than
   one slot total.
+- A caller-supplied or constructor-static `Accept` no longer reaches
+  the wire on any HTTP upstream leg. The Streamable HTTP request
+  sends, the era probe, and the legacy
+  `initialize`/`notifications/initialized` POSTs re-stamp
+  `application/json, text/event-stream` (the two response framings
+  Helio parses), the SSE connect GET re-stamps `text/event-stream`,
+  and the SSE message POSTs drop the supplied value — Helio asserts
+  no `Accept` there, and the runtime's own default (`*/*`) remains on
+  the wire. This covers the constructor and caller vectors reachable
+  through direct library use; yaml config is rejected at validation
+  per the breaking entry above.
 
 ## [0.12.0] - 2026-08-17
 
