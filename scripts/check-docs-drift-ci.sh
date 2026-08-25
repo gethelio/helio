@@ -28,12 +28,14 @@ SOURCE_DRIFT_PATTERNS=(
   '^docker/Dockerfile$'
 )
 
+# Member-identical with check-docs-drift.sh's DOC_PATTERNS; no shared source.
 DOC_PATTERNS=(
   '^README\.md$'
   '^CONTRIBUTING\.md$'
   '^SECURITY\.md$'
   '^CODE_OF_CONDUCT\.md$'
   '^DEPENDENCIES\.md$'
+  '^CHANGELOG\.md$'
   '^docs/.*\.md$'
   '^packages/proxy/README\.md$'
   '^packages/dashboard/README\.md$'
