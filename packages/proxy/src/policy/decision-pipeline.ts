@@ -59,6 +59,12 @@ export interface DecideInput {
    * `agent_id` match key — it shadows any literal `metadata.agent_id`.
    */
   readonly agentId?: string | undefined
+  /**
+   * The governed door's configured upstream name (issue #295). A string only
+   * on the MCP path when a name is configured; undefined on the sideband and
+   * in singular mode (upstream-scoped rules inert there).
+   */
+  readonly upstream?: string | undefined
 }
 
 /** The decision plus all the metadata the execution/audit steps consume. */
@@ -109,6 +115,7 @@ export function decide(input: DecideInput): PipelineDecision {
     toolArguments,
     environment,
     metadata,
+    upstream: input.upstream,
   })
 
   // In log mode a drifted tool is evaluated against BOTH the baseline
@@ -122,6 +129,7 @@ export function decide(input: DecideInput): PipelineDecision {
       toolArguments,
       environment,
       metadata,
+      upstream: input.upstream,
     })
     decision = stricterDecision(decision, currentDecision)
   }

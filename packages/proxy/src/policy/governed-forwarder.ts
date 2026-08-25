@@ -93,6 +93,13 @@ export interface GovernedForwarderOptions {
    * default chain (deny mode) for direct/library construction.
    */
   session?: CompiledSessionIdentity
+  /**
+   * The operator-chosen upstream entry name (issue #295, multi-upstream
+   * substrate). Unset in singular mode — every governance surface then
+   * behaves exactly as today. Nothing in the proxy passes it yet; the
+   * multi-upstream composition loop (issue #294) is what will.
+   */
+  upstreamName?: string
 }
 
 /**
@@ -217,6 +224,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly rateLimiter: RateLimiter | undefined
   private readonly spendLimiter: SpendLimiter | undefined
   private readonly budgetEngine: BudgetEngine | undefined
+  private readonly upstreamName: string | undefined
   private readonly annotationCache = new ToolAnnotationCache()
   private agentKeyWarned = false
   private senderKeyWarned = false
@@ -231,6 +239,7 @@ export class GovernedForwarder implements McpForwarder {
     this.rateLimiter = options?.rateLimiter
     this.spendLimiter = options?.spendLimiter
     this.budgetEngine = options?.budgetEngine
+    this.upstreamName = options?.upstreamName
     this.session = options?.session ?? DEFAULT_SESSION_IDENTITY
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
@@ -538,6 +547,7 @@ export class GovernedForwarder implements McpForwarder {
       baselineAnnotations: this.annotationCache.get(toolName),
       currentAnnotations: this.annotationCache.getCurrent(toolName),
       driftEvent: this.annotationCache.getDrift(toolName),
+      upstream: this.upstreamName,
     })
 
     // Pre-generated so budget ledger rows can reference the audit record
