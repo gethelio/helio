@@ -76,6 +76,12 @@ export interface SseRouteOptions {
    * is a hardcoded invariant (see MAX_CONCURRENT_SESSIONS).
    */
   readonly maxConcurrentSessions?: number
+  /**
+   * The route path label operator log lines name (issue #295). Defaults to
+   * `/sse`; a multi-upstream mount passes its own path (e.g. `/sse/<name>`)
+   * so the cap-refusal line names the door that refused.
+   */
+  readonly routeLabel?: string
 }
 
 const ssePostQuerySchema = z.object({
@@ -99,6 +105,7 @@ export function createSseRoute(forwarder: McpForwarder, options: SseRouteOptions
   const forwardHeaderAllowlist = options.forwardHeadersAllowlist ?? []
   const sessionIdentity = options.session ?? DEFAULT_SESSION_IDENTITY
   const maxConcurrentSessions = options.maxConcurrentSessions ?? MAX_CONCURRENT_SESSIONS
+  const routeLabel = options.routeLabel ?? '/sse'
 
   // Time-based cap-refusal throttle: the first refusal logs immediately,
   // then at most one summary per window carrying the cumulative count.
@@ -112,7 +119,7 @@ export function createSseRoute(forwarder: McpForwarder, options: SseRouteOptions
     lastRefusalLogAt = now
     // eslint-disable-next-line no-console -- operational error logging
     console.error(
-      `[helio] /sse at session cap (${String(maxConcurrentSessions)}); refusing new streams (${String(refusalCount)} refusals so far).`,
+      `[helio] ${routeLabel} at session cap (${String(maxConcurrentSessions)}); refusing new streams (${String(refusalCount)} refusals so far).`,
     )
   }
 

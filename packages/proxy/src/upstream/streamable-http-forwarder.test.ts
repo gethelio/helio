@@ -1757,3 +1757,45 @@ describe('StreamableHttpForwarder legacy-leg parity (issue #219)', () => {
     },
   )
 })
+
+// ---------------------------------------------------------------------------
+// Upstream name threading into the session manager (issue #295)
+// ---------------------------------------------------------------------------
+
+describe('StreamableHttpForwarder upstream name threading (issue #295)', () => {
+  it('threads upstreamName into the session manager era lines', async () => {
+    const logged: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map((arg) => String(arg)).join(' '))
+    })
+    globalThis.fetch = (_u: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const raw = typeof init?.body === 'string' ? init.body : '{}'
+      const body = JSON.parse(raw) as { method: string }
+      if (body.method === 'server/discover') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'helio-era-probe',
+              result: { supportedVersions: ['2026-07-28'] },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    }
+
+    const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp', upstreamName: 'payments' })
+    await fwd.forwardInternal(req())
+
+    expect(logged).toContain(
+      '[helio][payments] Upstream MCP era detected: modern (2026-07-28, via server/discover)',
+    )
+  })
+})

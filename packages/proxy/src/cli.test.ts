@@ -1000,7 +1000,7 @@ audit:
           timeoutMs: 8_000,
         })
         expect(stderr).toContain(
-          'Annotation cache primed: 2 tool definitions baselined for drift detection',
+          '[helio] Annotation cache primed: 2 tool definitions baselined for drift detection',
         )
         expect(upstream.calls.some((call) => call.method === 'tools/list')).toBe(true)
       } finally {

@@ -1326,3 +1326,88 @@ describe('UpstreamSessionManager relay era resolution (issue #219)', () => {
     expect(mgr.getDiscoverCapture()).toEqual({ capabilities: {}, instructions: 'be gentle' })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Era line upstream tagging (issue #295)
+// ---------------------------------------------------------------------------
+
+describe('UpstreamSessionManager era line upstream tagging (issue #295)', () => {
+  it('tags the legacy era-detected line with the upstream name', async () => {
+    stubLegacyUpstream('U-tag')
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      upstreamName: 'payments',
+    })
+
+    await mgr.ensureInternalSession()
+
+    expect(loggedLines).toContain(
+      '[helio][payments] Upstream MCP era detected: legacy (initialize handshake)',
+    )
+  })
+
+  it('tags the modern era-detected line with the upstream name', async () => {
+    stubUpstream({
+      'server/discover': () =>
+        jsonRpcResult({ supportedVersions: ['2026-07-28'], capabilities: {} }),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      upstreamName: 'payments',
+    })
+
+    await mgr.ensureInternalSession()
+
+    expect(loggedLines).toContain(
+      '[helio][payments] Upstream MCP era detected: modern (2026-07-28, via server/discover)',
+    )
+  })
+
+  it('tags the era-cleared line with the upstream name', async () => {
+    stubUpstream({ 'server/discover': () => new Response(null, { status: 202 }) })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: {},
+      upstreamName: 'payments',
+    })
+
+    await mgr.resolveRelayEra()
+    mgr.clearFalsifiedLegacyEra('relayed initialize was answered with HTTP 404')
+
+    expect(loggedLines).toContain(
+      '[helio][payments] Upstream MCP era cleared: relayed initialize was answered with HTTP 404; relays presume legacy and re-probing is throttled for 30s',
+    )
+  })
+
+  it('emits byte-exact untagged era-detected lines when no name is set', async () => {
+    stubUpstream({
+      'server/discover': () =>
+        jsonRpcResult({ supportedVersions: ['2026-07-28'], capabilities: {} }),
+    })
+    const modern = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    await modern.ensureInternalSession()
+
+    stubLegacyUpstream('U-dark')
+    const legacy = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+    await legacy.ensureInternalSession()
+
+    expect(loggedLines.filter((line) => line.includes('era detected'))).toEqual([
+      '[helio] Upstream MCP era detected: modern (2026-07-28, via server/discover)',
+      '[helio] Upstream MCP era detected: legacy (initialize handshake)',
+    ])
+  })
+
+  it('emits the byte-exact untagged era-cleared line when no name is set', async () => {
+    stubUpstream({ 'server/discover': () => new Response(null, { status: 202 }) })
+    const mgr = new UpstreamSessionManager({ url: 'http://up/mcp', staticHeaders: {} })
+
+    await mgr.resolveRelayEra()
+    mgr.clearFalsifiedLegacyEra('relayed initialize was answered with HTTP 404')
+
+    expect(eraClearedLines()).toEqual([
+      '[helio] Upstream MCP era cleared: relayed initialize was answered with HTTP 404; relays presume legacy and re-probing is throttled for 30s',
+    ])
+  })
+})

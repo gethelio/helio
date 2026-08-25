@@ -4,6 +4,7 @@ import {
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
 } from '../mcp/protocol-version.js'
 import { mergeUpstreamHeaders, UPSTREAM_POST_ACCEPT } from './merge-headers.js'
+import { helioLogTag } from '../util/log-label.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
 /**
@@ -71,6 +72,12 @@ export interface UpstreamSessionManagerOptions {
   staticHeaders: Record<string, string>
   requestTimeoutMs?: number
   protocolVersion?: UpstreamProtocolVersionPin
+  /**
+   * The operator-chosen upstream entry name (issue #295): tags the era
+   * lifecycle lines `[helio][<name>]`. Unset in singular mode — the lines
+   * keep their plain `[helio]` tag.
+   */
+  upstreamName?: string
 }
 
 /** Standard modern `_meta` for Helio-internal requests. */
@@ -138,12 +145,14 @@ export class UpstreamSessionManager {
   private inflight: Promise<UpstreamSession> | undefined
   private inflightProbe: Promise<EraProbeOutcome> | undefined
   private probeBackoffUntil = 0
+  private readonly logTag: string
 
   constructor(options: UpstreamSessionManagerOptions) {
     this.url = options.url
     this.staticHeaders = options.staticHeaders
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
     this.pin = options.protocolVersion ?? 'auto'
+    this.logTag = helioLogTag(options.upstreamName)
   }
 
   /** Return the internal session, establishing it once if needed. */
@@ -306,7 +315,7 @@ export class UpstreamSessionManager {
     this.probeBackoffUntil = Date.now() + ERA_PROBE_BACKOFF_MS
     // eslint-disable-next-line no-console -- operator-visible era lifecycle detail
     console.error(
-      `[helio] Upstream MCP era cleared: ${door}; ` +
+      `${this.logTag} Upstream MCP era cleared: ${door}; ` +
         `relays presume legacy and re-probing is throttled for ` +
         `${String(ERA_PROBE_BACKOFF_MS / 1000)}s`,
     )
@@ -375,8 +384,8 @@ export class UpstreamSessionManager {
     // eslint-disable-next-line no-console -- operator-visible startup detail
     console.error(
       era === 'modern'
-        ? `[helio] Upstream MCP era detected: modern (${HELIO_MCP_MODERN_PROTOCOL_VERSION}, via server/discover)`
-        : '[helio] Upstream MCP era detected: legacy (initialize handshake)',
+        ? `${this.logTag} Upstream MCP era detected: modern (${HELIO_MCP_MODERN_PROTOCOL_VERSION}, via server/discover)`
+        : `${this.logTag} Upstream MCP era detected: legacy (initialize handshake)`,
     )
   }
 

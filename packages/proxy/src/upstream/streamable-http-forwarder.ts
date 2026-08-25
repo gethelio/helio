@@ -46,6 +46,11 @@ export interface StreamableHttpForwarderOptions {
   requestTimeoutMs?: number
   /** `upstream.protocol_version`: `auto` (default) probes; a dated pin skips it. */
   protocolVersion?: UpstreamProtocolVersionPin
+  /**
+   * The operator-chosen upstream entry name (issue #295), threaded to the
+   * session manager's era lifecycle lines. Unset in singular mode.
+   */
+  upstreamName?: string
 }
 
 /**
@@ -71,6 +76,7 @@ export class StreamableHttpForwarder implements McpForwarder {
       staticHeaders: this.staticHeaders,
       requestTimeoutMs: this.requestTimeoutMs,
       protocolVersion: options.protocolVersion,
+      upstreamName: options.upstreamName,
     })
   }
 

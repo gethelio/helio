@@ -1,6 +1,7 @@
 /* eslint-disable no-console -- prime loop reports through the CLI's stderr */
 import type { AnnotationCachePrimeResult, GovernedForwarder } from './governed-forwarder.js'
 import type { CompiledToolRevalidation } from './types.js'
+import { helioLogTag } from '../util/log-label.js'
 
 /** Upper bound to wait for startup cache priming before serving requests. */
 const ANNOTATION_PRIME_INITIAL_WAIT_MS = 1_500
@@ -44,7 +45,9 @@ function computePrimeRetryDelayMs(attempt: number): number {
 export async function startAnnotationPrimeLoop(
   forwarder: Pick<GovernedForwarder, 'primeAnnotationCache'>,
   revalidation: CompiledToolRevalidation | undefined,
+  upstreamName?: string,
 ): Promise<AnnotationPrimeController> {
+  const tag = helioLogTag(upstreamName)
   let stopped = false
   let primed = false
   let retryAttempt = 0
@@ -81,7 +84,7 @@ export async function startAnnotationPrimeLoop(
         if (epoch !== revalidateEpoch) return // reconfigured or stopped mid-flight
         if (!result.success) {
           console.error(
-            `[helio] Tool revalidation failed: ${result.reason ?? 'unknown reason'} — keeping the last baselines; next attempt in ${String(rv.intervalMs)}ms`,
+            `${tag} Tool revalidation failed: ${result.reason ?? 'unknown reason'} — keeping the last baselines; next attempt in ${String(rv.intervalMs)}ms`,
           )
         }
         scheduleRevalidation()
@@ -109,7 +112,7 @@ export async function startAnnotationPrimeLoop(
     retryAttempt += 1
     const delayMs = computePrimeRetryDelayMs(retryAttempt)
     console.error(
-      `[helio] Annotation cache prime retry ${String(retryAttempt)} scheduled in ${String(delayMs)}ms`,
+      `${tag} Annotation cache prime retry ${String(retryAttempt)} scheduled in ${String(delayMs)}ms`,
     )
     retryTimer = setTimeout(() => {
       retryTimer = undefined
@@ -126,8 +129,8 @@ export async function startAnnotationPrimeLoop(
       clearRetryTimer()
       const prefix =
         phase === 'initial'
-          ? '[helio] Annotation cache primed'
-          : `[helio] Annotation cache primed after retry ${String(retryAttempt)}`
+          ? `${tag} Annotation cache primed`
+          : `${tag} Annotation cache primed after retry ${String(retryAttempt)}`
       console.error(
         `${prefix}: ${String(result.toolsCached)} tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)`,
       )
@@ -138,11 +141,11 @@ export async function startAnnotationPrimeLoop(
     const reason = result.reason ?? 'unknown reason'
     if (phase === 'initial') {
       console.error(
-        `[helio] Annotation cache priming failed: ${reason} — undocumented tools will be denied (fail-closed) until priming succeeds`,
+        `${tag} Annotation cache priming failed: ${reason} — undocumented tools will be denied (fail-closed) until priming succeeds`,
       )
     } else {
       console.error(
-        `[helio] Annotation cache prime retry ${String(retryAttempt)} failed: ${reason} — still fail-closed`,
+        `${tag} Annotation cache prime retry ${String(retryAttempt)} failed: ${reason} — still fail-closed`,
       )
     }
     scheduleRetry()
@@ -165,7 +168,7 @@ export async function startAnnotationPrimeLoop(
 
   if (initialOutcome === 'timeout') {
     console.error(
-      `[helio] Annotation cache priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms; continuing startup fail-closed and retrying in background`,
+      `${tag} Annotation cache priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms; continuing startup fail-closed and retrying in background`,
     )
     scheduleRetry()
   }

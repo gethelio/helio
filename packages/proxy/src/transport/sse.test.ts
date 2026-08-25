@@ -770,6 +770,40 @@ describe('SSE transport — concurrent session cap (issue #232)', () => {
     errorSpy.mockRestore()
   })
 
+  it('interpolates the configured routeLabel into the cap-refusal line (issue #295)', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // Self-contained history: vi.spyOn returns the shared spy instance, and a
+    // prior failing test never reaches its mockRestore.
+    errorSpy.mockClear()
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 0, routeLabel: '/sse/payments' })
+
+    const refused = await app.request('/sse')
+    expect(refused.status).toBe(503)
+    expect(capLogLines(errorSpy)).toEqual([
+      '[helio] /sse/payments at session cap (0); refusing new streams (1 refusals so far).',
+    ])
+    errorSpy.mockRestore()
+  })
+
+  it('emits the byte-exact default-label cap line when no routeLabel is set (issue #295)', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    errorSpy.mockClear()
+    const forwarder = createMockForwarder(okResponse)
+    const app = mountRoute(forwarder, { maxConcurrentSessions: 3 })
+
+    await openStream(app)
+    await openStream(app)
+    await openStream(app)
+
+    const refused = await app.request('/sse')
+    expect(refused.status).toBe(503)
+    expect(capLogLines(errorSpy)).toEqual([
+      '[helio] /sse at session cap (3); refusing new streams (1 refusals so far).',
+    ])
+    errorSpy.mockRestore()
+  })
+
   it('refuses with plain JSON that is not a JSON-RPC envelope', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const forwarder = createMockForwarder(okResponse)
