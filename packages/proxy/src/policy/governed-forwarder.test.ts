@@ -3806,6 +3806,75 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  describe('upstream label on budget charge contexts (issue #295)', () => {
+    const chargeBudget = {
+      name: 'daily-cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global' as const,
+      on_exceed: 'deny' as const,
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+    }
+
+    it('passes the configured upstream name at the budget gate site', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBe('payments')
+    })
+
+    it('passes the configured upstream name at the dry-run peek site', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', dry_run: true, rules: [] }),
+        {
+          budgetEngine: engine,
+          upstreamName: 'payments',
+        },
+      )
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBe('payments')
+    })
+
+    it('passes upstream: null at the gate site when no name is configured', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBeNull()
+    })
+  })
+
   // -------------------------------------------------------------------------
   // spend_limit action
   // -------------------------------------------------------------------------

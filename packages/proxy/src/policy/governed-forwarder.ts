@@ -943,6 +943,7 @@ export class GovernedForwarder implements McpForwarder {
       toolArguments,
       sessionId: sessionGate.ok ? sessionGate.session : null,
       senderId: null, // adapter context; absent on the MCP path
+      upstream: this.upstreamName ?? null,
     })
 
     if (charges.length === 0 && failures.length === 0) return { kind: 'proceed' }
@@ -1557,6 +1558,7 @@ export class GovernedForwarder implements McpForwarder {
         toolArguments,
         sessionId: sessionGate.ok ? sessionGate.session : null,
         senderId: null,
+        upstream: this.upstreamName ?? null,
       })
       if (failures.length > 0 || charges.length > 0) {
         const gated = gateBudgetCharges({ charges, failures }, sessionGate)

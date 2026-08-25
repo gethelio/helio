@@ -584,6 +584,7 @@ export class GovernanceService {
         toolArguments: req.arguments,
         sessionId: budgetSessionGate.ok ? budgetSessionGate.session : null,
         senderId,
+        upstream: null, // a sideband call has no upstream (issue #295)
       })
 
       const gatedCharges =

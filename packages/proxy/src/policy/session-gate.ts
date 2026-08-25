@@ -140,6 +140,8 @@ export function freezeGatedPlans(
         `(${String(breached.length)} markers for ${String(charges.length)} charges)`,
     )
   }
+  // Named-field copy only: a charge-level `upstream` label (issue #295) is
+  // deliberately dropped here, so deferred commits snapshot upstream: null.
   return charges.map(
     (charge, index) =>
       ({

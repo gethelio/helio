@@ -210,6 +210,7 @@ ${extraContributor}
       toolArguments: { amount: 60 },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
@@ -297,6 +298,7 @@ budgets:
       toolArguments: { amount: 60, category: 'ads' },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
@@ -321,6 +323,7 @@ budgets:
       toolArguments: { amount: 5, category: 'ads' },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     expect(stale.charges).toEqual([])
     expect(stale.failures).toEqual([])
@@ -395,6 +398,7 @@ budgets:
       toolArguments: { amount: 60 },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',
@@ -416,6 +420,7 @@ budgets:
       toolArguments: { amount: 50 },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     expect(engine.peekAll(mintGatedCharges(post.charges)).allowed).toBe(false)
 
