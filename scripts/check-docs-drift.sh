@@ -51,13 +51,17 @@ SOURCE_DRIFT_PATTERNS=(
 
 # Regex patterns matching files that count as "the committer updated a doc".
 # A match here means the commit is exempt from the drift check — the committer
-# is on record as having touched docs in the same unit of work.
+# is on record as having touched docs in the same unit of work. CHANGELOG.md
+# counts for the same reason: a changelog entry puts the committer on record
+# in the same unit of work (issue #307).
+# Member-identical with check-docs-drift-ci.sh's DOC_PATTERNS; no shared source.
 DOC_PATTERNS=(
   '^README\.md$'
   '^CONTRIBUTING\.md$'
   '^SECURITY\.md$'
   '^CODE_OF_CONDUCT\.md$'
   '^DEPENDENCIES\.md$'
+  '^CHANGELOG\.md$'
   '^docs/.*\.md$'
   '^packages/proxy/README\.md$'
   '^packages/dashboard/README\.md$'
@@ -153,7 +157,7 @@ fi
   echo "  SECURITY.md            packages/dashboard/README.md"
   echo "  CODE_OF_CONDUCT.md     packages/python-sdk/README.md"
   echo "  DEPENDENCIES.md        docker/README.md"
-  echo "                         examples/*/README.md"
+  echo "  CHANGELOG.md           examples/*/README.md"
   echo ""
   echo "If the change in any of the files above affects env vars, CLI"
   echo "flags, config keys, HTTP endpoints, curl / python / yaml snippets,"
