@@ -337,6 +337,86 @@ describe('StreamableHttpForwarder', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Issue #304: the send-leg accept advertises what Helio itself parses —
+  // both response framings — so a caller-forwarded or constructor-static
+  // value must never override the truthful base the merge seeded.
+  // -------------------------------------------------------------------------
+
+  describe('send-leg caller-supplied and static accept (issue #304)', () => {
+    it('re-stamps the truthful accept over a caller-supplied value on a legacy relay', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { accept: 'application/xml' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['accept']).toBe('application/json, text/event-stream')
+    })
+
+    it('re-stamps the truthful accept over a constructor static-header value', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = new StreamableHttpForwarder({
+        url: 'http://up/mcp',
+        protocolVersion: '2025-06-18',
+        headers: { accept: 'application/xml' },
+      })
+
+      await fwd.forward(req())
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['accept']).toBe('application/json, text/event-stream')
+    })
+
+    it('re-stamps the truthful accept on a modern relay', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = new StreamableHttpForwarder({
+        url: 'http://up/mcp',
+        protocolVersion: '2026-07-28',
+        headers: { accept: 'application/xml' },
+      })
+
+      await fwd.forward(req())
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['accept']).toBe('application/json, text/event-stream')
+    })
+
+    it('re-stamps the truthful accept whatever the caller key casing', async () => {
+      const calls = stubRelayUpstream({ 'tools/list': okResult() })
+      const fwd = legacyPinnedForwarder()
+
+      await fwd.forward(req({ headers: { Accept: 'application/xml' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['accept']).toBe('application/json, text/event-stream')
+    })
+
+    it('re-stamps the truthful accept on an internal send', async () => {
+      // Same sessionless legacy fixture as the #288 internal test above: the
+      // establish needs a 2xx on notifications/initialized or it throws
+      // before send() ever runs.
+      const calls = stubRelayUpstream({
+        'server/discover': () =>
+          jsonEnvelope({
+            jsonrpc: '2.0',
+            id: 'helio-era-probe',
+            error: { code: -32601, message: 'Method not found' },
+          }),
+        initialize: () =>
+          jsonEnvelope({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18' } }),
+        'notifications/initialized': () => new Response(null, { status: 202 }),
+        'tools/list': okResult(),
+      })
+      const fwd = new StreamableHttpForwarder({ url: 'http://up/mcp' })
+
+      await fwd.forwardInternal(req({ headers: { accept: 'application/xml' } }))
+
+      const relay = callsOf(calls, 'tools/list')[0]
+      expect(relay?.headers['accept']).toBe('application/json, text/event-stream')
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Regression 2: passthrough 404 surfaces as raw response (no throw)
   // -------------------------------------------------------------------------
 

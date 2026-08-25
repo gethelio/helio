@@ -1,6 +1,6 @@
 import { PendingRequests } from '../mcp/pending-requests.js'
 import { describeUnreachableUpstream } from './connection-error.js'
-import { mergeUpstreamHeaders } from './merge-headers.js'
+import { mergeUpstreamHeaders, UPSTREAM_SSE_CONNECT_ACCEPT } from './merge-headers.js'
 import { parseSseChunk } from './sse-parse.js'
 import type { SseParserState, SseEventHandler } from './sse-parse.js'
 import type {
@@ -65,14 +65,20 @@ export class SseUpstreamForwarder implements McpForwarder {
     const controller = new AbortController()
     this.abortController = controller
 
+    // Case-collapse the static names, then re-stamp text/event-stream over
+    // a merged accept — the only answer the connect can consume (issue #304).
+    const headers = mergeUpstreamHeaders(
+      { accept: UPSTREAM_SSE_CONNECT_ACCEPT },
+      {},
+      this.staticHeaders,
+    )
+    headers['accept'] = UPSTREAM_SSE_CONNECT_ACCEPT
+
     return new Promise<void>((resolve, reject) => {
       let resolved = false
 
       fetch(this.url, {
-        headers: {
-          accept: 'text/event-stream',
-          ...this.staticHeaders,
-        },
+        headers,
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.connectTimeoutMs)]),
       })
         .then((res) => {
@@ -150,6 +156,12 @@ export class SseUpstreamForwarder implements McpForwarder {
     delete headers['mcp-method']
     delete headers['mcp-name']
     delete headers['mcp-session-id']
+    // Helio seeds no accept on this leg and asserts none — the framed answer
+    // arrives on the event stream, not the POST response — so a caller- or
+    // constructor-supplied value is dropped (issue #304). The delete is
+    // JS-layer absence only, not wire absence: undici then stamps its own
+    // default (*/*), which is the runtime talking, not a Helio advertisement.
+    delete headers['accept']
 
     // Only the verbatim transport session id reaches the wire — never a
     // proxy-resolved governance id (issue #218).

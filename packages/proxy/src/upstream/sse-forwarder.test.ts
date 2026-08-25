@@ -17,6 +17,8 @@ interface MockSseServer {
   receivedBodies: unknown[]
   /** Captured POST request headers (lowercased names) for assertions. */
   receivedHeaders: Record<string, string>[]
+  /** Captured GET (connect) request headers (lowercased names) for assertions. */
+  receivedGetHeaders: Record<string, string>[]
 }
 
 /**
@@ -27,13 +29,15 @@ interface MockSseServer {
 function createMockSseServer(postStatus: number = 202): MockSseServer {
   const receivedBodies: unknown[] = []
   const receivedHeaders: Record<string, string>[] = []
+  const receivedGetHeaders: Record<string, string>[] = []
   const app = new Hono()
 
   // Store SSE writers by session (for simplicity, just use a single writer)
   const writers: WritableStreamDefaultWriter<Uint8Array>[] = []
   const encoder = new TextEncoder()
 
-  app.get('/', () => {
+  app.get('/', (c) => {
+    receivedGetHeaders.push(Object.fromEntries(c.req.raw.headers))
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
     const writer = writable.getWriter()
     writers.push(writer)
@@ -74,7 +78,7 @@ function createMockSseServer(postStatus: number = 202): MockSseServer {
   const server = serve({ fetch: app.fetch, port: 0 })
   const port = (server.address() as AddressInfo).port
 
-  return { server, port, receivedBodies, receivedHeaders }
+  return { server, port, receivedBodies, receivedHeaders, receivedGetHeaders }
 }
 
 function closeServer(server: ServerType): Promise<void> {
@@ -372,6 +376,103 @@ describe('SseUpstreamForwarder', () => {
     expect(mock.receivedHeaders[0]?.['content-length']).toBe(
       String(Buffer.byteLength(JSON.stringify(mock.receivedBodies[0]))),
     )
+  })
+
+  it('re-stamps text/event-stream on the connect GET over a static accept without dropping other statics', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { accept: 'application/json', authorization: 'Bearer s' },
+    })
+
+    await forwarder.connect()
+
+    expect(mock.receivedGetHeaders[0]?.['accept']).toBe('text/event-stream')
+    expect(mock.receivedGetHeaders[0]?.['authorization']).toBe('Bearer s')
+  })
+
+  it('re-stamps exactly text/event-stream on the connect GET whatever the static key casing', async () => {
+    // An Accept-cased static must not survive alongside the seed either:
+    // Node fetch combines case-distinct keys into one comma-joined wire
+    // value, so only a case-collapsing merge plus re-stamp owns the header.
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { Accept: 'application/json' },
+    })
+
+    await forwarder.connect()
+
+    expect(mock.receivedGetHeaders[0]?.['accept']).toBe('text/event-stream')
+  })
+
+  it('drops a caller-supplied accept from the request POST, leaving the runtime default', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/list',
+      headers: { accept: 'application/xml' },
+    })
+
+    // Helio asserts no accept on this leg; what the wire then carries is
+    // undici's own default, not a Helio advertisement.
+    expect(mock.receivedHeaders[0]?.['accept']).toBe('*/*')
+  })
+
+  it('drops a constructor static accept from the request POST, asserting none at the fetch layer', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { accept: 'application/xml' },
+    })
+    await forwarder.connect()
+
+    // The wire alone cannot distinguish the delete from an explicit */*
+    // stamp — both ship */* — so the headers Helio passes to fetch must
+    // additionally carry no accept key at all.
+    const originalFetch = globalThis.fetch
+    let postInit: RequestInit | undefined
+    globalThis.fetch = (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : 'GET')
+      ).toUpperCase()
+      if (method === 'POST') {
+        postInit = init
+      }
+      return originalFetch(input, init)
+    }
+
+    try {
+      await forwarder.forward({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+
+    expect(mock.receivedHeaders[0]?.['accept']).toBe('*/*')
+    expect(postInit).toBeDefined()
+    expect(postInit?.headers).not.toHaveProperty('accept')
+  })
+
+  it('drops a constructor static accept from the notification POST', async () => {
+    mock = createMockSseServer()
+    forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(mock.port)}/`,
+      headers: { accept: 'application/xml' },
+    })
+    await forwarder.connect()
+
+    await forwarder.forward({
+      jsonrpc: '2.0',
+      method: 'notifications/ping',
+    })
+
+    expect(mock.receivedHeaders[0]?.['accept']).toBe('*/*')
   })
 
   it('passes legitimate caller and static headers through untouched', async () => {

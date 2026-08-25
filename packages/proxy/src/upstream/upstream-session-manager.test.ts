@@ -612,6 +612,61 @@ describe('UpstreamSessionManager', () => {
     }
   })
 
+  // -------------------------------------------------------------------------
+  // Accept ownership (issue #304) — the era probe and the legacy handshake
+  // POSTs advertise what Helio itself parses (JSON and SSE framings alike),
+  // so a lying constructor accept must not override the truthful dual value
+  // on any of the three POSTs.
+  // -------------------------------------------------------------------------
+
+  it('era probe POST carries the truthful accept even with a lying static accept', async () => {
+    const calls = stubUpstream({
+      'server/discover': () =>
+        jsonRpcResult({ supportedVersions: ['2026-07-28'], capabilities: {} }),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: { accept: 'application/xml' },
+    })
+
+    await mgr.ensureInternalSession()
+
+    const probe = calls.find((call) => call.method === 'server/discover')
+    expect(probe?.headers['accept']).toBe('application/json, text/event-stream')
+  })
+
+  it('legacy initialize POST carries the truthful accept even with a lying static accept', async () => {
+    const calls = stubUpstream({
+      'server/discover': () => jsonRpcError({ code: -32601, message: 'Method not found' }),
+      initialize: legacyInitializeHandler(undefined, '2025-06-18'),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: { accept: 'application/xml' },
+    })
+
+    await mgr.ensureInternalSession()
+
+    const init = calls.find((call) => call.method === 'initialize')
+    expect(init?.headers['accept']).toBe('application/json, text/event-stream')
+  })
+
+  it('notifications/initialized clone carries the truthful accept even with a lying static accept', async () => {
+    const calls = stubUpstream({
+      'server/discover': () => jsonRpcError({ code: -32601, message: 'Method not found' }),
+      initialize: legacyInitializeHandler(undefined, '2025-06-18'),
+    })
+    const mgr = new UpstreamSessionManager({
+      url: 'http://up/mcp',
+      staticHeaders: { accept: 'application/xml' },
+    })
+
+    await mgr.ensureInternalSession()
+
+    const notify = calls.find((call) => call.method === 'notifications/initialized')
+    expect(notify?.headers['accept']).toBe('application/json, text/event-stream')
+  })
+
   it('reports a timeout with the configured duration when initialize times out', async () => {
     stubUpstream({
       'server/discover': () => new Response(null, { status: 202 }),

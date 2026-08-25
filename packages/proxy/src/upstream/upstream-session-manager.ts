@@ -3,7 +3,7 @@ import {
   HELIO_MCP_LEGACY_PROTOCOL_VERSION,
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
 } from '../mcp/protocol-version.js'
-import { mergeUpstreamHeaders } from './merge-headers.js'
+import { mergeUpstreamHeaders, UPSTREAM_POST_ACCEPT } from './merge-headers.js'
 import { describeUnreachableUpstream } from './connection-error.js'
 import { parseSseChunk, readSseJsonRpcResponse } from './sse-parse.js'
 /**
@@ -402,7 +402,7 @@ export class UpstreamSessionManager {
     const headers = mergeUpstreamHeaders(
       {
         'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
+        accept: UPSTREAM_POST_ACCEPT,
         'mcp-protocol-version': HELIO_MCP_MODERN_PROTOCOL_VERSION,
         'mcp-method': 'server/discover',
       },
@@ -416,6 +416,10 @@ export class UpstreamSessionManager {
     // standard-headers helper.
     headers['mcp-method'] = 'server/discover'
     delete headers['mcp-name']
+    // The accept is re-stamped the same way: the probe advertises the two
+    // response framings readProbeBody parses, and a lying constructor value
+    // can render the reply unparseable and misclassify the era (issue #304).
+    headers['accept'] = UPSTREAM_POST_ACCEPT
 
     const probeBody = {
       jsonrpc: '2.0' as const,
@@ -499,7 +503,7 @@ export class UpstreamSessionManager {
     const headers = mergeUpstreamHeaders(
       {
         'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
+        accept: UPSTREAM_POST_ACCEPT,
       },
       {},
       this.staticHeaders,
@@ -511,6 +515,10 @@ export class UpstreamSessionManager {
     // both. Absence cannot lie; strip it immediately, before either POST.
     delete headers['mcp-method']
     delete headers['mcp-name']
+    // The accept is re-stamped rather than stripped: both POSTs advertise
+    // the two response framings the envelope readers parse, and a lying
+    // constructor value would otherwise ride both (issue #304).
+    headers['accept'] = UPSTREAM_POST_ACCEPT
 
     const initBody = {
       jsonrpc: '2.0' as const,
