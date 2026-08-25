@@ -458,6 +458,25 @@ describe('helioConfigSchema', () => {
         expect(reservedIssue).toBeDefined()
       },
     )
+
+    it.each(['accept', 'Accept'])(
+      'rejects reserved header %s (issue #304, case-insensitive)',
+      (name) => {
+        const result = helioConfigSchema.safeParse(
+          minimalConfig({
+            upstream: {
+              url: 'http://localhost:8080',
+              headers: { [name]: 'application/xml' },
+            },
+          }),
+        )
+        expect(result.success).toBe(false)
+        if (result.success) return
+        const reservedIssue = result.error.issues.find((issue) => /reserved/i.test(issue.message))
+        expect(reservedIssue).toBeDefined()
+        expect(reservedIssue?.path).toEqual(['upstream', 'headers', name])
+      },
+    )
   })
 
   // -------------------------------------------------------------------------

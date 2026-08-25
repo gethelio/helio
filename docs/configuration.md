@@ -169,7 +169,7 @@ upstream:
     Authorization: 'Bearer ${UPSTREAM_TOKEN}'
 ```
 
-Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, `host`, `mcp-method`, and `mcp-name` are rejected — Helio owns those.
+Applies to the HTTP transports (`streamable-http`, `sse`); `stdio` has no request headers, so the field is ignored there. The reserved transport/protocol headers `mcp-session-id`, `mcp-protocol-version`, `content-type`, `content-length`, `host`, `accept`, `mcp-method`, and `mcp-name` are rejected — Helio owns those.
 
 On a name conflict, static `upstream.headers` take precedence over caller-forwarded headers (`forward_headers`), matched case-insensitively. This is deliberate: a downstream caller cannot override an operator-provided credential such as `Authorization`.
 
