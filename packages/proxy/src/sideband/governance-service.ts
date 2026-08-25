@@ -38,7 +38,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter } from '../policy/rate-limiter.js'
 import type { SpendLimiter } from '../policy/spend-limiter.js'
-import { ruleBucketKey } from '../policy/bucket-key.js'
+import { ruleBucketKey, toolLimitKey } from '../policy/bucket-key.js'
 import type { BudgetEngine, BudgetChargeFailure, BudgetPeekEntry } from '../budget/engine.js'
 import {
   gateSession,
@@ -2004,7 +2004,9 @@ function policyCanRequireApproval(policy: CompiledPolicy): boolean {
 }
 
 /**
- * Construct a non-session limit bucket key. Session keys are deliberately
+ * Construct a non-session limit bucket key. Tool-scope keys route through
+ * the shared `toolLimitKey` leaf but deliberately stay upstream-less here:
+ * a sideband call has no upstream (issue #295). Session keys are deliberately
  * NOT built here: they come only from the gate module's `sessionLimitKey`,
  * whose `GatedSession` parameter makes skipping the identity gate a compile
  * error (issue #218) — call sites branch on `key === 'session'`.
@@ -2020,7 +2022,7 @@ function buildLimitKey(
     case 'agent':
     case 'tool':
     default:
-      return `tool:${toolName}`
+      return toolLimitKey(toolName)
   }
 }
 

@@ -42,7 +42,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
-import { ruleBucketKey } from './bucket-key.js'
+import { ruleBucketKey, toolLimitKey } from './bucket-key.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 import type { CompiledApproval } from './types.js'
@@ -1602,7 +1602,9 @@ export class GovernedForwarder implements McpForwarder {
   }
 
   /**
-   * Construct a non-session limit bucket key. Session keys are deliberately
+   * Construct a non-session limit bucket key. Tool-scope keys route through
+   * the shared `toolLimitKey` leaf, which prefixes them with the configured
+   * upstream name when one is set (issue #295). Session keys are deliberately
    * NOT built here: they come only from the gate module's `sessionLimitKey`,
    * whose `GatedSession` parameter makes skipping the identity gate a
    * compile error (issue #218) — call sites branch on `key === 'session'`.
@@ -1621,7 +1623,7 @@ export class GovernedForwarder implements McpForwarder {
             '[helio] Warning: limits.key "agent" is not yet supported, falling back to "tool"',
           )
         }
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
       case 'sender_id':
         // sender_id is an adapter (host-enforced) context field — absent on the
         // MCP path, so fall back to tool scope. Config validation rejects this
@@ -1633,10 +1635,10 @@ export class GovernedForwarder implements McpForwarder {
             '[helio] Warning: limits.key "sender_id" has no sender on the MCP path, falling back to "tool"',
           )
         }
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
       case 'tool':
       default:
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
     }
   }
 
