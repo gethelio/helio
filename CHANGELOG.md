@@ -23,9 +23,10 @@ Maintainer notes:
 
 - **BREAKING: `upstream.headers` may no longer set `Accept` (#304).**
   The value joins the reserved transport headers Helio owns on the
-  wire: on the HTTP upstream legs it advertises Helio's own response
-  parsing, so an operator-set value could only misadvertise it, never
-  extend it. Such an override can break the SSE connect outright
+  wire: where Helio advertises at all it advertises its own response
+  parsing (the SSE message POSTs assert none), so an operator-set
+  value could only misadvertise it, never extend it. Such an override
+  can break the SSE connect outright
   (HTTP 406 from a config that validated cleanly) and can make the
   era probe's reply unparseable or non-classifiable, driving a
   wrong-era legacy handshake attempt against a modern upstream. A

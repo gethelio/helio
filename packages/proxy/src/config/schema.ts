@@ -48,9 +48,10 @@ const RESERVED_TRANSPORT_HEADERS = new Set([
   'content-type',
   'content-length',
   'host',
-  // The Accept on Helio's HTTP upstream requests advertises Helio's own
-  // response parsing per leg; an operator value could only misadvertise
-  // what Helio parses, never extend it (issue #304).
+  // The Accept is Helio-owned per HTTP upstream leg: where Helio
+  // advertises at all it advertises its own response parsing (the SSE
+  // message POSTs assert none), so an operator value could only
+  // misadvertise it, never extend it (issue #304).
   'accept',
   // Modern (2026-07-28) transport headers Helio owns on the wire for every
   // Streamable HTTP POST it sends upstream — relayed client traffic and

@@ -1,6 +1,8 @@
 /**
- * The Accept value every upstream POST leg advertises: the two response
- * framings Helio itself parses on those legs (issue #304).
+ * The Accept value the Streamable HTTP send(), the era probe, and the
+ * legacy `initialize` POSTs advertise: the two response framings Helio
+ * itself parses on those legs (issue #304). The SSE message POSTs
+ * advertise nothing — they delete a merged accept instead.
  */
 export const UPSTREAM_POST_ACCEPT = 'application/json, text/event-stream'
 
