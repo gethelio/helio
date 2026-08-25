@@ -34,6 +34,21 @@ Maintainer notes:
   existing reserved-header message; the migration is deleting the
   line.
 
+### Added
+
+- Internal multi-upstream substrate (#295): the policy match context,
+  the tool-scope limiter keys, budget charges and peek entries, and
+  the upstream lifecycle log lines (era detection, annotation priming,
+  the `/sse` cap refusal) can now carry an operator-chosen upstream
+  label. Nothing sets a label yet; it lights up when the multi-upstream
+  composition ships. Singular-mode behavior, key formats, and log
+  lines are byte-identical.
+- Type-level compatibility note for library embedders (#295): the
+  `BudgetChargeContext` passed to `BudgetEngine.resolveCharges()` has
+  a new required `upstream: string | null` field, so charge-context
+  object literals add `upstream: null` to compile. Runtime behavior
+  is unchanged.
+
 ### Fixed
 
 - The Streamable HTTP forwarder no longer forwards a caller-supplied
