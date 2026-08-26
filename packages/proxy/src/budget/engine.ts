@@ -29,6 +29,13 @@ export interface BudgetChargeContext {
   readonly sessionId: GatedSession | null
   /** Adapter-supplied sender id (sideband only); null on the MCP path. */
   readonly senderId: string | null
+  /**
+   * The governed door's configured upstream name (issue #295); null on the
+   * sideband and in singular mode. Required so every door states its
+   * upstream: a silently-missing value would exempt that door's calls from
+   * upstream-scoped contributors once those exist.
+   */
+  readonly upstream: string | null
 }
 
 /** One budget's share of a call: which bucket, how much. */
@@ -43,6 +50,12 @@ export interface BudgetCharge {
    * NOT repopulate the new pot with old-config spend — recordAll skips it.
    */
   readonly generation: number
+  /**
+   * The charge context's upstream name, stamped only when the door set one
+   * (issue #295). Optional is the honest type: `remintDeferredCharges`
+   * rebuilds charges without it, so deferred commits snapshot null.
+   */
+  readonly upstream?: string
 }
 
 /** A budget whose contributor matched but whose amount was unusable. */
@@ -69,6 +82,11 @@ export interface BudgetPeekEntry {
   readonly remaining: number
   /** Epoch ms when the oldest entry ages out (duration); null for session pots. */
   readonly resetAtMs: number | null
+  /**
+   * The charge's upstream label, or null: sideband calls, singular mode, and
+   * reminted deferred commits all snapshot null (issue #295).
+   */
+  readonly upstream: string | null
   /**
    * Set on recordAll snapshots for charges frozen before a tuple-changing
    * reload: the executed spend was ledgered under its evaluate-time
@@ -399,6 +417,7 @@ export class BudgetEngine {
         bucketKey: this.bucketKey(budget, ctx),
         amount: raw,
         generation: this.generations.get(budget.name) ?? 0,
+        ...(ctx.upstream !== null && { upstream: ctx.upstream }),
       })
     }
 
@@ -908,6 +927,7 @@ export class BudgetEngine {
       spent,
       remaining: Math.max(0, charge.budget.limit - spent),
       resetAtMs,
+      upstream: charge.upstream ?? null,
     }
   }
 }

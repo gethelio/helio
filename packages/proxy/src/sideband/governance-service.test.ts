@@ -1815,6 +1815,17 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     expect(records[0]?.record.block_reason).toBe('budget_exceeded')
   })
 
+  it('passes upstream: null on the sideband charge context (issue #295)', () => {
+    const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
+    if (!budgetEngine) throw new Error('expected budgetEngine')
+    const spy = vi.spyOn(budgetEngine, 'resolveCharges')
+
+    service.evaluate(stripeEval(30))
+
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0]?.[0]?.upstream).toBeNull()
+  })
+
   it('fails closed terminally when the contributor amount is invalid', () => {
     const { service, budgetEngine } = makeService({ budgets: [stripeBudget()] })
     const res = service.evaluate(stripeEval('not-a-number'))

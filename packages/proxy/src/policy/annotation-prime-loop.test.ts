@@ -209,6 +209,63 @@ describe('startAnnotationPrimeLoop', () => {
     controller.stop()
   })
 
+  it('tags every startup-path line with the upstream name when one is set (issue #295)', async () => {
+    const slowInitial = deferred<AnnotationCachePrimeResult>()
+    const forwarder = fakeForwarder([slowInitial.promise, fail('still down')], ok(2))
+
+    const startPromise = startAnnotationPrimeLoop(forwarder, undefined, 'payments')
+    await vi.advanceTimersByTimeAsync(INITIAL_WAIT_MS)
+    const controller = await startPromise
+
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache priming did not complete within 1500ms; continuing startup fail-closed and retrying in background',
+    )
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache prime retry 1 scheduled in 1000ms',
+    )
+
+    slowInitial.resolve(fail('slow upstream'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache priming failed: slow upstream — undocumented tools will be denied (fail-closed) until priming succeeds',
+    )
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache prime retry 1 failed: still down — still fail-closed',
+    )
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache prime retry 2 scheduled in 2000ms',
+    )
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache primed after retry 2: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+
+  it('tags the success-path primed line with the upstream name (issue #295)', async () => {
+    const forwarder = fakeForwarder([], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000), 'payments')
+
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache primed: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+
+  it('tags the revalidation-failed line with the upstream name (issue #295)', async () => {
+    const forwarder = fakeForwarder([ok(2)], fail('upstream 503'))
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000), 'payments')
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(messages()).toContain(
+      '[helio][payments] Tool revalidation failed: upstream 503 — keeping the last baselines; next attempt in 300000ms',
+    )
+    controller.stop()
+  })
+
   it('does not revalidate when disabled, and reconfigure() retimes/starts/stops the timer live', async () => {
     const forwarder = fakeForwarder([], ok(1))
     const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000, false))

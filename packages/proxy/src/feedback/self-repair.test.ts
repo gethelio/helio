@@ -763,6 +763,7 @@ describe('rule_index emission (issue #144 removed the ruleIndex alias)', () => {
     spent: 100,
     remaining: 0,
     resetAtMs: 60_000,
+    upstream: null,
   }
 
   // Break-glass builders only ever see budgets that raised a ticket.
@@ -915,6 +916,7 @@ describe('rule_index emission (issue #144 removed the ruleIndex alias)', () => {
           spent: 100,
           remaining: 0,
           resetAtMs: null,
+          upstream: null,
         },
       ],
       [
@@ -962,6 +964,7 @@ describe('budget break-glass feedback builders', () => {
     spent: 49,
     remaining: 1,
     resetAtMs: 4_600_000,
+    upstream: null,
   }
 
   it('denied: carries approver identity plus every breached budget', () => {

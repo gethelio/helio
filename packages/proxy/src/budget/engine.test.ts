@@ -61,12 +61,18 @@ const COMMIT_META = {
   timestampIso: '2026-07-09T12:00:00.000Z',
 }
 
-function chargeCtx(toolName: string, args: Record<string, unknown>, sessionId?: string) {
+function chargeCtx(
+  toolName: string,
+  args: Record<string, unknown>,
+  sessionId?: string,
+  upstream: string | null = null,
+) {
   return {
     toolName,
     toolArguments: args,
     sessionId: sessionId === undefined ? null : mintGatedSession(sessionId),
     senderId: null,
+    upstream,
   }
 }
 
@@ -157,6 +163,7 @@ describe('BudgetEngine.resolveCharges', () => {
       toolArguments: { amount: 1 },
       sessionId: null,
       senderId: 'U7',
+      upstream: null,
     })
     expect(charges[0]?.bucketKey).toBe('budget:sb:sender:U7')
   })
@@ -206,6 +213,7 @@ describe('BudgetEngine.resolveCharges', () => {
         toolArguments: undefined,
         sessionId: null,
         senderId: null,
+        upstream: null,
       })
       expect(charges).toEqual([])
       expect(failures).toEqual([])
@@ -1587,5 +1595,61 @@ describe('BudgetEngine persistence (PR 2)', () => {
     expect(() => engine.recordAll(gated(charges), COMMIT_META)).not.toThrow()
     expect(countRows()).toBe(2)
     expect(engine.listStates().map((s) => s.buckets[0]?.spent)).toEqual([30, 30])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Upstream label on the charge chain (issue #295)
+// ---------------------------------------------------------------------------
+
+describe('BudgetEngine — upstream label (issue #295)', () => {
+  it('stamps the context upstream onto resolved charges', () => {
+    const { engine } = createEngine([budgetConfig()])
+    const { charges } = engine.resolveCharges({
+      ...chargeCtx('stripe_charge', { amount: 25 }),
+      upstream: 'payments',
+    })
+    expect(charges[0]?.upstream).toBe('payments')
+  })
+
+  it('copies the charge upstream onto peek entries', () => {
+    const { engine } = createEngine([budgetConfig()])
+    const { charges } = engine.resolveCharges({
+      ...chargeCtx('stripe_charge', { amount: 25 }),
+      upstream: 'payments',
+    })
+    const { entries } = engine.peekAll(gated(charges))
+    expect(entries[0]?.upstream).toBe('payments')
+  })
+
+  it('snapshots upstream: null for a null-upstream context (singular mode)', () => {
+    const { engine } = createEngine([budgetConfig()])
+    const { charges } = engine.resolveCharges({
+      ...chargeCtx('stripe_charge', { amount: 25 }),
+      upstream: null,
+    })
+    const { entries } = engine.peekAll(gated(charges))
+    expect(entries[0]?.upstream).toBeNull()
+  })
+
+  it('carries upstream through recordAll snapshots, stale branch included', () => {
+    const { engine } = createEngine([budgetConfig()])
+    const spend = engine.resolveCharges({
+      ...chargeCtx('stripe_charge', { amount: 30 }),
+      upstream: 'payments',
+    })
+    const snapshots = engine.recordAll(gated(spend.charges), COMMIT_META)
+    expect(snapshots[0]?.upstream).toBe('payments')
+
+    // Stale branch: a tuple change between peek and commit bumps the
+    // generation; the stale snapshot must carry the label too.
+    const frozen = engine.resolveCharges({
+      ...chargeCtx('stripe_charge', { amount: 10 }),
+      upstream: 'payments',
+    })
+    engine.reconcile(compileBudgets([budgetConfig({ limit: 500 })]))
+    const staleSnapshots = engine.recordAll(gated(frozen.charges), COMMIT_META)
+    expect(staleSnapshots[0]?.stale).toBe(true)
+    expect(staleSnapshots[0]?.upstream).toBe('payments')
   })
 })

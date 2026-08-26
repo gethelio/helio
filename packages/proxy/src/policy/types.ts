@@ -225,4 +225,10 @@ export interface MatchContext {
    * request column) is merged in by the decision pipeline, not stored here twice.
    */
   readonly metadata?: Readonly<Record<string, unknown>>
+  /**
+   * The governed door's configured upstream name (issue #295). A string only on
+   * the MCP path when a name is configured; undefined on the sideband and in
+   * singular mode, so upstream-scoped rules are inert there by construction.
+   */
+  readonly upstream?: string
 }

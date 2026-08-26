@@ -3,6 +3,8 @@ import { readdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
 import type { BudgetCharge, BudgetChargeFailure } from '../budget/engine.js'
+import { BudgetEngine } from '../budget/engine.js'
+import { compileBudgets } from '../budget/parser.js'
 import type { CompiledBudget } from '../budget/types.js'
 import type { GatedCharges } from './session-gate.js'
 import {
@@ -224,6 +226,56 @@ describe('freezeGatedPlans', () => {
 
     const overridden = remintDeferredCharges(frozen, 9)
     expect([...overridden].map((c) => c.amount)).toEqual([9, 9])
+  })
+
+  it('the freeze → remint round-trip drops a charge-level upstream label (issue #295)', () => {
+    // Deliberate: the drop IS the sideband-null mechanism — a deferred commit
+    // snapshots upstream: null because the reminted charge carries no
+    // upstream key. Do not add a door name to frozen plans.
+    const labeled = gatedCharges([
+      { ...charge(sessionBudget, 'k1', 5), upstream: 'payments' } as BudgetCharge,
+    ])
+    const frozen = freezeGatedPlans(labeled, [false])
+    const reminted = [...remintDeferredCharges(frozen)]
+    expect(reminted[0]).toBeDefined()
+    expect('upstream' in (reminted[0] as object)).toBe(false)
+  })
+
+  it('a deferred commit snapshots upstream: null — freeze/remint drop the label (issue #295)', () => {
+    const engine = new BudgetEngine({
+      budgets: compileBudgets([
+        {
+          name: 'cap',
+          limit: 100,
+          currency: 'USD',
+          window: '24h',
+          key: 'global',
+          on_exceed: 'deny',
+          contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+        },
+      ]),
+      cleanupIntervalMs: 0,
+    })
+    const { charges } = engine.resolveCharges({
+      toolName: 'stripe_charge',
+      toolArguments: { amount: 5 },
+      sessionId: null,
+      senderId: null,
+      upstream: 'payments',
+    })
+    const gated = gateBudgetCharges({ charges, failures: [] }, gateSession('run-a', 'deny'))
+    if (!gated.ok) throw new Error('expected ok')
+    const frozen = freezeGatedPlans(gated.charges, [false])
+    const reminted = remintDeferredCharges(frozen)
+
+    const snapshots = engine.recordAll(reminted, {
+      kind: 'spend',
+      auditRecordId: 'audit-1',
+      origin: 'sideband',
+      toolName: 'stripe_charge',
+      timestampIso: '2026-08-25T12:00:00.000Z',
+    })
+    expect(snapshots[0]?.upstream).toBeNull()
   })
 
   it('rejects fresh unfrozen plan-shaped objects at the remint (type-level)', () => {

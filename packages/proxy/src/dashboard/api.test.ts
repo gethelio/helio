@@ -883,6 +883,7 @@ describe('GET /api/budgets', () => {
       toolArguments: { amount: 30 },
       sessionId: null,
       senderId: null,
+      upstream: null,
     })
     engine.recordAll(mintGatedCharges(charges), {
       kind: 'spend',

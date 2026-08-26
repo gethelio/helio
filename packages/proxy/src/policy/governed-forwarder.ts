@@ -42,7 +42,7 @@ import type {
 } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
-import { ruleBucketKey } from './bucket-key.js'
+import { ruleBucketKey, toolLimitKey } from './bucket-key.js'
 import { resolvePath } from './matchers.js'
 import type { BudgetEngine, BudgetPeekEntry } from '../budget/engine.js'
 import type { CompiledApproval } from './types.js'
@@ -93,6 +93,13 @@ export interface GovernedForwarderOptions {
    * default chain (deny mode) for direct/library construction.
    */
   session?: CompiledSessionIdentity
+  /**
+   * The operator-chosen upstream entry name (issue #295, multi-upstream
+   * substrate). Unset in singular mode — every governance surface then
+   * behaves exactly as today. Nothing in the proxy passes it yet; the
+   * multi-upstream composition loop (issue #294) is what will.
+   */
+  upstreamName?: string
 }
 
 /**
@@ -217,6 +224,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly rateLimiter: RateLimiter | undefined
   private readonly spendLimiter: SpendLimiter | undefined
   private readonly budgetEngine: BudgetEngine | undefined
+  private readonly upstreamName: string | undefined
   private readonly annotationCache = new ToolAnnotationCache()
   private agentKeyWarned = false
   private senderKeyWarned = false
@@ -231,6 +239,7 @@ export class GovernedForwarder implements McpForwarder {
     this.rateLimiter = options?.rateLimiter
     this.spendLimiter = options?.spendLimiter
     this.budgetEngine = options?.budgetEngine
+    this.upstreamName = options?.upstreamName
     this.session = options?.session ?? DEFAULT_SESSION_IDENTITY
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
@@ -538,6 +547,7 @@ export class GovernedForwarder implements McpForwarder {
       baselineAnnotations: this.annotationCache.get(toolName),
       currentAnnotations: this.annotationCache.getCurrent(toolName),
       driftEvent: this.annotationCache.getDrift(toolName),
+      upstream: this.upstreamName,
     })
 
     // Pre-generated so budget ledger rows can reference the audit record
@@ -933,6 +943,7 @@ export class GovernedForwarder implements McpForwarder {
       toolArguments,
       sessionId: sessionGate.ok ? sessionGate.session : null,
       senderId: null, // adapter context; absent on the MCP path
+      upstream: this.upstreamName ?? null,
     })
 
     if (charges.length === 0 && failures.length === 0) return { kind: 'proceed' }
@@ -1547,6 +1558,7 @@ export class GovernedForwarder implements McpForwarder {
         toolArguments,
         sessionId: sessionGate.ok ? sessionGate.session : null,
         senderId: null,
+        upstream: this.upstreamName ?? null,
       })
       if (failures.length > 0 || charges.length > 0) {
         const gated = gateBudgetCharges({ charges, failures }, sessionGate)
@@ -1592,7 +1604,9 @@ export class GovernedForwarder implements McpForwarder {
   }
 
   /**
-   * Construct a non-session limit bucket key. Session keys are deliberately
+   * Construct a non-session limit bucket key. Tool-scope keys route through
+   * the shared `toolLimitKey` leaf, which prefixes them with the configured
+   * upstream name when one is set (issue #295). Session keys are deliberately
    * NOT built here: they come only from the gate module's `sessionLimitKey`,
    * whose `GatedSession` parameter makes skipping the identity gate a
    * compile error (issue #218) — call sites branch on `key === 'session'`.
@@ -1611,7 +1625,7 @@ export class GovernedForwarder implements McpForwarder {
             '[helio] Warning: limits.key "agent" is not yet supported, falling back to "tool"',
           )
         }
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
       case 'sender_id':
         // sender_id is an adapter (host-enforced) context field — absent on the
         // MCP path, so fall back to tool scope. Config validation rejects this
@@ -1623,10 +1637,10 @@ export class GovernedForwarder implements McpForwarder {
             '[helio] Warning: limits.key "sender_id" has no sender on the MCP path, falling back to "tool"',
           )
         }
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
       case 'tool':
       default:
-        return `tool:${toolName}`
+        return toolLimitKey(toolName, this.upstreamName)
     }
   }
 

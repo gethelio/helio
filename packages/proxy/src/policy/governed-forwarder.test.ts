@@ -3674,6 +3674,207 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  describe('upstream-partitioned limiter keys (issue #295)', () => {
+    it('prefixes tool-scoped rate keys with the configured upstream name', async () => {
+      const inner = mockForwarder()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'tool' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        rateLimiter: limiter,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('get_weather', {}, 1))
+
+      expect(limiter.getKeyState('tool:get_weather:rule:0')).toBeUndefined()
+      expect(limiter.getKeyState('upstream:payments:tool:get_weather:rule:0')?.current).toBe(1)
+    })
+
+    it('prefixes tool-scoped spend keys with the configured upstream name', async () => {
+      const inner = mockForwarder()
+      const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'stripe_charge' },
+            action: 'spend_limit',
+            limits: {
+              max_spend: { field: '$.amount', limit: 100, currency: 'USD', window: '1h' },
+            },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        spendLimiter,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 40 }))
+
+      expect(spendLimiter.getKeyState('tool:stripe_charge:rule:0')).toBeUndefined()
+      expect(
+        spendLimiter.getKeyState('upstream:payments:tool:stripe_charge:rule:0')?.current_spend,
+      ).toBe(40)
+    })
+
+    it('prefixes the agent-fallback rate key with the configured upstream name', async () => {
+      const inner = mockForwarder()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'agent' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        rateLimiter: limiter,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('get_weather', {}, 1))
+
+      expect(limiter.getKeyState('tool:get_weather:rule:0')).toBeUndefined()
+      expect(limiter.getKeyState('upstream:payments:tool:get_weather:rule:0')?.current).toBe(1)
+
+      consoleSpy.mockRestore()
+    })
+
+    it('prefixes the sender_id-fallback rate key with the configured upstream name', async () => {
+      const inner = mockForwarder()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'sender_id' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        rateLimiter: limiter,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('get_weather', {}, 1))
+
+      expect(limiter.getKeyState('tool:get_weather:rule:0')).toBeUndefined()
+      expect(limiter.getKeyState('upstream:payments:tool:get_weather:rule:0')?.current).toBe(1)
+
+      consoleSpy.mockRestore()
+    })
+
+    it('never prefixes session keys even when an upstream name is set', async () => {
+      const inner = mockForwarder()
+      const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 5, window: '1m', key: 'session' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        rateLimiter: limiter,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallWithSession('get_weather', 'abc'))
+
+      expect(limiter.getKeyState('session:abc:rule:0')?.current).toBe(1)
+      expect(limiter.listKeyStates().map((state) => state.key)).toEqual(['session:abc:rule:0'])
+    })
+  })
+
+  describe('upstream label on budget charge contexts (issue #295)', () => {
+    const chargeBudget = {
+      name: 'daily-cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global' as const,
+      on_exceed: 'deny' as const,
+      contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+    }
+
+    it('passes the configured upstream name at the budget gate site', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        upstreamName: 'payments',
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBe('payments')
+    })
+
+    it('passes the configured upstream name at the dry-run peek site', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', dry_run: true, rules: [] }),
+        {
+          budgetEngine: engine,
+          upstreamName: 'payments',
+        },
+      )
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBe('payments')
+    })
+
+    it('passes upstream: null at the gate site when no name is configured', async () => {
+      const inner = mockForwarder()
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([chargeBudget]),
+        cleanupIntervalMs: 0,
+      })
+      const spy = vi.spyOn(engine, 'resolveCharges')
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+      })
+
+      await governed.forward(toolsCallRequest('stripe_charge', { amount: 30 }))
+
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]?.[0]?.upstream).toBeNull()
+    })
+  })
+
   // -------------------------------------------------------------------------
   // spend_limit action
   // -------------------------------------------------------------------------
