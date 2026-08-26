@@ -94,9 +94,10 @@ export interface AuditRecord {
    * Name of the upstream MCP server this record is attributed to (issue
    * #292). Null in singular mode (no named upstreams configured), on
    * sideband records (no MCP door), and on rows that predate the column.
-   * Optional until every producer stamps it in the same release.
+   * Required-nullable like session_source/protocol_version: a producer that
+   * could silently omit it would exempt that door from attribution.
    */
-  readonly upstream?: string | null
+  readonly upstream: string | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
 }

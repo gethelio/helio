@@ -41,6 +41,7 @@ function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
     origin: 'mcp',
     metadata: null,
     protocol_version: null,
+    upstream: null,
   }
   return {
     ...defaults,

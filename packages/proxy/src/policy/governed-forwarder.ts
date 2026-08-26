@@ -480,6 +480,7 @@ export class GovernedForwarder implements McpForwarder {
       metadata: null,
       // Drift is a cache event, not a request: no protocol claim exists.
       protocol_version: null,
+      upstream: this.upstreamName ?? null,
     })
   }
 
@@ -1152,6 +1153,7 @@ export class GovernedForwarder implements McpForwarder {
         origin: 'mcp',
         metadata: null,
         protocol_version: request.protocolVersion ?? null,
+        upstream: this.upstreamName ?? null,
       })
     }
 
@@ -1860,6 +1862,7 @@ export class GovernedForwarder implements McpForwarder {
       origin: 'mcp',
       metadata: null,
       protocol_version: request.protocolVersion ?? null,
+      upstream: this.upstreamName ?? null,
     }
 
     // Security-critical decisions — denies, approval resolutions, and

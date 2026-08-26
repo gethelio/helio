@@ -248,6 +248,17 @@ describe('GovernanceService.evaluate', () => {
     expect(records[0]?.immediate).toBe(true)
   })
 
+  it('stamps upstream null on sideband records — there is no MCP door here (issue #292)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'no-send', match: { tool: 'send' }, action: 'deny' }],
+    })
+    const { service, records } = makeService({ policy })
+    service.evaluate(evalInput())
+    expect(records).toHaveLength(1)
+    expect(records[0]?.record.upstream).toBeNull()
+  })
+
   it('does not consume rate counters at evaluate (peek only)', () => {
     const policy = compile({
       default: 'allow',

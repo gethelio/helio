@@ -1858,6 +1858,8 @@ export class GovernanceService {
       metadata: args.metadata,
       // The sideband has no MCP wire, so no protocol claim exists.
       protocol_version: null,
+      // No door on the sideband either: upstream attribution is MCP-only.
+      upstream: null,
     }
 
     // Enforcement decisions and approvals go on the priority flush queue; plain

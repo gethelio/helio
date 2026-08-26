@@ -1519,6 +1519,7 @@ audit:
         session_id: null,
         session_source: null,
         protocol_version: null,
+        upstream: null,
         agent_id: null,
         environment: null,
         tool_name: 'test_tool',

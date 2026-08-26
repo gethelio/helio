@@ -3875,6 +3875,107 @@ describe('GovernedForwarder', () => {
     })
   })
 
+  describe('upstream attribution on audit records (issue #292)', () => {
+    it('stamps the configured upstream name on tool_call audit records', async () => {
+      const inner = mockForwarder()
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+        upstreamName: 'github',
+      })
+
+      await governed.forward(toolsCallRequest('get_weather', {}))
+
+      expect(auditWriter.push).toHaveBeenCalledTimes(1)
+      const record = auditWriter.push.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['upstream']).toBe('github')
+    })
+
+    it('stamps the configured upstream name on drift records', async () => {
+      const inner = mockForwarder()
+      inner.forward
+        .mockResolvedValueOnce(
+          toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+        )
+        .mockResolvedValueOnce(
+          toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+        )
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+        upstreamName: 'github',
+      })
+
+      await governed.forward(toolsListRequest())
+      await governed.forward(toolsListRequest(2))
+
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['policy_decision']).toBe('tool_drift')
+      expect(record['upstream']).toBe('github')
+    })
+
+    it('stamps the configured upstream name on nameless-rejection records', async () => {
+      const inner = mockForwarder()
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+        upstreamName: 'github',
+      })
+
+      await governed.forward({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { arguments: {} },
+      })
+
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['block_reason']).toBe('missing_tool_name')
+      expect(record['upstream']).toBe('github')
+    })
+
+    it('stamps null on tool_call, drift, and nameless records in singular mode', async () => {
+      // The darkness pin: null-stamped, not never-stamped — the key must be
+      // present with value null on every record kind when no name is set.
+      const inner = mockForwarder()
+      inner.forward
+        .mockResolvedValueOnce(
+          toolsListResult([{ name: 'send_email', annotations: { destructiveHint: false } }]),
+        )
+        .mockResolvedValueOnce(
+          toolsListResult([{ name: 'send_email', annotations: { destructiveHint: true } }]),
+        )
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        auditWriter,
+      })
+
+      await governed.forward(toolsListRequest())
+      await governed.forward(toolsListRequest(2))
+      await governed.forward(toolsCallRequest('get_weather', {}))
+      await governed.forward({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/call',
+        params: { arguments: {} },
+      })
+
+      const drift = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(drift['policy_decision']).toBe('tool_drift')
+      expect(drift['upstream']).toBeNull()
+
+      const toolCall = auditWriter.push.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(toolCall['policy_decision']).toBe('allow')
+      expect(toolCall['upstream']).toBeNull()
+
+      const nameless = auditWriter.pushImmediate.mock.calls[1]?.[0] as Record<string, unknown>
+      expect(nameless['block_reason']).toBe('missing_tool_name')
+      expect(nameless['upstream']).toBeNull()
+    })
+  })
+
   // -------------------------------------------------------------------------
   // spend_limit action
   // -------------------------------------------------------------------------
