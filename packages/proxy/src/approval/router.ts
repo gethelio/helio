@@ -70,6 +70,13 @@ export interface ApprovalSubmitParams {
   readonly tool_input: Record<string, unknown>
   readonly matched_rule: CompiledPolicyRule | undefined
   readonly session_id: string | null
+  /**
+   * Identity-strategy attribution for session_id (issue #251).
+   * Required-nullable so no submit site can silently forget it.
+   */
+  readonly session_source: string | null
+  /** Upstream attribution (issue #292); null in singular mode. */
+  readonly upstream: string | null
   /** Breached budget context; marks the ticket as break-glass (issue #14). */
   readonly breached_budgets?: readonly BudgetBreachContext[]
   /**
@@ -150,6 +157,8 @@ export class ApprovalRouter {
       rule_index: rule?.index ?? null,
       channel_name: channelName,
       session_id: params.session_id,
+      session_source: params.session_source,
+      upstream: params.upstream,
       timeout_ms: timeoutMs,
       breached_budgets: params.breached_budgets,
     })
@@ -265,6 +274,10 @@ export class ApprovalRouter {
       rule_index: rule?.index ?? null,
       channel_name: `${NATIVE_CHANNEL_PREFIX}${params.origin}`,
       session_id: params.session_id,
+      // Adapter-supplied ids are sideband-attributed by definition (issue
+      // #251); deriving it at this single choke point means no future
+      // adapter can forget it. Upstream stays absent: no MCP door here.
+      session_source: params.session_id != null ? 'sideband' : null,
       timeout_ms: timeoutMs,
       breached_budgets: params.breached_budgets,
     })

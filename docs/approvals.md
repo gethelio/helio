@@ -7,7 +7,7 @@ Rule-level `approval` config is optional. If a `require_approval` rule omits it,
 ## How Approvals Work
 
 1. A `tools/call` request matches a rule with `action: require_approval`.
-2. The proxy creates an **approval ticket** containing the tool name, arguments, matched rule, and session ID.
+2. The proxy creates an **approval ticket** containing the tool name, arguments, matched rule, and session ID — plus, when attributed, the session's identity-strategy source (`session_source`, issue #251) and the upstream name (`upstream`, issue #292; named-upstream configurations only).
 3. The ticket is sent to the configured **approval channel** (dashboard, webhook, or Slack).
 4. The HTTP request is held open while waiting for a decision.
 5. A human approves, denies, the timeout fires, the client disconnects, or the proxy shuts down.
@@ -76,6 +76,7 @@ approval:
     "rule_index": 0,
     "channel_name": "webhook",
     "session_id": "session-abc",
+    "session_source": "header",
     "requested_at": "2026-04-09T12:00:00.000Z",
     "timeout_at": "2026-04-09T12:05:00.000Z",
     "timeout_ms": 300000,
@@ -84,6 +85,8 @@ approval:
   }
 }
 ```
+
+Both attribution fields are optional-absent: `session_source` appears whenever a session identity resolved, and `upstream` appears only once named upstreams are configured — an unattributed ticket omits the keys rather than sending null.
 
 **HMAC signing:** When `secret` is configured, the request includes an `x-helio-signature` header with the format `sha256=<hex_digest>`. The signature is computed as HMAC-SHA256 over the JSON request body using the configured secret.
 

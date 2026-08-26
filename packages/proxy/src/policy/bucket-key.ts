@@ -45,3 +45,21 @@ export function parseRuleIndex(key: string): number | undefined {
 export function toolLimitKey(toolName: string, upstreamName?: string): string {
   return upstreamName ? `upstream:${upstreamName}:tool:${toolName}` : `tool:${toolName}`
 }
+
+/** Matches the upstream partition prefix stamped by {@link toolLimitKey}. */
+const UPSTREAM_PREFIX_RE = /^upstream:([^:]+):/
+
+/**
+ * Parse the upstream name out of a limit key built by {@link toolLimitKey}
+ * with a name (issue #292). Every other key family (`tool:`, `session:`,
+ * `sender:`) returns null — only a named tool key ever starts `upstream:`,
+ * and client-influenced substrings (tool names, session ids) only appear
+ * AFTER those fixed prefixes, so the prefix is unambiguous. A name embedding
+ * a colon truncates at the first colon: the colon-free charset is #293's
+ * config-validation promise, so this parse documents today's behavior
+ * instead of guessing at rejection semantics.
+ */
+export function upstreamFromLimitKey(key: string): string | null {
+  const match = UPSTREAM_PREFIX_RE.exec(key)
+  return match?.[1] ?? null
+}

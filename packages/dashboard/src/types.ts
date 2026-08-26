@@ -106,6 +106,10 @@ export interface ApprovalTicket {
   readonly rule_index: number | null
   readonly channel_name: string
   readonly session_id: string | null
+  /** Identity strategy behind session_id (issue #251); absent when unattributed. */
+  readonly session_source?: string
+  /** Upstream attribution (issue #292); absent in singular mode. */
+  readonly upstream?: string
   readonly requested_at: string
   readonly timeout_at: string
   readonly timeout_ms: number

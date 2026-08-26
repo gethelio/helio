@@ -124,6 +124,53 @@ describe('ApprovalsPage', () => {
     })
   })
 
+  it('renders upstream and the session source on an expanded ticket (issues #292/#251)', async () => {
+    const namedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      upstream: 'github',
+      session_source: 'header',
+    }
+    mockFetchApprovals.mockResolvedValue({
+      data: [namedTicket],
+      total: 1,
+      limit: 1000,
+      offset: 0,
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('delete_record')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('delete_record'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Upstream')).toBeTruthy()
+      expect(screen.getAllByText('github').length).toBeGreaterThanOrEqual(1)
+      expect(document.body.textContent).toContain('sess-abc (header)')
+    })
+  })
+
+  it('renders no Upstream row for a ticket without one (issue #292 darkness pin)', async () => {
+    mockFetchApprovals.mockResolvedValue({
+      data: [pendingTicket],
+      total: 1,
+      limit: 1000,
+      offset: 0,
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('delete_record')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('delete_record'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Session ID')).toBeTruthy()
+    })
+    expect(screen.queryByText('Upstream')).toBeNull()
+    expect(document.body.textContent).not.toContain('(header)')
+  })
+
   it('renders breached budget context on a pending break-glass ticket (issue #14)', async () => {
     const breakGlassTicket: ApprovalTicket = {
       ...pendingTicket,

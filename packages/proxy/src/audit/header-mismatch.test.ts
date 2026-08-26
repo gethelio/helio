@@ -58,7 +58,16 @@ describe('buildHeaderMismatchAuditRecord', () => {
       origin: 'mcp',
       metadata: null,
       protocol_version: '2026-07-28',
+      upstream: null,
     })
+  })
+
+  it('stamps the caller-supplied upstream name, defaulting to null (issue #292)', () => {
+    const named = buildHeaderMismatchAuditRecord(baseRejection, 'production', 'github')
+    expect(named.upstream).toBe('github')
+
+    const unnamed = buildHeaderMismatchAuditRecord(baseRejection, 'production')
+    expect(unnamed.upstream).toBeNull()
   })
 
   it('falls back to the reserved sentinel when the body carries no name', () => {

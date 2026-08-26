@@ -509,6 +509,13 @@ function PendingCard({
           {ticket.tool_name}
         </span>
 
+        {/* Upstream attribution — rendered only when present (issue #292) */}
+        {ticket.upstream && (
+          <span className="hidden shrink-0 truncate font-mono text-xs text-gray-400 md:block md:max-w-24">
+            {ticket.upstream}
+          </span>
+        )}
+
         {/* Session / Agent ID */}
         <span className="hidden w-20 shrink-0 truncate text-xs text-gray-500 sm:block">
           {truncateId(ticket.session_id)}
@@ -557,8 +564,17 @@ function PendingCard({
 
           <BreachedBudgets ticket={ticket} />
 
+          {ticket.upstream && (
+            <DetailSection label="Upstream">
+              <span className="font-mono text-xs">{ticket.upstream}</span>
+            </DetailSection>
+          )}
+
           <DetailSection label="Session ID">
-            <span className="font-mono text-xs">{ticket.session_id ?? '\u2014'}</span>
+            <span className="font-mono text-xs">
+              {ticket.session_id ?? '\u2014'}
+              {ticket.session_source ? ` (${ticket.session_source})` : ''}
+            </span>
           </DetailSection>
 
           <DetailSection label="Channel">

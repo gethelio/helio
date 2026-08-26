@@ -480,6 +480,7 @@ export class GovernedForwarder implements McpForwarder {
       metadata: null,
       // Drift is a cache event, not a request: no protocol claim exists.
       protocol_version: null,
+      upstream: this.upstreamName ?? null,
     })
   }
 
@@ -758,6 +759,8 @@ export class GovernedForwarder implements McpForwarder {
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
         session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
+        upstream: this.upstreamName ?? null,
         breached_budgets: gate.breachContexts,
         approval: gate.approval,
       },
@@ -1152,6 +1155,7 @@ export class GovernedForwarder implements McpForwarder {
         origin: 'mcp',
         metadata: null,
         protocol_version: request.protocolVersion ?? null,
+        upstream: this.upstreamName ?? null,
       })
     }
 
@@ -1174,6 +1178,8 @@ export class GovernedForwarder implements McpForwarder {
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
         session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
+        upstream: this.upstreamName ?? null,
       },
       request.signal,
     )
@@ -1860,6 +1866,7 @@ export class GovernedForwarder implements McpForwarder {
       origin: 'mcp',
       metadata: null,
       protocol_version: request.protocolVersion ?? null,
+      upstream: this.upstreamName ?? null,
     }
 
     // Security-critical decisions — denies, approval resolutions, and

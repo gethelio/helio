@@ -36,6 +36,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     origin: 'mcp',
     metadata: null,
     protocol_version: null,
+    upstream: null,
     created_at: '2025-01-15T10:00:00.100Z',
   }
   return {
@@ -178,7 +179,7 @@ describe('recordsToCsv', () => {
     expect(row).toContain('"tool,with,commas"')
   })
 
-  it('includes all 29 AuditRecord fields in headers, in a stable order', () => {
+  it('includes all 30 AuditRecord fields in headers, in a stable order', () => {
     // Downstream consumers parse by column index, so new columns must only
     // ever be appended, never inserted or reordered.
     expect(CSV_HEADERS).toEqual([
@@ -211,6 +212,7 @@ describe('recordsToCsv', () => {
       'metadata',
       'session_source',
       'protocol_version',
+      'upstream',
     ])
   })
 
@@ -265,35 +267,35 @@ describe('recordsToCsv', () => {
 })
 
 // ---------------------------------------------------------------------------
-// protocol_version column (issue #219) — the trailing column; session_source
-// (issue #218) now sits second-to-last.
+// upstream column (issue #292) — the trailing column; protocol_version
+// (issue #219) now sits second-to-last.
 // ---------------------------------------------------------------------------
 
-describe('protocol_version column', () => {
-  it('appends protocol_version as the LAST column so positional consumers hold', () => {
-    expect(CSV_HEADERS[CSV_HEADERS.length - 1]).toBe('protocol_version')
-    expect(CSV_HEADERS[CSV_HEADERS.length - 2]).toBe('session_source')
+describe('upstream column', () => {
+  it('appends upstream as the LAST column so positional consumers hold', () => {
+    expect(CSV_HEADERS[CSV_HEADERS.length - 1]).toBe('upstream')
+    expect(CSV_HEADERS[CSV_HEADERS.length - 2]).toBe('protocol_version')
     // The pre-#218 prefix stays byte-stable.
     expect(CSV_HEADERS.slice(0, 3)).toEqual(['id', 'timestamp', 'session_id'])
   })
 
-  it('exports the protocol_version value in the trailing cell', () => {
-    const csv = recordsToCsv([
-      makeRecord({ session_source: 'header', protocol_version: '2026-07-28' }),
-    ])
+  it('exports the upstream value in the trailing cell', () => {
+    const csv = recordsToCsv([makeRecord({ protocol_version: '2026-07-28', upstream: 'github' })])
     const lines = csv.split('\n')
     const headers = (lines[0] ?? '').split(',')
     const cells = (lines[1] ?? '').split(',')
-    expect(headers[headers.length - 1]).toBe('protocol_version')
-    expect(cells[cells.length - 1]).toBe('2026-07-28')
-    // session_source keeps exporting by name in its (now inner) cell.
-    expect(cells[headers.indexOf('session_source')]).toBe('header')
+    expect(headers[headers.length - 1]).toBe('upstream')
+    expect(cells[cells.length - 1]).toBe('github')
+    // protocol_version keeps exporting by name in its (now inner) cell.
+    expect(cells[headers.indexOf('protocol_version')]).toBe('2026-07-28')
   })
 
-  it('exports an empty trailing cell when protocol_version is null', () => {
-    const csv = recordsToCsv([makeRecord({ protocol_version: null })])
+  it('exports an empty trailing cell when upstream is null', () => {
+    const csv = recordsToCsv([makeRecord({ upstream: null })])
     const lines = csv.split('\n')
+    const headers = (lines[0] ?? '').split(',')
     const cells = (lines[1] ?? '').split(',')
+    expect(headers[headers.length - 1]).toBe('upstream')
     expect(cells[cells.length - 1]).toBe('')
   })
 })

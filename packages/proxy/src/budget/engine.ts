@@ -247,6 +247,12 @@ export interface BudgetCommitEvent {
   readonly limit: number
   readonly currency: string
   readonly utilization: number
+  /**
+   * Upstream attribution from the charge context (issue #292), or null.
+   * Reminted frozen-plan charges drop the label by design, so deferred
+   * sideband commits always emit null here.
+   */
+  readonly upstream: string | null
 }
 
 /**
@@ -264,6 +270,8 @@ export interface BudgetBreachEvent {
   readonly spent: number
   readonly limit: number
   readonly currency: string
+  /** Upstream attribution from the peek entry's context (issue #292), or null. */
+  readonly upstream: string | null
 }
 
 /** Wire-ready bucket state for `GET /api/budgets` (snake_case DTO). */
@@ -520,6 +528,7 @@ export class BudgetEngine {
           limit: charge.budget.limit,
           currency: charge.budget.currency,
           utilization: snapshot.spent / charge.budget.limit,
+          upstream: charge.upstream ?? null,
         })
       } catch (err) {
         // eslint-disable-next-line no-console -- Subscriber bugs must not corrupt money state
@@ -548,6 +557,7 @@ export class BudgetEngine {
           spent: entry.spent,
           limit: entry.budget.limit,
           currency: entry.budget.currency,
+          upstream: entry.upstream,
         })
       } catch (err) {
         // eslint-disable-next-line no-console -- Subscriber bugs must not affect gate outcomes

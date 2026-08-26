@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
 import type { DashboardAppDeps } from './api.js'
-import { DashboardEventBus } from './event-bus.js'
+import { DashboardEventBus, dashboardEventCallbacks } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
 import type { AuditRecord } from '../audit/types.js'
 import { ApprovalQueue } from '../approval/queue.js'
@@ -107,6 +107,7 @@ function insertAuditRecord(
     session_id: null,
     session_source: null,
     protocol_version: null,
+    upstream: null,
     agent_id: null,
     environment: null,
     tool_name: 'test_tool',
@@ -233,6 +234,44 @@ describe('GET /api/feed', () => {
 // ---------------------------------------------------------------------------
 // Audit search
 // ---------------------------------------------------------------------------
+
+describe('upstream filters (issue #292)', () => {
+  it('filters /api/audit by upstream, exact match', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/audit?upstream=github')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.upstream).toBe('github')
+  })
+
+  it('filters /api/audit/export by upstream', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/audit/export?upstream=github')
+    expect(res.status).toBe(200)
+    const records = (await res.json()) as AuditRecord[]
+    expect(records).toHaveLength(1)
+    expect(records[0]?.upstream).toBe('github')
+  })
+
+  it('filters /api/feed by upstream — the feed gains its first filter', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/feed?upstream=github')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.upstream).toBe('github')
+  })
+})
 
 describe('GET /api/audit', () => {
   it('returns all records with no filters', async () => {
@@ -601,6 +640,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     // Find the ticket
     const tickets = approvalQueue.listPending()
@@ -631,6 +672,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     approvalRouter.approve(at(tickets, 0).id, 'someone')
@@ -648,6 +691,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     const res = await post(`/api/approvals/${at(tickets, 0).id}/approve`, {})
@@ -663,6 +708,8 @@ describe('POST /api/approvals/:id/deny', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
 
@@ -689,6 +736,8 @@ describe('POST /api/approvals/:id/deny', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     approvalRouter.deny(at(tickets, 0).id, 'someone')
@@ -706,6 +755,8 @@ describe('POST /api/approvals/:id/break-glass', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
 
@@ -737,6 +788,8 @@ describe('POST /api/approvals/:id/break-glass', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     const res = await post(`/api/approvals/${at(tickets, 0).id}/break-glass`, {
@@ -1108,7 +1161,7 @@ describe('GET /api/budgets/:name/events/export', () => {
     const lines = (await res.text()).split('\n')
     expect(lines[0]).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
     // Newest first in the CSV rows too, not only in the JSON body.
     expect(lines[1]).toContain('tool-1')
@@ -1197,7 +1250,7 @@ describe('GET /api/budgets/:name/events/export', () => {
     expect(csv.status).toBe(200)
     expect(await csv.text()).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
   })
 
@@ -1339,33 +1392,55 @@ describe('GET /api/events', () => {
     const initial = await readWithTimeout(1000)
     expect(initial).toContain('event: heartbeat')
 
-    // Emit an event and read it
-    eventBus.emit('action', {
-      id: 'evt-1',
-      tool_name: 'test_tool',
-      policy_decision: 'allow',
-      block_reason: null,
-      approval_status: null,
-      session_id: null,
-      session_source: null,
-      protocol_version: null,
-      agent_id: null,
-      environment: null,
-      timestamp: '2026-04-02T12:00:00Z',
-      total_duration_ms: 5,
-      approval_wait_ms: 0,
-      proxy_compute_ms: 5,
-      flagged_destructive: false,
-      dry_run: false,
-      matched_rule: null,
-      matched_rule_index: null,
-      record_kind: 'tool_call',
-      origin: 'mcp',
-    })
+    // Drive the bus through the production mapper path (issue #292): the
+    // factory's onPersist is what the composition roots wire, so the SSE
+    // payload reflects the real persist -> map -> bus -> SSE projection,
+    // never a hand-built event literal.
+    dashboardEventCallbacks(eventBus).onPersist(
+      {
+        timestamp: '2026-04-02T12:00:00Z',
+        session_id: null,
+        session_source: null,
+        protocol_version: null,
+        upstream: null,
+        agent_id: null,
+        environment: null,
+        tool_name: 'test_tool',
+        tool_input: {},
+        policy_decision: 'allow',
+        block_reason: null,
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: 5,
+        approval_wait_ms: 0,
+        proxy_compute_ms: 5,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      },
+      'evt-1',
+    )
 
     const eventData = await readWithTimeout(1000)
     expect(eventData).toContain('event: action')
-    expect(eventData).toContain('test_tool')
+    // The frame is `event:` / `data:` / `id:` lines — parse the data payload.
+    const dataLine = eventData.split('\n').find((line) => line.startsWith('data: '))
+    expect(dataLine).toBeDefined()
+    const payload = JSON.parse((dataLine ?? '').slice('data: '.length)) as Record<string, unknown>
+    expect(payload['tool_name']).toBe('test_tool')
+    // Darkness spelling for events: the upstream key is PRESENT, value null.
+    expect('upstream' in payload).toBe(true)
+    expect(payload['upstream']).toBeNull()
+    expect(payload['protocol_version']).toBeNull()
 
     await reader.cancel()
   })
@@ -1403,6 +1478,7 @@ describe('GET /api/events', () => {
       limit: 100,
       currency: 'USD',
       utilization: 1.2,
+      upstream: null,
     })
     const update = await readWithTimeout(1000)
     expect(update).toContain('event: budget_update')
@@ -1416,6 +1492,7 @@ describe('GET /api/events', () => {
       spent: 90,
       limit: 100,
       currency: 'USD',
+      upstream: null,
     })
     const breach = await readWithTimeout(1000)
     expect(breach).toContain('event: budget_breached')
@@ -1649,6 +1726,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1675,6 +1754,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1696,6 +1777,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1714,6 +1797,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1822,6 +1907,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1838,6 +1925,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1853,6 +1942,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id

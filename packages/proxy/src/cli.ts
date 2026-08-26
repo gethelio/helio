@@ -33,7 +33,11 @@ import { RateLimiter } from './policy/index.js'
 import { SpendLimiter } from './policy/index.js'
 import { BudgetEngine, BudgetLedger, budgetEventsToCsv, compileBudgets } from './budget/index.js'
 import { parseDuration } from './config/schema.js'
-import { createDashboardAppWithLifecycle, DashboardEventBus } from './dashboard/index.js'
+import {
+  createDashboardAppWithLifecycle,
+  DashboardEventBus,
+  dashboardEventCallbacks,
+} from './dashboard/index.js'
 import type { AuditRecord } from './audit/index.js'
 import { CSV_HEADERS, csvEscape } from './audit/csv.js'
 import type { ServerHandle } from './server.js'
@@ -247,7 +251,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   const budgets = compileBudgets(config.budgets)
 
   // Create dashboard event bus (used by all components for real-time events)
+  // and the shared record/ticket/limiter-state projections onto it. The
+  // source-guard test pins this exact binding + assignment form.
   const eventBus = new DashboardEventBus()
+  const cbs = dashboardEventCallbacks(eventBus)
 
   // Create audit writer
   const auditStore = new AuditStore({
@@ -269,30 +276,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
 
   const auditWriter = new AuditWriter({
     store: auditStore,
-    onPersist: (record, id) => {
-      eventBus.emit('action', {
-        id,
-        tool_name: record.tool_name,
-        policy_decision: record.policy_decision,
-        block_reason: record.block_reason,
-        approval_status: record.approval_status,
-        session_id: record.session_id,
-        session_source: record.session_source,
-        protocol_version: record.protocol_version,
-        agent_id: record.agent_id,
-        environment: record.environment,
-        timestamp: record.timestamp,
-        total_duration_ms: record.total_duration_ms,
-        approval_wait_ms: record.approval_wait_ms,
-        proxy_compute_ms: record.proxy_compute_ms,
-        flagged_destructive: record.flagged_destructive,
-        dry_run: record.dry_run,
-        matched_rule: record.matched_rule,
-        matched_rule_index: record.matched_rule_index,
-        record_kind: record.record_kind,
-        origin: record.origin,
-      })
-    },
+    onPersist: cbs.onPersist,
   })
   registerCrashDrainHook(() => {
     try {
@@ -315,14 +299,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     defaultOnTimeout: config.approval.default_on_timeout,
     channels,
     queue: approvalQueue,
-    onSubmit: (ticket) => {
-      eventBus.emit('approval_requested', {
-        ticket_id: ticket.id,
-        tool_name: ticket.tool_name,
-        channel: ticket.channel_name,
-        requested_at: ticket.requested_at,
-      })
-    },
+    onSubmit: cbs.onApprovalSubmit,
     onResolve: (ticket) => {
       eventBus.emit('approval_resolved', {
         ticket_id: ticket.id,
@@ -338,26 +315,10 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
 
   // Create rate and spend limiters
   const rateLimiter = new RateLimiter({
-    onWarning: (state) => {
-      eventBus.emit('limit_warning', {
-        key: state.key,
-        type: 'rate',
-        current: state.current,
-        limit: state.limit,
-        utilization: state.current / state.limit,
-      })
-    },
+    onWarning: cbs.onRateWarning,
   })
   const spendLimiter = new SpendLimiter({
-    onWarning: (state) => {
-      eventBus.emit('limit_warning', {
-        key: state.key,
-        type: 'spend',
-        current: state.current_spend,
-        limit: state.limit,
-        utilization: state.current_spend / state.limit,
-      })
-    },
+    onWarning: cbs.onSpendWarning,
   })
 
   // One budget engine shared by both doors — one pot, MCP and sideband alike.
@@ -737,6 +698,7 @@ interface ExportOptions {
   decision?: string
   reason?: string
   session?: string
+  upstream?: string
   from?: string
   to?: string
   limit: string
@@ -763,6 +725,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
         ['--decision', opts.decision],
         ['--reason', opts.reason],
         ['--session', opts.session],
+        ['--upstream', opts.upstream],
         ['--from', opts.from],
         ['--to', opts.to],
       ] as const
@@ -818,6 +781,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
         policy_decision: opts.decision,
         block_reason: opts.reason,
         session_id: opts.session,
+        upstream: opts.upstream,
         from: opts.from,
         to: opts.to,
       },
@@ -958,6 +922,7 @@ program
   .option('--decision <decision>', 'Filter by policy decision')
   .option('--reason <reason>', 'Filter by block reason')
   .option('--session <id>', 'Filter by session ID')
+  .option('--upstream <name>', 'Filter by upstream name')
   .option('--from <iso>', 'Start time (ISO 8601)')
   .option('--to <iso>', 'End time (ISO 8601)')
   .option('--limit <n>', 'Max records to export (up to 10000)', '1000')

@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS audit_records (
   origin            TEXT NOT NULL DEFAULT 'mcp',
   metadata          TEXT,
   protocol_version  TEXT,
-  created_at        TEXT NOT NULL
+  created_at        TEXT NOT NULL,
+  upstream          TEXT
 );
 `
 
@@ -89,6 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_block_reason     ON audit_records (block_re
 CREATE INDEX IF NOT EXISTS idx_audit_upstream_status_created_at ON audit_records (upstream_http_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_record_kind     ON audit_records (record_kind);
 CREATE INDEX IF NOT EXISTS idx_audit_origin          ON audit_records (origin);
+CREATE INDEX IF NOT EXISTS idx_audit_upstream        ON audit_records (upstream);
 `
 
 const INSERT_SQL = `
@@ -98,14 +100,16 @@ INSERT INTO audit_records (
   approved_by, upstream_response, upstream_error, upstream_latency_ms,
   upstream_http_status,
   total_duration_ms, approval_wait_ms, proxy_compute_ms,
-  flagged_destructive, dry_run, record_kind, origin, metadata, protocol_version, created_at
+  flagged_destructive, dry_run, record_kind, origin, metadata, protocol_version, created_at,
+  upstream
 ) VALUES (
   @id, @timestamp, @session_id, @session_source, @agent_id, @environment, @tool_name, @tool_input,
   @policy_decision, @block_reason, @matched_rule, @matched_rule_index, @evidence_chain, @approval_status,
   @approved_by, @upstream_response, @upstream_error, @upstream_latency_ms,
   @upstream_http_status,
   @total_duration_ms, @approval_wait_ms, @proxy_compute_ms,
-  @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @protocol_version, @created_at
+  @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @protocol_version, @created_at,
+  @upstream
 )
 `
 
@@ -126,6 +130,10 @@ const REQUIRED_AUDIT_COLUMNS = [
   // Same clean break, same unreleased cycle (issue #219): released users see
   // ONE break, at v0.12.0.
   'protocol_version',
+  // The one ratified exception to the clean break (issue #292): a
+  // v0.12.0-complete database missing ONLY this column is migrated in place
+  // by migrateAuditUpstreamColumn instead of failing the assertion.
+  'upstream',
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -162,6 +170,7 @@ interface RawAuditRow {
   metadata: string | null
   protocol_version: string | null
   created_at: string
+  upstream: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +211,7 @@ function deserializeRow(row: RawAuditRow): AuditRecord {
     origin: row.origin,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
     protocol_version: row.protocol_version,
+    upstream: row.upstream,
     created_at: row.created_at,
   }
 }
@@ -248,6 +258,10 @@ function buildWhereClause(filters: AuditQueryFilters): {
     conditions.push('session_id = ?')
     params.push(filters.session_id)
   }
+  if (filters.upstream !== undefined) {
+    conditions.push('upstream = ?')
+    params.push(filters.upstream)
+  }
   if (filters.agent_id !== undefined) {
     conditions.push('agent_id = ?')
     params.push(filters.agent_id)
@@ -279,6 +293,44 @@ function buildWhereClause(filters: AuditQueryFilters): {
 
   const clause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
   return { clause, params }
+}
+
+/**
+ * One-time additive migration for the `upstream` column (issue #292) — the
+ * ratified narrow exception to the pre-1.0 clean-break policy: additive
+ * nullable columns and indexes only.
+ *
+ * Runs the ALTER only when the set of missing required columns is EXACTLY
+ * `{upstream}` — i.e. the database is v0.12.0-complete and lacks only the
+ * new column. Anything else (a pre-0.12 schema, a manually mangled file)
+ * falls through untouched to `assertRequiredSchema`'s clean-break error.
+ *
+ * Probe-then-ALTER races across processes (`helio start` + `helio export`
+ * on first upgrade): when the ALTER throws, re-probe — if another opener
+ * landed the column, report no migration; if the column is genuinely still
+ * absent, rethrow the original error so a locked or broken database keeps
+ * its raw failure.
+ *
+ * @returns true iff THIS call's ALTER added the column.
+ * @internal Exported for direct race-path testing only — not part of the
+ *   package API; keep off `audit/index.ts` and the package root.
+ */
+export function migrateAuditUpstreamColumn(db: DatabaseType): boolean {
+  const probe = (): Set<string> => {
+    const rows = db.pragma('table_info(audit_records)') as Array<{ name: string }>
+    return new Set(rows.map((row) => row.name))
+  }
+  const existing = probe()
+  const missing = REQUIRED_AUDIT_COLUMNS.filter((name) => !existing.has(name))
+  if (missing.length !== 1 || missing[0] !== 'upstream') return false
+
+  try {
+    db.exec('ALTER TABLE audit_records ADD COLUMN upstream TEXT')
+  } catch (err) {
+    if (probe().has('upstream')) return false
+    throw err
+  }
+  return true
 }
 
 /**
@@ -348,10 +400,16 @@ export class AuditStore {
     this.retentionMs = parseDuration(options.retention)
     this.includeResponses = options.includeResponses
 
-    // Create table first, validate schema, then create indexes.
-    // This preserves an explicit clean-break policy for incompatible
-    // pre-1.0 local schemas.
+    // Create table first, migrate v0.12 files, validate schema, then create
+    // indexes. This preserves an explicit clean-break policy for
+    // incompatible pre-1.0 local schemas; the upstream column is the one
+    // ratified additive exception (issue #292). Every open migrates —
+    // `helio start` and `helio export` construct the store the same way.
     this.db.exec(CREATE_TABLE_DDL)
+    if (migrateAuditUpstreamColumn(this.db)) {
+      // eslint-disable-next-line no-console -- Intentional operational notice; stderr keeps stdout clean for piped exports
+      console.error('[helio] Audit DB migrated: added column "upstream"')
+    }
     this.assertRequiredSchema(options.path)
     this.db.exec(CREATE_INDEX_DDL)
 
@@ -486,6 +544,7 @@ export class AuditStore {
       origin: record.origin,
       metadata: record.metadata ? JSON.stringify(record.metadata) : null,
       protocol_version: record.protocol_version,
+      upstream: record.upstream ?? null,
       created_at: now,
     })
 

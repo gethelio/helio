@@ -65,6 +65,18 @@ export interface ApprovalTicket {
   readonly rule_index: number | null
   readonly channel_name: string
   readonly session_id: string | null
+  /**
+   * Which identity strategy produced session_id (issue #251): the MCP
+   * resolver's vocabulary on proxy tickets, `sideband` on adapter tickets.
+   * OPTIONAL-ABSENT, not nullable: the ticket is the wire object, and an
+   * unattributed ticket omits the key rather than emitting null.
+   */
+  readonly session_source?: string
+  /**
+   * Upstream attribution (issue #292). Absent in singular mode and on
+   * native (sideband) tickets — same wire-additive optional spelling.
+   */
+  readonly upstream?: string
   readonly requested_at: string
   readonly timeout_at: string
   readonly timeout_ms: number

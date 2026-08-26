@@ -66,6 +66,10 @@ export class ApprovalQueue {
     timeout_ms: number
     /** Breached budget context on break-glass / merged tickets (issue #14). */
     breached_budgets?: readonly BudgetBreachContext[]
+    /** Identity-strategy attribution for session_id (issue #251). */
+    session_source?: string | null
+    /** Upstream attribution (issue #292); absent in singular mode. */
+    upstream?: string | null
   }): ApprovalTicket {
     if (this.closed) throw new Error('ApprovalQueue is closed')
 
@@ -78,6 +82,9 @@ export class ApprovalQueue {
       rule_index: params.rule_index,
       channel_name: params.channel_name,
       session_id: params.session_id,
+      // Wire-darkness spelling: set only when attributed, never null.
+      ...(params.session_source != null && { session_source: params.session_source }),
+      ...(params.upstream != null && { upstream: params.upstream }),
       requested_at: new Date(now).toISOString(),
       timeout_at: new Date(now + params.timeout_ms).toISOString(),
       timeout_ms: params.timeout_ms,

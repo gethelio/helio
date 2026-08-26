@@ -36,6 +36,17 @@ Maintainer notes:
 
 ### Added
 
+- Upstream attribution substrate (#292): audit records gain a nullable
+  `upstream` column (indexed, filterable, appended last in CSV
+  exports), dashboard action, approval, limit-warning, and budget
+  events carry an `upstream` field, approval tickets gain optional
+  `upstream` and `session_source` (#251) fields rendered in Slack and
+  the dashboard queue, and budget event listings read `upstream` from
+  the referenced audit record. New filters: `upstream` on `/api/audit`,
+  `/api/audit/export`, and `/api/feed`, plus `helio export --upstream`.
+  Every upstream value is null or absent until the multi-upstream
+  composition ships; `session_source` on tickets is live immediately.
+
 - Internal multi-upstream substrate (#295): the policy match context,
   the tool-scope limiter keys, budget charges and peek entries, and
   the upstream lifecycle log lines (era detection, annotation priming,
@@ -48,6 +59,15 @@ Maintainer notes:
   a new required `upstream: string | null` field, so charge-context
   object literals add `upstream: null` to compile. Runtime behavior
   is unchanged.
+
+### Changed
+
+- First use of the ratified additive-migration path (#292): a v0.12.0
+  audit database missing only the new `upstream` column is migrated in
+  place on first open with a single `ALTER TABLE` and one stderr
+  notice. This is a narrow boundary rule — additive nullable columns
+  and indexes only — not a general migration promise; databases older
+  than v0.12.0 still hit the documented clean break.
 
 ### Fixed
 

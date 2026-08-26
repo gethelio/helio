@@ -180,6 +180,46 @@ describe('SlackChannel', () => {
 // Block Kit helpers
 // ---------------------------------------------------------------------------
 
+describe('buildApprovalBlocks — upstream and session_source (issues #292/#251)', () => {
+  function sectionText(ticket: ApprovalTicket): string {
+    const blocks = buildApprovalBlocks(ticket)
+    const section = blocks.find((b) => b.type === 'section') as {
+      text: { text: string }
+    }
+    return section.text.text
+  }
+
+  it('renders an Upstream line after Tool and the session source parenthetical', () => {
+    const text = sectionText(makeTicket({ upstream: 'github', session_source: 'header' }))
+
+    expect(text).toContain('*Upstream:* `github`')
+    const toolIdx = text.indexOf('*Tool:*')
+    const upstreamIdx = text.indexOf('*Upstream:*')
+    const inputIdx = text.indexOf('*Input:*')
+    expect(upstreamIdx).toBeGreaterThan(toolIdx)
+    expect(upstreamIdx).toBeLessThan(inputIdx)
+    expect(text).toContain('*Session:* `s1` (header)')
+  })
+
+  it('sanitizes both interpolations like every other ticket field', () => {
+    const text = sectionText(makeTicket({ upstream: 'git`hub*', session_source: 'hea*der' }))
+    // The Upstream line is a code span: backticks stripped, mrkdwn
+    // metacharacters preserved — a mrkdwn-sanitized line would drop the *.
+    expect(text).toContain('*Upstream:* `github*`')
+    expect(text).not.toContain('git`hub')
+    // The source parenthetical is raw mrkdwn: metacharacters stripped —
+    // a code-span-sanitized source would keep the *.
+    expect(text).toContain('(header)')
+    expect(text).not.toContain('(hea*der)')
+  })
+
+  it('renders exactly the pre-#292 lines when neither field is set (darkness pin)', () => {
+    expect(sectionText(makeTicket())).toBe(
+      '*Tool:* `create_payment`\n*Input:*\n```\n{"amount":5000,"currency":"GBP"}\n```\n*Rule:* approve-payments\n*Session:* `s1`',
+    )
+  })
+})
+
 describe('buildApprovalBlocks', () => {
   it('includes header, section, context, and actions blocks', () => {
     const blocks = buildApprovalBlocks(makeTicket())
@@ -495,6 +535,8 @@ describe('SlackChannel integration with ApprovalRouter', () => {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'slack' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     // Give the notify() call time to fire
@@ -516,6 +558,8 @@ describe('SlackChannel integration with ApprovalRouter', () => {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'slack' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     await new Promise((resolve) => setTimeout(resolve, 10))

@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import Database from 'better-sqlite3'
 import { createSidebandApp } from '../evidence/api.js'
 import { EvidenceStore } from '../evidence/store.js'
 import { GovernanceService } from './governance-service.js'
@@ -12,6 +11,7 @@ import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
+import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -505,7 +505,7 @@ describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
 
   it('a budget ledger fault maps to a 500 on /audit; the adapter retry gets 201 (PR 2)', async () => {
     const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     let failNext = true
     const failOnce: BudgetLedgerSink = {
@@ -569,7 +569,7 @@ describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
   it('a post-commit fault maps to a 500; the unretried expiry lands under the committed id (issue #149)', async () => {
     const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
     let time = 1_000_000
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const budgetEngine = new BudgetEngine({
       budgets: compileBudgets([

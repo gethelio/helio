@@ -18,6 +18,7 @@ import type { AuditRecord } from './types.js'
 export function buildHeaderMismatchAuditRecord(
   rejection: HeaderMismatchRejection,
   environment?: string,
+  upstream?: string,
 ): Omit<AuditRecord, 'id' | 'created_at'> {
   return {
     timestamp: new Date().toISOString(),
@@ -56,5 +57,8 @@ export function buildHeaderMismatchAuditRecord(
     origin: 'mcp',
     metadata: null,
     protocol_version: rejection.protocolVersion ?? null,
+    // The door context lives with the caller (the composition root), not
+    // the rejection payload; singular composition passes nothing.
+    upstream: upstream ?? null,
   }
 }

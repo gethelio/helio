@@ -149,14 +149,22 @@ ORDER BY e.bucket_key ASC
 // go"), and money that moved under a since-retired config tuple still moved;
 // retention bounds the depth.
 const LIST_EVENTS_SQL = `
-SELECT id, budget_name, bucket_key, kind, amount, currency, tool_name,
-       origin, audit_record_id, timestamp, timestamp_ms, created_at
-FROM budget_events
-WHERE budget_name = ?
-ORDER BY timestamp_ms DESC, rowid DESC
+SELECT e.id AS id, e.budget_name AS budget_name, e.bucket_key AS bucket_key,
+       e.kind AS kind, e.amount AS amount, e.currency AS currency,
+       e.tool_name AS tool_name, e.origin AS origin,
+       e.audit_record_id AS audit_record_id, e.timestamp AS timestamp,
+       e.timestamp_ms AS timestamp_ms, e.created_at AS created_at,
+       a.upstream AS upstream
+FROM budget_events e
+LEFT JOIN audit_records a ON a.id = e.audit_record_id
+WHERE e.budget_name = ?
+ORDER BY e.timestamp_ms DESC, e.rowid DESC
 LIMIT ? OFFSET ?
 `
 
+// Join-free BY DESIGN: budget_events → audit_records is one-to-zero-or-one,
+// so the LEFT JOIN above cannot change row counts — keeping the COUNT on the
+// bare table pins the pagination invariant instead of trusting it.
 const COUNT_EVENTS_SQL = 'SELECT COUNT(*) AS total FROM budget_events WHERE budget_name = ?'
 
 /** Default page size for {@link BudgetLedger.listEvents}. */
@@ -180,6 +188,13 @@ export interface BudgetEventRecord {
   readonly timestamp: string
   readonly timestamp_ms: number
   readonly created_at: string
+  /**
+   * Upstream attribution read from the referenced audit record via LEFT
+   * JOIN (issue #292) — never a stored ledger column. Null on singular-mode
+   * records, dangling or null `audit_record_id`, and rows predating the
+   * audit column; a null renders as empty/absent, never a made-up label.
+   */
+  readonly upstream: string | null
 }
 
 /** One page of a budget's event history plus the unpaginated total. */

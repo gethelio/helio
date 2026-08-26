@@ -7,7 +7,6 @@ import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
-import Database from 'better-sqlite3'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { BudgetEngine } from '../budget/engine.js'
@@ -21,6 +20,7 @@ import { EvidenceStore } from '../evidence/index.js'
 import { compileSessionIdentity } from '../mcp/session-resolver.js'
 import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 import { resetSessionGateWarningsForTests } from '../policy/session-gate.js'
+import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -248,6 +248,17 @@ describe('GovernanceService.evaluate', () => {
     expect(records[0]?.immediate).toBe(true)
   })
 
+  it('stamps upstream null on sideband records — there is no MCP door here (issue #292)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'no-send', match: { tool: 'send' }, action: 'deny' }],
+    })
+    const { service, records } = makeService({ policy })
+    service.evaluate(evalInput())
+    expect(records).toHaveLength(1)
+    expect(records[0]?.record.upstream).toBeNull()
+  })
+
   it('does not consume rate counters at evaluate (peek only)', () => {
     const policy = compile({
       default: 'allow',
@@ -301,6 +312,40 @@ describe('GovernanceService.evaluate', () => {
     expect(approval.id).toBeTruthy()
     expect(approval.resolve_path).toBe(`/approval/${approval.id}/resolve`)
     expect(approvalRouter?.getTicket(approval.id)?.channel_name).toBe('native:openclaw')
+  })
+
+  it('native tickets derive session_source sideband from the session id (issue #251)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, approvalRouter } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput({ session_id: 'oc-1' }))
+    const approval = res.body['approval'] as { id: string }
+
+    const ticket = approvalRouter?.getTicket(approval.id)
+    expect(ticket?.session_source).toBe('sideband')
+    const wire = JSON.parse(JSON.stringify(ticket)) as Record<string, unknown>
+    expect(wire['session_source']).toBe('sideband')
+    // No door on the sideband: upstream never appears on native tickets.
+    expect('upstream' in wire).toBe(false)
+  })
+
+  it('native tickets without a session id carry neither attribution key (issue #251)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, approvalRouter } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput({ session_id: null }))
+    const approval = res.body['approval'] as { id: string }
+
+    const wire = JSON.parse(JSON.stringify(approvalRouter?.getTicket(approval.id))) as Record<
+      string,
+      unknown
+    >
+    expect('session_source' in wire).toBe(false)
+    expect('upstream' in wire).toBe(false)
   })
 
   describe('drift guard', () => {
@@ -1265,6 +1310,8 @@ describe('GovernanceService.resolveApproval', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const ticketId = queue.listPending()[0]?.id as string
     expect(service.resolveApproval(ticketId, { resolution: 'approved' }).body['error']).toBe(
@@ -2133,7 +2180,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
   })
 
   it('persists real ledger rows at /audit sharing the audit record id (PR 2)', () => {
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const { service, records } = makeService({
       budgets: [stripeBudget()],
@@ -2165,7 +2212,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     // (the route layer maps this to a 500) BEFORE the commit latch is set,
     // so nothing persists anywhere and the idempotent retry re-attempts the
     // whole commit cleanly.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     let failNext = true
     const failOnce: BudgetLedgerSink = {
@@ -2235,7 +2282,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     // must be the record a successful retry would have written, minus the
     // outcome: latched id (so the ledger row resolves), committed chain,
     // and the sideband block marking the commit.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const { service, records, advance, budgetEngine, evidenceStore } = makeService({
       withEvidence: true,
@@ -2924,7 +2971,7 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     // approved → committed (approved_overage) → post-commit failure → no
     // retry → expiry. The human decision, the sanctioned overage, and the
     // ledger linkage must all survive on the expired record.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const harness = makeService({
       withApprovals: true,
@@ -3046,6 +3093,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       spent: 0,
       limit: 10,
       currency: 'USD',
+      upstream: null,
     })
     expect(onBudgetCommit).not.toHaveBeenCalled()
   })
@@ -3238,6 +3286,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       limit: 100,
       currency: 'USD',
       utilization: 0.3,
+      upstream: null,
     })
   })
 
@@ -3268,6 +3317,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       limit: 10,
       currency: 'USD',
       utilization: 5,
+      upstream: null,
     })
   })
 })
