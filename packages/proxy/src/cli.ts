@@ -698,6 +698,7 @@ interface ExportOptions {
   decision?: string
   reason?: string
   session?: string
+  upstream?: string
   from?: string
   to?: string
   limit: string
@@ -724,6 +725,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
         ['--decision', opts.decision],
         ['--reason', opts.reason],
         ['--session', opts.session],
+        ['--upstream', opts.upstream],
         ['--from', opts.from],
         ['--to', opts.to],
       ] as const
@@ -779,6 +781,7 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
         policy_decision: opts.decision,
         block_reason: opts.reason,
         session_id: opts.session,
+        upstream: opts.upstream,
         from: opts.from,
         to: opts.to,
       },
@@ -919,6 +922,7 @@ program
   .option('--decision <decision>', 'Filter by policy decision')
   .option('--reason <reason>', 'Filter by block reason')
   .option('--session <id>', 'Filter by session ID')
+  .option('--upstream <name>', 'Filter by upstream name')
   .option('--from <iso>', 'Start time (ISO 8601)')
   .option('--to <iso>', 'End time (ISO 8601)')
   .option('--limit <n>', 'Max records to export (up to 10000)', '1000')

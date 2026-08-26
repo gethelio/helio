@@ -235,6 +235,44 @@ describe('GET /api/feed', () => {
 // Audit search
 // ---------------------------------------------------------------------------
 
+describe('upstream filters (issue #292)', () => {
+  it('filters /api/audit by upstream, exact match', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/audit?upstream=github')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.upstream).toBe('github')
+  })
+
+  it('filters /api/audit/export by upstream', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/audit/export?upstream=github')
+    expect(res.status).toBe(200)
+    const records = (await res.json()) as AuditRecord[]
+    expect(records).toHaveLength(1)
+    expect(records[0]?.upstream).toBe('github')
+  })
+
+  it('filters /api/feed by upstream — the feed gains its first filter', async () => {
+    const { get, auditStore } = setup()
+    insertAuditRecord(auditStore, { upstream: 'github', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: null, tool_name: 'b' })
+
+    const res = await get('/api/feed?upstream=github')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.upstream).toBe('github')
+  })
+})
+
 describe('GET /api/audit', () => {
   it('returns all records with no filters', async () => {
     const { get, auditStore } = setup()

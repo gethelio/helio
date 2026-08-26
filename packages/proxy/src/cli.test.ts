@@ -1697,6 +1697,52 @@ budget:
       }
     })
 
+    it('filters by upstream (issue #292)', async () => {
+      const { dir, configPath } = setupExport([
+        makeRecord({ upstream: 'github' }),
+        makeRecord({ upstream: null }),
+      ])
+
+      try {
+        const { code, stdout } = await runCli([
+          'export',
+          '-c',
+          configPath,
+          '-f',
+          'json',
+          '--upstream',
+          'github',
+        ])
+        expect(code).toBe(0)
+
+        const records = JSON.parse(stdout) as AuditRecord[]
+        expect(records).toHaveLength(1)
+        expect(records[0]?.upstream).toBe('github')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('rejects --budgets combined with --upstream, naming the flag (issue #292)', async () => {
+      const { dir, configPath } = setupExport([makeRecord()])
+
+      try {
+        const { code, stderr } = await runCli([
+          'export',
+          '-c',
+          configPath,
+          '--budgets',
+          'daily-cap',
+          '--upstream',
+          'github',
+        ])
+        expect(code).toBe(1)
+        expect(stderr).toContain('--budgets cannot be combined with audit filters (--upstream)')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('filters by tool name', async () => {
       const { dir, configPath } = setupExport([
         makeRecord({ tool_name: 'alpha' }),
@@ -1909,7 +1955,7 @@ audit:
 
       const BUDGET_CSV_HEADER =
         'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at'
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream'
 
       it('exports a budget ledger as CSV, newest first', async () => {
         const { dir, configPath } = setupBudgetExport([

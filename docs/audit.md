@@ -212,6 +212,7 @@ helio export
 | `--decision <decision>` | string | —            | Filter by policy decision.                                 |
 | `--reason <reason>`     | string | —            | Filter by block reason.                                    |
 | `--session <id>`        | string | —            | Filter by session ID.                                      |
+| `--upstream <name>`     | string | —            | Filter by upstream name (issue #292).                      |
 | `--from <iso>`          | string | —            | Start time (ISO 8601).                                     |
 | `--to <iso>`            | string | —            | End time (ISO 8601).                                       |
 | `--limit <n>`           | number | `1000`       | Maximum number of records to export (up to 10,000).        |
@@ -237,7 +238,7 @@ helio export --budgets daily-cap -f csv > daily-cap.csv
 
 Audit data is written to stdout; status messages go to stderr. This means you can pipe or redirect the output without capturing log messages.
 
-`--budgets <name>` switches the export target to the named budget's spend ledger, read from the same database file — it works offline, with the proxy stopped and the dashboard disabled. Ledger rows export newest-first with the same thirteen columns as the [ledger export endpoint](./sideband-api.md#get-apibudgetsnameeventsexport); `--format` and `--limit` apply unchanged, an unknown name exports an empty artifact, and combining `--budgets` with the audit filter flags (`--tool`, `--decision`, `--reason`, `--session`, `--from`, `--to`) is an error.
+`--budgets <name>` switches the export target to the named budget's spend ledger, read from the same database file — it works offline, with the proxy stopped and the dashboard disabled. Ledger rows export newest-first with the same thirteen columns as the [ledger export endpoint](./sideband-api.md#get-apibudgetsnameeventsexport); `--format` and `--limit` apply unchanged, an unknown name exports an empty artifact, and combining `--budgets` with the audit filter flags (`--tool`, `--decision`, `--reason`, `--session`, `--upstream`, `--from`, `--to`) is an error.
 
 ## Dashboard API Export
 
@@ -268,6 +269,7 @@ GET /api/audit/export
 | `record_kind`         | —       | Filter by record kind (exact match).               |
 | `channel_id`          | —       | Filter by `metadata.channel_id` (substring match). |
 | `sender_id`           | —       | Filter by `metadata.sender_id` (substring match).  |
+| `upstream`            | —       | Filter by upstream name (exact match).             |
 
 **Examples:**
 

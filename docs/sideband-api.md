@@ -415,14 +415,15 @@ See [Audit Trail](./audit.md) for the full audit record field reference and CLI 
 
 #### GET /api/feed
 
-Most recent audit records, newest-first. Designed for a live "activity feed" view that does not need server-side filtering.
+Most recent audit records, newest-first. Designed for a live "activity feed" view; its only server-side filter is `upstream` (issue #292) — every other dimension stays client-side.
 
 **Query parameters:**
 
-| Parameter | Default | Range      | Description                   |
-| --------- | ------- | ---------- | ----------------------------- |
-| `limit`   | `50`    | `[1, 200]` | Maximum records per response. |
-| `offset`  | `0`     | `[0, ∞)`   | Number of records to skip.    |
+| Parameter  | Default | Range      | Description                            |
+| ---------- | ------- | ---------- | -------------------------------------- |
+| `limit`    | `50`    | `[1, 200]` | Maximum records per response.          |
+| `offset`   | `0`     | `[0, ∞)`   | Number of records to skip.             |
+| `upstream` | —       | —          | Filter by upstream name (exact match). |
 
 **Response (200):**
 
@@ -467,8 +468,9 @@ Searchable, filtered, paginated audit log.
 | `record_kind`         | —       | —              | Filter by record category (`tool_call`, `drift_event`, `install_scan`, `evaluation_expired`). |
 | `channel_id`          | —       | —              | Filter by `metadata.channel_id` (adapter-supplied).                                           |
 | `sender_id`           | —       | —              | Filter by `metadata.sender_id` (adapter-supplied).                                            |
+| `upstream`            | —       | —              | Filter by upstream name (issue #292).                                                         |
 
-`tool`, `origin`, `channel_id`, and `sender_id` use substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, and `record_kind` use exact equality matching.
+`tool`, `origin`, `channel_id`, and `sender_id` use substring matching (`LIKE %value%`). `decision`, `reason`, `session`, `agent`, `record_kind`, and `upstream` use exact equality matching (rows with a null `upstream` never match a filter value).
 
 **Response (200):**
 

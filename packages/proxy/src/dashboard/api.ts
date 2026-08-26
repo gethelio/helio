@@ -108,6 +108,9 @@ const clampedQueryInt = (fallback: number, min: number, max: number) =>
 const feedQuerySchema = z.object({
   limit: clampedQueryInt(50, 1, 200),
   offset: clampedQueryInt(0, 0, Number.MAX_SAFE_INTEGER),
+  // The feed's first (and so far only) filter (issue #292): attribution is
+  // the one dimension a live view needs server-side once upstreams multiply.
+  upstream: optionalQueryString,
 })
 
 const auditExportQuerySchema = z.object({
@@ -128,6 +131,7 @@ const auditExportQuerySchema = z.object({
   record_kind: optionalQueryString,
   channel_id: optionalQueryString,
   sender_id: optionalQueryString,
+  upstream: optionalQueryString,
 })
 
 const auditQuerySchema = z.object({
@@ -149,6 +153,7 @@ const auditQuerySchema = z.object({
   record_kind: optionalQueryString,
   channel_id: optionalQueryString,
   sender_id: optionalQueryString,
+  upstream: optionalQueryString,
 })
 
 const budgetEventsQuerySchema = z.object({
@@ -455,7 +460,7 @@ export function createDashboardAppWithLifecycle(
     const limit = query.limit
     const offset = query.offset
 
-    const result = auditStore.list({}, { limit, offset, order: 'desc' })
+    const result = auditStore.list({ upstream: query.upstream }, { limit, offset, order: 'desc' })
     return c.json({
       data: result.records,
       total: result.total,
@@ -490,6 +495,7 @@ export function createDashboardAppWithLifecycle(
       record_kind: query.record_kind,
       channel_id: query.channel_id,
       sender_id: query.sender_id,
+      upstream: query.upstream,
     }
 
     const result = auditStore.listForExport(filters, limit)
@@ -542,6 +548,7 @@ export function createDashboardAppWithLifecycle(
       record_kind: query.record_kind,
       channel_id: query.channel_id,
       sender_id: query.sender_id,
+      upstream: query.upstream,
     }
 
     const result = auditStore.list(filters, { limit, offset, order: 'desc' })
