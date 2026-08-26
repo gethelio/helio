@@ -5542,6 +5542,7 @@ describe('GovernedForwarder', () => {
         spent: 0,
         limit: 10,
         currency: 'USD',
+        upstream: null,
       })
     })
 
@@ -5606,6 +5607,7 @@ describe('GovernedForwarder', () => {
         limit: 10,
         currency: 'USD',
         utilization: 2,
+        upstream: null,
       })
       approvalRouter.close()
       queue.close()

@@ -26,7 +26,11 @@ import { SpendLimiter } from '../policy/index.js'
 import { BudgetEngine } from '../budget/engine.js'
 import { compileBudgets } from '../budget/parser.js'
 import { GovernanceService } from '../sideband/governance-service.js'
-import { createDashboardApp, DashboardEventBus } from '../dashboard/index.js'
+import {
+  createDashboardApp,
+  DashboardEventBus,
+  dashboardEventCallbacks,
+} from '../dashboard/index.js'
 import type { DashboardEventType, DashboardEvents } from '../dashboard/index.js'
 
 // ---------------------------------------------------------------------------
@@ -147,8 +151,12 @@ beforeAll(async () => {
   upstream = await startHttpMcpServer()
   const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
 
-  // 2. Event bus — collect events for SSE assertions
+  // 2. Event bus — collect events for SSE assertions. The harness consumes
+  // the SAME callback factory the cli wires (issue #292), so its action
+  // events carry the record's protocol_version instead of the old
+  // hardcoded null — a deliberate harness change, not an accident.
   eventBus = new DashboardEventBus()
+  const cbs = dashboardEventCallbacks(eventBus)
   unsubscribeEvents = eventBus.onAny((type, data) => {
     collectedEvents.push({ type, data })
   })
@@ -163,30 +171,7 @@ beforeAll(async () => {
   auditWriter = new AuditWriter({
     store: auditStore,
     flushIntervalMs: 0,
-    onPersist: (record, id) => {
-      eventBus.emit('action', {
-        id,
-        tool_name: record.tool_name,
-        policy_decision: record.policy_decision,
-        block_reason: record.block_reason,
-        approval_status: record.approval_status,
-        session_id: record.session_id,
-        session_source: record.session_source,
-        protocol_version: null,
-        agent_id: record.agent_id,
-        environment: record.environment,
-        timestamp: record.timestamp,
-        total_duration_ms: record.total_duration_ms,
-        approval_wait_ms: record.approval_wait_ms,
-        proxy_compute_ms: record.proxy_compute_ms,
-        flagged_destructive: record.flagged_destructive,
-        dry_run: record.dry_run,
-        matched_rule: record.matched_rule,
-        matched_rule_index: record.matched_rule_index,
-        record_kind: record.record_kind,
-        origin: record.origin,
-      })
-    },
+    onPersist: cbs.onPersist,
   })
 
   // 4. Evidence store
@@ -200,14 +185,7 @@ beforeAll(async () => {
     defaultOnTimeout: 'deny',
     channels,
     queue: approvalQueue,
-    onSubmit: (ticket) => {
-      eventBus.emit('approval_requested', {
-        ticket_id: ticket.id,
-        tool_name: ticket.tool_name,
-        channel: ticket.channel_name,
-        requested_at: ticket.requested_at,
-      })
-    },
+    onSubmit: cbs.onApprovalSubmit,
     onResolve: (ticket) => {
       eventBus.emit('approval_resolved', {
         ticket_id: ticket.id,
@@ -221,27 +199,11 @@ beforeAll(async () => {
   // 6. Rate + spend limiters
   rateLimiter = new RateLimiter({
     cleanupIntervalMs: 0,
-    onWarning: (state) => {
-      eventBus.emit('limit_warning', {
-        key: state.key,
-        type: 'rate',
-        current: state.current,
-        limit: state.limit,
-        utilization: state.current / state.limit,
-      })
-    },
+    onWarning: cbs.onRateWarning,
   })
   spendLimiter = new SpendLimiter({
     cleanupIntervalMs: 0,
-    onWarning: (state) => {
-      eventBus.emit('limit_warning', {
-        key: state.key,
-        type: 'spend',
-        current: state.current_spend,
-        limit: state.limit,
-        utilization: state.current_spend / state.limit,
-      })
-    },
+    onWarning: cbs.onSpendWarning,
   })
 
   // 7. Compile policies + create governed forwarder (budgets: issue #14)

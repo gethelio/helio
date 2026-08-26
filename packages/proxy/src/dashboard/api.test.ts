@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
 import type { DashboardAppDeps } from './api.js'
-import { DashboardEventBus } from './event-bus.js'
+import { DashboardEventBus, dashboardEventCallbacks } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
 import type { AuditRecord } from '../audit/types.js'
 import { ApprovalQueue } from '../approval/queue.js'
@@ -1340,33 +1340,55 @@ describe('GET /api/events', () => {
     const initial = await readWithTimeout(1000)
     expect(initial).toContain('event: heartbeat')
 
-    // Emit an event and read it
-    eventBus.emit('action', {
-      id: 'evt-1',
-      tool_name: 'test_tool',
-      policy_decision: 'allow',
-      block_reason: null,
-      approval_status: null,
-      session_id: null,
-      session_source: null,
-      protocol_version: null,
-      agent_id: null,
-      environment: null,
-      timestamp: '2026-04-02T12:00:00Z',
-      total_duration_ms: 5,
-      approval_wait_ms: 0,
-      proxy_compute_ms: 5,
-      flagged_destructive: false,
-      dry_run: false,
-      matched_rule: null,
-      matched_rule_index: null,
-      record_kind: 'tool_call',
-      origin: 'mcp',
-    })
+    // Drive the bus through the production mapper path (issue #292): the
+    // factory's onPersist is what the composition roots wire, so the SSE
+    // payload reflects the real persist -> map -> bus -> SSE projection,
+    // never a hand-built event literal.
+    dashboardEventCallbacks(eventBus).onPersist(
+      {
+        timestamp: '2026-04-02T12:00:00Z',
+        session_id: null,
+        session_source: null,
+        protocol_version: null,
+        upstream: null,
+        agent_id: null,
+        environment: null,
+        tool_name: 'test_tool',
+        tool_input: {},
+        policy_decision: 'allow',
+        block_reason: null,
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: 5,
+        approval_wait_ms: 0,
+        proxy_compute_ms: 5,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      },
+      'evt-1',
+    )
 
     const eventData = await readWithTimeout(1000)
     expect(eventData).toContain('event: action')
-    expect(eventData).toContain('test_tool')
+    // The frame is `event:` / `data:` / `id:` lines — parse the data payload.
+    const dataLine = eventData.split('\n').find((line) => line.startsWith('data: '))
+    expect(dataLine).toBeDefined()
+    const payload = JSON.parse((dataLine ?? '').slice('data: '.length)) as Record<string, unknown>
+    expect(payload['tool_name']).toBe('test_tool')
+    // Darkness spelling for events: the upstream key is PRESENT, value null.
+    expect('upstream' in payload).toBe(true)
+    expect(payload['upstream']).toBeNull()
+    expect(payload['protocol_version']).toBeNull()
 
     await reader.cancel()
   })
@@ -1404,6 +1426,7 @@ describe('GET /api/events', () => {
       limit: 100,
       currency: 'USD',
       utilization: 1.2,
+      upstream: null,
     })
     const update = await readWithTimeout(1000)
     expect(update).toContain('event: budget_update')
@@ -1417,6 +1440,7 @@ describe('GET /api/events', () => {
       spent: 90,
       limit: 100,
       currency: 'USD',
+      upstream: null,
     })
     const breach = await readWithTimeout(1000)
     expect(breach).toContain('event: budget_breached')

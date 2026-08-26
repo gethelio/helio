@@ -11,6 +11,7 @@ import { BudgetLedger } from './ledger.js'
 import { compileBudgets } from './parser.js'
 import type { BudgetConfig } from '../config/schema.js'
 import { mintGatedCharges, mintGatedSession } from '../__tests__/helpers/session-gate-mints.js'
+import { freezeGatedPlans, remintDeferredCharges } from '../policy/session-gate.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -478,6 +479,39 @@ describe('BudgetEngine commit events', () => {
       utilization: 0.4,
     })
   })
+
+  it('carries the charge upstream on commit events (issue #292)', () => {
+    const onCommit = vi.fn()
+    const { engine } = createEngine([budgetConfig()], { onCommit })
+    const { charges } = engine.resolveCharges(
+      chargeCtx('stripe_charge', { amount: 40 }, undefined, 'github'),
+    )
+    engine.recordAll(gated(charges), COMMIT_META)
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect((onCommit.mock.calls[0]?.[0] as Record<string, unknown>)['upstream']).toBe('github')
+  })
+
+  it('emits upstream null for reminted frozen-plan charges (the remint drop, issue #292)', () => {
+    // Frozen plans copy named fields only, so the deferred sideband commit
+    // remints charges without the label — the event surfaces that null
+    // end-to-end BY DESIGN, not as a gap.
+    const onCommit = vi.fn()
+    const { engine } = createEngine([budgetConfig()], { onCommit })
+    const { charges } = engine.resolveCharges(
+      chargeCtx('stripe_charge', { amount: 40 }, undefined, 'github'),
+    )
+    const frozen = freezeGatedPlans(
+      gated(charges),
+      charges.map(() => false),
+    )
+    engine.recordAll(remintDeferredCharges(frozen), COMMIT_META)
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const event = onCommit.mock.calls[0]?.[0] as Record<string, unknown>
+    expect('upstream' in event).toBe(true)
+    expect(event['upstream']).toBeNull()
+  })
 })
 
 describe('BudgetEngine breach events (PR 4)', () => {
@@ -504,7 +538,40 @@ describe('BudgetEngine breach events (PR 4)', () => {
       spent: 90,
       limit: 100,
       currency: 'USD',
+      upstream: null,
     })
+  })
+
+  it('carries the peek entry upstream on breach events (issue #292)', () => {
+    const onBreach = vi.fn()
+    const { engine } = createEngine([budgetConfig({ on_exceed: 'require_approval' })], {
+      onBreach,
+    })
+    const seed = engine.resolveCharges(
+      chargeCtx('stripe_charge', { amount: 90 }, undefined, 'github'),
+    )
+    engine.recordAll(gated(seed.charges), COMMIT_META)
+    const { charges } = engine.resolveCharges(
+      chargeCtx('stripe_charge', { amount: 20 }, undefined, 'github'),
+    )
+    const peek = engine.peekAll(gated(charges))
+    engine.reportBreaches(peek.entries.filter((entry) => !entry.allowed))
+
+    expect((onBreach.mock.calls[0]?.[0] as Record<string, unknown>)['upstream']).toBe('github')
+  })
+
+  it('emits upstream null on breaches from a null-upstream context (issue #292)', () => {
+    const onBreach = vi.fn()
+    const { engine } = createEngine([budgetConfig({ on_exceed: 'deny' })], { onBreach })
+    const seed = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 90 }))
+    engine.recordAll(gated(seed.charges), COMMIT_META)
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }))
+    const peek = engine.peekAll(gated(charges))
+    engine.reportBreaches(peek.entries.filter((entry) => !entry.allowed))
+
+    const event = onBreach.mock.calls[0]?.[0] as Record<string, unknown>
+    expect('upstream' in event).toBe(true)
+    expect(event['upstream']).toBeNull()
   })
 
   it('isolates a throwing onBreach subscriber and still reports later entries', () => {

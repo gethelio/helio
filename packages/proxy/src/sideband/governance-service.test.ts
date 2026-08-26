@@ -3057,6 +3057,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       spent: 0,
       limit: 10,
       currency: 'USD',
+      upstream: null,
     })
     expect(onBudgetCommit).not.toHaveBeenCalled()
   })
@@ -3249,6 +3250,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       limit: 100,
       currency: 'USD',
       utilization: 0.3,
+      upstream: null,
     })
   })
 
@@ -3279,6 +3281,7 @@ describe('GovernanceService — budget breach/commit events (issue #14)', () => 
       limit: 10,
       currency: 'USD',
       utilization: 5,
+      upstream: null,
     })
   })
 })
