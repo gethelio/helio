@@ -42,6 +42,8 @@ function setup(options?: { apiSecret?: string }) {
       tool_input: { amount: 5000 },
       matched_rule: undefined,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     const pending = queue.listPending()
@@ -287,6 +289,8 @@ describe('Approval REST API', () => {
         tool_input: { amount: 5 },
         matched_rule: undefined,
         session_id: null,
+        session_source: null,
+        upstream: null,
         breached_budgets: breached,
       })
       const ticketId = ctx.queue.listPending()[0]?.id as string
@@ -657,6 +661,8 @@ describe('Approval REST API', () => {
           tool_input: { amount: 5000 },
           matched_rule: { approval: { channel: 'webhook' } } as never,
           session_id: 's1',
+          session_source: null,
+          upstream: null,
         })
         const pending = queue.listPending()
         const ticket = pending[pending.length - 1]

@@ -586,6 +586,7 @@ Look up a single approval ticket by ID.
     "rule_index": 0,
     "channel_name": "dashboard",
     "session_id": "session-abc",
+    "session_source": "header",
     "requested_at": "2026-04-15T10:00:00.000Z",
     "timeout_at": "2026-04-15T10:05:00.000Z",
     "timeout_ms": 300000,
@@ -595,7 +596,7 @@ Look up a single approval ticket by ID.
 }
 ```
 
-Resolved tickets additionally include `resolved_at`, plus — depending on resolution — `resolved_by`, `denial_reason`, or `break_glass_reason` (`resolved_by` appears only when a resolver identity was supplied; the proxy's own `timeout`, `client_disconnected`, and `shutdown_cancelled` resolutions never include one). Resolution statuses include `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, `shutdown_cancelled`, and — for adapter-owned tickets — `cancelled`. Escalated tickets include `escalated_at` and `escalated_to`; `notification_failures` records failed notification deliveries. Tickets live in memory, and resolved tickets are dropped about an hour after resolution — see [Approval Workflows](./approvals.md) for the retention model.
+`session_source` (issue #251) appears when a session identity resolved (`sideband` on adapter-owned tickets), and `upstream` (issue #292) appears only on tickets from a named upstream — both are omitted entirely when unattributed. Resolved tickets additionally include `resolved_at`, plus — depending on resolution — `resolved_by`, `denial_reason`, or `break_glass_reason` (`resolved_by` appears only when a resolver identity was supplied; the proxy's own `timeout`, `client_disconnected`, and `shutdown_cancelled` resolutions never include one). Resolution statuses include `approved`, `denied`, `timeout`, `break_glass`, `client_disconnected`, `shutdown_cancelled`, and — for adapter-owned tickets — `cancelled`. Escalated tickets include `escalated_at` and `escalated_to`; `notification_failures` records failed notification deliveries. Tickets live in memory, and resolved tickets are dropped about an hour after resolution — see [Approval Workflows](./approvals.md) for the retention model.
 
 **Error responses:**
 

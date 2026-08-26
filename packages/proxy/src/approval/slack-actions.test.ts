@@ -78,6 +78,8 @@ function setup() {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'slack' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
     const pending = queue.listPending()
     const ticket = pending.find((t) => t.tool_name === tool_name)
@@ -337,6 +339,8 @@ describe('Slack action handler', () => {
       tool_input: { amount: 10_000 },
       matched_rule: { approval: { channel: 'slack' } } as never,
       session_id: 's2',
+      session_source: null,
+      upstream: null,
     })
 
     // Give notify() time to fire

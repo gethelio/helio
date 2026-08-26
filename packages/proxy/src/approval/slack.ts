@@ -84,13 +84,22 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   const rawInput = truncate(JSON.stringify(ticket.tool_input), MAX_INPUT_LENGTH)
   const safeInput = sanitizeForCodeBlock(rawInput)
 
-  const detailLines = [`*Tool:* \`${safeName}\``, `*Input:*\n\`\`\`\n${safeInput}\n\`\`\``]
+  const detailLines = [`*Tool:* \`${safeName}\``]
+  if (ticket.upstream) {
+    detailLines.push(`*Upstream:* \`${sanitizeCodeSpanContent(ticket.upstream)}\``)
+  }
+  detailLines.push(`*Input:*\n\`\`\`\n${safeInput}\n\`\`\``)
 
   if (ticket.matched_rule) {
     detailLines.push(`*Rule:* ${sanitizeMrkdwnText(ticket.matched_rule)}`)
   }
   if (ticket.session_id) {
-    detailLines.push(`*Session:* \`${sanitizeCodeSpanContent(ticket.session_id)}\``)
+    const sessionLine = `*Session:* \`${sanitizeCodeSpanContent(ticket.session_id)}\``
+    detailLines.push(
+      ticket.session_source
+        ? `${sessionLine} (${sanitizeMrkdwnText(ticket.session_source)})`
+        : sessionLine,
+    )
   }
 
   // Break-glass context (issue #14): the approver is deciding a budget

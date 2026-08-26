@@ -602,6 +602,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     // Find the ticket
     const tickets = approvalQueue.listPending()
@@ -632,6 +634,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     approvalRouter.approve(at(tickets, 0).id, 'someone')
@@ -649,6 +653,8 @@ describe('POST /api/approvals/:id/approve', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     const res = await post(`/api/approvals/${at(tickets, 0).id}/approve`, {})
@@ -664,6 +670,8 @@ describe('POST /api/approvals/:id/deny', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
 
@@ -690,6 +698,8 @@ describe('POST /api/approvals/:id/deny', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     approvalRouter.deny(at(tickets, 0).id, 'someone')
@@ -707,6 +717,8 @@ describe('POST /api/approvals/:id/break-glass', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
 
@@ -738,6 +750,8 @@ describe('POST /api/approvals/:id/break-glass', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const tickets = approvalQueue.listPending()
     const res = await post(`/api/approvals/${at(tickets, 0).id}/break-glass`, {
@@ -1674,6 +1688,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1700,6 +1716,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1721,6 +1739,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1739,6 +1759,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1847,6 +1869,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     expect(pending).toHaveLength(1)
@@ -1863,6 +1887,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id
@@ -1878,6 +1904,8 @@ describe('Auth', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const pending = approvalQueue.listPending()
     const ticketId = at(pending, 0).id

@@ -3936,6 +3936,90 @@ describe('GovernedForwarder', () => {
       expect(record['upstream']).toBe('github')
     })
 
+    it('threads upstream and session_source onto rule-approval tickets', async () => {
+      const inner = mockForwarder()
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const approvalRouter = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels: new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]]),
+        queue,
+      })
+      const policy = compile({
+        default: 'allow',
+        rules: [
+          {
+            match: { tool: 'deploy_production' },
+            action: 'require_approval',
+            approval: { channel: 'dashboard' },
+          },
+        ],
+      })
+      const governed = new GovernedForwarder(inner, policy, {
+        approvalRouter,
+        upstreamName: 'github',
+      })
+
+      const pending = governed.forward(toolsCallWithSession('deploy_production', 'run-a'))
+      await vi.waitFor(() => {
+        expect(queue.listPending()).toHaveLength(1)
+      })
+      const ticket = queue.listPending()[0]
+      expect(ticket?.upstream).toBe('github')
+      expect(ticket?.session_source).toBe('header')
+
+      approvalRouter.deny(ticket?.id ?? '', 'bob')
+      await pending
+      approvalRouter.close()
+      queue.close()
+    })
+
+    it('threads upstream and session_source onto break-glass budget tickets', async () => {
+      const inner = mockForwarder()
+      const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+      const approvalRouter = new ApprovalRouter({
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels: new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]]),
+        queue,
+      })
+      const engine = new BudgetEngine({
+        budgets: compileBudgets([
+          {
+            name: 'small',
+            limit: 10,
+            currency: 'USD',
+            window: '24h',
+            key: 'global',
+            on_exceed: 'require_approval',
+            contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+          },
+        ]),
+        cleanupIntervalMs: 0,
+      })
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        budgetEngine: engine,
+        approvalRouter,
+        upstreamName: 'github',
+      })
+
+      const pending = governed.forward({
+        ...toolsCallRequest('stripe_charge', { amount: 50 }),
+        session: { id: 'run-a', source: 'header' },
+      })
+      await vi.waitFor(() => {
+        expect(queue.listPending()).toHaveLength(1)
+      })
+      const ticket = queue.listPending()[0]
+      expect(ticket?.upstream).toBe('github')
+      expect(ticket?.session_source).toBe('header')
+
+      approvalRouter.deny(ticket?.id ?? '', 'bob')
+      await pending
+      approvalRouter.close()
+      queue.close()
+    })
+
     it('stamps null on tool_call, drift, and nameless records in singular mode', async () => {
       // The darkness pin: null-stamped, not never-stamped — the key must be
       // present with value null on every record kind when no name is set.

@@ -39,9 +39,42 @@ function submitParams(overrides?: Partial<Parameters<ApprovalRouter['submit']>[0
     tool_input: { amount: 5000 },
     matched_rule: makeRule(),
     session_id: 's1',
+    session_source: null,
+    upstream: null,
     ...overrides,
   }
 }
+
+/** Attribution threading (issue #292) and session_source (issue #251). */
+describe('ticket attribution fields', () => {
+  it('threads upstream and session_source onto the ticket and its wire shape', async () => {
+    const { router, queue } = createRouter()
+    const promise = router.submit(submitParams({ upstream: 'github', session_source: 'header' }))
+
+    const ticket = queue.listPending()[0]
+    expect(ticket?.upstream).toBe('github')
+    expect(ticket?.session_source).toBe('header')
+    const wire = JSON.parse(JSON.stringify(ticket)) as Record<string, unknown>
+    expect(wire['upstream']).toBe('github')
+    expect(wire['session_source']).toBe('header')
+
+    router.approve(ticket?.id ?? '', 'admin')
+    await promise
+  })
+
+  it('omits both keys entirely when null — the ticket wire-darkness spelling', async () => {
+    const { router, queue } = createRouter()
+    const promise = router.submit(submitParams({ upstream: null, session_source: null }))
+
+    const ticket = queue.listPending()[0]
+    const wire = JSON.parse(JSON.stringify(ticket)) as Record<string, unknown>
+    expect('upstream' in wire).toBe(false)
+    expect('session_source' in wire).toBe(false)
+
+    router.approve(ticket?.id ?? '', 'admin')
+    await promise
+  })
+})
 
 /** Create a router with controllable timeout (using vi.useFakeTimers). */
 function createRouter(options?: {

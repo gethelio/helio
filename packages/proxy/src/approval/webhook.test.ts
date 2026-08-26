@@ -63,6 +63,65 @@ describe('WebhookChannel', () => {
     expect(body.ticket.tool_name).toBe('create_payment')
   })
 
+  it('carries upstream and session_source on the wire ticket (issues #292/#251)', async () => {
+    // The ticket must come from the QUEUE, not a fixture spread: a hand
+    // literal would carry any key regardless of what queue.add stores, and
+    // the webhook serializes whatever object it is given.
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    try {
+      const ticket = queue.add({
+        tool_name: 'create_payment',
+        tool_input: { amount: 5000 },
+        matched_rule: 'approve-payments',
+        rule_index: 0,
+        channel_name: 'webhook',
+        session_id: 's1',
+        timeout_ms: 300_000,
+        upstream: 'github',
+        session_source: 'header',
+      })
+      const channel = new WebhookChannel({ url: 'https://example.com/hook' })
+      await channel.notify(ticket)
+
+      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+      const body = JSON.parse(init.body as string) as { ticket: Record<string, unknown> }
+      expect(body.ticket['upstream']).toBe('github')
+      expect(body.ticket['session_source']).toBe('header')
+    } finally {
+      queue.close()
+    }
+  })
+
+  it('omits both keys from the payload when the ticket has neither (darkness pin)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    try {
+      const ticket = queue.add({
+        tool_name: 'create_payment',
+        tool_input: { amount: 5000 },
+        matched_rule: 'approve-payments',
+        rule_index: 0,
+        channel_name: 'webhook',
+        session_id: 's1',
+        timeout_ms: 300_000,
+      })
+      const channel = new WebhookChannel({ url: 'https://example.com/hook' })
+      await channel.notify(ticket)
+
+      const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+      const body = JSON.parse(init.body as string) as { ticket: Record<string, unknown> }
+      expect('upstream' in body.ticket).toBe(false)
+      expect('session_source' in body.ticket).toBe(false)
+    } finally {
+      queue.close()
+    }
+  })
+
   it('serializes breached_budgets verbatim on break-glass tickets (issue #14)', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', mockFetch)
@@ -198,6 +257,8 @@ describe('WebhookChannel integration with ApprovalRouter', () => {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'webhook' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     // Give the notify() call time to fire
@@ -223,6 +284,8 @@ describe('WebhookChannel integration with ApprovalRouter', () => {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'webhook' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -253,6 +316,8 @@ describe('WebhookChannel integration with ApprovalRouter', () => {
       tool_input: { amount: 5000 },
       matched_rule: { approval: { channel: 'webhook' } } as never,
       session_id: 's1',
+      session_source: null,
+      upstream: null,
     })
 
     await new Promise((resolve) => setTimeout(resolve, 10))

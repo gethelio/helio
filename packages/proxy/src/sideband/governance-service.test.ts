@@ -314,6 +314,40 @@ describe('GovernanceService.evaluate', () => {
     expect(approvalRouter?.getTicket(approval.id)?.channel_name).toBe('native:openclaw')
   })
 
+  it('native tickets derive session_source sideband from the session id (issue #251)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, approvalRouter } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput({ session_id: 'oc-1' }))
+    const approval = res.body['approval'] as { id: string }
+
+    const ticket = approvalRouter?.getTicket(approval.id)
+    expect(ticket?.session_source).toBe('sideband')
+    const wire = JSON.parse(JSON.stringify(ticket)) as Record<string, unknown>
+    expect(wire['session_source']).toBe('sideband')
+    // No door on the sideband: upstream never appears on native tickets.
+    expect('upstream' in wire).toBe(false)
+  })
+
+  it('native tickets without a session id carry neither attribution key (issue #251)', () => {
+    const policy = compile({
+      default: 'allow',
+      rules: [{ name: 'ap', match: { tool: 'send' }, action: 'require_approval' }],
+    })
+    const { service, approvalRouter } = makeService({ policy, withApprovals: true })
+    const res = service.evaluate(evalInput({ session_id: null }))
+    const approval = res.body['approval'] as { id: string }
+
+    const wire = JSON.parse(JSON.stringify(approvalRouter?.getTicket(approval.id))) as Record<
+      string,
+      unknown
+    >
+    expect('session_source' in wire).toBe(false)
+    expect('upstream' in wire).toBe(false)
+  })
+
   describe('drift guard', () => {
     it('detects drift across two evaluates and gates per on_tool_drift: block', () => {
       const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
@@ -1276,6 +1310,8 @@ describe('GovernanceService.resolveApproval', () => {
       tool_input: {},
       matched_rule: undefined,
       session_id: null,
+      session_source: null,
+      upstream: null,
     })
     const ticketId = queue.listPending()[0]?.id as string
     expect(service.resolveApproval(ticketId, { resolution: 'approved' }).body['error']).toBe(

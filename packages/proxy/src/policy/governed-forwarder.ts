@@ -759,6 +759,8 @@ export class GovernedForwarder implements McpForwarder {
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
         session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
+        upstream: this.upstreamName ?? null,
         breached_budgets: gate.breachContexts,
         approval: gate.approval,
       },
@@ -1176,6 +1178,8 @@ export class GovernedForwarder implements McpForwarder {
         tool_input: toolArguments ?? {},
         matched_rule: decision.matchedRule,
         session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
+        upstream: this.upstreamName ?? null,
       },
       request.signal,
     )
