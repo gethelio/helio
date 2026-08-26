@@ -1123,7 +1123,7 @@ describe('GET /api/budgets/:name/events/export', () => {
     const lines = (await res.text()).split('\n')
     expect(lines[0]).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
     // Newest first in the CSV rows too, not only in the JSON body.
     expect(lines[1]).toContain('tool-1')
@@ -1212,7 +1212,7 @@ describe('GET /api/budgets/:name/events/export', () => {
     expect(csv.status).toBe(200)
     expect(await csv.text()).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
   })
 

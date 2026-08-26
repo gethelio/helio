@@ -368,7 +368,8 @@ An unknown budget name returns `200` with an empty page (budget names are config
       "audit_record_id": "b53a2f8e-6a3d-4a56-8a3c-2f1f9df1c001",
       "timestamp": "2026-07-13T12:00:00.000Z",
       "timestamp_ms": 1783944000000,
-      "created_at": "2026-07-13T12:00:00.012Z"
+      "created_at": "2026-07-13T12:00:00.012Z",
+      "upstream": null
     }
   ],
   "total": 137,
@@ -378,12 +379,13 @@ An unknown budget name returns `200` with an empty page (budget names are config
 ```
 
 - `kind` — `spend`, or `approved_overage` for charges committed through a break-glass approval.
+- `upstream` — upstream attribution read from the charge's audit record (issue #292). Null in singular mode, on rows whose `audit_record_id` is null or unresolved, and on rows predating the audit column.
 - `audit_record_id` — the audit record of the call that produced the charge. The ledger is the source of truth for spend; the audit trail for calls — the referenced audit row may lag briefly (async audit writer) or be missing after a crash.
 - `origin` — `mcp`, or the adapter origin for sideband-committed charges.
 
 #### GET /api/budgets/:name/events/export
 
-Bulk export of one budget's ledger rows as a downloadable attachment. **Not a JSON envelope** — the body is a bare array of the listing's wire rows (or a CSV document with the same twelve columns, in the same order). Returned with `Content-Disposition: attachment; filename="helio-budget-<name>-events.<ext>"`, where `<name>` is the budget name stripped to the config-name character set (`A-Z a-z 0-9 _ -`), so browsers download a file identifiable per pot.
+Bulk export of one budget's ledger rows as a downloadable attachment. **Not a JSON envelope** — the body is a bare array of the listing's wire rows (or a CSV document with the same thirteen columns, in the same order). Returned with `Content-Disposition: attachment; filename="helio-budget-<name>-events.<ext>"`, where `<name>` is the budget name stripped to the config-name character set (`A-Z a-z 0-9 _ -`), so browsers download a file identifiable per pot.
 
 Rows are exported newest-first — the listing's own order, and the deliberate opposite of the audit export's oldest-first: this endpoint takes no time filters, so a capped export keeps the most recent spend reachable, while older rows age out through the audit `retention` window. Like the listing, history spans config resets, and an unknown budget name returns `200` with an empty artifact.
 

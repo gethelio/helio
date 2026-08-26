@@ -22,6 +22,9 @@ export const BUDGET_EVENT_CSV_HEADERS = [
   'timestamp',
   'timestamp_ms',
   'created_at',
+  // Appended LAST (issue #292): positional consumers of the existing
+  // columns keep working — new columns always go at the end.
+  'upstream',
 ] as const
 
 /** Convert a single ledger event to a CSV row string. */

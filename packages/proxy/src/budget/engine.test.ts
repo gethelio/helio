@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-import Database from 'better-sqlite3'
 import { BudgetEngine } from './engine.js'
 import type {
   BudgetBreachEvent,
@@ -12,6 +11,7 @@ import { compileBudgets } from './parser.js'
 import type { BudgetConfig } from '../config/schema.js'
 import { mintGatedCharges, mintGatedSession } from '../__tests__/helpers/session-gate-mints.js'
 import { freezeGatedPlans, remintDeferredCharges } from '../policy/session-gate.js'
+import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -997,7 +997,7 @@ function delegatingPersistence(
  * An optional sink override per boot injects faults around the real ledger.
  */
 function persistentHarness(initialTime = 1_000_000) {
-  const db = new Database(':memory:')
+  const db = auditBackedDb()
   const clock = { time: initialTime }
   const now = () => clock.time
   const ledger = new BudgetLedger({ database: db, now })
@@ -1210,7 +1210,7 @@ describe('BudgetEngine persistence (PR 2)', () => {
       key: 'session' as const,
       idle_ttl: '1h',
     })
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const clock = { time: 1_000_000 }
     const ledger = new BudgetLedger({ database: db, now: () => clock.time })
     const failing = delegatingPersistence(ledger, {

@@ -16,9 +16,25 @@ function eventRecord(overrides: Partial<BudgetEventRecord> = {}): BudgetEventRec
     timestamp: '2026-07-10T12:00:00.000Z',
     timestamp_ms: 1_000_000,
     created_at: '2026-07-10T12:00:00.012Z',
+    upstream: null,
     ...overrides,
   }
 }
+
+describe('budget CSV upstream column (issue #292)', () => {
+  it('appends upstream as the thirteenth, trailing header', () => {
+    expect(BUDGET_EVENT_CSV_HEADERS.length).toBe(13)
+    expect(BUDGET_EVENT_CSV_HEADERS.at(-1)).toBe('upstream')
+  })
+
+  it('renders the upstream cell as the value or the empty string', () => {
+    const named = budgetEventsToCsv([eventRecord({ upstream: 'github' })]).split('\n')[1]
+    expect(named?.endsWith(',github')).toBe(true)
+
+    const dark = budgetEventsToCsv([eventRecord({ upstream: null })]).split('\n')[1]
+    expect(dark?.endsWith(',')).toBe(true)
+  })
+})
 
 describe('budgetEventsToCsv', () => {
   it('emits the wire row columns as the header line, in wire order', () => {
@@ -35,11 +51,12 @@ describe('budgetEventsToCsv', () => {
       'timestamp',
       'timestamp_ms',
       'created_at',
+      'upstream',
     ])
     const csv = budgetEventsToCsv([eventRecord()])
     expect(csv.split('\n')[0]).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
   })
 
@@ -47,7 +64,7 @@ describe('budgetEventsToCsv', () => {
     const csv = budgetEventsToCsv([eventRecord({ amount: 12.5, audit_record_id: null })])
     expect(csv.split('\n')[1]).toBe(
       'event-1,daily-cap,budget:daily-cap:global,spend,12.5,USD,stripe_charge,mcp,,' +
-        '2026-07-10T12:00:00.000Z,1000000,2026-07-10T12:00:00.012Z',
+        '2026-07-10T12:00:00.000Z,1000000,2026-07-10T12:00:00.012Z,',
     )
   })
 
@@ -69,7 +86,7 @@ describe('budgetEventsToCsv', () => {
     const csv = budgetEventsToCsv([])
     expect(csv).toBe(
       'id,budget_name,bucket_key,kind,amount,currency,tool_name,origin,' +
-        'audit_record_id,timestamp,timestamp_ms,created_at',
+        'audit_record_id,timestamp,timestamp_ms,created_at,upstream',
     )
   })
 })

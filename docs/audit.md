@@ -237,7 +237,7 @@ helio export --budgets daily-cap -f csv > daily-cap.csv
 
 Audit data is written to stdout; status messages go to stderr. This means you can pipe or redirect the output without capturing log messages.
 
-`--budgets <name>` switches the export target to the named budget's spend ledger, read from the same database file — it works offline, with the proxy stopped and the dashboard disabled. Ledger rows export newest-first with the same twelve columns as the [ledger export endpoint](./sideband-api.md#get-apibudgetsnameeventsexport); `--format` and `--limit` apply unchanged, an unknown name exports an empty artifact, and combining `--budgets` with the audit filter flags (`--tool`, `--decision`, `--reason`, `--session`, `--from`, `--to`) is an error.
+`--budgets <name>` switches the export target to the named budget's spend ledger, read from the same database file — it works offline, with the proxy stopped and the dashboard disabled. Ledger rows export newest-first with the same thirteen columns as the [ledger export endpoint](./sideband-api.md#get-apibudgetsnameeventsexport); `--format` and `--limit` apply unchanged, an unknown name exports an empty artifact, and combining `--budgets` with the audit filter flags (`--tool`, `--decision`, `--reason`, `--session`, `--from`, `--to`) is an error.
 
 ## Dashboard API Export
 

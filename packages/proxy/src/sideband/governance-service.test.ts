@@ -7,7 +7,6 @@ import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
 import type { AuditRecord } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
-import Database from 'better-sqlite3'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { BudgetEngine } from '../budget/engine.js'
@@ -21,6 +20,7 @@ import { EvidenceStore } from '../evidence/index.js'
 import { compileSessionIdentity } from '../mcp/session-resolver.js'
 import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 import { resetSessionGateWarningsForTests } from '../policy/session-gate.js'
+import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2180,7 +2180,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
   })
 
   it('persists real ledger rows at /audit sharing the audit record id (PR 2)', () => {
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const { service, records } = makeService({
       budgets: [stripeBudget()],
@@ -2212,7 +2212,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     // (the route layer maps this to a 500) BEFORE the commit latch is set,
     // so nothing persists anywhere and the idempotent retry re-attempts the
     // whole commit cleanly.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     let failNext = true
     const failOnce: BudgetLedgerSink = {
@@ -2282,7 +2282,7 @@ describe('GovernanceService — budget gate (issue #14)', () => {
     // must be the record a successful retry would have written, minus the
     // outcome: latched id (so the ledger row resolves), committed chain,
     // and the sideband block marking the commit.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const { service, records, advance, budgetEngine, evidenceStore } = makeService({
       withEvidence: true,
@@ -2971,7 +2971,7 @@ describe('GovernanceService — budget break-glass (issue #14)', () => {
     // approved → committed (approved_overage) → post-commit failure → no
     // retry → expiry. The human decision, the sanctioned overage, and the
     // ledger linkage must all survive on the expired record.
-    const db = new Database(':memory:')
+    const db = auditBackedDb()
     const ledger = new BudgetLedger({ database: db })
     const harness = makeService({
       withApprovals: true,

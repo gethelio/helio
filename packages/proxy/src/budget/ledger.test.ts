@@ -7,6 +7,7 @@ import type { Database as DatabaseType } from 'better-sqlite3'
 import { BudgetLedger } from './ledger.js'
 import type { BudgetLedgerRow, BudgetMetaRow } from './engine.js'
 import { AuditStore, EXPORT_MAX_RECORDS } from '../audit/index.js'
+import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -42,7 +43,10 @@ function metaRow(overrides: Partial<BudgetMetaRow> = {}): BudgetMetaRow {
 }
 
 function createLedger(database?: DatabaseType) {
-  const db = database ?? new Database(':memory:')
+  // The listing SQL LEFT JOINs audit_records (issue #292), so the ledger
+  // requires a database carrying the audit schema — which production always
+  // provides (the ledger co-locates in the audit store's file).
+  const db = database ?? auditBackedDb()
   let time = 5_000_000
   const ledger = new BudgetLedger({ database: db, now: () => time })
   const advance = (ms: number) => {
@@ -413,6 +417,108 @@ describe('BudgetLedger.readAllMeta', () => {
 // Dashboard events listing (PR 4)
 // ---------------------------------------------------------------------------
 
+describe('BudgetLedger.listEvents — upstream attribution (issue #292)', () => {
+  /** Ledger co-located with a real audit store, so the JOIN has its table. */
+  function createJoinedLedger() {
+    const store = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const ledger = new BudgetLedger({ database: store.database })
+    return { store, ledger }
+  }
+
+  function insertAuditRow(store: AuditStore, id: string, upstream: string | null): void {
+    store.insert(
+      {
+        timestamp: '2026-08-26T12:00:00.000Z',
+        session_id: null,
+        session_source: null,
+        protocol_version: null,
+        upstream,
+        agent_id: null,
+        environment: null,
+        tool_name: 'stripe_charge',
+        tool_input: {},
+        policy_decision: 'allow',
+        block_reason: null,
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: 1,
+        approval_wait_ms: 0,
+        proxy_compute_ms: 1,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      },
+      undefined,
+      id,
+    )
+  }
+
+  it('joins upstream from the audit record; every miss class yields null', () => {
+    const { store, ledger } = createJoinedLedger()
+    try {
+      insertAuditRow(store, 'a1', 'github')
+      insertAuditRow(store, 'a2', null)
+      ledger.commitAll([ledgerRow({ audit_record_id: 'a1', timestamp_ms: 1_000, amount: 1 })])
+      ledger.commitAll([ledgerRow({ audit_record_id: 'a2', timestamp_ms: 2_000, amount: 2 })])
+      // A crash-dangled reference: the id resolves to no audit row.
+      ledger.commitAll([
+        ledgerRow({ audit_record_id: 'dangling-uuid', timestamp_ms: 4_000, amount: 4 }),
+      ])
+      // A NULL audit_record_id row (the column is nullable): raw SQL, the
+      // same seeding the P2 planning probe used — no prod writer emits one.
+      store.database
+        .prepare(
+          `INSERT INTO budget_events (id, budget_name, epoch, bucket_key, kind, amount,
+             currency, tool_name, origin, audit_record_id, timestamp, timestamp_ms, created_at)
+           VALUES ('e3', 'daily-cap', 1, 'budget:daily-cap:global', 'spend', 3,
+             'USD', 'stripe_charge', 'mcp', NULL, '2026-08-26T12:00:03.000Z', 3000,
+             '2026-08-26T12:00:03.000Z')`,
+        )
+        .run()
+
+      // Newest first: dangling(4), null-id(3), joined-null(2), joined-named(1).
+      const { events, total } = ledger.listEvents('daily-cap', {})
+      expect(total).toBe(4)
+      expect(events.map((e) => e.amount)).toEqual([4, 3, 2, 1])
+      expect(events.map((e) => e.upstream)).toEqual([null, null, null, 'github'])
+
+      // The pagination invariant: the join-free COUNT and the LIMIT/OFFSET
+      // window are unchanged by the LEFT JOIN.
+      const page = ledger.listEvents('daily-cap', { limit: 2, offset: 1 })
+      expect(page.total).toBe(4)
+      expect(page.events.map((e) => e.amount)).toEqual([3, 2])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('listEventsForExport rows carry upstream through the shared statement', () => {
+    const { store, ledger } = createJoinedLedger()
+    try {
+      insertAuditRow(store, 'a1', 'github')
+      ledger.commitAll([ledgerRow({ audit_record_id: 'a1' })])
+      const { events } = ledger.listEventsForExport('daily-cap')
+      expect(events[0]?.upstream).toBe('github')
+    } finally {
+      store.close()
+    }
+  })
+})
+
 describe('BudgetLedger.listEvents', () => {
   it('lists a budget name newest first, same-ms ties by insert order', () => {
     const { ledger } = createLedger()
@@ -446,6 +552,7 @@ describe('BudgetLedger.listEvents', () => {
       'timestamp',
       'timestamp_ms',
       'tool_name',
+      'upstream',
     ])
   })
 
@@ -613,6 +720,7 @@ describe('BudgetLedger.listEventsForExport', () => {
       'timestamp',
       'timestamp_ms',
       'tool_name',
+      'upstream',
     ])
   })
 })
