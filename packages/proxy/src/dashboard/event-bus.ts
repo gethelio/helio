@@ -224,9 +224,10 @@ export function actionEventFromRecord(
 
 /**
  * Map an approval ticket to an ApprovalRequestedEvent. The parameter is
- * duck-typed to the fields the mapper reads — not `ApprovalTicket`, whose
- * optional `upstream` lands in a later commit; the ticket stays structurally
- * assignable before and after, so nothing retargets when it does.
+ * duck-typed to the fields the mapper reads — not `ApprovalTicket` — so
+ * this module never depends on the ticket DTO's shape. `ApprovalTicket`,
+ * whose `upstream` is optional-absent, stays structurally assignable, and
+ * an absent key maps to the event's required null.
  */
 export function approvalRequestedEvent(ticket: {
   id: string

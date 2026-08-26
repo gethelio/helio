@@ -340,8 +340,8 @@ describe('actionEventFromRecord (issue #292)', () => {
 describe('approvalRequestedEvent (issue #292)', () => {
   it('maps the five-field ticket projection, upstream flowing through when present', () => {
     // The param is duck-typed to the fields the mapper reads, not
-    // ApprovalTicket — tickets gain their optional upstream in a later
-    // commit, and the ticket stays structurally assignable either way.
+    // ApprovalTicket, whose upstream is optional-absent — the ticket
+    // stays structurally assignable with or without the key.
     const named = approvalRequestedEvent({
       id: 't-1',
       tool_name: 'send_payment',

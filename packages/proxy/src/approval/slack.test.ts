@@ -202,9 +202,14 @@ describe('buildApprovalBlocks — upstream and session_source (issues #292/#251)
   })
 
   it('sanitizes both interpolations like every other ticket field', () => {
-    const text = sectionText(makeTicket({ upstream: 'git`hub', session_source: 'hea*der' }))
-    // Code-span sanitizer strips backticks; mrkdwn sanitizer escapes markup.
+    const text = sectionText(makeTicket({ upstream: 'git`hub*', session_source: 'hea*der' }))
+    // The Upstream line is a code span: backticks stripped, mrkdwn
+    // metacharacters preserved — a mrkdwn-sanitized line would drop the *.
+    expect(text).toContain('*Upstream:* `github*`')
     expect(text).not.toContain('git`hub')
+    // The source parenthetical is raw mrkdwn: metacharacters stripped —
+    // a code-span-sanitized source would keep the *.
+    expect(text).toContain('(header)')
     expect(text).not.toContain('(hea*der)')
   })
 
