@@ -36,6 +36,7 @@ Each audit record contains the following fields:
 | `origin`               | string         | Enforcement origin: `mcp` for the proxy path, or an adapter origin string (e.g. `openclaw`) for [sideband-governed](./adapter-api.md) calls.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `metadata`             | object \| null | Adapter-supplied context (reserved keys `channel_id`, `sender_id`, `sender_name`, `conversation_id`). Null for MCP-origin records.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `protocol_version`     | string \| null | The client's verbatim `MCP-Protocol-Version` wire claim on the inbound request (issue #219). This is the CLIENT'S claim, not the upstream era — recorded uncapped, exactly as sent, untouched by the agreement door's tier normalization. As of issue #226 a FORWARDED request claiming `2026-07-28` has passed [header/body agreement](#header-mismatch-rejections); tier-2 claims (legacy, unknown, malformed) and notification claims remain unvalidated as recorded. Null when the request carried no header and on records with no MCP wire (drift events, all sideband records). |
+| `upstream`             | string \| null | Name of the upstream MCP server the record is attributed to (issue #292). Null in singular mode (no named upstreams configured, which is every configuration until the multi-upstream config surface lands), on sideband records (no MCP door), and on rows written before the column existed.                                                                                                                                                                                                                                                                                         |
 | `created_at`           | string         | ISO 8601 timestamp of when the record was persisted to the database.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ### Block Reasons
@@ -131,7 +132,7 @@ audit:
   include_responses: true # Store full upstream responses
 ```
 
-**Indexes** are created on `created_at`, `tool_name`, `policy_decision`, `block_reason`, `session_id`, `record_kind`, and `origin` for fast queries, plus a composite `(upstream_http_status, created_at)` index for upstream status rollups and status-over-time alert queries.
+**Indexes** are created on `created_at`, `tool_name`, `policy_decision`, `block_reason`, `session_id`, `record_kind`, `origin`, and `upstream` for fast queries, plus a composite `(upstream_http_status, created_at)` index for upstream status rollups and status-over-time alert queries.
 
 ### Budget Ledger Tables
 
@@ -156,6 +157,8 @@ rm helio-audit.db helio-audit.db-wal helio-audit.db-shm
 ```
 
 If your `audit.path` points elsewhere, delete that path and its `-wal` / `-shm` sidecars instead.
+
+**One-time additive migration (v0.13).** The `upstream` column is the one ratified exception to the clean break: a database created by v0.12.0, complete except for `upstream`, is migrated in place on first open with a single `ALTER TABLE`. Every open path migrates, `helio start` and `helio export` alike, and the process that performed the migration prints one notice to stderr: `[helio] Audit DB migrated: added column "upstream"`. Pre-existing rows read back with a null `upstream`; nothing is backfilled. When two processes race to migrate the same file, the loser detects the winner's column and continues silently, so the notice appears at most once per migration. The exception covers additive nullable columns and indexes only. Databases older than v0.12.0 still hit the clean break above, and their schema-mismatch error now also names `upstream` among the missing columns.
 
 ## Response Recording
 
@@ -286,11 +289,11 @@ The export response includes a `Content-Disposition` header for browser download
 
 ## CSV Format
 
-CSV exports include all 29 of the record's fields:
+CSV exports include all 30 of the record's fields:
 
-`id`, `timestamp`, `session_id`, `agent_id`, `tool_name`, `tool_input`, `policy_decision`, `block_reason`, `matched_rule`, `evidence_chain`, `approval_status`, `approved_by`, `upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `created_at`, `environment`, `matched_rule_index`, `record_kind`, `origin`, `metadata`, `session_source`, `protocol_version`
+`id`, `timestamp`, `session_id`, `agent_id`, `tool_name`, `tool_input`, `policy_decision`, `block_reason`, `matched_rule`, `evidence_chain`, `approval_status`, `approved_by`, `upstream_response`, `upstream_error`, `upstream_http_status`, `upstream_latency_ms`, `total_duration_ms`, `approval_wait_ms`, `proxy_compute_ms`, `flagged_destructive`, `dry_run`, `created_at`, `environment`, `matched_rule_index`, `record_kind`, `origin`, `metadata`, `session_source`, `protocol_version`, `upstream`
 
-New columns are only ever appended, so positional consumers of the existing columns keep working — `protocol_version` is the trailing column as of 0.12.
+New columns are only ever appended, so positional consumers of the existing columns keep working — `upstream` is the trailing column as of 0.13.
 
 Dashboard API CSV exports (`GET /api/audit/export?format=csv`) serialize object fields (`tool_input`, `evidence_chain`, `upstream_response`, `metadata`) as JSON strings. Fields containing commas, newlines, or quotes are properly escaped per RFC 4180. Boolean values are exported as `true` or `false`. Null values are exported as empty strings.
 

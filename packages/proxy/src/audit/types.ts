@@ -90,6 +90,13 @@ export interface AuditRecord {
    * and on records with no MCP wire (drift events, sideband records).
    */
   readonly protocol_version: string | null
+  /**
+   * Name of the upstream MCP server this record is attributed to (issue
+   * #292). Null in singular mode (no named upstreams configured), on
+   * sideband records (no MCP door), and on rows that predate the column.
+   * Optional until every producer stamps it in the same release.
+   */
+  readonly upstream?: string | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
 }
@@ -110,6 +117,11 @@ export interface AuditQueryFilters {
   readonly blocked?: boolean
   /** Filter by session ID (exact match). */
   readonly session_id?: string
+  /**
+   * Filter by upstream name (exact match). SQL equality: rows whose
+   * upstream is NULL never match any filter value.
+   */
+  readonly upstream?: string
   /** Filter by agent ID (exact match). */
   readonly agent_id?: string
   /** Include only records created at or after this ISO 8601 timestamp. */

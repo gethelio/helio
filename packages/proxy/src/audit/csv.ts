@@ -33,10 +33,11 @@ export const CSV_HEADERS = [
   'record_kind',
   'origin',
   'metadata',
-  // Appended LAST (issues #218, #219): positional consumers of the existing
-  // columns keep working — new columns always go at the end.
+  // Appended LAST (issues #218, #219, #292): positional consumers of the
+  // existing columns keep working — new columns always go at the end.
   'session_source',
   'protocol_version',
+  'upstream',
 ] as const
 
 /**
