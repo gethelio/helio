@@ -875,6 +875,31 @@ describe('config-samples guard', () => {
   )
 
   it(
+    'still fails a fragment carrying both upstream: and upstreams: (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      // Displacement replaces the HARNESS upstream only — a fence that
+      // itself declares both modes must keep both keys and fail the
+      // exactly-one-of contract loudly.
+      const root = makeTree({
+        'docs/test.md': doc(
+          [
+            'upstream:',
+            "  url: 'http://localhost:8080/mcp'",
+            'upstreams:',
+            '  - name: files',
+            "    url: 'http://localhost:8081/mcp'",
+          ].join('\n'),
+        ),
+      })
+      const { code, output } = await runGuard(root)
+      expect(code).toBe(1)
+      expect(output).toContain('FAIL')
+      expect(output).toContain('Set exactly one of')
+    },
+  )
+
+  it(
     'still fails an upstreams: fragment carrying a bad entry name (issue #293)',
     { timeout: 60_000 },
     async () => {

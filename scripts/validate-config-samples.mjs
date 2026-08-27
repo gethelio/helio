@@ -484,10 +484,12 @@ function classifyFence(text) {
     }
     if (keys.length > 0 && keys.every((key) => ROOT_KEYS.has(key) || key.startsWith('x-'))) {
       const merged = { ...HARNESS, ...node }
-      // A named-mode fragment displaces the harness's singular upstream —
+      // A named-mode fragment displaces the HARNESS's singular upstream —
       // without this the overlay would build a both-modes doc that fails
-      // the exactly-one-of contract (issue #293).
-      if ('upstreams' in node) delete merged.upstream
+      // the exactly-one-of contract. A fence that itself declares both
+      // modes keeps both keys, so its own defect still fails loudly
+      // (issue #293).
+      if ('upstreams' in node && !('upstream' in node)) delete merged.upstream
       return {
         kind: 'fragment',
         candidateText: yaml.dump(merged, DUMP_OPTS),
