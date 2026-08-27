@@ -5,6 +5,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import Database from 'better-sqlite3'
 import { AuditStore } from './audit/store.js'
 import type { AuditRecord } from './audit/types.js'
 import { BudgetLedger } from './budget/ledger.js'
@@ -951,6 +952,81 @@ dashboard:
         // A refusal, not a validation failure: helio validate accepts this
         // exact config (pinned above in the validate suite).
         expect(message).not.toContain('Invalid configuration')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('start with a stale legacy audit DB exits 1 with the recovery message alone (issue #233)', async () => {
+      const { dir, configPath } = writeStdioStartConfig('30s')
+      const auditPath = join(dir, 'audit.db')
+      const staleDb = new Database(auditPath)
+      // The issue's repro table: MANY required columns missing. A DB missing
+      // only `upstream` is silently repaired on open (the #292 additive
+      // exception) and would boot clean instead of reproducing.
+      staleDb.exec(
+        'CREATE TABLE audit_records (' +
+          'id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, tool_name TEXT NOT NULL, ' +
+          'policy_decision TEXT NOT NULL, matched_rule TEXT, tool_input TEXT, ' +
+          'flagged_destructive INTEGER, dry_run INTEGER)',
+      )
+      staleDb.close()
+
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain(
+          '[helio] Audit DB schema mismatch: missing required columns',
+        )
+        expect(result.stderr).toContain('then restart Helio.')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+        expect(result.stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('start with an unreachable singular sse upstream exits 1 with the connect error alone (issue #233)', async () => {
+      // Grab a port that was just free, so the connect fails fast with
+      // ECONNREFUSED instead of eating the connect timeout.
+      const closedPort = await new Promise<number>((resolve) => {
+        const srv = createServer()
+        srv.listen(0, '127.0.0.1', () => {
+          const port = (srv.address() as AddressInfo).port
+          srv.close(() => {
+            resolve(port)
+          })
+        })
+      })
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sse-conn-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:${String(closedPort)}/sse"
+  transport: sse
+  connect_timeout: "2s"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('is unreachable (ECONNREFUSED)')
+        // Singular mode: the underlying message alone — no minted upstream
+        // name, no crash dump.
+        expect(result.stderr).not.toContain('upstream "')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

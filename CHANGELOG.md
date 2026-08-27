@@ -109,6 +109,14 @@ Maintainer notes:
 
 ### Fixed
 
+- Diagnosed startup failures now exit cleanly instead of crash-dumping
+  (#233): when `helio start` refuses to boot for a stated reason — an
+  audit database from an older build with a mismatched schema, or an
+  upstream that fails to connect — stderr carries the diagnosis alone
+  and the process exits 1, without the
+  `[helio] Unhandled promise rejection:` wrapper and stack trace that
+  previously buried the recovery instructions. Genuine crashes keep
+  the full stack and the crash-drain path.
 - A configuration reload that leaves `policies.tool_revalidation`
   unchanged no longer restarts the revalidation clock, so frequent
   saves cannot keep pushing the next definition check a full interval

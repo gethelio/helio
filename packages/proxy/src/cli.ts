@@ -56,6 +56,7 @@ import {
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
+import { StartupError } from './startup-error.js'
 
 // ---------------------------------------------------------------------------
 // Process-level error handlers — ensure crashes are logged, and let every
@@ -233,7 +234,17 @@ async function connectUpstream(
   upstream: SingularHelioConfig['upstream'],
   upstreamName?: string,
 ): Promise<BuiltForwarder> {
-  return createForwarderFromConfig({ upstream }, upstreamName)
+  try {
+    return await createForwarderFromConfig({ upstream }, upstreamName)
+  } catch (err) {
+    // A connect failure is a diagnosed boot failure, not a crash (#233). A
+    // named entry's failure names the entry; singular mode prints the
+    // underlying message ALONE — no name is ever minted for it.
+    const message = err instanceof Error ? err.message : String(err)
+    throw new StartupError(
+      upstreamName === undefined ? message : `upstream "${upstreamName}": ${message}`,
+    )
+  }
 }
 
 /** One governed upstream stack: the forwarder wrapped in governance plus
@@ -972,7 +983,18 @@ program
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .option('--no-hot-reload', 'Disable policy hot-reload — config edits will require a restart')
   .action((opts: { config: string; hotReload?: boolean }) =>
-    startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }),
+    startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }).catch(
+      (err: unknown) => {
+        // A StartupError message is the complete operator diagnosis: print
+        // it verbatim and exit — no stack, no rejection wrapper (#233).
+        // Anything else rethrows into the unhandledRejection crash path.
+        if (err instanceof StartupError) {
+          console.error(err.message)
+          process.exit(1)
+        }
+        throw err
+      },
+    ),
   )
 
 program
