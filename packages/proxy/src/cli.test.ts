@@ -490,6 +490,126 @@ dashboard:
       }
     })
 
+    describe('named-mode acceptance matrix (issue #293)', () => {
+      const NAMED_HEADER = [
+        'version: "1"',
+        'upstreams:',
+        '  - name: files',
+        '    url: "http://localhost:8081/mcp"',
+        '  - name: search',
+        '    url: "http://localhost:8082/mcp"',
+      ].join('\n')
+      const FOOTER = 'dashboard:\n  enabled: false\n'
+
+      const rejectionCases: Array<[string, string, string[]]> = [
+        [
+          'both upstream: and upstreams:',
+          `version: "1"\nupstream:\n  url: "http://localhost:8080/mcp"\nupstreams:\n  - name: files\n    url: "http://localhost:8081/mcp"\n${FOOTER}`,
+          ['upstreams: Set exactly one of'],
+        ],
+        [
+          'neither upstream: nor upstreams:',
+          `version: "1"\n${FOOTER}`,
+          ['(top level): Missing upstream configuration'],
+        ],
+        [
+          'empty upstreams: list',
+          `version: "1"\nupstreams: []\n${FOOTER}`,
+          ['would serve nothing'],
+        ],
+        [
+          'duplicate entry names',
+          `version: "1"\nupstreams:\n  - name: files\n    url: "http://localhost:8081/mcp"\n  - name: files\n    url: "http://localhost:8082/mcp"\n${FOOTER}`,
+          ['upstreams.1.name: Duplicate upstream name "files"'],
+        ],
+        [
+          'entry name outside the charset',
+          `version: "1"\nupstreams:\n  - name: "bad name"\n    url: "http://localhost:8081/mcp"\n${FOOTER}`,
+          ['upstreams.0.name: Upstream names may only contain letters, digits, "_" and "-"'],
+        ],
+        [
+          'stdio entry missing command',
+          `version: "1"\nupstreams:\n  - name: files\n    url: "unused"\n    transport: stdio\n${FOOTER}`,
+          ['upstreams.0.command: "command" is required when transport is "stdio"'],
+        ],
+        [
+          'rule naming an unknown upstream',
+          `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n        upstreams: [ghost]\n      action: deny\n${FOOTER}`,
+          ['policies.rules.0.match.upstreams.0: Rule names upstream "ghost"'],
+        ],
+        [
+          'rule combining upstreams with metadata',
+          `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        upstreams: [files]\n        metadata:\n          channel_id: "C1"\n      action: deny\n${FOOTER}`,
+          ['match.upstreams cannot be combined with match.metadata'],
+        ],
+        [
+          'sender_id budget with only scoped contributors',
+          `${NAMED_HEADER}\nbudgets:\n  - name: cap\n    limit: 100\n    currency: USD\n    window: 24h\n    key: sender_id\n    on_exceed: deny\n    contributors:\n      - match:\n          tool: "stripe_*"\n          upstreams: [files]\n        field: "$.amount"\nsdk:\n  enabled: true\n${FOOTER}`,
+          ['budgets.0.key: budget key "sender_id" requires at least one contributor'],
+        ],
+        [
+          'evidence-gated rule under the default legacy_header chain',
+          `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n      action: allow\n      requires: [deploy_ticket]\n${FOOTER}`,
+          ['session.identity.1: session.identity includes "legacy_header"'],
+        ],
+      ]
+
+      it.each(rejectionCases)('rejects %s', async (_name, yamlBody, fragments) => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, yamlBody)
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(1)
+          expect(stderr).toContain('Invalid config')
+          for (const fragment of fragments) {
+            expect(stderr).toContain(fragment)
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('accepts a governance-rich named config end to end', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(
+          configPath,
+          `${NAMED_HEADER}\n` +
+            'session:\n' +
+            '  identity:\n' +
+            '    - source: header\n' +
+            '      name: x-helio-session-id\n' +
+            'policies:\n' +
+            '  rules:\n' +
+            '    - match:\n' +
+            '        tool: "send_*"\n' +
+            '        upstreams: [files]\n' +
+            '      action: deny\n' +
+            'budgets:\n' +
+            '  - name: cap\n' +
+            '    limit: 100\n' +
+            '    currency: USD\n' +
+            '    window: 24h\n' +
+            '    key: global\n' +
+            '    on_exceed: deny\n' +
+            '    contributors:\n' +
+            '      - match:\n' +
+            '          tool: "stripe_*"\n' +
+            '          upstreams: [files, search]\n' +
+            '        field: "$.amount"\n' +
+            FOOTER,
+        )
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(0)
+          expect(stderr).toContain(`Config is valid: ${configPath} (1 policy rule, 1 budget)`)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+    })
+
     it('warns above 16 upstreams while still validating (issue #293)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')
