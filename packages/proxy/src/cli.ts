@@ -7,11 +7,16 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import { loadConfig, ConfigError, ConfigWatcher, isNamedConfig } from './config/index.js'
+import type { SingularHelioConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { createApp, startServer, startSidebandServer } from './server.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
+import type { BuiltForwarder } from './cli-forwarder.js'
+import type { McpForwarder } from './mcp/types.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
+import type { CompiledPolicy } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
+import type { GovernedForwarderOptions } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
 import { startAnnotationPrimeLoop } from './policy/annotation-prime-loop.js'
 import type { AnnotationPrimeController } from './policy/annotation-prime-loop.js'
@@ -218,6 +223,45 @@ function printConfigErrorDetails(error: ConfigError, prefix = ''): void {
   }
 }
 
+/**
+ * Phase 1 of per-upstream stack assembly: build and connect the transport
+ * forwarder for one upstream section. Kept separate from governUpstream so
+ * every upstream connects before any shared service is constructed — a bad
+ * upstream fails boot without side effects (no audit DB is created).
+ */
+async function connectUpstream(upstream: SingularHelioConfig['upstream']): Promise<BuiltForwarder> {
+  return createForwarderFromConfig({ upstream })
+}
+
+/** One governed upstream stack: the forwarder wrapped in governance plus
+ *  its running annotation prime loop. */
+interface UpstreamStack {
+  readonly governedForwarder: GovernedForwarder
+  readonly annotationPrime: AnnotationPrimeController
+}
+
+/**
+ * Phase 2 of per-upstream stack assembly: wrap a connected forwarder with
+ * governance and start its annotation prime loop. Runs after the shared
+ * services exist; `governance` carries the services every stack shares.
+ */
+async function governUpstream(options: {
+  forwarder: McpForwarder
+  policy: CompiledPolicy
+  governance: GovernedForwarderOptions
+}): Promise<UpstreamStack> {
+  const governedForwarder = new GovernedForwarder(
+    options.forwarder,
+    options.policy,
+    options.governance,
+  )
+  const annotationPrime = await startAnnotationPrimeLoop(
+    governedForwarder,
+    options.policy.toolRevalidation,
+  )
+  return { governedForwarder, annotationPrime }
+}
+
 interface StartOptions {
   config: string
   /** When true, do not start the config file watcher. Overrides the YAML. */
@@ -260,7 +304,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   }
 
   // Create the right forwarder based on upstream transport
-  const { forwarder, close: closeForwarder } = await createForwarderFromConfig(config)
+  const { forwarder, close: closeForwarder } = await connectUpstream(config.upstream)
 
   // Compile policies and wrap the forwarder with governance
   const { policy, warnings } = compilePolicies(config.policies)
@@ -362,18 +406,20 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // restart-required at the reload boundary (issue #218).
   const session = compileSessionIdentity(config.session)
 
-  const governedForwarder = new GovernedForwarder(forwarder, policy, {
-    environment: config.environment,
-    auditWriter,
-    evidenceStore,
-    approvalRouter,
-    rateLimiter,
-    spendLimiter,
-    budgetEngine,
-    session,
+  const { governedForwarder, annotationPrime } = await governUpstream({
+    forwarder,
+    policy,
+    governance: {
+      environment: config.environment,
+      auditWriter,
+      evidenceStore,
+      approvalRouter,
+      rateLimiter,
+      spendLimiter,
+      budgetEngine,
+      session,
+    },
   })
-
-  const annotationPrime = await startAnnotationPrimeLoop(governedForwarder, policy.toolRevalidation)
 
   // Conditionally create Slack action handler if any Slack channels exist
   const hasSlackChannels = [...channels.values()].some((ch) => ch.type === 'slack')

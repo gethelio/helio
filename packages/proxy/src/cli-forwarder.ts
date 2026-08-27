@@ -12,10 +12,12 @@ export interface BuiltForwarder {
 /**
  * Construct the upstream forwarder for the configured transport. Static
  * `upstream.headers` are passed to the HTTP transports (`streamable-http`,
- * `sse`); `stdio` is a child process with no request headers.
+ * `sse`); `stdio` is a child process with no request headers. Only the
+ * `upstream` section is read, so callers may pass any object carrying one —
+ * a full singular config, or a named entry wrapped as `{ upstream: entry }`.
  */
 export async function createForwarderFromConfig(
-  config: SingularHelioConfig,
+  config: Pick<SingularHelioConfig, 'upstream'>,
 ): Promise<BuiltForwarder> {
   switch (config.upstream.transport) {
     case 'streamable-http': {

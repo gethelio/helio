@@ -92,6 +92,11 @@ Maintainer notes:
 
 ### Changed
 
+- Internal groundwork for multi-upstream composition (#294):
+  `helio start` now assembles its upstream stack (transport connect,
+  governance wrap, annotation prime loop) through two extracted
+  per-upstream helpers. Singular-mode behavior, construction order,
+  and log output are unchanged.
 - First use of the ratified additive-migration path (#292): a v0.12.0
   audit database missing only the new `upstream` column is migrated in
   place on first open with a single `ALTER TABLE` and one stderr
