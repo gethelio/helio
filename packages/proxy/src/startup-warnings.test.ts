@@ -5,7 +5,35 @@ import {
   warnIfDashboardOpenMode,
   warnIfNoEnforcement,
   warnIfBudgetWindowExceedsRetention,
+  warnIfManyUpstreams,
 } from './startup-warnings.js'
+
+describe('warnIfManyUpstreams', () => {
+  const upstreams = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      name: `up-${String(i)}`,
+      url: `http://localhost:${String(9000 + i)}/mcp`,
+    }))
+
+  it('warns above 16 upstream entries', () => {
+    const messages: string[] = []
+    const warned = warnIfManyUpstreams({ upstreams: upstreams(17) }, (m) => messages.push(m))
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toBe(
+      '[helio] Warning: 17 upstreams configured. Each upstream runs its own upstream ' +
+        'connection or child process plus an annotation prime loop; consider whether one ' +
+        'proxy should govern this many.',
+    )
+  })
+
+  it('does not warn at exactly 16 entries', () => {
+    const messages: string[] = []
+    const warned = warnIfManyUpstreams({ upstreams: upstreams(16) }, (m) => messages.push(m))
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+})
 
 describe('warnIfWebhookChannelUnreachable', () => {
   function makeConfig(

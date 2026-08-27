@@ -47,6 +47,7 @@ import {
   warnIfDashboardOpenMode,
   warnIfNoEnforcement,
   warnIfBudgetWindowExceedsRetention,
+  warnIfManyUpstreams,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -669,6 +670,12 @@ async function validateCommand(configPath: string): Promise<void> {
       console.error(`Warning: policy ${label}: ${w.message}`)
     }
     compileBudgets(config.budgets)
+
+    // The start command cannot reach this warning yet — it refuses named
+    // mode outright — so validate is where the operator hears it (#293).
+    if (isNamedConfig(config)) {
+      warnIfManyUpstreams(config)
+    }
 
     if (config.dashboard.enabled && !getBundledDashboardDistPath()) {
       console.error(

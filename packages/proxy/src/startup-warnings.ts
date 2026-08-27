@@ -53,6 +53,27 @@ export function warnIfBudgetWindowExceedsRetention(
  * at boot prevents silent mis-configurations where tickets are created but
  * can never be resolved via webhook.
  */
+/**
+ * Emit a warning when a named config declares more than 16 upstreams. Each
+ * upstream runs its own connection or child process plus an annotation prime
+ * loop, so a very wide proxy multiplies that cost — the guardrail nudges the
+ * operator to consider splitting the deployment. Warning-only: nothing
+ * refuses to run (issue #293).
+ */
+export function warnIfManyUpstreams(
+  config: { upstreams: ReadonlyArray<unknown> },
+  log: (message: string) => void = console.error,
+): boolean {
+  const count = config.upstreams.length
+  if (count <= 16) return false
+  log(
+    `[helio] Warning: ${String(count)} upstreams configured. Each upstream runs its own ` +
+      'upstream connection or child process plus an annotation prime loop; consider ' +
+      'whether one proxy should govern this many.',
+  )
+  return true
+}
+
 export function warnIfWebhookChannelUnreachable(
   config: {
     approval: { channels: ReadonlyArray<{ type: string }> }

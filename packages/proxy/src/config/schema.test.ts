@@ -984,6 +984,134 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Named-mode legacy_header identity guard (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('named-mode legacy_header identity guard (issue #293)', () => {
+    const identityGuardMessage =
+      'session.identity includes "legacy_header" while named upstreams and evidence-gated ' +
+      'rules ("evidence"/"requires") are configured. On the legacy relay flow the ' +
+      'Mcp-Session-Id a client echoes was minted by the upstream itself, so with multiple ' +
+      'upstreams a hostile server could collide session identities across doors and ' +
+      "pollute another door's evidence gates. Remove legacy_header from session.identity " +
+      'and use a caller-owned source such as the default "x-helio-session-id" header.'
+
+    const namedConfig = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [{ name: 'files', url: 'http://localhost:8081/mcp' }],
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    const explicitLegacyChain = {
+      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+    }
+
+    it('rejects named + evidence rule + explicit legacy_header chain at the legacy index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: ['session', 'identity', 1], message: identityGuardMessage },
+      ])
+    })
+
+    it('rejects named + bare requires rule under the DEFAULT session chain', () => {
+      // The default identity chain carries legacy_header at index 1 — the
+      // guard deliberately fires here too, and the message spells the remedy.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires: ['deploy_ticket'] }],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: ['session', 'identity', 1], message: identityGuardMessage },
+      ])
+    })
+
+    it('accepts singular + evidence rule + legacy_header', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + evidence rule + header-only chain', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: { identity: [{ source: 'header', name: 'x-helio-session-id' }] },
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + requires_success-only rule + legacy_header', () => {
+      // requires_success alone is inert at runtime — it only modifies a
+      // non-empty requires list, so it must not trip the guard.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires_success: true }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + empty evidence.requires + legacy_header (runtime-gate alignment)', () => {
+      // An empty requires list never gates at runtime; a key-presence
+      // predicate would reject configs the pipeline treats as ungated.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', evidence: { requires: [] } }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + empty bare requires + legacy_header (runtime-gate alignment)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires: [] }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Session identity (issue #218)
   // -------------------------------------------------------------------------
 

@@ -472,6 +472,29 @@ dashboard:
       }
     })
 
+    it('warns above 16 upstreams while still validating (issue #293)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      const entries = Array.from(
+        { length: 17 },
+        (_, i) => `  - name: up-${String(i)}\n    url: "http://localhost:${String(9000 + i)}/mcp"`,
+      ).join('\n')
+      writeFileSync(
+        configPath,
+        `version: "1"\nupstreams:\n${entries}\ndashboard:\n  enabled: false\n`,
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain('17 upstreams configured')
+        expect(stderr).toContain('Config is valid')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('rejects invalid config (missing upstream.url)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')

@@ -1383,6 +1383,36 @@ function upstreamVocabularyChecks(
       })
     }
   }
+
+  // Named mode + evidence gating + legacy_header identity is fail-closed:
+  // the guard fires under the DEFAULT identity chain too, so the message
+  // must spell the exact remedy. The gating predicate mirrors the decision
+  // pipeline's runtime gate verbatim — only a NON-EMPTY requires list (in
+  // either spelling) gates a session; requires_success alone is inert.
+  if (configuredNames !== null) {
+    const hasEvidenceGatedRule = cfg.policies.rules.some(
+      (rule) => (rule.evidence?.requires.length ?? 0) > 0 || (rule.requires?.length ?? 0) > 0,
+    )
+    if (hasEvidenceGatedRule) {
+      const legacyIndex = cfg.session.identity.findIndex(
+        (source) => source.source === 'legacy_header',
+      )
+      if (legacyIndex !== -1) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['session', 'identity', legacyIndex],
+          message:
+            'session.identity includes "legacy_header" while named upstreams and ' +
+            'evidence-gated rules ("evidence"/"requires") are configured. On the legacy ' +
+            'relay flow the Mcp-Session-Id a client echoes was minted by the upstream ' +
+            'itself, so with multiple upstreams a hostile server could collide session ' +
+            "identities across doors and pollute another door's evidence gates. Remove " +
+            'legacy_header from session.identity and use a caller-owned source such as ' +
+            'the default "x-helio-session-id" header.',
+        })
+      }
+    }
+  }
 }
 
 const singularConfigSchema = singularConfigBase.superRefine((cfg, ctx) => {
