@@ -97,11 +97,15 @@ Maintainer notes:
   the `/sse` cap refusal, the stdio max-retries death line, the
   protocol-pin confirmation) carry the entry's `[helio][<name>]` tag,
   and the more-than-16-upstreams warning now prints from start as
-  well as validate. For library embedders, `createMultiApp(config,
-forwarders)` is exported beside `createApp`; its forwarder record
-  must match the configured names exactly (missing or extra keys
-  throw at composition). Singular-mode serving is byte-identical,
-  including its log lines and limiter key formats.
+  well as validate. The dashboard Limits page renders an
+  upstream-prefixed tool key as the tool with the door as a qualifier
+  (`send_email (files)`); the full grouping and filtering UX is
+  tracked separately (#297). For library embedders,
+  `createMultiApp(config, forwarders)` is exported beside
+  `createApp`; its forwarder record must match the configured names
+  exactly (missing or extra keys throw at composition).
+  Singular-mode serving is byte-identical, including its log lines
+  and limiter key formats.
 - Internal multi-upstream substrate (#295): the policy match context,
   the tool-scope limiter keys, budget charges and peek entries, and
   the upstream lifecycle log lines (era detection, annotation priming,
