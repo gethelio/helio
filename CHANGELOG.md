@@ -97,9 +97,10 @@ Maintainer notes:
   entry, the upstream lifecycle log lines (era detection, priming,
   the stdio max-retries death line, the protocol-pin confirmation)
   carry the entry's `[helio][<name>]` tag, the `/sse` cap-refusal
-  line names the door that refused (`[helio] /sse/<name> at session
-cap ...`), and the more-than-16-upstreams warning now prints from
-  start as well as validate. The dashboard Limits page renders an
+  line names the door that refused
+  (`[helio] /sse/<name> at session cap ...`), and the
+  more-than-16-upstreams warning now prints from start as well as
+  validate. The dashboard Limits page renders an
   upstream-prefixed tool key as the tool with the door as a qualifier
   (`send_email (files)`); the full grouping and filtering UX is
   tracked separately (#297). For library embedders,
@@ -112,7 +113,7 @@ cap ...`), and the more-than-16-upstreams warning now prints from
   the tool-scope limiter keys, budget charges and peek entries, and
   the upstream lifecycle log lines (era detection, annotation priming,
   the `/sse` cap refusal) can now carry an operator-chosen upstream
-  label. Named multi-upstream serving (#294, below) is what sets the
+  label. Named multi-upstream serving (#294, above) is what sets the
   labels. Singular-mode behavior, key formats, and log lines are
   byte-identical.
 - Type-level compatibility note for library embedders (#295): the
