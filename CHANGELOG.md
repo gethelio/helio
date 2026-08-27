@@ -47,8 +47,13 @@ Maintainer notes:
   now a union of the two modes with `isSingularConfig` /
   `isNamedConfig` guards exported, and `createApp` throws on a named
   config, pointing at the upcoming `createMultiApp`. A mode switch is
-  restart-required at the reload boundary. Singular configs parse
-  exactly as before.
+  restart-required at the reload boundary. Policy rules gain
+  `match.upstreams`, a non-empty list of configured upstream names
+  (exact match, OR within the list, AND with the other match
+  dimensions; inert on the sideband). Validation rejects the dead
+  combinations up front: `match.upstreams` in singular mode, unknown
+  names, combination with `match.metadata`, and combination with
+  sender-keyed limits. Singular configs parse exactly as before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget

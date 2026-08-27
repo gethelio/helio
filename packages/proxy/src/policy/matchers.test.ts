@@ -7,6 +7,7 @@ import {
   matchInput,
   matchEnvironment,
   matchMetadata,
+  matchUpstreams,
 } from './matchers.js'
 import type { PoliciesConfig } from '../config/schema.js'
 import type {
@@ -705,6 +706,29 @@ describe('matchEnvironment', () => {
 })
 
 // ---------------------------------------------------------------------------
+// matchUpstreams (issue #293)
+// ---------------------------------------------------------------------------
+
+describe('matchUpstreams (issue #293)', () => {
+  it('matches when ctx.upstream is in the list (OR within the list)', () => {
+    expect(matchUpstreams(['files', 'search'], ctx({ upstream: 'search' }))).toBe(true)
+  })
+
+  it('does not match when ctx.upstream is not in the list', () => {
+    expect(matchUpstreams(['files'], ctx({ upstream: 'search' }))).toBe(false)
+  })
+
+  it('returns false when ctx.upstream is undefined (sideband and singular inertness)', () => {
+    expect(matchUpstreams(['files'], ctx())).toBe(false)
+  })
+
+  it('is case-sensitive exact matching, no globs', () => {
+    expect(matchUpstreams(['Files'], ctx({ upstream: 'files' }))).toBe(false)
+    expect(matchUpstreams(['files*'], ctx({ upstream: 'files' }))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // matchRule — integration
 // ---------------------------------------------------------------------------
 
@@ -760,6 +784,21 @@ describe('matchRule', () => {
   it('combined tool + environment — environment matches, tool does not', () => {
     const rule = compileRule({ tool: 'deploy_*', environment: 'production' })
     expect(matchRule(rule, ctx({ toolName: 'read_config', environment: 'production' }))).toBe(false)
+  })
+
+  it('combined tool + upstreams — both match (issue #293)', () => {
+    const rule = compileRule({ tool: 'send_*', upstreams: ['files'] })
+    expect(matchRule(rule, ctx({ toolName: 'send_email', upstream: 'files' }))).toBe(true)
+  })
+
+  it('combined tool + upstreams — tool matches, upstream not in list (issue #293)', () => {
+    const rule = compileRule({ tool: 'send_*', upstreams: ['files'] })
+    expect(matchRule(rule, ctx({ toolName: 'send_email', upstream: 'search' }))).toBe(false)
+  })
+
+  it('upstreams-only rule is inert when ctx carries no upstream (issue #293)', () => {
+    const rule = compileRule({ upstreams: ['files'] })
+    expect(matchRule(rule, ctx({ toolName: 'send_email' }))).toBe(false)
   })
 
   it('rule with input conditions matches correct arguments', () => {

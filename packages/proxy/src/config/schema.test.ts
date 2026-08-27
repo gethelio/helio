@@ -663,6 +663,179 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // match.upstreams vocabulary (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('match.upstreams vocabulary (issue #293)', () => {
+    const namedWithRules = (
+      rules: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      policies: { rules },
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    it('accepts a rule scoped to configured upstream names', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: ['files', 'search'] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects match.upstreams in singular mode', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          policies: { rules: [{ match: { tool: '*', upstreams: ['files'] }, action: 'deny' }] },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'Rule sets match.upstreams but the config declares a single "upstream:", which ' +
+            'has no name on purpose. Upstream-scoped rules require the named "upstreams:" list.',
+        },
+      ])
+    })
+
+    it('rejects an unknown upstream name at the entry index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: ['files', 'ghost'] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams', 1],
+          message:
+            'Rule names upstream "ghost" in match.upstreams but no configured upstream has ' +
+            'that name. Every entry must name an upstream from the upstreams: list.',
+        },
+      ])
+    })
+
+    it('rejects an empty match.upstreams list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: [] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams must name at least one upstream — an empty list matches nothing.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with match.metadata', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([
+          {
+            match: { upstreams: ['files'], metadata: { channel_id: 'C1' } },
+            action: 'deny',
+          },
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams cannot be combined with match.metadata — metadata rules only ' +
+            'match on the sideband (host) path and upstream-scoped rules only on the MCP ' +
+            'path, so the combination can never match. Split it into two rules.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with limits.key sender_id', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules(
+          [
+            {
+              match: { tool: '*', upstreams: ['files'] },
+              action: 'allow',
+              limits: { key: 'sender_id', max_calls: 10, window: '60s' },
+            },
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'limits', 'key'],
+          message:
+            'limits.key "sender_id" cannot be combined with match.upstreams — an ' +
+            'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+            'and the key would silently collapse to tool scope.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with limits.max_spend.key sender_id', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules(
+          [
+            {
+              match: { tool: '*', upstreams: ['files'] },
+              action: 'allow',
+              limits: {
+                max_spend: {
+                  field: '$.amount',
+                  limit: 100,
+                  currency: 'USD',
+                  window: '24h',
+                  key: 'sender_id',
+                },
+              },
+            },
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'limits', 'max_spend', 'key'],
+          message:
+            'limits.max_spend.key "sender_id" cannot be combined with match.upstreams — an ' +
+            'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+            'and the key would silently collapse to tool scope.',
+        },
+      ])
+    })
+
+    it('adds no new rejection for agent keys on an upstream-scoped rule', () => {
+      // Pinned exemption: agent keys stay warn-only at compile time; the
+      // schema must not invent a rejection for them.
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([
+          {
+            match: { tool: '*', upstreams: ['files'] },
+            action: 'allow',
+            limits: { key: 'agent', max_calls: 10, window: '60s' },
+          },
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Session identity (issue #218)
   // -------------------------------------------------------------------------
 

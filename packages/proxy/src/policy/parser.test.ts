@@ -136,6 +136,24 @@ describe('tool glob compilation', () => {
     )
     expect(rule.match.tool).toBeUndefined()
   })
+
+  it('passes match.upstreams through to the compiled match (issue #293)', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { tool: '*', upstreams: ['files', 'search'] }, action: 'deny' }],
+      }),
+    )
+    expect(rule.match.upstreams).toEqual(['files', 'search'])
+  })
+
+  it('rule without upstreams has no upstreams field (issue #293)', () => {
+    const { rule } = firstRule(
+      minimalPolicies({
+        rules: [{ match: { tool: '*' }, action: 'deny' }],
+      }),
+    )
+    expect(rule.match.upstreams).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

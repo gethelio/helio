@@ -430,6 +430,13 @@ const matchSchema = z
     input: z.record(z.string(), inputConditionSchema).optional(),
     environment: z.string().optional(),
     metadata: z.record(z.string(), metadataConditionSchema).optional(),
+    /** Configured upstream names the rule is scoped to (issue #293). */
+    upstreams: z
+      .array(z.string().min(1))
+      .min(1, {
+        message: 'match.upstreams must name at least one upstream — an empty list matches nothing.',
+      })
+      .optional(),
   })
   .strict()
 
@@ -1232,8 +1239,89 @@ function rootConfigChecks(cfg: RootConfigSections, ctx: z.core.$RefinementCtx): 
   }
 }
 
-const singularConfigSchema = singularConfigBase.superRefine(rootConfigChecks)
-const namedConfigSchema = namedConfigBase.superRefine(rootConfigChecks)
+/**
+ * The upstream-vocabulary validations (issue #293). One function, run by BOTH
+ * mode arms — `configuredNames` is null in singular mode and the declared
+ * name set in named mode — so a mode-dependent rule can never be attached to
+ * one arm and silently skipped in the other.
+ */
+function upstreamVocabularyChecks(
+  cfg: RootConfigSections,
+  ctx: z.core.$RefinementCtx,
+  configuredNames: ReadonlySet<string> | null,
+): void {
+  for (const [ruleIndex, rule] of cfg.policies.rules.entries()) {
+    const upstreams = rule.match.upstreams
+    if (upstreams === undefined) continue
+
+    if (configuredNames === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'match', 'upstreams'],
+        message:
+          'Rule sets match.upstreams but the config declares a single "upstream:", which ' +
+          'has no name on purpose. Upstream-scoped rules require the named "upstreams:" list.',
+      })
+    } else {
+      for (const [entryIndex, name] of upstreams.entries()) {
+        if (!configuredNames.has(name)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['policies', 'rules', ruleIndex, 'match', 'upstreams', entryIndex],
+            message:
+              `Rule names upstream "${name}" in match.upstreams but no configured upstream ` +
+              'has that name. Every entry must name an upstream from the upstreams: list.',
+          })
+        }
+      }
+    }
+
+    // Metadata only exists on the sideband and upstream scoping only on the
+    // MCP path — the combination is a rule that can never match.
+    if (rule.match.metadata !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'match', 'upstreams'],
+        message:
+          'match.upstreams cannot be combined with match.metadata — metadata rules only ' +
+          'match on the sideband (host) path and upstream-scoped rules only on the MCP ' +
+          'path, so the combination can never match. Split it into two rules.',
+      })
+    }
+
+    // sender_id is sideband-only for the same reason — an upstream-scoped
+    // sender key could only ever collapse to tool scope.
+    if (rule.limits?.key === 'sender_id') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'limits', 'key'],
+        message:
+          'limits.key "sender_id" cannot be combined with match.upstreams — an ' +
+          'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+          'and the key would silently collapse to tool scope.',
+      })
+    }
+    if (rule.limits?.max_spend?.key === 'sender_id') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'limits', 'max_spend', 'key'],
+        message:
+          'limits.max_spend.key "sender_id" cannot be combined with match.upstreams — an ' +
+          'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+          'and the key would silently collapse to tool scope.',
+      })
+    }
+  }
+}
+
+const singularConfigSchema = singularConfigBase.superRefine((cfg, ctx) => {
+  rootConfigChecks(cfg, ctx)
+  upstreamVocabularyChecks(cfg, ctx, null)
+})
+const namedConfigSchema = namedConfigBase.superRefine((cfg, ctx) => {
+  rootConfigChecks(cfg, ctx)
+  upstreamVocabularyChecks(cfg, ctx, new Set(cfg.upstreams.map((entry) => entry.name)))
+})
 
 /** A fully validated and defaulted singular-mode (`upstream:`) configuration. */
 export type SingularHelioConfig = z.output<typeof singularConfigSchema>
