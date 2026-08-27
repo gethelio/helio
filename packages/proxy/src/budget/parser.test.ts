@@ -42,6 +42,22 @@ describe('compileBudgets', () => {
     expect(budget?.window).toEqual({ kind: 'session', idleTtlMs: 43_200_000 })
   })
 
+  it('passes contributor match.upstreams through to the compiled contributor (issue #293)', () => {
+    const [budget] = compileBudgets([
+      budgetConfig({
+        contributors: [
+          { match: { tool: 'stripe_*', upstreams: ['files', 'search'] }, field: '$.amount' },
+        ],
+      }),
+    ])
+    expect(budget?.contributors[0]?.upstreams).toEqual(['files', 'search'])
+  })
+
+  it('contributor without upstreams compiles without an upstreams field (issue #293)', () => {
+    const [budget] = compileBudgets([budgetConfig()])
+    expect(budget?.contributors[0]?.upstreams).toBeUndefined()
+  })
+
   it('carries name, limit, currency, key, and on_exceed through', () => {
     const [budget] = compileBudgets([budgetConfig()])
     expect(budget?.name).toBe('daily-cap')

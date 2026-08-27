@@ -623,6 +623,13 @@ const budgetContributorMatchSchema = z
     // matchers (annotations, environment, metadata) stay strict-rejected
     // until the budget charge context can actually evaluate them.
     input: z.record(z.string(), inputConditionSchema).optional(),
+    /** Configured upstream names the contributor is scoped to (issue #293). */
+    upstreams: z
+      .array(z.string().min(1))
+      .min(1, {
+        message: 'match.upstreams must name at least one upstream — an empty list matches nothing.',
+      })
+      .optional(),
   })
   .strict()
 
@@ -1309,6 +1316,70 @@ function upstreamVocabularyChecks(
           'limits.max_spend.key "sender_id" cannot be combined with match.upstreams — an ' +
           'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
           'and the key would silently collapse to tool scope.',
+      })
+    }
+  }
+
+  for (const [budgetIndex, budget] of cfg.budgets.entries()) {
+    let hasUnscopedContributor = false
+    for (const [contributorIndex, contributor] of budget.contributors.entries()) {
+      // The legacy flat contributor shape ({ tool, field }) reaches these
+      // checks unparsed: its migration rejection sits behind a
+      // z.unknown() pipe, and z.unknown() lets the raw object through the
+      // field parse. Treat it as unscoped — the migration message is the
+      // real issue and the config is already rejected.
+      const upstreams = (contributor as { match?: { upstreams?: readonly string[] } }).match
+        ?.upstreams
+      if (upstreams === undefined) {
+        hasUnscopedContributor = true
+        continue
+      }
+
+      if (configuredNames === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['budgets', budgetIndex, 'contributors', contributorIndex, 'match', 'upstreams'],
+          message:
+            'Contributor sets match.upstreams but the config declares a single "upstream:", ' +
+            'which has no name on purpose. Upstream-scoped contributors require the named ' +
+            '"upstreams:" list.',
+        })
+      } else {
+        for (const [entryIndex, name] of upstreams.entries()) {
+          if (!configuredNames.has(name)) {
+            ctx.addIssue({
+              code: 'custom',
+              path: [
+                'budgets',
+                budgetIndex,
+                'contributors',
+                contributorIndex,
+                'match',
+                'upstreams',
+                entryIndex,
+              ],
+              message:
+                `Contributor names upstream "${name}" in match.upstreams but no configured ` +
+                'upstream has that name. Every entry must name an upstream from the ' +
+                'upstreams: list.',
+            })
+          }
+        }
+      }
+    }
+
+    // A sender-keyed pot fed only by upstream-scoped contributors is dead
+    // config: MCP calls never carry a sender and sideband calls never carry
+    // an upstream, so the two scopes can never meet.
+    if (budget.key === 'sender_id' && !hasUnscopedContributor) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['budgets', budgetIndex, 'key'],
+        message:
+          'budget key "sender_id" requires at least one contributor without an ' +
+          '"upstreams" scope — upstream-scoped contributors only match MCP calls, which ' +
+          'never carry a sender, so every charge would land in the shared "unknown" pot ' +
+          'while sideband calls (the only ones with real senders) never feed this budget.',
       })
     }
   }

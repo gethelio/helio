@@ -76,6 +76,9 @@ function compileContributor(
 
   return {
     match: { tool, ...(input !== undefined && { input }) },
+    ...(contributor.match.upstreams !== undefined && {
+      upstreams: [...contributor.match.upstreams],
+    }),
     field: contributor.field,
   }
 }

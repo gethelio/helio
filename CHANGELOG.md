@@ -53,7 +53,11 @@ Maintainer notes:
   dimensions; inert on the sideband). Validation rejects the dead
   combinations up front: `match.upstreams` in singular mode, unknown
   names, combination with `match.metadata`, and combination with
-  sender-keyed limits. Singular configs parse exactly as before.
+  sender-keyed limits. Budget contributors gain the same optional
+  `upstreams` scope: a scoped contributor only feeds its pot from the
+  named doors (never from the sideband), an unscoped contributor keeps
+  charging everywhere, and a `sender_id` budget must keep at least one
+  unscoped contributor. Singular configs parse exactly as before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget

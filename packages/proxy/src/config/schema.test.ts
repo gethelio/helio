@@ -836,6 +836,154 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Budget contributor upstreams scoping (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('budget contributor upstreams scoping (issue #293)', () => {
+    const namedWithBudgets = (
+      budgets: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      budgets,
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    const budget = (
+      contributors: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      name: 'cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global',
+      on_exceed: 'deny',
+      contributors,
+      ...overrides,
+    })
+
+    it('accepts a contributor scoped to configured upstream names', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([{ match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' }]),
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a scoped contributor in singular mode', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          budgets: [
+            budget([{ match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' }]),
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams'],
+          message:
+            'Contributor sets match.upstreams but the config declares a single "upstream:", ' +
+            'which has no name on purpose. Upstream-scoped contributors require the named ' +
+            '"upstreams:" list.',
+        },
+      ])
+    })
+
+    it('rejects an unknown upstream name at the contributor entry index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([
+            { match: { tool: 'stripe_*', upstreams: ['files', 'ghost'] }, field: '$.amount' },
+          ]),
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams', 1],
+          message:
+            'Contributor names upstream "ghost" in match.upstreams but no configured ' +
+            'upstream has that name. Every entry must name an upstream from the upstreams: list.',
+        },
+      ])
+    })
+
+    it('rejects an empty contributor upstreams list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([{ match: { tool: 'stripe_*', upstreams: [] }, field: '$.amount' }]),
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams must name at least one upstream — an empty list matches nothing.',
+        },
+      ])
+    })
+
+    it('rejects a sender_id budget whose contributors are all upstream-scoped', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets(
+          [
+            budget(
+              [
+                { match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' },
+                { match: { tool: 'paypal_*', upstreams: ['search'] }, field: '$.total' },
+              ],
+              { key: 'sender_id' },
+            ),
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'key'],
+          message:
+            'budget key "sender_id" requires at least one contributor without an ' +
+            '"upstreams" scope — upstream-scoped contributors only match MCP calls, which ' +
+            'never carry a sender, so every charge would land in the shared "unknown" pot ' +
+            'while sideband calls (the only ones with real senders) never feed this budget.',
+        },
+      ])
+    })
+
+    it('accepts a sender_id budget with at least one unscoped contributor', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets(
+          [
+            budget(
+              [
+                { match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' },
+                { match: { tool: 'paypal_*' }, field: '$.total' },
+              ],
+              { key: 'sender_id' },
+            ),
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Session identity (issue #218)
   // -------------------------------------------------------------------------
 
