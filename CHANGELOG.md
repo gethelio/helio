@@ -60,7 +60,8 @@ Maintainer notes:
   unscoped contributor. Named configs combining evidence-gated rules
   with the `legacy_header` identity source are rejected with a message
   naming the remedy (upstream-minted session ids could collide across
-  doors), and `helio validate` warns above 16 upstream entries.
+  doors), and `helio validate` warns, without refusing, above 16
+  upstream entries.
   `helio init` scaffolds a commented `# upstreams:` pointer beside the
   singular section, and the docs samples guard understands both forms
   (`upstreams` shares the canonical slot of `upstream`). Singular

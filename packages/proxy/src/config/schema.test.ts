@@ -574,6 +574,22 @@ describe('helioConfigSchema', () => {
       ])
     })
 
+    it.each([
+      ['null', null, 'null'],
+      ['a string', 'nope', 'string'],
+      ['an array', [], 'array'],
+      ['a number', 3, 'number'],
+    ])('rejects %s root as a type error, not a mode error', (_name, input, received) => {
+      // A non-object document is not a config mapping at all — the diagnosis
+      // is the type, never the exactly-one-of contract.
+      const result = helioConfigSchema.safeParse(input)
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: [], message: `Invalid input: expected object, received ${received}` },
+      ])
+    })
+
     it('rejects a config that sets neither upstream: nor upstreams:', () => {
       const result = helioConfigSchema.safeParse({ version: '1', dashboard: { enabled: false } })
       expect(result.success).toBe(false)

@@ -1438,13 +1438,27 @@ export type NamedHelioConfig = z.output<typeof namedConfigSchema>
  * the exactly-one-of contract and forwards the chosen arm's issues verbatim,
  * so every error keeps its real path and message.
  */
+// Produces zod's canonical invalid_type issue for a non-object root — the
+// same message the pre-dispatch root schema generated, kept so a garbage
+// document is diagnosed as a type error, never as a mode error.
+const objectRootSchema = z.object({})
+
 function dispatchByMode(
   raw: unknown,
   ctx: z.core.$RefinementCtx,
 ): SingularHelioConfig | NamedHelioConfig {
   const isObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
-  const hasUpstream = isObject && 'upstream' in raw
-  const hasUpstreams = isObject && 'upstreams' in raw
+  if (!isObject) {
+    const typeResult = objectRootSchema.safeParse(raw)
+    if (!typeResult.success) {
+      for (const issue of typeResult.error.issues) {
+        ctx.addIssue(issue as z.core.$ZodRawIssue)
+      }
+    }
+    return z.NEVER
+  }
+  const hasUpstream = 'upstream' in raw
+  const hasUpstreams = 'upstreams' in raw
 
   if (hasUpstream && hasUpstreams) {
     ctx.addIssue({

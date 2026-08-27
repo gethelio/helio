@@ -46,14 +46,6 @@ export function warnIfBudgetWindowExceedsRetention(
 }
 
 /**
- * Emit a startup warning if a webhook approval channel is configured while
- * the dashboard sideband is bound to localhost only. Webhook callbacks
- * originate from outside the host, so they cannot reach
- * `/api/approvals/:id/approve` on a 127.0.0.1-bound sideband. Surfacing this
- * at boot prevents silent mis-configurations where tickets are created but
- * can never be resolved via webhook.
- */
-/**
  * Emit a warning when a named config declares more than 16 upstreams. Each
  * upstream runs its own connection or child process plus an annotation prime
  * loop, so a very wide proxy multiplies that cost — the guardrail nudges the
@@ -74,6 +66,14 @@ export function warnIfManyUpstreams(
   return true
 }
 
+/**
+ * Emit a startup warning if a webhook approval channel is configured while
+ * the dashboard sideband is bound to localhost only. Webhook callbacks
+ * originate from outside the host, so they cannot reach
+ * `/api/approvals/:id/approve` on a 127.0.0.1-bound sideband. Surfacing this
+ * at boot prevents silent mis-configurations where tickets are created but
+ * can never be resolved via webhook.
+ */
 export function warnIfWebhookChannelUnreachable(
   config: {
     approval: { channels: ReadonlyArray<{ type: string }> }
