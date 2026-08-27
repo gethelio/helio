@@ -74,8 +74,9 @@ Maintainer notes:
   the dashboard queue, and budget event listings read `upstream` from
   the referenced audit record. New filters: `upstream` on `/api/audit`,
   `/api/audit/export`, and `/api/feed`, plus `helio export --upstream`.
-  Every upstream value is null or absent until the multi-upstream
-  composition ships; `session_source` on tickets is live immediately.
+  Every upstream value is null in singular mode; named multi-upstream
+  serving (#294, below) is what populates them. `session_source` on
+  tickets is live in both modes.
 
 - Multi-upstream serving (#294): `helio start` now serves named
   multi-upstream configs. Each entry gets its own `/mcp/<name>` and
@@ -94,10 +95,11 @@ Maintainer notes:
   every entry, shutdown stops every prime loop first and closes every
   forwarder last, startup prints one `Upstream[<name>]:` line per
   entry, the upstream lifecycle log lines (era detection, priming,
-  the `/sse` cap refusal, the stdio max-retries death line, the
-  protocol-pin confirmation) carry the entry's `[helio][<name>]` tag,
-  and the more-than-16-upstreams warning now prints from start as
-  well as validate. The dashboard Limits page renders an
+  the stdio max-retries death line, the protocol-pin confirmation)
+  carry the entry's `[helio][<name>]` tag, the `/sse` cap-refusal
+  line names the door that refused (`[helio] /sse/<name> at session
+cap ...`), and the more-than-16-upstreams warning now prints from
+  start as well as validate. The dashboard Limits page renders an
   upstream-prefixed tool key as the tool with the door as a qualifier
   (`send_email (files)`); the full grouping and filtering UX is
   tracked separately (#297). For library embedders,
@@ -110,9 +112,9 @@ Maintainer notes:
   the tool-scope limiter keys, budget charges and peek entries, and
   the upstream lifecycle log lines (era detection, annotation priming,
   the `/sse` cap refusal) can now carry an operator-chosen upstream
-  label. Nothing sets a label yet; it lights up when the multi-upstream
-  composition ships. Singular-mode behavior, key formats, and log
-  lines are byte-identical.
+  label. Named multi-upstream serving (#294, below) is what sets the
+  labels. Singular-mode behavior, key formats, and log lines are
+  byte-identical.
 - Type-level compatibility note for library embedders (#295): the
   `BudgetChargeContext` passed to `BudgetEngine.resolveCharges()` has
   a new required `upstream: string | null` field, so charge-context
