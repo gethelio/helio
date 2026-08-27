@@ -1,7 +1,7 @@
 import { parseDuration } from './config/schema.js'
 import { SseUpstreamForwarder, StreamableHttpForwarder } from './upstream/index.js'
 import { StdioForwarder } from './transport/stdio-wrapper.js'
-import type { HelioConfig } from './config/index.js'
+import type { SingularHelioConfig } from './config/index.js'
 import type { McpForwarder } from './mcp/types.js'
 
 export interface BuiltForwarder {
@@ -14,7 +14,9 @@ export interface BuiltForwarder {
  * `upstream.headers` are passed to the HTTP transports (`streamable-http`,
  * `sse`); `stdio` is a child process with no request headers.
  */
-export async function createForwarderFromConfig(config: HelioConfig): Promise<BuiltForwarder> {
+export async function createForwarderFromConfig(
+  config: SingularHelioConfig,
+): Promise<BuiltForwarder> {
   switch (config.upstream.transport) {
     case 'streamable-http': {
       // connect() is a no-op (upstream sessions are established lazily), so

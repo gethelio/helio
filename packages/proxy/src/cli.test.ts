@@ -446,6 +446,32 @@ dashboard:
       }
     })
 
+    it('accepts a named multi-upstream config fully (issue #293)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      const namedConfig = `
+version: "1"
+upstreams:
+  - name: files
+    url: "http://localhost:8081/mcp"
+  - name: search
+    url: "http://localhost:8082/mcp"
+    transport: streamable-http
+dashboard:
+  enabled: false
+`
+      writeFileSync(configPath, namedConfig)
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain(`Config is valid: ${configPath} (0 policy rules, 0 budgets)`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('rejects invalid config (missing upstream.url)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')
@@ -730,6 +756,40 @@ dashboard:
         await expect(startAndCaptureStderr(['-c', configPath])).rejects.toThrow(
           /sdk: Unrecognized key: "enable"/,
         )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses to start a named multi-upstream config, pointing at #294 (issue #293)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(
+        configPath,
+        'version: "1"\n' +
+          'upstreams:\n' +
+          '  - name: files\n' +
+          '    url: "http://localhost:8081/mcp"\n' +
+          'dashboard:\n' +
+          '  enabled: false\n',
+      )
+
+      try {
+        const err = await startAndCaptureStderr(['-c', configPath]).then(
+          () => null,
+          (e: unknown) => e,
+        )
+        expect(err).toBeInstanceOf(Error)
+        const message = err instanceof Error ? err.message : ''
+        expect(message).toContain(
+          'Error: this config declares named upstreams (upstreams:), which "helio start" ' +
+            'cannot serve yet — multi-upstream composition and routing land with issue #294. ' +
+            '"helio validate" fully validates named configs; to start today, use the ' +
+            'singular "upstream:" form.',
+        )
+        // A refusal, not a validation failure: helio validate accepts this
+        // exact config (pinned above in the validate suite).
+        expect(message).not.toContain('Invalid configuration')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

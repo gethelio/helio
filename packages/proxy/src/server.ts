@@ -5,6 +5,7 @@ import type { Socket } from 'node:net'
 import { createStreamableHttpRoute } from './transport/streamable-http.js'
 import { createSseRoute } from './transport/sse.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
+import { isNamedConfig } from './config/index.js'
 import type { HelioConfig } from './config/index.js'
 import type { HeaderMismatchRejection, McpForwarder } from './mcp/types.js'
 
@@ -146,6 +147,14 @@ export function createApp(
   forwarder: McpForwarder,
   options?: CreateAppOptions,
 ): Hono {
+  if (isNamedConfig(config)) {
+    // One app serves one upstream; silently mounting a single door for a
+    // named config would drop every other declared upstream.
+    throw new Error(
+      'createApp serves a single-upstream (upstream:) config only. Named multi-upstream ' +
+        'configs are composed by createMultiApp, which lands with issue #294.',
+    )
+  }
   const app = new Hono()
   const forwardHeadersAllowlist = config.upstream.forward_headers
   const allowedOrigins = config.listen.allowed_origins

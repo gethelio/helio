@@ -74,6 +74,55 @@ describe('createApp', () => {
     expect(json).toEqual({ status: 'ok' })
   })
 
+  it('throws on a named multi-upstream config (issue #293)', () => {
+    // Library-level darkness: an embedder handing createApp a named config
+    // must get a loud pointer at createMultiApp, never a silent single-mount
+    // app serving only one of the declared upstreams.
+    const named = {
+      version: '1',
+      upstreams: [
+        {
+          name: 'files',
+          url: 'http://localhost:8081/mcp',
+          transport: 'streamable-http',
+          protocol_version: 'auto',
+          connect_timeout: '10s',
+          request_timeout: '30s',
+          forward_headers: [],
+          headers: {},
+        },
+      ],
+      listen: { port: 3000, host: '127.0.0.1', allowed_origins: [] },
+      dashboard: {
+        enabled: false,
+        port: 3100,
+        host: '127.0.0.1',
+        allow_open_mode: false,
+        sse_heartbeat_interval: '30s',
+      },
+      session: {
+        identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+        on_unresolved: 'deny',
+      },
+      policies: { default: 'allow', dry_run: false, rules: [] },
+      approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
+      audit: {
+        storage: 'sqlite',
+        path: './helio-audit.db',
+        retention: '90d',
+        include_responses: true,
+      },
+      sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
+      budgets: [],
+    } as HelioConfig
+    const forwarder = createMockForwarder({ status: 200, headers: {}, body: {} })
+
+    expect(() => createApp(named, forwarder)).toThrow(
+      'createApp serves a single-upstream (upstream:) config only. Named multi-upstream ' +
+        'configs are composed by createMultiApp, which lands with issue #294.',
+    )
+  })
+
   it('routes POST /mcp to the forwarder', async () => {
     const forwarder = createMockForwarder({
       status: 200,

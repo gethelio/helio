@@ -144,6 +144,43 @@ describe('diffReloadBoundary', () => {
     const diff = diffReloadBoundary(previous, next)
     expect(diff.restartRequiredPaths).toEqual(['listen'])
   })
+
+  describe('named upstreams (issue #293)', () => {
+    const namedConfig = (upstreams: unknown[]): HelioConfig =>
+      parseConfig({ version: '1', upstreams, dashboard: { enabled: false } })
+
+    it('requires restart when the named upstreams list changes', () => {
+      const previous = namedConfig([{ name: 'files', url: 'http://localhost:8081/mcp' }])
+      const next = namedConfig([{ name: 'files', url: 'http://localhost:9091/mcp' }])
+
+      const diff = diffReloadBoundary(previous, next)
+      expect(diff.restartRequiredPaths).toEqual(['upstreams'])
+    })
+
+    it('does not require restart when named lists are deep-equal', () => {
+      const previous = namedConfig([{ name: 'files', url: 'http://localhost:8081/mcp' }])
+      const next = namedConfig([{ name: 'files', url: 'http://localhost:8081/mcp' }])
+
+      const diff = diffReloadBoundary(previous, next)
+      expect(diff.restartRequiredPaths).toEqual([])
+    })
+
+    it('pushes both section labels on a mode switch, in both directions', () => {
+      // The operator edited both sections (one removed, one added) — naming
+      // only one would misreport half the change.
+      const singular = minimalConfig()
+      const named = namedConfig([{ name: 'files', url: 'http://localhost:8081/mcp' }])
+
+      expect(diffReloadBoundary(singular, named).restartRequiredPaths).toEqual([
+        'upstream',
+        'upstreams',
+      ])
+      expect(diffReloadBoundary(named, singular).restartRequiredPaths).toEqual([
+        'upstream',
+        'upstreams',
+      ])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

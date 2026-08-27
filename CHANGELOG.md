@@ -43,8 +43,12 @@ Maintainer notes:
   required `name` (letters, digits, `_`, `-`; unique within the list).
   `helio validate` fully validates named configs. `helio start` does
   not serve them yet: it refuses named mode with an error pointing at
-  the composition work (#294). Singular configs parse exactly as
-  before.
+  the composition work (#294). For library embedders, `HelioConfig` is
+  now a union of the two modes with `isSingularConfig` /
+  `isNamedConfig` guards exported, and `createApp` throws on a named
+  config, pointing at the upcoming `createMultiApp`. A mode switch is
+  restart-required at the reload boundary. Singular configs parse
+  exactly as before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget

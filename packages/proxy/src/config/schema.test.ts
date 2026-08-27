@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import type { z } from 'zod'
 import {
   helioConfigSchema,
   durationSchema,
@@ -6,7 +7,19 @@ import {
   upstreamNameSchema,
   namedUpstreamEntrySchema,
   upstreamsListSchema,
+  isSingularConfig,
+  isNamedConfig,
 } from './schema.js'
+import type { HelioConfig } from './schema.js'
+
+// Compile-time insurance: the schema's inferred output must stay exactly the
+// declared HelioConfig union — a drift in the dispatch's return type fails
+// `pnpm typecheck` here instead of silently widening downstream.
+type Equal<A, B> =
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- the single-use T on each side IS the exact-equality probe
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false
+const _schemaInfersTheDeclaredUnion: Equal<z.infer<typeof helioConfigSchema>, HelioConfig> = true
+void _schemaInfersTheDeclaredUnion
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,6 +145,8 @@ describe('helioConfigSchema', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
 
       expect(result.data.upstream.transport).toBe('streamable-http')
       expect(result.data.upstream.connect_timeout).toBe('10s')
@@ -461,6 +476,193 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Mode dispatch: upstream | upstreams (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('mode dispatch: upstream | upstreams (issue #293)', () => {
+    const namedMinimal = (overrides: Record<string, unknown> = {}) => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    it('parses a minimal named config with entry defaults applied', () => {
+      const result = helioConfigSchema.safeParse(namedMinimal())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(isNamedConfig(result.data)).toBe(true)
+      if (!isNamedConfig(result.data)) return
+      expect(result.data.upstreams).toHaveLength(2)
+      expect(result.data.upstreams[0]?.name).toBe('files')
+      expect(result.data.upstreams[0]?.transport).toBe('streamable-http')
+      expect(result.data.upstreams[0]?.protocol_version).toBe('auto')
+      expect(result.data.upstreams[1]?.name).toBe('search')
+      expect(result.data.session.on_unresolved).toBe('deny')
+      expect(result.data.policies.default).toBe('allow')
+    })
+
+    it('rejects a bad entry name at the entry path through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({ upstreams: [{ name: 'with:colon', url: 'http://localhost:8081/mcp' }] }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'name'],
+          message: 'Upstream names may only contain letters, digits, "_" and "-"',
+        },
+      ])
+    })
+
+    it('rejects duplicate entry names at the duplicate index through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [
+            { name: 'files', url: 'http://localhost:8081/mcp' },
+            { name: 'files', url: 'http://localhost:8082/mcp' },
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['upstreams', 1, 'name'])
+      expect(result.error.issues[0]?.message).toContain('Duplicate upstream name "files"')
+    })
+
+    it('applies every per-entry refinement at the entry path through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [
+            { name: 'files', url: 'x', transport: 'stdio' },
+            { name: 'search', url: 'x', headers: { 'mcp-session-id': 'y' } },
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+        {
+          path: ['upstreams', 1, 'headers', 'mcp-session-id'],
+          message: 'upstream.headers must not set reserved header "mcp-session-id"',
+        },
+      ])
+    })
+
+    it('rejects a config that sets both upstream: and upstreams:', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({ upstream: { url: 'http://localhost:8080' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams'],
+          message:
+            'Set exactly one of "upstream:" (single upstream) or "upstreams:" (named ' +
+            'multi-upstream list) — not both. To migrate, move the upstream: fields into ' +
+            'an upstreams: entry and give it a name.',
+        },
+      ])
+    })
+
+    it('rejects a config that sets neither upstream: nor upstreams:', () => {
+      const result = helioConfigSchema.safeParse({ version: '1', dashboard: { enabled: false } })
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: [],
+          message:
+            'Missing upstream configuration: set exactly one of "upstream:" (single ' +
+            'upstream) or "upstreams:" (named multi-upstream list).',
+        },
+      ])
+    })
+
+    it('rejects an empty upstreams: list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(namedMinimal({ upstreams: [] }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams'],
+          message:
+            'upstreams: must declare at least one upstream — an empty list would serve ' +
+            'nothing. For a single upstream you can keep the "upstream:" form.',
+        },
+      ])
+    })
+
+    it('emits named-mode top-level keys in the canonical section order', () => {
+      // Twin of the singular key-order pin: input keys deliberately reversed,
+      // upstreams in slot 2.
+      const result = helioConfigSchema.safeParse({
+        sdk: {},
+        dashboard: { enabled: false },
+        audit: {},
+        approval: {},
+        budgets: [],
+        policies: {},
+        session: {},
+        environment: 'production',
+        listen: {},
+        upstreams: [{ name: 'files', url: 'http://localhost:8081/mcp' }],
+        version: '1',
+      })
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(Object.keys(result.data)).toEqual([
+        'version',
+        'upstreams',
+        'listen',
+        'environment',
+        'session',
+        'policies',
+        'budgets',
+        'approval',
+        'audit',
+        'dashboard',
+        'sdk',
+      ])
+    })
+
+    it('forwards singular-arm issues verbatim through the dispatch', () => {
+      // The singular arm's error shape is the pre-#293 one — pinned so the
+      // dispatch encoding cannot bury or reword singular errors.
+      const result = helioConfigSchema.safeParse(minimalConfig({ upstream: {} }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstream', 'url'],
+          message: 'Invalid input: expected string, received undefined',
+        },
+      ])
+    })
+
+    it('narrows with the mode guards', () => {
+      const singular = helioConfigSchema.safeParse(minimalConfig())
+      const named = helioConfigSchema.safeParse(namedMinimal())
+      expect(singular.success).toBe(true)
+      expect(named.success).toBe(true)
+      if (!singular.success || !named.success) return
+      expect(isSingularConfig(singular.data)).toBe(true)
+      expect(isNamedConfig(singular.data)).toBe(false)
+      expect(isNamedConfig(named.data)).toBe(true)
+      expect(isSingularConfig(named.data)).toBe(false)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Session identity (issue #218)
   // -------------------------------------------------------------------------
 
@@ -681,6 +883,8 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.headers).toEqual({ Authorization: 'Bearer abc' })
     })
 
@@ -755,6 +959,8 @@ describe('helioConfigSchema', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.protocol_version).toBe('auto')
     })
 
@@ -766,6 +972,8 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.protocol_version).toBe(version)
     })
 

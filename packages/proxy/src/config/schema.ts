@@ -796,28 +796,49 @@ const sdkSchema = z
 // Root config
 // ---------------------------------------------------------------------------
 
-const helioConfigBaseSchema = z
+// Every root section except the upstream slot, shared by both mode arms
+// below. Declaration order is the canonical section order — zod emits output
+// keys in declaration order and the key-order pins depend on it.
+const rootSectionSchemas = {
+  listen: listenSchema.prefault({}),
+  environment: z.string().optional(),
+  // Session precedes policies deliberately: upstream/listen/environment say
+  // where and as-what Helio runs, session says who is calling, and
+  // policies/budgets then govern those calls (issue #218).
+  session: sessionSchema.prefault({}),
+  policies: policiesSchema.prefault({}),
+  // Budgets sit beside policies deliberately: they are the second half of the
+  // governance declaration (policy decision → budget gate), not plumbing.
+  budgets: z.array(budgetSchema).default([]),
+  approval: approvalSchema.prefault({}),
+  audit: auditSchema.prefault({}),
+  // Dashboard follows audit deliberately: an operator surface, not part of
+  // the request path (canonical section order, #89/#163).
+  dashboard: dashboardSchema.prefault({}),
+  sdk: sdkSchema.prefault({}),
+}
+
+// The two mode arms of the config (issue #293): identical except for slot 2,
+// `upstream:` (singular) vs `upstreams:` (named list). dispatchByMode below
+// routes every parse to exactly one arm.
+const singularConfigBase = z
   .object({
     version: z.literal('1'),
     upstream: upstreamSchema,
-    listen: listenSchema.prefault({}),
-    environment: z.string().optional(),
-    // Session precedes policies deliberately: upstream/listen/environment say
-    // where and as-what Helio runs, session says who is calling, and
-    // policies/budgets then govern those calls (issue #218).
-    session: sessionSchema.prefault({}),
-    policies: policiesSchema.prefault({}),
-    // Budgets sit beside policies deliberately: they are the second half of the
-    // governance declaration (policy decision → budget gate), not plumbing.
-    budgets: z.array(budgetSchema).default([]),
-    approval: approvalSchema.prefault({}),
-    audit: auditSchema.prefault({}),
-    // Dashboard follows audit deliberately: an operator surface, not part of
-    // the request path (canonical section order, #89/#163).
-    dashboard: dashboardSchema.prefault({}),
-    sdk: sdkSchema.prefault({}),
+    ...rootSectionSchemas,
   })
   .strict()
+
+const namedConfigBase = z
+  .object({
+    version: z.literal('1'),
+    upstreams: upstreamsListSchema,
+    ...rootSectionSchemas,
+  })
+  .strict()
+
+/** The root sections every mode arm shares — what {@link rootConfigChecks} reads. */
+type RootConfigSections = Omit<z.output<typeof singularConfigBase>, 'upstream'>
 
 /**
  * Top-level keys matching `^x-` are extension keys: schema-ignored holders
@@ -834,7 +855,11 @@ function stripRootExtensionKeys(value: unknown): unknown {
   )
 }
 
-const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) => {
+// The cross-section validations both mode arms run (issue #293 moved the
+// body out of a single root schema's superRefine; the checks themselves are
+// unchanged). One function, called by each arm, so a check can never be
+// attached to one mode and silently skipped in the other.
+function rootConfigChecks(cfg: RootConfigSections, ctx: z.core.$RefinementCtx): void {
   const hasConfiguredEnvironment =
     typeof cfg.environment === 'string' && cfg.environment.trim().length > 0
 
@@ -1205,17 +1230,91 @@ const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
       }
     }
   }
-})
+}
+
+const singularConfigSchema = singularConfigBase.superRefine(rootConfigChecks)
+const namedConfigSchema = namedConfigBase.superRefine(rootConfigChecks)
+
+/** A fully validated and defaulted singular-mode (`upstream:`) configuration. */
+export type SingularHelioConfig = z.output<typeof singularConfigSchema>
+
+/** A fully validated and defaulted named-mode (`upstreams:`) configuration. */
+export type NamedHelioConfig = z.output<typeof namedConfigSchema>
+
+/**
+ * Route a raw config document to exactly one mode arm (issue #293). A plain
+ * z.union cannot do this job: zod's arm selection is heuristic, and a common
+ * mistake like a named entry missing `url` surfaces as a buried
+ * "(top level): Invalid input" instead of its real issue. The dispatch owns
+ * the exactly-one-of contract and forwards the chosen arm's issues verbatim,
+ * so every error keeps its real path and message.
+ */
+function dispatchByMode(
+  raw: unknown,
+  ctx: z.core.$RefinementCtx,
+): SingularHelioConfig | NamedHelioConfig {
+  const isObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+  const hasUpstream = isObject && 'upstream' in raw
+  const hasUpstreams = isObject && 'upstreams' in raw
+
+  if (hasUpstream && hasUpstreams) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['upstreams'],
+      message:
+        'Set exactly one of "upstream:" (single upstream) or "upstreams:" (named ' +
+        'multi-upstream list) — not both. To migrate, move the upstream: fields into ' +
+        'an upstreams: entry and give it a name.',
+    })
+    return z.NEVER
+  }
+  if (!hasUpstream && !hasUpstreams) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'Missing upstream configuration: set exactly one of "upstream:" (single ' +
+        'upstream) or "upstreams:" (named multi-upstream list).',
+    })
+    return z.NEVER
+  }
+
+  const result = hasUpstreams
+    ? namedConfigSchema.safeParse(raw)
+    : singularConfigSchema.safeParse(raw)
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      // A finished $ZodIssue is runtime-compatible with addIssue (it
+      // normalizes and pushes), but the declared parameter type only admits
+      // raw issues — forward verbatim under the raw-issue type.
+      ctx.addIssue(issue as z.core.$ZodRawIssue)
+    }
+    return z.NEVER
+  }
+  return result.data
+}
 
 /** Zod schema for the complete `helio.yaml` configuration file. */
-export const helioConfigSchema = z.preprocess(stripRootExtensionKeys, helioConfigRefinedSchema)
+export const helioConfigSchema = z.preprocess(
+  stripRootExtensionKeys,
+  z.unknown().transform(dispatchByMode),
+)
 
 // ---------------------------------------------------------------------------
 // Inferred types
 // ---------------------------------------------------------------------------
 
-/** Fully validated and defaulted Helio configuration. */
-export type HelioConfig = z.infer<typeof helioConfigSchema>
+/** Fully validated and defaulted Helio configuration — one of the two mode arms. */
+export type HelioConfig = SingularHelioConfig | NamedHelioConfig
+
+/** Narrow a parsed config to the singular-mode (`upstream:`) arm. */
+export function isSingularConfig(config: HelioConfig): config is SingularHelioConfig {
+  return !('upstreams' in config)
+}
+
+/** Narrow a parsed config to the named-mode (`upstreams:`) arm. */
+export function isNamedConfig(config: HelioConfig): config is NamedHelioConfig {
+  return 'upstreams' in config
+}
 
 /** A single policy rule from the `policies.rules` array. */
 export type PolicyRule = z.infer<typeof policyRuleSchema>

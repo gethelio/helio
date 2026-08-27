@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
-import { loadConfig, ConfigError, ConfigWatcher } from './config/index.js'
+import { loadConfig, ConfigError, ConfigWatcher, isNamedConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { createApp, startServer, startSidebandServer } from './server.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
@@ -228,6 +228,19 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       process.exit(1)
     }
     throw err
+  }
+
+  // Refuse (not reject) named mode: the config is valid, but composition and
+  // routing for multiple upstreams land with issue #294. The exit doubles as
+  // the type narrowing — everything below runs on a singular config.
+  if (isNamedConfig(config)) {
+    console.error(
+      'Error: this config declares named upstreams (upstreams:), which "helio start" ' +
+        'cannot serve yet — multi-upstream composition and routing land with issue #294. ' +
+        '"helio validate" fully validates named configs; to start today, use the ' +
+        'singular "upstream:" form.',
+    )
+    process.exit(1)
   }
 
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
