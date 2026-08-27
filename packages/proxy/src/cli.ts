@@ -129,6 +129,12 @@ upstream:
 #   headers:
 #     Authorization: "Bearer \${UPSTREAM_TOKEN}"
 
+# Multiple named upstreams (multi-upstream mode) replace \`upstream:\` —
+# set exactly one of the two. See docs/configuration.md.
+# upstreams:
+#   - name: files
+#     url: "http://localhost:8081/mcp"
+
 # listen:
 #   port: 3000
 #   host: 127.0.0.1

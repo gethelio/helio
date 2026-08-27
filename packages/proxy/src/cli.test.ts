@@ -378,6 +378,23 @@ describe('CLI', () => {
       }
     })
 
+    it('scaffolds a commented upstreams: pointer stub (issue #293)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const outPath = join(dir, 'helio.yaml')
+
+      try {
+        const { code } = await runCli(['init', '-o', outPath])
+        expect(code).toBe(0)
+
+        const contents = readFileSync(outPath, 'utf-8')
+        expect(contents).toContain('\n# upstreams:\n')
+        expect(contents).toContain('# Multiple named upstreams (multi-upstream mode)')
+        expect(contents).toContain('#   - name: files')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('scaffolds every top-level section in canonical order', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const outPath = join(dir, 'helio.yaml')
@@ -393,6 +410,7 @@ describe('CLI', () => {
         const canonicalOrder = [
           'version',
           'upstream',
+          'upstreams',
           'listen',
           'environment',
           'session',

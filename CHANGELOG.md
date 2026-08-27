@@ -61,7 +61,10 @@ Maintainer notes:
   with the `legacy_header` identity source are rejected with a message
   naming the remedy (upstream-minted session ids could collide across
   doors), and `helio validate` warns above 16 upstream entries.
-  Singular configs parse exactly as before.
+  `helio init` scaffolds a commented `# upstreams:` pointer beside the
+  singular section, and the docs samples guard understands both forms
+  (`upstreams` shares the canonical slot of `upstream`). Singular
+  configs parse exactly as before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget

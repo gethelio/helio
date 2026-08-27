@@ -45,21 +45,29 @@ import yaml from 'js-yaml'
 // Vocabulary
 // ---------------------------------------------------------------------------
 
-/** Canonical top-level section order (docs/configuration.md is the reference). */
-const CANONICAL_ORDER = [
-  'version',
-  'upstream',
-  'listen',
-  'environment',
-  'session',
-  'policies',
-  'budgets',
-  'approval',
-  'audit',
-  'dashboard',
-  'sdk',
+/**
+ * Canonical top-level section order (docs/configuration.md is the
+ * reference), as slots: `upstream` (singular) and `upstreams` (named list)
+ * share one slot because a config declares exactly one of the two
+ * (issue #293) — and the init scaffold legitimately shows both, the live
+ * section plus the commented pointer stub.
+ */
+const CANONICAL_SLOTS = [
+  ['version'],
+  ['upstream', 'upstreams'],
+  ['listen'],
+  ['environment'],
+  ['session'],
+  ['policies'],
+  ['budgets'],
+  ['approval'],
+  ['audit'],
+  ['dashboard'],
+  ['sdk'],
 ]
+const CANONICAL_ORDER = CANONICAL_SLOTS.flat()
 const ROOT_KEYS = new Set(CANONICAL_ORDER)
+const SLOT_OF = new Map(CANONICAL_SLOTS.flatMap((keys, slot) => keys.map((key) => [key, slot])))
 
 /** Top-level keys of a policy rule (policyRuleSchema in config/schema.ts). */
 const RULE_KEYS = new Set([
@@ -470,12 +478,16 @@ function classifyFence(text) {
 
   if (isPlainObject(node)) {
     const keys = Object.keys(node)
-    if (keys.includes('version') && keys.includes('upstream')) {
+    if (keys.includes('version') && (keys.includes('upstream') || keys.includes('upstreams'))) {
       // Full config: validate the fence text as-is, byte for byte.
       return { kind: 'full-config', candidateText: text, doc: node, ownKeys: keys }
     }
     if (keys.length > 0 && keys.every((key) => ROOT_KEYS.has(key) || key.startsWith('x-'))) {
       const merged = { ...HARNESS, ...node }
+      // A named-mode fragment displaces the harness's singular upstream —
+      // without this the overlay would build a both-modes doc that fails
+      // the exactly-one-of contract (issue #293).
+      if ('upstreams' in node) delete merged.upstream
       return {
         kind: 'fragment',
         candidateText: yaml.dump(merged, DUMP_OPTS),
@@ -537,12 +549,14 @@ function expectedCounts(doc) {
 
 /** Canonical-order subsequence check over a document's own top-level keys. */
 function orderViolation(ownKeys) {
-  const indices = ownKeys
-    .filter((key) => ROOT_KEYS.has(key))
-    .map((key) => CANONICAL_ORDER.indexOf(key))
-  for (let i = 1; i < indices.length; i++) {
-    if (indices[i] <= indices[i - 1]) {
-      return `top-level keys not in canonical order (${CANONICAL_ORDER.join(' → ')})`
+  const slots = ownKeys.filter((key) => ROOT_KEYS.has(key)).map((key) => SLOT_OF.get(key))
+  for (let i = 1; i < slots.length; i++) {
+    // Strictly earlier slots violate; an equal slot is the upstream/upstreams
+    // pair sharing slot 2 (a parsed object cannot repeat a key, and the
+    // scaffold matcher finds each key once — issue #293).
+    if (slots[i] < slots[i - 1]) {
+      const order = CANONICAL_SLOTS.map((keys) => keys.join('|')).join(' → ')
+      return `top-level keys not in canonical order (${order})`
     }
   }
   return null
@@ -636,17 +650,21 @@ function scaffoldOrderViolation(scaffoldText) {
 }
 
 /**
- * Check 4: all 10 root keys present in the init scaffold (commented stubs
- * count) and, uncommented at column 0, in at least one configuration.md
- * fence. Returns violation strings.
+ * Check 4: every canonical slot present in the init scaffold (commented
+ * stubs count) and, uncommented at column 0, in at least one
+ * configuration.md fence. Returns violation strings.
  */
 function checkCompleteness(scaffoldText, configurationFences) {
   const violations = []
 
+  // Slots, not keys: either spelling of the upstream slot satisfies it
+  // (issue #293), so the scaffold's commented `# upstreams:` stub and
+  // configuration.md's existing `upstream:` fences both count.
   if (scaffoldText !== null) {
-    for (const key of CANONICAL_ORDER) {
-      if (!new RegExp(`^(?:#\\s*)?${key}:`, 'm').test(scaffoldText)) {
-        violations.push(`init scaffold is missing a top-level \`${key}:\` stub`)
+    for (const slotKeys of CANONICAL_SLOTS) {
+      const label = slotKeys.join('|')
+      if (!new RegExp(`^(?:#\\s*)?(?:${slotKeys.join('|')}):`, 'm').test(scaffoldText)) {
+        violations.push(`init scaffold is missing a top-level \`${label}:\` stub`)
       }
     }
   }
@@ -654,12 +672,13 @@ function checkCompleteness(scaffoldText, configurationFences) {
   if (configurationFences === undefined) {
     violations.push('docs/configuration.md not found — cannot check root-key completeness')
   } else {
-    for (const key of CANONICAL_ORDER) {
+    for (const slotKeys of CANONICAL_SLOTS) {
+      const label = slotKeys.join('|')
       const shown = configurationFences.some((fence) =>
-        new RegExp(`^${key}:`, 'm').test(fence.text),
+        new RegExp(`^(?:${slotKeys.join('|')}):`, 'm').test(fence.text),
       )
       if (!shown) {
-        violations.push(`docs/configuration.md shows no fence with a top-level \`${key}:\``)
+        violations.push(`docs/configuration.md shows no fence with a top-level \`${label}:\``)
       }
     }
   }
