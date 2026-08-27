@@ -194,6 +194,55 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Golden singular parse (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('golden singular parse (issue #293)', () => {
+    it('parses a minimal singular config to exactly this defaulted object', () => {
+      // Byte-identity pin for the multi-upstream schema work: singular configs
+      // must keep parsing to exactly this object. A diff here means a schema
+      // refactor changed singular behavior — fix the refactor, not this test.
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data).toStrictEqual({
+        version: '1',
+        upstream: {
+          url: 'http://localhost:8080',
+          transport: 'streamable-http',
+          protocol_version: 'auto',
+          connect_timeout: '10s',
+          request_timeout: '30s',
+          forward_headers: [],
+          headers: {},
+        },
+        listen: { port: 3000, host: '127.0.0.1', allowed_origins: [] },
+        session: {
+          identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+          on_unresolved: 'deny',
+        },
+        policies: { default: 'allow', dry_run: false, rules: [] },
+        budgets: [],
+        approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
+        audit: {
+          storage: 'sqlite',
+          path: './helio-audit.db',
+          retention: '90d',
+          include_responses: true,
+        },
+        dashboard: {
+          enabled: false,
+          port: 3100,
+          host: '127.0.0.1',
+          allow_open_mode: false,
+          sse_heartbeat_interval: '30s',
+        },
+        sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Session identity (issue #218)
   // -------------------------------------------------------------------------
 
