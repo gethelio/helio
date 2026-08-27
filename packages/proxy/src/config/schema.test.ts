@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { helioConfigSchema, durationSchema, parseDuration } from './schema.js'
+import {
+  helioConfigSchema,
+  durationSchema,
+  parseDuration,
+  upstreamNameSchema,
+  namedUpstreamEntrySchema,
+  upstreamsListSchema,
+} from './schema.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -239,6 +246,217 @@ describe('helioConfigSchema', () => {
         },
         sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
       })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Named upstream leaf schemas (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('singular upstream refinement fold parity (issue #293)', () => {
+    it('emits every refinement issue family, stdio-command first, in one parse', () => {
+      // Pins the pre-#293 issue order and content for a singular upstream that
+      // trips all four per-entry checks at once. The shared-superRefine fold
+      // must keep this array identical — a diff means the fold changed
+      // singular error behavior.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'x',
+            transport: 'stdio',
+            protocol_version: '2026-07-28',
+            forward_headers: ['nope'],
+            headers: { 'content-type': 'y' },
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: ['upstream', 'command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'protocol_version'],
+          message:
+            'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'stdio modern-era support is tracked in #256.',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'forward_headers', 0],
+          message: 'Forwarded caller headers must start with "x-"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'headers', 'content-type'],
+          message: 'upstream.headers must not set reserved header "content-type"',
+        },
+      ])
+    })
+  })
+
+  describe('upstreamNameSchema (issue #293)', () => {
+    it.each(['files', 'files-2', 'files_2', 'A1', 'a'.repeat(64)])('accepts "%s"', (name) => {
+      expect(upstreamNameSchema.safeParse(name).success).toBe(true)
+    })
+
+    it('rejects the empty string', () => {
+      expect(upstreamNameSchema.safeParse('').success).toBe(false)
+    })
+
+    it('rejects names longer than 64 characters', () => {
+      expect(upstreamNameSchema.safeParse('a'.repeat(65)).success).toBe(false)
+    })
+
+    it.each(['with space', 'with:colon', 'with/slash', 'with.dot', 'naïve'])(
+      'rejects "%s" with the charset message',
+      (name) => {
+        const result = upstreamNameSchema.safeParse(name)
+        expect(result.success).toBe(false)
+        if (result.success) return
+        expect(result.error.issues.map((i) => i.message)).toContain(
+          'Upstream names may only contain letters, digits, "_" and "-"',
+        )
+      },
+    )
+  })
+
+  describe('namedUpstreamEntrySchema (issue #293)', () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      name: 'files',
+      url: 'http://localhost:8081/mcp',
+      ...overrides,
+    })
+
+    it('parses a minimal entry with name first and singular defaults applied', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(Object.keys(result.data)).toEqual([
+        'name',
+        'url',
+        'transport',
+        'protocol_version',
+        'connect_timeout',
+        'request_timeout',
+        'forward_headers',
+        'headers',
+      ])
+      expect(result.data.transport).toBe('streamable-http')
+      expect(result.data.protocol_version).toBe('auto')
+      expect(result.data.connect_timeout).toBe('10s')
+      expect(result.data.request_timeout).toBe('30s')
+      expect(result.data.forward_headers).toEqual([])
+      expect(result.data.headers).toEqual({})
+    })
+
+    it('requires the name', () => {
+      const result = namedUpstreamEntrySchema.safeParse({ url: 'http://localhost:8081/mcp' })
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['name'])
+    })
+
+    it('stays strict: an unknown entry key is rejected', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ urll: 'typo' }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => i.message)).toContain('Unrecognized key: "urll"')
+    })
+
+    it('requires command for stdio transport, same message and path as singular', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ transport: 'stdio' }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: ['command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+      ])
+    })
+
+    it('applies the modern-pin transport check per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(
+        entry({ transport: 'sse', protocol_version: '2026-07-28' }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['protocol_version'])
+      expect(result.error.issues[0]?.message).toBe(
+        'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+          'the SSE upstream transport is the deprecated legacy transport.',
+      )
+    })
+
+    it('applies the forward_headers x- prefix check per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ forward_headers: ['bad'] }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['forward_headers', 0])
+      expect(result.error.issues[0]?.message).toBe('Forwarded caller headers must start with "x-"')
+    })
+
+    it('applies the reserved-header guard per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(
+        entry({ headers: { 'mcp-session-id': 'x' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['headers', 'mcp-session-id'])
+      expect(result.error.issues[0]?.message).toBe(
+        'upstream.headers must not set reserved header "mcp-session-id"',
+      )
+    })
+  })
+
+  describe('upstreamsListSchema (issue #293)', () => {
+    it('accepts a list of uniquely named entries', () => {
+      const result = upstreamsListSchema.safeParse([
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ])
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects an empty list with the pinned message', () => {
+      const result = upstreamsListSchema.safeParse([])
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.message).toBe(
+        'upstreams: must declare at least one upstream — an empty list would serve nothing. ' +
+          'For a single upstream you can keep the "upstream:" form.',
+      )
+    })
+
+    it('rejects duplicate names at the duplicate index', () => {
+      const result = upstreamsListSchema.safeParse([
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+        { name: 'files', url: 'http://localhost:8083/mcp' },
+      ])
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: [2, 'name'],
+          message:
+            'Duplicate upstream name "files". Upstream names embed in mount paths, limiter ' +
+            'keys, and audit records — each upstream needs its own.',
+        },
+      ])
     })
   })
 

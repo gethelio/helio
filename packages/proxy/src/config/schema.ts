@@ -72,7 +72,7 @@ const transportSchema = z.enum(['streamable-http', 'sse', 'stdio'])
  */
 const protocolVersionSchema = z.enum(['auto', '2025-06-18', '2026-07-28'])
 
-const upstreamSchema = z
+const upstreamObjectSchema = z
   .object({
     url: z.string(),
     transport: transportSchema.default('streamable-http'),
@@ -85,46 +85,107 @@ const upstreamSchema = z
     headers: z.record(z.string(), z.string()).default({}),
   })
   .strict()
-  .refine((data) => data.transport !== 'stdio' || data.command !== undefined, {
-    message: '"command" is required when transport is "stdio"',
-    path: ['command'],
-  })
-  .superRefine((data, ctx) => {
-    // The modern pin only makes sense on Streamable HTTP: the SSE upstream
-    // transport is the deprecated legacy transport and will never be modern,
-    // and stdio modern-era support is tracked separately (#256).
-    if (data.protocol_version === '2026-07-28' && data.transport !== 'streamable-http') {
+
+// Shared by the singular `upstream:` schema and every named `upstreams:` entry
+// (issue #293). Messages, paths, and check order are pinned by tests —
+// singular configs must keep erroring byte-identically.
+function upstreamEntryChecks(
+  data: z.output<typeof upstreamObjectSchema>,
+  ctx: z.core.$RefinementCtx,
+): void {
+  if (data.transport === 'stdio' && data.command === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['command'],
+      message: '"command" is required when transport is "stdio"',
+    })
+  }
+
+  // The modern pin only makes sense on Streamable HTTP: the SSE upstream
+  // transport is the deprecated legacy transport and will never be modern,
+  // and stdio modern-era support is tracked separately (#256).
+  if (data.protocol_version === '2026-07-28' && data.transport !== 'streamable-http') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['protocol_version'],
+      message:
+        data.transport === 'stdio'
+          ? 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'stdio modern-era support is tracked in #256.'
+          : 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'the SSE upstream transport is the deprecated legacy transport.',
+    })
+  }
+  for (const [index, header] of data.forward_headers.entries()) {
+    if (!header.toLowerCase().startsWith('x-')) {
       ctx.addIssue({
         code: 'custom',
-        path: ['protocol_version'],
-        message:
-          data.transport === 'stdio'
-            ? 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
-              'stdio modern-era support is tracked in #256.'
-            : 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
-              'the SSE upstream transport is the deprecated legacy transport.',
+        path: ['forward_headers', index],
+        message: 'Forwarded caller headers must start with "x-"',
       })
     }
-    for (const [index, header] of data.forward_headers.entries()) {
-      if (!header.toLowerCase().startsWith('x-')) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['forward_headers', index],
-          message: 'Forwarded caller headers must start with "x-"',
-        })
-      }
-    }
+  }
 
-    // Reserved transport/protocol headers must not be operator-overridden via
-    // upstream.headers — the forwarders own these.
-    for (const name of Object.keys(data.headers)) {
-      if (RESERVED_TRANSPORT_HEADERS.has(name.toLowerCase())) {
+  // Reserved transport/protocol headers must not be operator-overridden via
+  // upstream.headers — the forwarders own these.
+  for (const name of Object.keys(data.headers)) {
+    if (RESERVED_TRANSPORT_HEADERS.has(name.toLowerCase())) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['headers', name],
+        message: `upstream.headers must not set reserved header "${name}"`,
+      })
+    }
+  }
+}
+
+const upstreamSchema = upstreamObjectSchema.superRefine(upstreamEntryChecks)
+
+/**
+ * Upstream entry names embed in mount paths, limiter keys
+ * (`upstream:<name>:…`), and audit records — the budget-name charset keeps
+ * them delimiter-free so those keys stay parseable (issue #293).
+ */
+export const upstreamNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-zA-Z0-9_-]+$/, {
+    message: 'Upstream names may only contain letters, digits, "_" and "-"',
+  })
+
+/**
+ * One entry of the named `upstreams:` list: every singular `upstream:` field
+ * plus a required unique `name`. The name is declared first so parsed entries
+ * render name-first; the per-entry refinements are the singular schema's,
+ * shared verbatim (issue #293).
+ */
+export const namedUpstreamEntrySchema = z
+  .object({ name: upstreamNameSchema, ...upstreamObjectSchema.shape })
+  .strict()
+  .superRefine(upstreamEntryChecks)
+
+/** The named `upstreams:` list — non-empty, with unique entry names (issue #293). */
+export const upstreamsListSchema = z
+  .array(namedUpstreamEntrySchema)
+  .min(1, {
+    message:
+      'upstreams: must declare at least one upstream — an empty list would serve nothing. ' +
+      'For a single upstream you can keep the "upstream:" form.',
+  })
+  .superRefine((entries, ctx) => {
+    const seen = new Set<string>()
+    for (const [index, entry] of entries.entries()) {
+      if (seen.has(entry.name)) {
         ctx.addIssue({
           code: 'custom',
-          path: ['headers', name],
-          message: `upstream.headers must not set reserved header "${name}"`,
+          path: [index, 'name'],
+          message:
+            `Duplicate upstream name "${entry.name}". Upstream names embed in mount paths, ` +
+            'limiter keys, and audit records — each upstream needs its own.',
         })
       }
+      seen.add(entry.name)
     }
   })
 

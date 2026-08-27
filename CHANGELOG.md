@@ -36,6 +36,15 @@ Maintainer notes:
 
 ### Added
 
+- Named multi-upstream configuration (#293): `helio.yaml` accepts a
+  top-level `upstreams:` list of named upstream entries as an
+  alternative to the singular `upstream:` section; exactly one of the
+  two must be set. Each entry takes every `upstream.*` field plus a
+  required `name` (letters, digits, `_`, `-`; unique within the list).
+  `helio validate` fully validates named configs. `helio start` does
+  not serve them yet: it refuses named mode with an error pointing at
+  the composition work (#294). Singular configs parse exactly as
+  before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget
