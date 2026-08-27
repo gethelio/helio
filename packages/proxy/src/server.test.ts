@@ -119,7 +119,7 @@ describe('createApp', () => {
 
     expect(() => createApp(named, forwarder)).toThrow(
       'createApp serves a single-upstream (upstream:) config only. Named multi-upstream ' +
-        'configs are composed by createMultiApp, which lands with issue #294.',
+        'configs are composed by createMultiApp.',
     )
   })
 

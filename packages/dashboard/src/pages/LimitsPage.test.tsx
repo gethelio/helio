@@ -67,6 +67,46 @@ describe('LimitsPage', () => {
     })
   })
 
+  it('renders upstream-prefixed tool keys as the tool with a door qualifier (issue #294)', async () => {
+    mockFetchLimits.mockResolvedValue({
+      rate_limits: [
+        {
+          key: 'upstream:files:tool:send_email',
+          current: 1,
+          limit: 10,
+          window_ms: MS_PER_HOUR,
+          reset_at_ms: Date.now() + 30 * MS_PER_MINUTE,
+        },
+        {
+          key: 'upstream:files:tool:send_email:rule:2',
+          current: 2,
+          limit: 10,
+          window_ms: MS_PER_HOUR,
+          reset_at_ms: Date.now() + 30 * MS_PER_MINUTE,
+        },
+        {
+          key: 'tool:list_files',
+          current: 3,
+          limit: 10,
+          window_ms: MS_PER_HOUR,
+          reset_at_ms: Date.now() + 30 * MS_PER_MINUTE,
+        },
+      ],
+      spend_limits: [],
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('send_email (files)')).toBeTruthy()
+      expect(screen.getByText('send_email:rule:2 (files)')).toBeTruthy()
+      // Singular keys keep today's first-colon split byte-identically.
+      expect(screen.getByText('list_files')).toBeTruthy()
+      // All three render as TOOL rows — the door prefix is a qualifier, not
+      // a type of its own.
+      expect(screen.getAllByText('tool')).toHaveLength(3)
+    })
+  })
+
   it('renders spend limit cards', async () => {
     mockFetchLimits.mockResolvedValue({
       rate_limits: [],

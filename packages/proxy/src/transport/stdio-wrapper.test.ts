@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { StdioForwarder } from './stdio-wrapper.js'
 import type { McpRequest } from '../mcp/types.js'
 
@@ -184,6 +184,50 @@ describe('StdioForwarder', () => {
     await new Promise((resolve) => setTimeout(resolve, 100))
 
     await expect(forwarder.forward(makeRequest(1, 'ping'))).rejects.toThrow('dead')
+  }, 5000)
+
+  it('tags the max-retries death line with the upstream name when one is set (issue #294)', async () => {
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+    try {
+      forwarder = new StdioForwarder({
+        command: 'node',
+        args: ['-e', CRASH_SCRIPT],
+        maxRetries: 0,
+        retryDelayMs: 10,
+        upstreamName: 'files',
+      })
+      await forwarder.start()
+
+      // Wait for the crash to mark the forwarder dead and log the death line.
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(logged).toContain('[helio][files] Stdio forwarder: max retries (0) exceeded')
+    } finally {
+      spy.mockRestore()
+    }
+  }, 5000)
+
+  it('keeps the max-retries death line bare when no upstream name is set', async () => {
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+    try {
+      forwarder = new StdioForwarder({
+        command: 'node',
+        args: ['-e', CRASH_SCRIPT],
+        maxRetries: 0,
+        retryDelayMs: 10,
+      })
+      await forwarder.start()
+
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(logged).toContain('[helio] Stdio forwarder: max retries (0) exceeded')
+    } finally {
+      spy.mockRestore()
+    }
   }, 5000)
 
   it('auto-restarts on crash up to maxRetries', async () => {

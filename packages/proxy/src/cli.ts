@@ -7,11 +7,18 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import { loadConfig, ConfigError, ConfigWatcher, isNamedConfig } from './config/index.js'
+import type { SingularHelioConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
-import { createApp, startServer, startSidebandServer } from './server.js'
+import type { Hono } from 'hono'
+import { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
+import { applyReloadedPolicy } from './reload-fanout.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
+import type { BuiltForwarder } from './cli-forwarder.js'
+import type { McpForwarder } from './mcp/types.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
+import type { CompiledPolicy } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
+import type { GovernedForwarderOptions } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
 import { startAnnotationPrimeLoop } from './policy/annotation-prime-loop.js'
 import type { AnnotationPrimeController } from './policy/annotation-prime-loop.js'
@@ -51,6 +58,7 @@ import {
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
+import { StartupError } from './startup-error.js'
 
 // ---------------------------------------------------------------------------
 // Process-level error handlers — ensure crashes are logged, and let every
@@ -218,6 +226,59 @@ function printConfigErrorDetails(error: ConfigError, prefix = ''): void {
   }
 }
 
+/**
+ * Phase 1 of per-upstream stack assembly: build and connect the transport
+ * forwarder for one upstream section. Kept separate from governUpstream so
+ * every upstream connects before any shared service is constructed — a bad
+ * upstream fails boot without side effects (no audit DB is created).
+ */
+async function connectUpstream(
+  upstream: SingularHelioConfig['upstream'],
+  upstreamName?: string,
+): Promise<BuiltForwarder> {
+  try {
+    return await createForwarderFromConfig({ upstream }, upstreamName)
+  } catch (err) {
+    // A connect failure is a diagnosed boot failure, not a crash (#233). A
+    // named entry's failure names the entry; singular mode prints the
+    // underlying message ALONE — no name is ever minted for it.
+    const message = err instanceof Error ? err.message : String(err)
+    throw new StartupError(
+      upstreamName === undefined ? message : `upstream "${upstreamName}": ${message}`,
+    )
+  }
+}
+
+/** One governed upstream stack: the forwarder wrapped in governance plus
+ *  its running annotation prime loop. */
+interface UpstreamStack {
+  readonly governedForwarder: GovernedForwarder
+  readonly annotationPrime: AnnotationPrimeController
+}
+
+/**
+ * Phase 2 of per-upstream stack assembly: wrap a connected forwarder with
+ * governance and start its annotation prime loop. Runs after the shared
+ * services exist; `governance` carries the services every stack shares.
+ */
+async function governUpstream(options: {
+  forwarder: McpForwarder
+  policy: CompiledPolicy
+  governance: GovernedForwarderOptions
+  upstreamName?: string
+}): Promise<UpstreamStack> {
+  const governedForwarder = new GovernedForwarder(options.forwarder, options.policy, {
+    ...options.governance,
+    upstreamName: options.upstreamName,
+  })
+  const annotationPrime = await startAnnotationPrimeLoop(
+    governedForwarder,
+    options.policy.toolRevalidation,
+    options.upstreamName,
+  )
+  return { governedForwarder, annotationPrime }
+}
+
 interface StartOptions {
   config: string
   /** When true, do not start the config file watcher. Overrides the YAML. */
@@ -237,19 +298,6 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     throw err
   }
 
-  // Refuse (not reject) named mode: the config is valid, but composition and
-  // routing for multiple upstreams land with issue #294. The exit doubles as
-  // the type narrowing — everything below runs on a singular config.
-  if (isNamedConfig(config)) {
-    console.error(
-      'Error: this config declares named upstreams (upstreams:), which "helio start" ' +
-        'cannot serve yet — multi-upstream composition and routing land with issue #294. ' +
-        '"helio validate" fully validates named configs; to start today, use the ' +
-        'singular "upstream:" form.',
-    )
-    process.exit(1)
-  }
-
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
   if (config.dashboard.enabled && !bundledDashboardDistPath) {
     console.error(
@@ -259,8 +307,47 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     process.exit(1)
   }
 
-  // Create the right forwarder based on upstream transport
-  const { forwarder, close: closeForwarder } = await createForwarderFromConfig(config)
+  // The capacity guardrail prints BEFORE the connect loop, so the operator
+  // hears it even when an early entry fails to connect.
+  if (isNamedConfig(config)) {
+    warnIfManyUpstreams(config)
+  }
+
+  // Phase 1 of per-upstream assembly: connect EVERY upstream before any
+  // shared service is constructed — a bad upstream fails boot with no side
+  // effects (no audit DB is created). Sequential, in config order, and
+  // all-or-nothing: the first failure closes whatever already connected
+  // (best-effort) and aborts the boot naming the entry. Singular mode is
+  // the same loop over one nameless entry.
+  const upstreamSections: Array<{
+    name: string | undefined
+    upstream: SingularHelioConfig['upstream']
+  }> = isNamedConfig(config)
+    ? config.upstreams.map((entry) => ({ name: entry.name, upstream: entry }))
+    : [{ name: undefined, upstream: config.upstream }]
+
+  const doors: Array<{
+    name: string | undefined
+    forwarder: McpForwarder
+    close?: () => Promise<void>
+  }> = []
+  for (const { name, upstream } of upstreamSections) {
+    try {
+      const built = await connectUpstream(upstream, name)
+      doors.push({ name, forwarder: built.forwarder, close: built.close })
+    } catch (err) {
+      for (const door of doors) {
+        try {
+          await door.close?.()
+        } catch (closeErr) {
+          console.error(
+            `[helio] Ignoring a forwarder close failure while aborting startup: ${String(closeErr)}`,
+          )
+        }
+      }
+      throw err
+    }
+  }
 
   // Compile policies and wrap the forwarder with governance
   const { policy, warnings } = compilePolicies(config.policies)
@@ -362,7 +449,12 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // restart-required at the reload boundary (issue #218).
   const session = compileSessionIdentity(config.session)
 
-  const governedForwarder = new GovernedForwarder(forwarder, policy, {
+  // Phase 2 of per-upstream assembly: wrap every connected forwarder with
+  // governance and start its annotation prime loop. Sequential in config
+  // order; each door waits its prime loop's startup window, so a slow
+  // upstream costs up to 1.5s per entry at boot (accepted v1). The shared
+  // services are constructed once and every stack composes them.
+  const governance: GovernedForwarderOptions = {
     environment: config.environment,
     auditWriter,
     evidenceStore,
@@ -371,9 +463,19 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     spendLimiter,
     budgetEngine,
     session,
-  })
-
-  const annotationPrime = await startAnnotationPrimeLoop(governedForwarder, policy.toolRevalidation)
+  }
+  const stacks: Array<{ name: string | undefined } & UpstreamStack> = []
+  for (const door of doors) {
+    stacks.push({
+      name: door.name,
+      ...(await governUpstream({
+        forwarder: door.forwarder,
+        policy,
+        governance,
+        upstreamName: door.name,
+      })),
+    })
+  }
 
   // Conditionally create Slack action handler if any Slack channels exist
   const hasSlackChannels = [...channels.values()].some((ch) => ch.type === 'slack')
@@ -381,12 +483,34 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     ? createSlackActionApp({ router: approvalRouter, channels })
     : undefined
 
-  const app = createApp(config, governedForwarder, {
-    slackActionApp,
-    onHeaderMismatch: (rejection) => {
-      auditWriter.pushImmediate(buildHeaderMismatchAuditRecord(rejection, config.environment))
-    },
-  })
+  // The apps serve the GOVERNED forwarders — mounting a raw transport
+  // forwarder would silently bypass policy, approval, and audit.
+  let app: Hono
+  if (isNamedConfig(config)) {
+    const forwarders: Record<string, McpForwarder> = {}
+    for (const stack of stacks) {
+      if (stack.name !== undefined) forwarders[stack.name] = stack.governedForwarder
+    }
+    app = createMultiApp(config, forwarders, {
+      slackActionApp,
+      onHeaderMismatch: (rejection, upstreamName) => {
+        auditWriter.pushImmediate(
+          buildHeaderMismatchAuditRecord(rejection, config.environment, upstreamName),
+        )
+      },
+    })
+  } else {
+    const stack = stacks[0]
+    if (stack === undefined) {
+      throw new Error('unreachable: singular mode connects exactly one upstream')
+    }
+    app = createApp(config, stack.governedForwarder, {
+      slackActionApp,
+      onHeaderMismatch: (rejection) => {
+        auditWriter.pushImmediate(buildHeaderMismatchAuditRecord(rejection, config.environment))
+      },
+    })
+  }
   const handle = startServer(app, config)
 
   // Conditionally start the sideband server for SDK communication.
@@ -498,7 +622,15 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     `Policies: ${String(ruleCount)} rule${ruleCount !== 1 ? 's' : ''} loaded (default: ${policy.defaultAction})`,
   )
   warnIfNoEnforcement(policy)
-  if (config.upstream.transport === 'stdio') {
+  if (isNamedConfig(config)) {
+    for (const entry of config.upstreams) {
+      if (entry.transport === 'stdio') {
+        console.error(`Upstream[${entry.name}]: ${entry.command ?? ''} (stdio)`)
+      } else {
+        console.error(`Upstream[${entry.name}]: ${entry.url} (${entry.transport})`)
+      }
+    }
+  } else if (config.upstream.transport === 'stdio') {
     console.error(`Upstream: ${config.upstream.command ?? ''} (stdio)`)
   } else {
     console.error(`Upstream: ${config.upstream.url} (${config.upstream.transport})`)
@@ -584,8 +716,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         // watcher's onError keeps the current config) before any policy
         // swap — the reload applies all-or-nothing across the file.
         budgetEngine.reconcile(newBudgets)
-        governedForwarder.updatePolicy(newPolicy)
-        annotationPrime.reconfigure(newPolicy.toolRevalidation)
+        applyReloadedPolicy(stacks, newPolicy)
         governanceService?.updatePolicy(newPolicy)
         const budgetTotal = newBudgets.length
         console.error(
@@ -628,8 +759,8 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
 
   registerShutdown(
     handle,
-    annotationPrime,
-    closeForwarder,
+    stacks.map((stack) => stack.annotationPrime),
+    doors.flatMap((door) => (door.close ? [door.close] : [])),
     auditWriter,
     configWatcher,
     sidebandHandle,
@@ -677,8 +808,8 @@ async function validateCommand(configPath: string): Promise<void> {
     }
     compileBudgets(config.budgets)
 
-    // The start command cannot reach this warning yet — it refuses named
-    // mode outright — so validate is where the operator hears it (#293).
+    // Start warns too (before its connect loop); validate is the cheap
+    // preflight an operator runs first, so it warns as well.
     if (isNamedConfig(config)) {
       warnIfManyUpstreams(config)
     }
@@ -848,8 +979,8 @@ function writeCsv(records: readonly AuditRecord[]): void {
 
 function registerShutdown(
   handle: ServerHandle,
-  annotationPrime?: AnnotationPrimeController,
-  closeForwarder?: () => Promise<void>,
+  annotationPrimes?: ReadonlyArray<AnnotationPrimeController>,
+  closeForwarders?: ReadonlyArray<() => Promise<void>>,
   auditWriter?: AuditWriter,
   configWatcher?: ConfigWatcher,
   sidebandHandle?: ServerHandle,
@@ -877,8 +1008,8 @@ function registerShutdown(
 
     void closeResources({
       handle,
-      annotationPrime,
-      closeForwarder,
+      annotationPrimes,
+      closeForwarders,
       auditWriter,
       configWatcher,
       sidebandHandle,
@@ -922,7 +1053,18 @@ program
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .option('--no-hot-reload', 'Disable policy hot-reload — config edits will require a restart')
   .action((opts: { config: string; hotReload?: boolean }) =>
-    startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }),
+    startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }).catch(
+      (err: unknown) => {
+        // A StartupError message is the complete operator diagnosis: print
+        // it verbatim and exit — no stack, no rejection wrapper (#233).
+        // Anything else rethrows into the unhandledRejection crash path.
+        if (err instanceof StartupError) {
+          console.error(err.message)
+          process.exit(1)
+        }
+        throw err
+      },
+    ),
   )
 
 program

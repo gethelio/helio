@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
 import { AuditStore, EXPORT_MAX_RECORDS, migrateAuditUpstreamColumn } from './store.js'
+import { StartupError } from '../startup-error.js'
 import type { AuditRecord } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -173,6 +174,39 @@ CREATE TABLE IF NOT EXISTS audit_records (
         ).toThrow(
           /Audit DB schema mismatch: missing required columns .*"block_reason".*Delete ".*audit\.db".*then restart Helio\./,
         )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('throws a StartupError on a schema mismatch, for the CLI clean-exit path (issue #233)', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-audit-startup-error-'))
+      const dbPath = join(dir, 'audit.db')
+      const legacyDb = new Database(dbPath)
+      // MANY required columns missing: a DB missing only `upstream` is
+      // silently repaired on open (the #292 additive exception) and would
+      // never reach the mismatch throw.
+      legacyDb.exec(
+        'CREATE TABLE audit_records (' +
+          'id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, tool_name TEXT NOT NULL, ' +
+          'policy_decision TEXT NOT NULL, matched_rule TEXT, tool_input TEXT, ' +
+          'flagged_destructive INTEGER, dry_run INTEGER)',
+      )
+      legacyDb.close()
+
+      try {
+        let caught: unknown
+        try {
+          new AuditStore({
+            path: dbPath,
+            retention: '90d',
+            includeResponses: true,
+            cleanupIntervalMs: 0,
+          })
+        } catch (err) {
+          caught = err
+        }
+        expect(caught).toBeInstanceOf(StartupError)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

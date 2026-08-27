@@ -1,4 +1,5 @@
 import { parseDuration } from './config/schema.js'
+import { helioLogTag } from './util/log-label.js'
 import { SseUpstreamForwarder, StreamableHttpForwarder } from './upstream/index.js'
 import { StdioForwarder } from './transport/stdio-wrapper.js'
 import type { SingularHelioConfig } from './config/index.js'
@@ -12,10 +13,13 @@ export interface BuiltForwarder {
 /**
  * Construct the upstream forwarder for the configured transport. Static
  * `upstream.headers` are passed to the HTTP transports (`streamable-http`,
- * `sse`); `stdio` is a child process with no request headers.
+ * `sse`); `stdio` is a child process with no request headers. Only the
+ * `upstream` section is read, so callers may pass any object carrying one —
+ * a full singular config, or a named entry wrapped as `{ upstream: entry }`.
  */
 export async function createForwarderFromConfig(
-  config: SingularHelioConfig,
+  config: Pick<SingularHelioConfig, 'upstream'>,
+  upstreamName?: string,
 ): Promise<BuiltForwarder> {
   switch (config.upstream.transport) {
     case 'streamable-http': {
@@ -27,13 +31,14 @@ export async function createForwarderFromConfig(
         headers: config.upstream.headers,
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
         protocolVersion: config.upstream.protocol_version,
+        upstreamName,
       })
       if (config.upstream.protocol_version !== 'auto') {
         // A pin is never probed, so no era-detected line will ever appear;
         // this line is the operator's confirmation the pin took effect.
         // eslint-disable-next-line no-console -- operator-visible startup detail
         console.error(
-          `[helio] Upstream MCP protocol version pinned: ` +
+          `${helioLogTag(upstreamName)} Upstream MCP protocol version pinned: ` +
             `${config.upstream.protocol_version} (upstream.protocol_version)`,
         )
       }
@@ -55,6 +60,7 @@ export async function createForwarderFromConfig(
         command: config.upstream.command as string,
         args: config.upstream.args,
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
+        upstreamName,
       })
       await stdio.start()
       return { forwarder: stdio, close: () => stdio.close() }

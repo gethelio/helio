@@ -3,6 +3,7 @@ import type { Database as DatabaseType, Statement } from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { chmodSync } from 'node:fs'
 import { parseDuration } from '../config/schema.js'
+import { StartupError } from '../startup-error.js'
 import { extractResponseSummary } from '../upstream/response-summary.js'
 import { clamp } from '../util/clamp.js'
 import type {
@@ -491,7 +492,9 @@ export class AuditStore {
     if (missing.length === 0) return
 
     const quotedColumns = missing.map((name) => `"${name}"`).join(', ')
-    throw new Error(
+    // StartupError: the message is the complete operator diagnosis; the CLI
+    // prints it clean and exits instead of crash-dumping (issue #233).
+    throw new StartupError(
       '[helio] Audit DB schema mismatch: missing required columns ' +
         `${quotedColumns}. ` +
         `This local database was created by an older Helio build. ` +

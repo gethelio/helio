@@ -25,11 +25,13 @@ describe('closeResources', () => {
 
     await closeResources({
       handle: asyncClose('handle'),
-      annotationPrime: { stop: () => order.push('annotationPrime') },
-      closeForwarder: async () => {
-        await Promise.resolve()
-        order.push('forwarder')
-      },
+      annotationPrimes: [{ stop: () => order.push('annotationPrime') }],
+      closeForwarders: [
+        async () => {
+          await Promise.resolve()
+          order.push('forwarder')
+        },
+      ],
       auditWriter: sync('auditWriter'),
       configWatcher: sync('configWatcher'),
       sidebandHandle: asyncClose('sidebandHandle'),
@@ -76,5 +78,35 @@ describe('closeResources', () => {
     const { order, asyncClose } = orderedHarness()
     await expect(closeResources({ handle: asyncClose('handle') })).resolves.toBeUndefined()
     expect(order).toEqual(['handle'])
+  })
+
+  it('stops every prime loop first and closes every forwarder last, in stack order (issue #294)', async () => {
+    const { order, sync, asyncClose } = orderedHarness()
+    await closeResources({
+      handle: asyncClose('handle'),
+      annotationPrimes: [
+        { stop: () => order.push('prime-a') },
+        { stop: () => order.push('prime-b') },
+      ],
+      closeForwarders: [
+        async () => {
+          await Promise.resolve()
+          order.push('forwarder-a')
+        },
+        async () => {
+          await Promise.resolve()
+          order.push('forwarder-b')
+        },
+      ],
+      auditWriter: sync('auditWriter'),
+    })
+    expect(order).toEqual([
+      'prime-a',
+      'prime-b',
+      'handle',
+      'auditWriter',
+      'forwarder-a',
+      'forwarder-b',
+    ])
   })
 })

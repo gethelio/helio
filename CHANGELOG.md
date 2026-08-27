@@ -41,12 +41,12 @@ Maintainer notes:
   alternative to the singular `upstream:` section; exactly one of the
   two must be set. Each entry takes every `upstream.*` field plus a
   required `name` (letters, digits, `_`, `-`; unique within the list).
-  `helio validate` fully validates named configs. `helio start` does
-  not serve them yet: it refuses named mode with an error pointing at
-  the composition work (#294). For library embedders, `HelioConfig` is
+  `helio validate` fully validates named configs, and `helio start`
+  serves them through the multi-upstream composition (#294, below).
+  For library embedders, `HelioConfig` is
   now a union of the two modes with `isSingularConfig` /
   `isNamedConfig` guards exported, and `createApp` throws on a named
-  config, pointing at the upcoming `createMultiApp`. A mode switch is
+  config, pointing at `createMultiApp`. A mode switch is
   restart-required at the reload boundary. Policy rules gain
   `match.upstreams`, a non-empty list of configured upstream names
   (exact match, OR within the list, AND with the other match
@@ -74,16 +74,48 @@ Maintainer notes:
   the dashboard queue, and budget event listings read `upstream` from
   the referenced audit record. New filters: `upstream` on `/api/audit`,
   `/api/audit/export`, and `/api/feed`, plus `helio export --upstream`.
-  Every upstream value is null or absent until the multi-upstream
-  composition ships; `session_source` on tickets is live immediately.
+  Every upstream value is null in singular mode; named multi-upstream
+  serving (#294, below) is what populates them. `session_source` on
+  tickets is live in both modes.
 
+- Multi-upstream serving (#294): `helio start` now serves named
+  multi-upstream configs. Each entry gets its own `/mcp/<name>` and
+  `/sse/<name>` mounts wrapping that entry's forwarder with a fresh
+  governed route stack (own annotation cache, era cache, prime loop,
+  header/body agreement door, and per-door `/sse` session cap);
+  `/healthz` and `/slack/actions` stay global. There is no bare-path
+  default: bare `/mcp`, `/sse`, and unknown names return an explicit
+  HTTP 404 with an id-less JSON-RPC `-32600` envelope stating the
+  path shape, never enumerating configured names. Startup is
+  all-or-nothing in config order — a connect failure aborts boot
+  naming the entry (`upstream "<name>": …`) after best-effort closing
+  the entries that did connect — and boot waits each entry's
+  annotation-prime window in turn, so a slow upstream can add up to
+  1.5 seconds per entry. Hot reload fans policy updates out across
+  every entry, shutdown stops every prime loop first and closes every
+  forwarder last, startup prints one `Upstream[<name>]:` line per
+  entry, the upstream lifecycle log lines (era detection, priming,
+  the stdio max-retries death line, the protocol-pin confirmation)
+  carry the entry's `[helio][<name>]` tag, the `/sse` cap-refusal
+  line names the door that refused
+  (`[helio] /sse/<name> at session cap ...`), and the
+  more-than-16-upstreams warning now prints from start as well as
+  validate. The dashboard Limits page renders an
+  upstream-prefixed tool key as the tool with the door as a qualifier
+  (`send_email (files)`); the full grouping and filtering UX is
+  tracked separately (#297). For library embedders,
+  `createMultiApp(config, forwarders)` is exported beside
+  `createApp`; its forwarder record must match the configured names
+  exactly (missing or extra keys throw at composition).
+  Singular-mode serving is byte-identical, including its log lines
+  and limiter key formats.
 - Internal multi-upstream substrate (#295): the policy match context,
   the tool-scope limiter keys, budget charges and peek entries, and
   the upstream lifecycle log lines (era detection, annotation priming,
   the `/sse` cap refusal) can now carry an operator-chosen upstream
-  label. Nothing sets a label yet; it lights up when the multi-upstream
-  composition ships. Singular-mode behavior, key formats, and log
-  lines are byte-identical.
+  label. Named multi-upstream serving (#294, above) is what sets the
+  labels. Singular-mode behavior, key formats, and log lines are
+  byte-identical.
 - Type-level compatibility note for library embedders (#295): the
   `BudgetChargeContext` passed to `BudgetEngine.resolveCharges()` has
   a new required `upstream: string | null` field, so charge-context
@@ -101,6 +133,22 @@ Maintainer notes:
 
 ### Fixed
 
+- Diagnosed startup failures now exit cleanly instead of crash-dumping
+  (#233): when `helio start` refuses to boot for a stated reason — an
+  audit database from an older build with a mismatched schema, or an
+  upstream that fails to connect — stderr carries the diagnosis alone
+  and the process exits 1, without the
+  `[helio] Unhandled promise rejection:` wrapper and stack trace that
+  previously buried the recovery instructions. Genuine crashes keep
+  the full stack and the crash-drain path.
+- A configuration reload that leaves `policies.tool_revalidation`
+  unchanged no longer restarts the revalidation clock, so frequent
+  saves cannot keep pushing the next definition check a full interval
+  out. A revalidation, retry, or startup prime attempt that rejects
+  outright (instead of reporting a failure result) is now logged and
+  survived with the cadence and backoff intact; previously such a
+  rejection crashed the proxy, or for a prime attempt landing after
+  the startup wait, vanished silently.
 - The Streamable HTTP forwarder no longer forwards a caller-supplied
   `mcp-session-id` on its request sends. Merge residue from caller
   headers and constructor static headers alike is now cleared on every

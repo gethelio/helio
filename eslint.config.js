@@ -38,6 +38,9 @@ export default tseslint.config(
       'packages/python-sdk/',
       '**/*.config.js',
       '**/*.config.ts',
+      // Plain-JS child-process fixtures spawned by e2e tests; not part of
+      // any TypeScript project, so the typed lint cannot parse them.
+      '**/__tests__/helpers/*.cjs',
       '**/scripts/**',
       '.local/',
       'docker/',

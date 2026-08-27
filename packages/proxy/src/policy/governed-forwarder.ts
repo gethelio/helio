@@ -96,8 +96,8 @@ export interface GovernedForwarderOptions {
   /**
    * The operator-chosen upstream entry name (issue #295, multi-upstream
    * substrate). Unset in singular mode — every governance surface then
-   * behaves exactly as today. Nothing in the proxy passes it yet; the
-   * multi-upstream composition loop (issue #294) is what will.
+   * behaves exactly as today. The multi-upstream composition loop (issue
+   * #294) passes each entry's name.
    */
   upstreamName?: string
 }

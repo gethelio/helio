@@ -3,6 +3,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const upstreamCtor = vi.fn()
 const sseCtor = vi.fn()
 const streamableCtor = vi.fn()
+const stdioCtor = vi.fn()
+
+vi.mock('./transport/stdio-wrapper.js', () => ({
+  StdioForwarder: class {
+    start = vi.fn().mockResolvedValue(undefined)
+    close = vi.fn().mockResolvedValue(undefined)
+    constructor(opts: unknown) {
+      stdioCtor(opts)
+    }
+  },
+}))
 
 vi.mock('./upstream/index.js', () => ({
   UpstreamForwarder: upstreamCtor,
@@ -30,6 +41,7 @@ describe('createForwarderFromConfig', () => {
     upstreamCtor.mockClear()
     sseCtor.mockClear()
     streamableCtor.mockClear()
+    stdioCtor.mockClear()
   })
 
   it('passes upstream.headers to the streamable-http forwarder', async () => {
@@ -95,5 +107,77 @@ describe('createForwarderFromConfig', () => {
     expect(sseCtor).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { Authorization: 'Bearer t' } }),
     )
+  })
+
+  it('tags the protocol-pin confirmation line with the upstream name (issue #294)', async () => {
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+    try {
+      const config = makeConfig({
+        upstream: {
+          url: 'http://upstream/mcp',
+          transport: 'streamable-http',
+          request_timeout: '30s',
+          protocol_version: '2025-06-18',
+        },
+      })
+
+      await createForwarderFromConfig(config, 'files')
+
+      expect(logged).toContain(
+        '[helio][files] Upstream MCP protocol version pinned: 2025-06-18 (upstream.protocol_version)',
+      )
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('keeps the protocol-pin confirmation line bare without an upstream name', async () => {
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+    try {
+      const config = makeConfig({
+        upstream: {
+          url: 'http://upstream/mcp',
+          transport: 'streamable-http',
+          request_timeout: '30s',
+          protocol_version: '2025-06-18',
+        },
+      })
+
+      await createForwarderFromConfig(config)
+
+      expect(logged).toContain(
+        '[helio] Upstream MCP protocol version pinned: 2025-06-18 (upstream.protocol_version)',
+      )
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('passes the upstream name into the stdio and streamable forwarder options (issue #294)', async () => {
+    const streamable = makeConfig({
+      upstream: {
+        url: 'http://upstream/mcp',
+        transport: 'streamable-http',
+        request_timeout: '30s',
+      },
+    })
+    await createForwarderFromConfig(streamable, 'files')
+    expect(streamableCtor).toHaveBeenCalledWith(expect.objectContaining({ upstreamName: 'files' }))
+
+    const stdio = makeConfig({
+      upstream: {
+        transport: 'stdio',
+        command: 'node',
+        request_timeout: '30s',
+      },
+    })
+    await createForwarderFromConfig(stdio, 'github')
+    expect(stdioCtor).toHaveBeenCalledWith(expect.objectContaining({ upstreamName: 'github' }))
   })
 })

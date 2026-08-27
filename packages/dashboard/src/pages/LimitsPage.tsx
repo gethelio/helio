@@ -32,6 +32,17 @@ function formatWindow(ms: number): string {
 }
 
 function parseKeyLabel(key: string): { type: string; name: string } {
+  // Named-mode tool keys (`upstream:<door>:tool:<rest>`) render as the TOOL
+  // with the door as a qualifier, matching the singular rendering of the
+  // same tool. The full grouping/filter UX is issue #297; every other key
+  // shape keeps the first-colon split.
+  const upstreamTool = /^upstream:([^:]+):tool:(.*)$/.exec(key)
+  if (upstreamTool) {
+    const [, door, rest] = upstreamTool
+    if (door !== undefined && rest !== undefined) {
+      return { type: 'tool', name: `${rest} (${door})` }
+    }
+  }
   const idx = key.indexOf(':')
   if (idx === -1) return { type: '', name: key }
   return { type: key.slice(0, idx), name: key.slice(idx + 1) }
