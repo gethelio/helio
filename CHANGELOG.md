@@ -95,8 +95,11 @@ Maintainer notes:
 - Internal groundwork for multi-upstream composition (#294):
   `helio start` now assembles its upstream stack (transport connect,
   governance wrap, annotation prime loop) through two extracted
-  per-upstream helpers. Singular-mode behavior, construction order,
-  and log output are unchanged.
+  per-upstream helpers. The stdio forwarder's max-retries death line
+  and the protocol-pin confirmation line can now carry the
+  operator-chosen upstream label, joining the #295 substrate; nothing
+  sets a label yet. Singular-mode behavior, construction order, and
+  log output are unchanged.
 - First use of the ratified additive-migration path (#292): a v0.12.0
   audit database missing only the new `upstream` column is migrated in
   place on first open with a single `ALTER TABLE` and one stderr

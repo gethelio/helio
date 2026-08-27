@@ -229,8 +229,11 @@ function printConfigErrorDetails(error: ConfigError, prefix = ''): void {
  * every upstream connects before any shared service is constructed — a bad
  * upstream fails boot without side effects (no audit DB is created).
  */
-async function connectUpstream(upstream: SingularHelioConfig['upstream']): Promise<BuiltForwarder> {
-  return createForwarderFromConfig({ upstream })
+async function connectUpstream(
+  upstream: SingularHelioConfig['upstream'],
+  upstreamName?: string,
+): Promise<BuiltForwarder> {
+  return createForwarderFromConfig({ upstream }, upstreamName)
 }
 
 /** One governed upstream stack: the forwarder wrapped in governance plus
@@ -249,15 +252,16 @@ async function governUpstream(options: {
   forwarder: McpForwarder
   policy: CompiledPolicy
   governance: GovernedForwarderOptions
+  upstreamName?: string
 }): Promise<UpstreamStack> {
-  const governedForwarder = new GovernedForwarder(
-    options.forwarder,
-    options.policy,
-    options.governance,
-  )
+  const governedForwarder = new GovernedForwarder(options.forwarder, options.policy, {
+    ...options.governance,
+    upstreamName: options.upstreamName,
+  })
   const annotationPrime = await startAnnotationPrimeLoop(
     governedForwarder,
     options.policy.toolRevalidation,
+    options.upstreamName,
   )
   return { governedForwarder, annotationPrime }
 }

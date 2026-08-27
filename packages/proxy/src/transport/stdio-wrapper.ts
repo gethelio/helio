@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { PendingRequests } from '../mcp/pending-requests.js'
+import { helioLogTag } from '../util/log-label.js'
 import type {
   McpForwarder,
   McpRequest,
@@ -26,6 +27,11 @@ export interface StdioForwarderOptions {
   retryDelayMs?: number
   /** Timeout in milliseconds for individual requests. */
   requestTimeoutMs?: number
+  /**
+   * The operator-chosen upstream entry name (multi-upstream mode). Unset in
+   * singular mode — the death line then keeps its bare `[helio]` tag.
+   */
+  upstreamName?: string
 }
 
 /**
@@ -40,6 +46,7 @@ export class StdioForwarder implements McpForwarder {
   private readonly maxRetries: number
   private readonly retryDelayMs: number
   private readonly pending: PendingRequests
+  private readonly logTag: string
 
   private child: ChildProcess | null = null
   private buffer = ''
@@ -53,6 +60,7 @@ export class StdioForwarder implements McpForwarder {
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
     this.pending = new PendingRequests(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS)
+    this.logTag = helioLogTag(options.upstreamName)
   }
 
   /** Spawn the child process and set up event handlers. */
@@ -211,7 +219,9 @@ export class StdioForwarder implements McpForwarder {
     } else {
       this.dead = true
       // eslint-disable-next-line no-console -- operational error logging
-      console.error(`[helio] Stdio forwarder: max retries (${String(this.maxRetries)}) exceeded`)
+      console.error(
+        `${this.logTag} Stdio forwarder: max retries (${String(this.maxRetries)}) exceeded`,
+      )
       this.pending.rejectAll(new Error('stdio forwarder is dead (max retries exceeded)'))
     }
   }
