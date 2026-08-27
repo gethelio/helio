@@ -2,8 +2,8 @@ export { VERSION } from './version.js'
 
 export { loadConfig, ConfigError, isSingularConfig, isNamedConfig } from './config/index.js'
 export type { HelioConfig, SingularHelioConfig, NamedHelioConfig } from './config/index.js'
-export { createApp, startServer, startSidebandServer } from './server.js'
-export type { ServerHandle, CreateAppOptions } from './server.js'
+export { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
+export type { ServerHandle, CreateAppOptions, CreateMultiAppOptions } from './server.js'
 // eslint-disable-next-line @typescript-eslint/no-deprecated -- deliberate compat re-export of the deprecated alias
 export { UpstreamForwarder } from './upstream/index.js'
 export type { UpstreamForwarderOptions } from './upstream/index.js'
