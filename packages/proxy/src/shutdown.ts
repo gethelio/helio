@@ -10,8 +10,8 @@
 export interface CloseableResources {
   /** The MCP server — the primary traffic door. Drained with `await`. */
   handle: { close(): Promise<void> }
-  annotationPrime?: { stop(): void }
-  closeForwarder?: () => Promise<void>
+  annotationPrimes?: ReadonlyArray<{ stop(): void }>
+  closeForwarders?: ReadonlyArray<() => Promise<void>>
   auditWriter?: { close(): void }
   configWatcher?: { close(): void }
   sidebandHandle?: { close(): Promise<void> }
@@ -30,7 +30,7 @@ export interface CloseableResources {
 /** Close everything the proxy holds, in traffic-safe order. */
 export async function closeResources(resources: CloseableResources): Promise<void> {
   // Background loops first: nothing may schedule new work mid-shutdown.
-  resources.annotationPrime?.stop()
+  for (const prime of resources.annotationPrimes ?? []) prime.stop()
   resources.configWatcher?.close()
 
   // Resolve pending approvals BEFORE draining the doors: requests parked on
@@ -59,5 +59,7 @@ export async function closeResources(resources: CloseableResources): Promise<voi
   // Storage last: drained requests above may still have flushed audit rows.
   resources.evidenceStore?.close()
   resources.auditWriter?.close()
-  if (resources.closeForwarder) await resources.closeForwarder()
+  // Forwarders close LAST, sequentially in stack order — deterministic, and
+  // bounded by the CLI's force-exit timer.
+  for (const close of resources.closeForwarders ?? []) await close()
 }

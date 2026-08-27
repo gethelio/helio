@@ -184,6 +184,64 @@ audit:
   return { dir, configPath, listenPort }
 }
 
+/** Grab a port that was just free, for fast-ECONNREFUSED connect failures. */
+function getClosedPort(): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const srv = createServer()
+    srv.listen(0, '127.0.0.1', () => {
+      const port = (srv.address() as AddressInfo).port
+      srv.close(() => {
+        resolve(port)
+      })
+    })
+  })
+}
+
+/** Path of the MCP-speaking stdio child fixture (see the file's header). */
+const STDIO_MCP_FIXTURE = join(import.meta.dirname, '__tests__', 'helpers', 'stdio-mcp-fixture.cjs')
+
+/**
+ * Write a two-entry named-mode config whose stdio children each advertise a
+ * tool named after their entry (`files_ping` / `github_ping`).
+ */
+function writeTwoUpstreamConfig(): { dir: string; configPath: string; listenPort: number } {
+  const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-'))
+  const configPath = join(dir, 'helio.yaml')
+  const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+  writeFileSync(
+    configPath,
+    `
+version: "1"
+upstreams:
+  - name: files
+    url: "http://127.0.0.1:1/mcp"
+    transport: stdio
+    command: "node"
+    args: ["${STDIO_MCP_FIXTURE}", "files_ping"]
+  - name: github
+    url: "http://127.0.0.1:1/mcp"
+    transport: stdio
+    command: "node"
+    args: ["${STDIO_MCP_FIXTURE}", "github_ping"]
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules:
+    - name: deny-probe
+      match:
+        tool: "denied_probe"
+      action: deny
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+  )
+  return { dir, configPath, listenPort }
+}
+
 /** Wait until the proxy health endpoint responds, to avoid startup races. */
 async function waitForProxyHealth(baseUrl: string, timeoutMs: number): Promise<void> {
   const started = Date.now()
@@ -923,35 +981,177 @@ dashboard:
       }
     }, 15_000)
 
-    it('refuses to start a named multi-upstream config, pointing at #294 (issue #293)', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+    it('serves a two-entry named config end to end (issue #294)', async () => {
+      const { dir, configPath, listenPort } = writeTwoUpstreamConfig()
+      const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      try {
+        // A pre-healthy exit (e.g. a boot refusal) must surface its stderr
+        // instead of a bare health-poll timeout.
+        await Promise.race([
+          waitForProxyHealth(baseUrl, 8_000),
+          new Promise<never>((_, reject) => {
+            child.on('close', (code) => {
+              reject(
+                new Error(`helio start exited ${String(code)} before healthy. stderr:\n${stderr}`),
+              )
+            })
+          }),
+        ])
+
+        // The acceptance leg: each door serves ITS OWN child's entry-named
+        // tool over real HTTP. Status alone cannot prove the mount wiring;
+        // the tool NAME can. Content-Type is required or the door 415s.
+        for (const [name, toolName, id] of [
+          ['files', 'files_ping', 1],
+          ['github', 'github_ping', 2],
+        ] as const) {
+          const res = await fetch(`${baseUrl}/mcp/${name}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/list' }),
+          })
+          expect(res.status).toBe(200)
+          const body = (await res.json()) as { result: { tools: Array<{ name: string }> } }
+          expect(body.result.tools[0]?.name).toBe(toolName)
+        }
+
+        // Catch-alls over real HTTP: bare prefix and unknown name get the
+        // exact id-less envelope.
+        for (const path of ['/mcp', '/mcp/ghost']) {
+          const res = await fetch(`${baseUrl}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list' }),
+          })
+          expect(res.status).toBe(404)
+          expect(res.headers.get('content-type')).toContain('application/json')
+          const body = (await res.json()) as Record<string, unknown>
+          expect(body).toEqual({
+            jsonrpc: '2.0',
+            error: {
+              code: -32600,
+              message:
+                'No MCP endpoint answers this request: this Helio serves named upstreams at /mcp/<name>.',
+            },
+          })
+          expect('id' in body).toBe(false)
+        }
+
+        // The door serves the GOVERNED forwarder, not the raw transport: a
+        // deny rule answers with the policy envelope instead of relaying.
+        const deniedRes = await fetch(`${baseUrl}/mcp/files`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 9,
+            method: 'tools/call',
+            params: { name: 'denied_probe', arguments: {} },
+          }),
+        })
+        const deniedBody = (await deniedRes.json()) as {
+          error?: { code: number; data?: { blocked?: boolean } }
+        }
+        expect(deniedBody.error?.code).toBe(-32001)
+        expect(deniedBody.error?.data?.blocked).toBe(true)
+
+        // Per-entry startup lines and name-tagged prime lines.
+        expect(stderr).toContain('Upstream[files]: node (stdio)')
+        expect(stderr).toContain('Upstream[github]: node (stdio)')
+        expect(stderr).toMatch(/\[helio\]\[files\] Annotation cache primed/)
+        expect(stderr).toMatch(/\[helio\]\[github\] Annotation cache primed/)
+
+        // Clean shutdown.
+        const exitCode = await new Promise<number | null>((resolve) => {
+          if (child.exitCode !== null) {
+            resolve(child.exitCode)
+            return
+          }
+          child.on('close', (code) => {
+            resolve(code)
+          })
+          child.kill('SIGTERM')
+        })
+        expect(exitCode).toBe(0)
+      } finally {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('all-or-nothing boot: an unreachable entry fails startup naming it (issue #294)', async () => {
+      const closedPort = await getClosedPort()
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-fail-'))
       const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
       writeFileSync(
         configPath,
-        'version: "1"\n' +
-          'upstreams:\n' +
-          '  - name: files\n' +
-          '    url: "http://localhost:8081/mcp"\n' +
-          'dashboard:\n' +
-          '  enabled: false\n',
+        `
+version: "1"
+upstreams:
+  - name: files
+    url: "http://127.0.0.1:1/mcp"
+    transport: stdio
+    command: "node"
+    args: ["${STDIO_MCP_FIXTURE}", "files_ping"]
+  - name: backend
+    url: "http://127.0.0.1:${String(closedPort)}/sse"
+    transport: sse
+    connect_timeout: "2s"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
       )
-
       try {
-        const err = await startAndCaptureStderr(['-c', configPath]).then(
-          () => null,
-          (e: unknown) => e,
-        )
-        expect(err).toBeInstanceOf(Error)
-        const message = err instanceof Error ? err.message : ''
-        expect(message).toContain(
-          'Error: this config declares named upstreams (upstreams:), which "helio start" ' +
-            'cannot serve yet — multi-upstream composition and routing land with issue #294. ' +
-            '"helio validate" fully validates named configs; to start today, use the ' +
-            'singular "upstream:" form.',
-        )
-        // A refusal, not a validation failure: helio validate accepts this
-        // exact config (pinned above in the validate suite).
-        expect(message).not.toContain('Invalid configuration')
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('upstream "backend": ')
+        expect(result.stderr).toContain('is unreachable (ECONNREFUSED)')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('warns before connecting when more than 16 upstreams are configured (issue #294)', async () => {
+      const closedPort = await getClosedPort()
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-many-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const entries = Array.from(
+        { length: 17 },
+        (_, i) =>
+          `  - name: u${String(i)}\n` +
+          `    url: "http://127.0.0.1:${String(closedPort)}/sse"\n` +
+          '    transport: sse\n' +
+          '    connect_timeout: "2s"\n',
+      ).join('')
+      writeFileSync(
+        configPath,
+        `version: "1"\nupstreams:\n${entries}listen:\n  port: ${String(listenPort)}\n  host: 127.0.0.1\ndashboard:\n  enabled: false\naudit:\n  path: "${join(dir, 'audit.db')}"\n`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        const warningIndex = result.stderr.indexOf('[helio] Warning: 17 upstreams configured.')
+        const failureIndex = result.stderr.indexOf('upstream "u0": ')
+        expect(warningIndex).toBeGreaterThanOrEqual(0)
+        expect(failureIndex).toBeGreaterThanOrEqual(0)
+        // The operator hears the warning even though entry 1 fails: it
+        // prints BEFORE the connect loop.
+        expect(warningIndex).toBeLessThan(failureIndex)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
