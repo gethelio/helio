@@ -7,8 +7,14 @@ import type { CompiledToolRevalidation } from './types.js'
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** A prime result the fake forwarder can hand back, sync or deferred. */
-type PrimeResponse = AnnotationCachePrimeResult | Promise<AnnotationCachePrimeResult>
+/** A prime result the fake forwarder can hand back, sync or deferred. A
+ *  thunk entry is invoked at call time, so a rejected promise can be minted
+ *  the moment the loop consumes it rather than sitting unhandled from test
+ *  start. */
+type PrimeResponse =
+  | AnnotationCachePrimeResult
+  | Promise<AnnotationCachePrimeResult>
+  | (() => Promise<AnnotationCachePrimeResult>)
 
 interface FakeForwarder {
   primeAnnotationCache: () => Promise<AnnotationCachePrimeResult>
@@ -28,21 +34,30 @@ function fakeForwarder(script: PrimeResponse[], fallback: PrimeResponse): FakeFo
     primeAnnotationCache: () => {
       const next = script[calls] ?? fallback
       calls += 1
-      return Promise.resolve(next)
+      return typeof next === 'function' ? next() : Promise.resolve(next)
     },
   }
 }
 
-/** A promise plus its resolver, for keeping a prime attempt in flight. */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+/** A promise plus its settlers, for keeping a prime attempt in flight. */
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason: unknown) => void
+} {
   let settle: ((value: T) => void) | undefined
-  const promise = new Promise<T>((res) => {
+  let fail: ((reason: unknown) => void) | undefined
+  const promise = new Promise<T>((res, rej) => {
     settle = res
+    fail = rej
   })
   return {
     promise,
     resolve: (value: T) => {
       settle?.(value)
+    },
+    reject: (reason: unknown) => {
+      fail?.(reason)
     },
   }
 }
@@ -372,6 +387,115 @@ describe('startAnnotationPrimeLoop', () => {
     expect(messages().some((m) => m.includes('Tool revalidation failed'))).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(600_000)
+    expect(forwarder.calls).toBe(2)
+    controller.stop()
+  })
+
+  it('reconfigure() with an identical revalidation keeps the pending timer (issue #257)', async () => {
+    const forwarder = fakeForwarder([], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000))
+    expect(forwarder.calls).toBe(1)
+
+    // One tick shy of the interval, a reload delivers identical values in a
+    // fresh object (the compiler mints a new CompiledToolRevalidation every
+    // reload, so this is value equality, not reference equality).
+    await vi.advanceTimersByTimeAsync(299_999)
+    expect(forwarder.calls).toBe(1)
+    controller.reconfigure(revalidation(300_000))
+
+    // The clock must not restart: the tick fires on the original schedule.
+    await vi.advanceTimersByTimeAsync(1)
+    expect(forwarder.calls).toBe(2)
+    controller.stop()
+  })
+
+  it('a revalidation attempt that rejects logs, keeps the cadence, and does not crash (issue #257)', async () => {
+    const forwarder = fakeForwarder(
+      [ok(2), () => Promise.reject(new Error('tools/list exploded'))],
+      ok(2),
+    )
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000))
+
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(forwarder.calls).toBe(2)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages()).toContain(
+      '[helio] Tool revalidation attempt failed unexpectedly: tools/list exploded — keeping the cadence',
+    )
+
+    // The cadence survives the rejection: the next tick still fires.
+    await vi.advanceTimersByTimeAsync(300_000)
+    expect(forwarder.calls).toBe(3)
+    controller.stop()
+  })
+
+  it('a retry attempt that rejects logs and keeps the backoff (issue #257)', async () => {
+    const forwarder = fakeForwarder(
+      [fail('still down'), () => Promise.reject(new Error('socket torn'))],
+      ok(2),
+    )
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000))
+    expect(forwarder.calls).toBe(1)
+
+    // Retry 1 rejects outright (not a clean failure result).
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(forwarder.calls).toBe(2)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages()).toContain(
+      '[helio] Tool revalidation attempt failed unexpectedly: socket torn — keeping the cadence',
+    )
+
+    // The backoff chain survives: retry 2 fires and succeeds.
+    expect(messages()).toContain('[helio] Annotation cache prime retry 2 scheduled in 2000ms')
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(forwarder.calls).toBe(3)
+    expect(messages()).toContain(
+      '[helio] Annotation cache primed after retry 2: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+
+  it('an initial prime attempt that rejects resolves startup, logs tagged, and enters retry (issue #257)', async () => {
+    const forwarder = fakeForwarder([() => Promise.reject(new Error('handshake exploded'))], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, revalidation(300_000), 'payments')
+
+    expect(messages()).toContain(
+      '[helio][payments] Tool revalidation attempt failed unexpectedly: handshake exploded — keeping the cadence',
+    )
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache prime retry 1 scheduled in 1000ms',
+    )
+
+    // Boot continued fail-closed; the armed retry succeeds.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(forwarder.calls).toBe(2)
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache primed after retry 1: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+
+  it('an initial prime rejection landing after the startup window logs and keeps the retry chain (issue #257)', async () => {
+    const slowInitial = deferred<AnnotationCachePrimeResult>()
+    const forwarder = fakeForwarder([slowInitial.promise], ok(2))
+
+    const startPromise = startAnnotationPrimeLoop(forwarder, revalidation(300_000))
+    await vi.advanceTimersByTimeAsync(INITIAL_WAIT_MS)
+    const controller = await startPromise
+    expect(messages()).toContain(
+      '[helio] Annotation cache priming did not complete within 1500ms; continuing startup fail-closed and retrying in background',
+    )
+
+    // The detached attempt rejects after the race window: the rejection must
+    // be reported, not swallowed, and must not double-arm the retry.
+    slowInitial.reject(new Error('late explosion'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(messages()).toContain(
+      '[helio] Tool revalidation attempt failed unexpectedly: late explosion — keeping the cadence',
+    )
+
+    // The retry armed at the timeout fires once and succeeds.
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(forwarder.calls).toBe(2)
     controller.stop()
   })

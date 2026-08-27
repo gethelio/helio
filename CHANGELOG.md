@@ -106,6 +106,14 @@ Maintainer notes:
 
 ### Fixed
 
+- A configuration reload that leaves `policies.tool_revalidation`
+  unchanged no longer restarts the revalidation clock, so frequent
+  saves cannot keep pushing the next definition check a full interval
+  out. A revalidation, retry, or startup prime attempt that rejects
+  outright (instead of reporting a failure result) is now logged and
+  survived with the cadence and backoff intact; previously such a
+  rejection crashed the proxy, or for a prime attempt landing after
+  the startup wait, vanished silently.
 - The Streamable HTTP forwarder no longer forwards a caller-supplied
   `mcp-session-id` on its request sends. Merge residue from caller
   headers and constructor static headers alike is now cleared on every

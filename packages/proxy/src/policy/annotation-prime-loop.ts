@@ -16,9 +16,30 @@ export interface AnnotationPrimeController {
   stop(): void
   /**
    * Apply a hot-reloaded `policies.tool_revalidation` section. Enabling,
-   * disabling, or retiming takes effect on the next tick — no restart.
+   * disabling, or retiming takes effect on the next tick — no restart. An
+   * unchanged section is a no-op: the pending timer keeps its clock, so a
+   * reload that does not touch revalidation cannot push the next check out.
    */
   reconfigure(revalidation: CompiledToolRevalidation | undefined): void
+}
+
+/** Value equality for reload-delivered revalidation sections: the compiler
+ *  mints a fresh object every reload, so reference equality never holds. */
+function sameRevalidation(
+  a: CompiledToolRevalidation | undefined,
+  b: CompiledToolRevalidation | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return (
+    a.enabled === b.enabled &&
+    a.intervalMs === b.intervalMs &&
+    a.maxAdvertisedTtlMs === b.maxAdvertisedTtlMs
+  )
+}
+
+/** Render a rejection reason for the unexpected-failure defense lines. */
+function describeRejection(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
 }
 
 function computePrimeRetryDelayMs(attempt: number): number {
@@ -80,15 +101,27 @@ export async function startAnnotationPrimeLoop(
     const epoch = revalidateEpoch
     revalidateTimer = setTimeout(() => {
       revalidateTimer = undefined
-      void forwarder.primeAnnotationCache().then((result) => {
-        if (epoch !== revalidateEpoch) return // reconfigured or stopped mid-flight
-        if (!result.success) {
+      void forwarder
+        .primeAnnotationCache()
+        .then((result) => {
+          if (epoch !== revalidateEpoch) return // reconfigured or stopped mid-flight
+          if (!result.success) {
+            console.error(
+              `${tag} Tool revalidation failed: ${result.reason ?? 'unknown reason'} — keeping the last baselines; next attempt in ${String(rv.intervalMs)}ms`,
+            )
+          }
+          scheduleRevalidation()
+        })
+        .catch((reason: unknown) => {
+          // primeAnnotationCache's contract is to swallow throws into failure
+          // results; a rejection is a contract breach the loop survives —
+          // uncaught it would reach unhandledRejection and exit the process.
+          if (epoch !== revalidateEpoch) return
           console.error(
-            `${tag} Tool revalidation failed: ${result.reason ?? 'unknown reason'} — keeping the last baselines; next attempt in ${String(rv.intervalMs)}ms`,
+            `${tag} Tool revalidation attempt failed unexpectedly: ${describeRejection(reason)} — keeping the cadence`,
           )
-        }
-        scheduleRevalidation()
-      })
+          scheduleRevalidation()
+        })
     }, rv.intervalMs)
     revalidateTimer.unref()
   }
@@ -101,6 +134,10 @@ export async function startAnnotationPrimeLoop(
   }
 
   const reconfigure = (next: CompiledToolRevalidation | undefined) => {
+    // Every successful reload lands here whether or not the section changed;
+    // restarting the clock on an unchanged section would push the next check
+    // a full interval out on every save (issue #257).
+    if (sameRevalidation(current, next)) return
     current = next
     revalidateEpoch += 1 // any in-flight completion returns without rescheduling
     clearRevalidateTimer()
@@ -152,8 +189,21 @@ export async function startAnnotationPrimeLoop(
   }
 
   const runPrimeAttempt = async (phase: 'initial' | 'retry') => {
-    const result = await forwarder.primeAnnotationCache()
-    handlePrimeResult(phase, result)
+    try {
+      const result = await forwarder.primeAnnotationCache()
+      handlePrimeResult(phase, result)
+    } catch (reason) {
+      // Same contract-breach defense as the revalidation chain. The initial
+      // attempt runs detached once the startup race times out, and the retry
+      // chain is void-dropped — a rejection on either must be survived, not
+      // crash the process. Late rejections after stop/prime stay silent,
+      // mirroring handlePrimeResult's orphan discipline.
+      if (stopped || primed) return
+      console.error(
+        `${tag} Tool revalidation attempt failed unexpectedly: ${describeRejection(reason)} — keeping the cadence`,
+      )
+      scheduleRetry()
+    }
   }
 
   const initialAttempt = runPrimeAttempt('initial')
