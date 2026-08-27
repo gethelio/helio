@@ -46,6 +46,27 @@ export function warnIfBudgetWindowExceedsRetention(
 }
 
 /**
+ * Emit a warning when a named config declares more than 16 upstreams. Each
+ * upstream runs its own connection or child process plus an annotation prime
+ * loop, so a very wide proxy multiplies that cost — the guardrail nudges the
+ * operator to consider splitting the deployment. Warning-only: nothing
+ * refuses to run (issue #293).
+ */
+export function warnIfManyUpstreams(
+  config: { upstreams: ReadonlyArray<unknown> },
+  log: (message: string) => void = console.error,
+): boolean {
+  const count = config.upstreams.length
+  if (count <= 16) return false
+  log(
+    `[helio] Warning: ${String(count)} upstreams configured. Each upstream runs its own ` +
+      'upstream connection or child process plus an annotation prime loop; consider ' +
+      'whether one proxy should govern this many.',
+  )
+  return true
+}
+
+/**
  * Emit a startup warning if a webhook approval channel is configured while
  * the dashboard sideband is bound to localhost only. Webhook callbacks
  * originate from outside the host, so they cannot reach

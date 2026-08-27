@@ -43,6 +43,29 @@ beforeEach(() => {
   vi.mocked(evaluatePolicy).mockClear()
 })
 
+describe('decide — match.upstreams scoping (issue #293)', () => {
+  const scopedDeny = () =>
+    compile({
+      default: 'allow',
+      rules: [{ match: { upstreams: ['a'] }, action: 'deny' }],
+    })
+
+  it('fires for the named door', () => {
+    const { decision } = decide(input({ policy: scopedDeny(), upstream: 'a' }))
+    expect(decision.action).toBe('deny')
+  })
+
+  it('does not fire for another door', () => {
+    const { decision } = decide(input({ policy: scopedDeny(), upstream: 'b' }))
+    expect(decision.action).toBe('allow')
+  })
+
+  it('does not fire on the sideband, where upstream is unset', () => {
+    const { decision } = decide(input({ policy: scopedDeny() }))
+    expect(decision.action).toBe('allow')
+  })
+})
+
 describe('decide — upstream threading (issue #295)', () => {
   it('threads upstream into the base evaluatePolicy match context', () => {
     const policy = compile({ default: 'allow', rules: [] })

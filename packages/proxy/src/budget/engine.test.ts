@@ -112,6 +112,66 @@ describe('BudgetEngine.resolveCharges', () => {
     expect(charges.map((c) => c.budget.name)).toEqual(['cap-a', 'cap-b'])
   })
 
+  describe('upstream-scoped contributors (issue #293)', () => {
+    const scopedBudget = () =>
+      budgetConfig({
+        contributors: [{ match: { tool: 'stripe_*', upstreams: ['a'] }, field: '$.amount' }],
+      })
+
+    it('charges a scoped contributor on its named door', () => {
+      const { engine } = createEngine([scopedBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25 }, undefined, 'a'),
+      )
+      expect(failures).toEqual([])
+      expect(charges).toHaveLength(1)
+      expect(charges[0]?.amount).toBe(25)
+    })
+
+    it('does not charge on a door outside the scope', () => {
+      const { engine } = createEngine([scopedBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25 }, undefined, 'b'),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toEqual([])
+    })
+
+    it('does not charge when ctx.upstream is null (singular mode and sideband)', () => {
+      const { engine } = createEngine([scopedBudget()])
+      const { charges, failures } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 25 }),
+      )
+      expect(charges).toEqual([])
+      expect(failures).toEqual([])
+    })
+
+    it('unscoped contributors keep charging on every door', () => {
+      const { engine } = createEngine([budgetConfig()])
+      for (const upstream of ['a', 'b', null]) {
+        const { charges } = engine.resolveCharges(
+          chargeCtx('stripe_charge', { amount: 25 }, undefined, upstream),
+        )
+        expect(charges).toHaveLength(1)
+      }
+    })
+
+    it('skips a non-matching scoped contributor and lets a later unscoped one supply the amount', () => {
+      const { engine } = createEngine([
+        budgetConfig({
+          contributors: [
+            { match: { tool: 'stripe_*', upstreams: ['a'] }, field: '$.amount' },
+            { match: { tool: 'stripe_*' }, field: '$.total' },
+          ],
+        }),
+      ])
+      const { charges } = engine.resolveCharges(
+        chargeCtx('stripe_charge', { amount: 5, total: 999 }, undefined, 'b'),
+      )
+      expect(charges[0]?.amount).toBe(999)
+    })
+  })
+
   it('uses the first matching contributor when globs overlap', () => {
     const { engine } = createEngine([
       budgetConfig({

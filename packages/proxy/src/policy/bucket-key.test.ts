@@ -17,10 +17,12 @@ describe('upstreamFromLimitKey (issue #292)', () => {
     expect(upstreamFromLimitKey('tool:upstream:github:oddname')).toBeNull()
   })
 
-  it('truncates a colon-bearing name at the first colon (documented until #293 validates the charset)', () => {
-    // GovernedForwarderOptions.upstreamName is an unconstrained string until
-    // #293's config validation lands; this pins the parse behavior for a
-    // name that embeds a colon rather than guessing rejection semantics.
+  it('truncates a colon-bearing name at the first colon (embedder-facing)', () => {
+    // Config names are charset-validated (#293), but
+    // GovernedForwarderOptions.upstreamName is a public embedder surface and
+    // deliberately stays an unconstrained string; this pins the parse
+    // behavior for a name that embeds a colon rather than guessing rejection
+    // semantics.
     expect(upstreamFromLimitKey('upstream:foo:bar:tool:x')).toBe('foo')
   })
 })

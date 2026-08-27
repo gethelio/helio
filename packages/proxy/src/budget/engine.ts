@@ -361,14 +361,18 @@ export class BudgetEngine {
   /**
    * Resolve which budgets a call feeds and how much it charges each.
    *
-   * A contributor participates when its tool glob matches the tool name AND
-   * every `match.input` condition holds (absent conditions means the glob
-   * alone decides); the FIRST participating contributor (config order, over
-   * that combined predicate) supplies the amount field. A call that matches
-   * the glob but not the conditions simply does not feed the budget — no
-   * charge, no failure. Once a contributor is selected, a missing,
-   * non-numeric, negative, or non-finite amount fails closed as a `failures`
-   * entry — the caller must deny the call.
+   * A contributor participates when its upstream scope admits the call's
+   * door (absent scope admits every door; a scoped contributor never
+   * participates when `ctx.upstream` is null — sideband, singular mode) AND
+   * its tool glob matches the tool name AND every `match.input` condition
+   * holds (absent conditions means the glob alone decides); the FIRST
+   * participating contributor (config order, over that combined predicate)
+   * supplies the amount field. A call that matches the glob but not the
+   * conditions or the scope simply does not feed the budget — no charge, no
+   * failure — and a later contributor may still participate. Once a
+   * contributor is selected, a missing, non-numeric, negative, or non-finite
+   * amount fails closed as a `failures` entry — the caller must deny the
+   * call.
    */
   resolveCharges(ctx: BudgetChargeContext): {
     charges: BudgetCharge[]
@@ -389,6 +393,8 @@ export class BudgetEngine {
     for (const budget of this.budgets.values()) {
       const contributor = budget.contributors.find(
         (c) =>
+          (c.upstreams === undefined ||
+            (ctx.upstream !== null && c.upstreams.includes(ctx.upstream))) &&
           c.match.tool.test(ctx.toolName) &&
           (c.match.input === undefined || matchInput(c.match.input, matchCtx)),
       )

@@ -55,9 +55,11 @@ const UPSTREAM_PREFIX_RE = /^upstream:([^:]+):/
  * `sender:`) returns null — only a named tool key ever starts `upstream:`,
  * and client-influenced substrings (tool names, session ids) only appear
  * AFTER those fixed prefixes, so the prefix is unambiguous. A name embedding
- * a colon truncates at the first colon: the colon-free charset is #293's
- * config-validation promise, so this parse documents today's behavior
- * instead of guessing at rejection semantics.
+ * a colon truncates at the first colon: config validation pins the colon-free
+ * charset for `upstreams:` entry names (#293), while the embedder-facing
+ * `GovernedForwarderOptions.upstreamName` stays deliberately unconstrained —
+ * this parse documents that surface's behavior instead of guessing at
+ * rejection semantics.
  */
 export function upstreamFromLimitKey(key: string): string | null {
   const match = UPSTREAM_PREFIX_RE.exec(key)

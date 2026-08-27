@@ -66,6 +66,8 @@ export interface CompiledMatch {
   readonly environment?: string
   /** Flattened list of metadata conditions (one entry per key+operator pair). */
   readonly metadata?: readonly MetadataCondition[]
+  /** Configured upstream names the rule is scoped to, OR within the list (issue #293). */
+  readonly upstreams?: readonly string[]
 }
 
 /** Compiled approval configuration with durations as milliseconds. */

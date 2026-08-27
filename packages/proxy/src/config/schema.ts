@@ -72,7 +72,7 @@ const transportSchema = z.enum(['streamable-http', 'sse', 'stdio'])
  */
 const protocolVersionSchema = z.enum(['auto', '2025-06-18', '2026-07-28'])
 
-const upstreamSchema = z
+const upstreamObjectSchema = z
   .object({
     url: z.string(),
     transport: transportSchema.default('streamable-http'),
@@ -85,46 +85,107 @@ const upstreamSchema = z
     headers: z.record(z.string(), z.string()).default({}),
   })
   .strict()
-  .refine((data) => data.transport !== 'stdio' || data.command !== undefined, {
-    message: '"command" is required when transport is "stdio"',
-    path: ['command'],
-  })
-  .superRefine((data, ctx) => {
-    // The modern pin only makes sense on Streamable HTTP: the SSE upstream
-    // transport is the deprecated legacy transport and will never be modern,
-    // and stdio modern-era support is tracked separately (#256).
-    if (data.protocol_version === '2026-07-28' && data.transport !== 'streamable-http') {
+
+// Shared by the singular `upstream:` schema and every named `upstreams:` entry
+// (issue #293). Messages, paths, and check order are pinned by tests —
+// singular configs must keep erroring byte-identically.
+function upstreamEntryChecks(
+  data: z.output<typeof upstreamObjectSchema>,
+  ctx: z.core.$RefinementCtx,
+): void {
+  if (data.transport === 'stdio' && data.command === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['command'],
+      message: '"command" is required when transport is "stdio"',
+    })
+  }
+
+  // The modern pin only makes sense on Streamable HTTP: the SSE upstream
+  // transport is the deprecated legacy transport and will never be modern,
+  // and stdio modern-era support is tracked separately (#256).
+  if (data.protocol_version === '2026-07-28' && data.transport !== 'streamable-http') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['protocol_version'],
+      message:
+        data.transport === 'stdio'
+          ? 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'stdio modern-era support is tracked in #256.'
+          : 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'the SSE upstream transport is the deprecated legacy transport.',
+    })
+  }
+  for (const [index, header] of data.forward_headers.entries()) {
+    if (!header.toLowerCase().startsWith('x-')) {
       ctx.addIssue({
         code: 'custom',
-        path: ['protocol_version'],
-        message:
-          data.transport === 'stdio'
-            ? 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
-              'stdio modern-era support is tracked in #256.'
-            : 'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
-              'the SSE upstream transport is the deprecated legacy transport.',
+        path: ['forward_headers', index],
+        message: 'Forwarded caller headers must start with "x-"',
       })
     }
-    for (const [index, header] of data.forward_headers.entries()) {
-      if (!header.toLowerCase().startsWith('x-')) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['forward_headers', index],
-          message: 'Forwarded caller headers must start with "x-"',
-        })
-      }
-    }
+  }
 
-    // Reserved transport/protocol headers must not be operator-overridden via
-    // upstream.headers — the forwarders own these.
-    for (const name of Object.keys(data.headers)) {
-      if (RESERVED_TRANSPORT_HEADERS.has(name.toLowerCase())) {
+  // Reserved transport/protocol headers must not be operator-overridden via
+  // upstream.headers — the forwarders own these.
+  for (const name of Object.keys(data.headers)) {
+    if (RESERVED_TRANSPORT_HEADERS.has(name.toLowerCase())) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['headers', name],
+        message: `upstream.headers must not set reserved header "${name}"`,
+      })
+    }
+  }
+}
+
+const upstreamSchema = upstreamObjectSchema.superRefine(upstreamEntryChecks)
+
+/**
+ * Upstream entry names embed in mount paths, limiter keys
+ * (`upstream:<name>:…`), and audit records — the budget-name charset keeps
+ * them delimiter-free so those keys stay parseable (issue #293).
+ */
+export const upstreamNameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-zA-Z0-9_-]+$/, {
+    message: 'Upstream names may only contain letters, digits, "_" and "-"',
+  })
+
+/**
+ * One entry of the named `upstreams:` list: every singular `upstream:` field
+ * plus a required unique `name`. The name is declared first so parsed entries
+ * render name-first; the per-entry refinements are the singular schema's,
+ * shared verbatim (issue #293).
+ */
+export const namedUpstreamEntrySchema = z
+  .object({ name: upstreamNameSchema, ...upstreamObjectSchema.shape })
+  .strict()
+  .superRefine(upstreamEntryChecks)
+
+/** The named `upstreams:` list — non-empty, with unique entry names (issue #293). */
+export const upstreamsListSchema = z
+  .array(namedUpstreamEntrySchema)
+  .min(1, {
+    message:
+      'upstreams: must declare at least one upstream — an empty list would serve nothing. ' +
+      'For a single upstream you can keep the "upstream:" form.',
+  })
+  .superRefine((entries, ctx) => {
+    const seen = new Set<string>()
+    for (const [index, entry] of entries.entries()) {
+      if (seen.has(entry.name)) {
         ctx.addIssue({
           code: 'custom',
-          path: ['headers', name],
-          message: `upstream.headers must not set reserved header "${name}"`,
+          path: [index, 'name'],
+          message:
+            `Duplicate upstream name "${entry.name}". Upstream names embed in mount paths, ` +
+            'limiter keys, and audit records — each upstream needs its own.',
         })
       }
+      seen.add(entry.name)
     }
   })
 
@@ -369,6 +430,13 @@ const matchSchema = z
     input: z.record(z.string(), inputConditionSchema).optional(),
     environment: z.string().optional(),
     metadata: z.record(z.string(), metadataConditionSchema).optional(),
+    /** Configured upstream names the rule is scoped to (issue #293). */
+    upstreams: z
+      .array(z.string().min(1))
+      .min(1, {
+        message: 'match.upstreams must name at least one upstream — an empty list matches nothing.',
+      })
+      .optional(),
   })
   .strict()
 
@@ -555,6 +623,13 @@ const budgetContributorMatchSchema = z
     // matchers (annotations, environment, metadata) stay strict-rejected
     // until the budget charge context can actually evaluate them.
     input: z.record(z.string(), inputConditionSchema).optional(),
+    /** Configured upstream names the contributor is scoped to (issue #293). */
+    upstreams: z
+      .array(z.string().min(1))
+      .min(1, {
+        message: 'match.upstreams must name at least one upstream — an empty list matches nothing.',
+      })
+      .optional(),
   })
   .strict()
 
@@ -735,28 +810,49 @@ const sdkSchema = z
 // Root config
 // ---------------------------------------------------------------------------
 
-const helioConfigBaseSchema = z
+// Every root section except the upstream slot, shared by both mode arms
+// below. Declaration order is the canonical section order — zod emits output
+// keys in declaration order and the key-order pins depend on it.
+const rootSectionSchemas = {
+  listen: listenSchema.prefault({}),
+  environment: z.string().optional(),
+  // Session precedes policies deliberately: upstream/listen/environment say
+  // where and as-what Helio runs, session says who is calling, and
+  // policies/budgets then govern those calls (issue #218).
+  session: sessionSchema.prefault({}),
+  policies: policiesSchema.prefault({}),
+  // Budgets sit beside policies deliberately: they are the second half of the
+  // governance declaration (policy decision → budget gate), not plumbing.
+  budgets: z.array(budgetSchema).default([]),
+  approval: approvalSchema.prefault({}),
+  audit: auditSchema.prefault({}),
+  // Dashboard follows audit deliberately: an operator surface, not part of
+  // the request path (canonical section order, #89/#163).
+  dashboard: dashboardSchema.prefault({}),
+  sdk: sdkSchema.prefault({}),
+}
+
+// The two mode arms of the config (issue #293): identical except for slot 2,
+// `upstream:` (singular) vs `upstreams:` (named list). dispatchByMode below
+// routes every parse to exactly one arm.
+const singularConfigBase = z
   .object({
     version: z.literal('1'),
     upstream: upstreamSchema,
-    listen: listenSchema.prefault({}),
-    environment: z.string().optional(),
-    // Session precedes policies deliberately: upstream/listen/environment say
-    // where and as-what Helio runs, session says who is calling, and
-    // policies/budgets then govern those calls (issue #218).
-    session: sessionSchema.prefault({}),
-    policies: policiesSchema.prefault({}),
-    // Budgets sit beside policies deliberately: they are the second half of the
-    // governance declaration (policy decision → budget gate), not plumbing.
-    budgets: z.array(budgetSchema).default([]),
-    approval: approvalSchema.prefault({}),
-    audit: auditSchema.prefault({}),
-    // Dashboard follows audit deliberately: an operator surface, not part of
-    // the request path (canonical section order, #89/#163).
-    dashboard: dashboardSchema.prefault({}),
-    sdk: sdkSchema.prefault({}),
+    ...rootSectionSchemas,
   })
   .strict()
+
+const namedConfigBase = z
+  .object({
+    version: z.literal('1'),
+    upstreams: upstreamsListSchema,
+    ...rootSectionSchemas,
+  })
+  .strict()
+
+/** The root sections every mode arm shares — what {@link rootConfigChecks} reads. */
+type RootConfigSections = Omit<z.output<typeof singularConfigBase>, 'upstream'>
 
 /**
  * Top-level keys matching `^x-` are extension keys: schema-ignored holders
@@ -773,7 +869,11 @@ function stripRootExtensionKeys(value: unknown): unknown {
   )
 }
 
-const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) => {
+// The cross-section validations both mode arms run (issue #293 moved the
+// body out of a single root schema's superRefine; the checks themselves are
+// unchanged). One function, called by each arm, so a check can never be
+// attached to one mode and silently skipped in the other.
+function rootConfigChecks(cfg: RootConfigSections, ctx: z.core.$RefinementCtx): void {
   const hasConfiguredEnvironment =
     typeof cfg.environment === 'string' && cfg.environment.trim().length > 0
 
@@ -1144,17 +1244,280 @@ const helioConfigRefinedSchema = helioConfigBaseSchema.superRefine((cfg, ctx) =>
       }
     }
   }
+}
+
+/**
+ * The upstream-vocabulary validations (issue #293). One function, run by BOTH
+ * mode arms — `configuredNames` is null in singular mode and the declared
+ * name set in named mode — so a mode-dependent rule can never be attached to
+ * one arm and silently skipped in the other.
+ */
+function upstreamVocabularyChecks(
+  cfg: RootConfigSections,
+  ctx: z.core.$RefinementCtx,
+  configuredNames: ReadonlySet<string> | null,
+): void {
+  for (const [ruleIndex, rule] of cfg.policies.rules.entries()) {
+    const upstreams = rule.match.upstreams
+    if (upstreams === undefined) continue
+
+    if (configuredNames === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'match', 'upstreams'],
+        message:
+          'Rule sets match.upstreams but the config declares a single "upstream:", which ' +
+          'has no name on purpose. Upstream-scoped rules require the named "upstreams:" list.',
+      })
+    } else {
+      for (const [entryIndex, name] of upstreams.entries()) {
+        if (!configuredNames.has(name)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['policies', 'rules', ruleIndex, 'match', 'upstreams', entryIndex],
+            message:
+              `Rule names upstream "${name}" in match.upstreams but no configured upstream ` +
+              'has that name. Every entry must name an upstream from the upstreams: list.',
+          })
+        }
+      }
+    }
+
+    // Metadata only exists on the sideband and upstream scoping only on the
+    // MCP path — the combination is a rule that can never match.
+    if (rule.match.metadata !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'match', 'upstreams'],
+        message:
+          'match.upstreams cannot be combined with match.metadata — metadata rules only ' +
+          'match on the sideband (host) path and upstream-scoped rules only on the MCP ' +
+          'path, so the combination can never match. Split it into two rules.',
+      })
+    }
+
+    // sender_id is sideband-only for the same reason — an upstream-scoped
+    // sender key could only ever collapse to tool scope.
+    if (rule.limits?.key === 'sender_id') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'limits', 'key'],
+        message:
+          'limits.key "sender_id" cannot be combined with match.upstreams — an ' +
+          'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+          'and the key would silently collapse to tool scope.',
+      })
+    }
+    if (rule.limits?.max_spend?.key === 'sender_id') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policies', 'rules', ruleIndex, 'limits', 'max_spend', 'key'],
+        message:
+          'limits.max_spend.key "sender_id" cannot be combined with match.upstreams — an ' +
+          'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+          'and the key would silently collapse to tool scope.',
+      })
+    }
+  }
+
+  for (const [budgetIndex, budget] of cfg.budgets.entries()) {
+    let hasUnscopedContributor = false
+    for (const [contributorIndex, contributor] of budget.contributors.entries()) {
+      // The legacy flat contributor shape ({ tool, field }) reaches these
+      // checks unparsed: its migration rejection sits behind a
+      // z.unknown() pipe, and z.unknown() lets the raw object through the
+      // field parse. Treat it as unscoped — the migration message is the
+      // real issue and the config is already rejected.
+      const upstreams = (contributor as { match?: { upstreams?: readonly string[] } }).match
+        ?.upstreams
+      if (upstreams === undefined) {
+        hasUnscopedContributor = true
+        continue
+      }
+
+      if (configuredNames === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['budgets', budgetIndex, 'contributors', contributorIndex, 'match', 'upstreams'],
+          message:
+            'Contributor sets match.upstreams but the config declares a single "upstream:", ' +
+            'which has no name on purpose. Upstream-scoped contributors require the named ' +
+            '"upstreams:" list.',
+        })
+      } else {
+        for (const [entryIndex, name] of upstreams.entries()) {
+          if (!configuredNames.has(name)) {
+            ctx.addIssue({
+              code: 'custom',
+              path: [
+                'budgets',
+                budgetIndex,
+                'contributors',
+                contributorIndex,
+                'match',
+                'upstreams',
+                entryIndex,
+              ],
+              message:
+                `Contributor names upstream "${name}" in match.upstreams but no configured ` +
+                'upstream has that name. Every entry must name an upstream from the ' +
+                'upstreams: list.',
+            })
+          }
+        }
+      }
+    }
+
+    // A sender-keyed pot fed only by upstream-scoped contributors is dead
+    // config: MCP calls never carry a sender and sideband calls never carry
+    // an upstream, so the two scopes can never meet.
+    if (budget.key === 'sender_id' && !hasUnscopedContributor) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['budgets', budgetIndex, 'key'],
+        message:
+          'budget key "sender_id" requires at least one contributor without an ' +
+          '"upstreams" scope — upstream-scoped contributors only match MCP calls, which ' +
+          'never carry a sender, so every charge would land in the shared "unknown" pot ' +
+          'while sideband calls (the only ones with real senders) never feed this budget.',
+      })
+    }
+  }
+
+  // Named mode + evidence gating + legacy_header identity is fail-closed:
+  // the guard fires under the DEFAULT identity chain too, so the message
+  // must spell the exact remedy. The gating predicate mirrors the decision
+  // pipeline's runtime gate verbatim — only a NON-EMPTY requires list (in
+  // either spelling) gates a session; requires_success alone is inert.
+  if (configuredNames !== null) {
+    const hasEvidenceGatedRule = cfg.policies.rules.some(
+      (rule) => (rule.evidence?.requires.length ?? 0) > 0 || (rule.requires?.length ?? 0) > 0,
+    )
+    if (hasEvidenceGatedRule) {
+      const legacyIndex = cfg.session.identity.findIndex(
+        (source) => source.source === 'legacy_header',
+      )
+      if (legacyIndex !== -1) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['session', 'identity', legacyIndex],
+          message:
+            'session.identity includes "legacy_header" while named upstreams and ' +
+            'evidence-gated rules ("evidence"/"requires") are configured. On the legacy ' +
+            'relay flow the Mcp-Session-Id a client echoes was minted by the upstream ' +
+            'itself, so with multiple upstreams a hostile server could collide session ' +
+            "identities across doors and pollute another door's evidence gates. Remove " +
+            'legacy_header from session.identity and use a caller-owned source such as ' +
+            'the default "x-helio-session-id" header.',
+        })
+      }
+    }
+  }
+}
+
+const singularConfigSchema = singularConfigBase.superRefine((cfg, ctx) => {
+  rootConfigChecks(cfg, ctx)
+  upstreamVocabularyChecks(cfg, ctx, null)
+})
+const namedConfigSchema = namedConfigBase.superRefine((cfg, ctx) => {
+  rootConfigChecks(cfg, ctx)
+  upstreamVocabularyChecks(cfg, ctx, new Set(cfg.upstreams.map((entry) => entry.name)))
 })
 
+/** A fully validated and defaulted singular-mode (`upstream:`) configuration. */
+export type SingularHelioConfig = z.output<typeof singularConfigSchema>
+
+/** A fully validated and defaulted named-mode (`upstreams:`) configuration. */
+export type NamedHelioConfig = z.output<typeof namedConfigSchema>
+
+/**
+ * Route a raw config document to exactly one mode arm (issue #293). A plain
+ * z.union cannot do this job: zod's arm selection is heuristic, and a common
+ * mistake like a named entry missing `url` surfaces as a buried
+ * "(top level): Invalid input" instead of its real issue. The dispatch owns
+ * the exactly-one-of contract and forwards the chosen arm's issues verbatim,
+ * so every error keeps its real path and message.
+ */
+// Produces zod's canonical invalid_type issue for a non-object root — the
+// same message the pre-dispatch root schema generated, kept so a garbage
+// document is diagnosed as a type error, never as a mode error.
+const objectRootSchema = z.object({})
+
+function dispatchByMode(
+  raw: unknown,
+  ctx: z.core.$RefinementCtx,
+): SingularHelioConfig | NamedHelioConfig {
+  const isObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+  if (!isObject) {
+    const typeResult = objectRootSchema.safeParse(raw)
+    if (!typeResult.success) {
+      for (const issue of typeResult.error.issues) {
+        ctx.addIssue(issue as z.core.$ZodRawIssue)
+      }
+    }
+    return z.NEVER
+  }
+  const hasUpstream = 'upstream' in raw
+  const hasUpstreams = 'upstreams' in raw
+
+  if (hasUpstream && hasUpstreams) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['upstreams'],
+      message:
+        'Set exactly one of "upstream:" (single upstream) or "upstreams:" (named ' +
+        'multi-upstream list) — not both. To migrate, move the upstream: fields into ' +
+        'an upstreams: entry and give it a name.',
+    })
+    return z.NEVER
+  }
+  if (!hasUpstream && !hasUpstreams) {
+    ctx.addIssue({
+      code: 'custom',
+      message:
+        'Missing upstream configuration: set exactly one of "upstream:" (single ' +
+        'upstream) or "upstreams:" (named multi-upstream list).',
+    })
+    return z.NEVER
+  }
+
+  const result = hasUpstreams
+    ? namedConfigSchema.safeParse(raw)
+    : singularConfigSchema.safeParse(raw)
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      // A finished $ZodIssue is runtime-compatible with addIssue (it
+      // normalizes and pushes), but the declared parameter type only admits
+      // raw issues — forward verbatim under the raw-issue type.
+      ctx.addIssue(issue as z.core.$ZodRawIssue)
+    }
+    return z.NEVER
+  }
+  return result.data
+}
+
 /** Zod schema for the complete `helio.yaml` configuration file. */
-export const helioConfigSchema = z.preprocess(stripRootExtensionKeys, helioConfigRefinedSchema)
+export const helioConfigSchema = z.preprocess(
+  stripRootExtensionKeys,
+  z.unknown().transform(dispatchByMode),
+)
 
 // ---------------------------------------------------------------------------
 // Inferred types
 // ---------------------------------------------------------------------------
 
-/** Fully validated and defaulted Helio configuration. */
-export type HelioConfig = z.infer<typeof helioConfigSchema>
+/** Fully validated and defaulted Helio configuration — one of the two mode arms. */
+export type HelioConfig = SingularHelioConfig | NamedHelioConfig
+
+/** Narrow a parsed config to the singular-mode (`upstream:`) arm. */
+export function isSingularConfig(config: HelioConfig): config is SingularHelioConfig {
+  return !('upstreams' in config)
+}
+
+/** Narrow a parsed config to the named-mode (`upstreams:`) arm. */
+export function isNamedConfig(config: HelioConfig): config is NamedHelioConfig {
+  return 'upstreams' in config
+}
 
 /** A single policy rule from the `policies.rules` array. */
 export type PolicyRule = z.infer<typeof policyRuleSchema>

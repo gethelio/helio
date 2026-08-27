@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { loadConfig, ConfigError, interpolateEnvVars } from './loader.js'
+import { isSingularConfig } from './schema.js'
 
 // ---------------------------------------------------------------------------
 // interpolateEnvVars
@@ -81,6 +82,8 @@ dashboard:
     const config = await loadConfig(filePath)
 
     expect(config.version).toBe('1')
+    expect(isSingularConfig(config)).toBe(true)
+    if (!isSingularConfig(config)) return
     expect(config.upstream.url).toBe('http://localhost:8080')
     expect(config.upstream.transport).toBe('streamable-http')
     expect(config.listen.port).toBe(3000)
@@ -128,6 +131,8 @@ dashboard:
     const filePath = await writeTempYaml('helio.yaml', yaml)
     const config = await loadConfig(filePath, { UPSTREAM_TOKEN: 'tok-123' })
 
+    expect(isSingularConfig(config)).toBe(true)
+    if (!isSingularConfig(config)) return
     expect(config.upstream.headers).toEqual({ Authorization: 'Bearer tok-123' })
   })
 

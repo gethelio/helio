@@ -139,6 +139,7 @@ function compileMatch(
     ...(match.metadata !== undefined && {
       metadata: flattenMetadataConditions(match.metadata, ruleIndex, ruleName),
     }),
+    ...(match.upstreams !== undefined && { upstreams: [...match.upstreams] }),
   }
 }
 

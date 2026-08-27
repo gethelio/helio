@@ -1,5 +1,25 @@
 import { describe, it, expect } from 'vitest'
-import { helioConfigSchema, durationSchema, parseDuration } from './schema.js'
+import type { z } from 'zod'
+import {
+  helioConfigSchema,
+  durationSchema,
+  parseDuration,
+  upstreamNameSchema,
+  namedUpstreamEntrySchema,
+  upstreamsListSchema,
+  isSingularConfig,
+  isNamedConfig,
+} from './schema.js'
+import type { HelioConfig } from './schema.js'
+
+// Compile-time insurance: the schema's inferred output must stay exactly the
+// declared HelioConfig union — a drift in the dispatch's return type fails
+// `pnpm typecheck` here instead of silently widening downstream.
+type Equal<A, B> =
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- the single-use T on each side IS the exact-equality probe
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false
+const _schemaInfersTheDeclaredUnion: Equal<z.infer<typeof helioConfigSchema>, HelioConfig> = true
+void _schemaInfersTheDeclaredUnion
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -125,6 +145,8 @@ describe('helioConfigSchema', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
 
       expect(result.data.upstream.transport).toBe('streamable-http')
       expect(result.data.upstream.connect_timeout).toBe('10s')
@@ -190,6 +212,918 @@ describe('helioConfigSchema', () => {
         'dashboard',
         'sdk',
       ])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Golden singular parse (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('golden singular parse (issue #293)', () => {
+    it('parses a minimal singular config to exactly this defaulted object', () => {
+      // Byte-identity pin for the multi-upstream schema work: singular configs
+      // must keep parsing to exactly this object. A diff here means a schema
+      // refactor changed singular behavior — fix the refactor, not this test.
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data).toStrictEqual({
+        version: '1',
+        upstream: {
+          url: 'http://localhost:8080',
+          transport: 'streamable-http',
+          protocol_version: 'auto',
+          connect_timeout: '10s',
+          request_timeout: '30s',
+          forward_headers: [],
+          headers: {},
+        },
+        listen: { port: 3000, host: '127.0.0.1', allowed_origins: [] },
+        session: {
+          identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+          on_unresolved: 'deny',
+        },
+        policies: { default: 'allow', dry_run: false, rules: [] },
+        budgets: [],
+        approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
+        audit: {
+          storage: 'sqlite',
+          path: './helio-audit.db',
+          retention: '90d',
+          include_responses: true,
+        },
+        dashboard: {
+          enabled: false,
+          port: 3100,
+          host: '127.0.0.1',
+          allow_open_mode: false,
+          sse_heartbeat_interval: '30s',
+        },
+        sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Named upstream leaf schemas (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('singular upstream refinement fold parity (issue #293)', () => {
+    it('emits every refinement issue family, stdio-command first, in one parse', () => {
+      // Pins the pre-#293 issue order and content for a singular upstream that
+      // trips all four per-entry checks at once. The shared-superRefine fold
+      // must keep this array identical — a diff means the fold changed
+      // singular error behavior.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            url: 'x',
+            transport: 'stdio',
+            protocol_version: '2026-07-28',
+            forward_headers: ['nope'],
+            headers: { 'content-type': 'y' },
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: ['upstream', 'command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'protocol_version'],
+          message:
+            'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'stdio modern-era support is tracked in #256.',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'forward_headers', 0],
+          message: 'Forwarded caller headers must start with "x-"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'headers', 'content-type'],
+          message: 'upstream.headers must not set reserved header "content-type"',
+        },
+      ])
+    })
+  })
+
+  describe('upstreamNameSchema (issue #293)', () => {
+    it.each(['files', 'files-2', 'files_2', 'A1', 'a'.repeat(64)])('accepts "%s"', (name) => {
+      expect(upstreamNameSchema.safeParse(name).success).toBe(true)
+    })
+
+    it('rejects the empty string', () => {
+      expect(upstreamNameSchema.safeParse('').success).toBe(false)
+    })
+
+    it('rejects names longer than 64 characters', () => {
+      expect(upstreamNameSchema.safeParse('a'.repeat(65)).success).toBe(false)
+    })
+
+    it.each(['with space', 'with:colon', 'with/slash', 'with.dot', 'naïve'])(
+      'rejects "%s" with the charset message',
+      (name) => {
+        const result = upstreamNameSchema.safeParse(name)
+        expect(result.success).toBe(false)
+        if (result.success) return
+        expect(result.error.issues.map((i) => i.message)).toContain(
+          'Upstream names may only contain letters, digits, "_" and "-"',
+        )
+      },
+    )
+  })
+
+  describe('namedUpstreamEntrySchema (issue #293)', () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      name: 'files',
+      url: 'http://localhost:8081/mcp',
+      ...overrides,
+    })
+
+    it('parses a minimal entry with name first and singular defaults applied', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(Object.keys(result.data)).toEqual([
+        'name',
+        'url',
+        'transport',
+        'protocol_version',
+        'connect_timeout',
+        'request_timeout',
+        'forward_headers',
+        'headers',
+      ])
+      expect(result.data.transport).toBe('streamable-http')
+      expect(result.data.protocol_version).toBe('auto')
+      expect(result.data.connect_timeout).toBe('10s')
+      expect(result.data.request_timeout).toBe('30s')
+      expect(result.data.forward_headers).toEqual([])
+      expect(result.data.headers).toEqual({})
+    })
+
+    it('requires the name', () => {
+      const result = namedUpstreamEntrySchema.safeParse({ url: 'http://localhost:8081/mcp' })
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['name'])
+    })
+
+    it('stays strict: an unknown entry key is rejected', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ urll: 'typo' }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => i.message)).toContain('Unrecognized key: "urll"')
+    })
+
+    it('requires command for stdio transport, same message and path as singular', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ transport: 'stdio' }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: ['command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+      ])
+    })
+
+    it('applies the modern-pin transport check per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(
+        entry({ transport: 'sse', protocol_version: '2026-07-28' }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['protocol_version'])
+      expect(result.error.issues[0]?.message).toBe(
+        'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+          'the SSE upstream transport is the deprecated legacy transport.',
+      )
+    })
+
+    it('applies the forward_headers x- prefix check per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(entry({ forward_headers: ['bad'] }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['forward_headers', 0])
+      expect(result.error.issues[0]?.message).toBe('Forwarded caller headers must start with "x-"')
+    })
+
+    it('applies the reserved-header guard per entry', () => {
+      const result = namedUpstreamEntrySchema.safeParse(
+        entry({ headers: { 'mcp-session-id': 'x' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['headers', 'mcp-session-id'])
+      expect(result.error.issues[0]?.message).toBe(
+        'upstream.headers must not set reserved header "mcp-session-id"',
+      )
+    })
+  })
+
+  describe('upstreamsListSchema (issue #293)', () => {
+    it('accepts a list of uniquely named entries', () => {
+      const result = upstreamsListSchema.safeParse([
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ])
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects an empty list with the pinned message', () => {
+      const result = upstreamsListSchema.safeParse([])
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.message).toBe(
+        'upstreams: must declare at least one upstream — an empty list would serve nothing. ' +
+          'For a single upstream you can keep the "upstream:" form.',
+      )
+    })
+
+    it('rejects duplicate names at the duplicate index', () => {
+      const result = upstreamsListSchema.safeParse([
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+        { name: 'files', url: 'http://localhost:8083/mcp' },
+      ])
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: [2, 'name'],
+          message:
+            'Duplicate upstream name "files". Upstream names embed in mount paths, limiter ' +
+            'keys, and audit records — each upstream needs its own.',
+        },
+      ])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Mode dispatch: upstream | upstreams (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('mode dispatch: upstream | upstreams (issue #293)', () => {
+    const namedMinimal = (overrides: Record<string, unknown> = {}) => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    it('parses a minimal named config with entry defaults applied', () => {
+      const result = helioConfigSchema.safeParse(namedMinimal())
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(isNamedConfig(result.data)).toBe(true)
+      if (!isNamedConfig(result.data)) return
+      expect(result.data.upstreams).toHaveLength(2)
+      expect(result.data.upstreams[0]?.name).toBe('files')
+      expect(result.data.upstreams[0]?.transport).toBe('streamable-http')
+      expect(result.data.upstreams[0]?.protocol_version).toBe('auto')
+      expect(result.data.upstreams[1]?.name).toBe('search')
+      expect(result.data.session.on_unresolved).toBe('deny')
+      expect(result.data.policies.default).toBe('allow')
+    })
+
+    it('rejects a bad entry name at the entry path through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({ upstreams: [{ name: 'with:colon', url: 'http://localhost:8081/mcp' }] }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'name'],
+          message: 'Upstream names may only contain letters, digits, "_" and "-"',
+        },
+      ])
+    })
+
+    it('rejects duplicate entry names at the duplicate index through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [
+            { name: 'files', url: 'http://localhost:8081/mcp' },
+            { name: 'files', url: 'http://localhost:8082/mcp' },
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['upstreams', 1, 'name'])
+      expect(result.error.issues[0]?.message).toContain('Duplicate upstream name "files"')
+    })
+
+    it('applies every per-entry refinement at the entry path through the root schema', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [
+            { name: 'files', url: 'x', transport: 'stdio' },
+            { name: 'search', url: 'x', headers: { 'mcp-session-id': 'y' } },
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+        {
+          path: ['upstreams', 1, 'headers', 'mcp-session-id'],
+          message: 'upstream.headers must not set reserved header "mcp-session-id"',
+        },
+      ])
+    })
+
+    it('rejects a config that sets both upstream: and upstreams:', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({ upstream: { url: 'http://localhost:8080' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams'],
+          message:
+            'Set exactly one of "upstream:" (single upstream) or "upstreams:" (named ' +
+            'multi-upstream list) — not both. To migrate, move the upstream: fields into ' +
+            'an upstreams: entry and give it a name.',
+        },
+      ])
+    })
+
+    it.each([
+      ['null', null, 'null'],
+      ['a string', 'nope', 'string'],
+      ['an array', [], 'array'],
+      ['a number', 3, 'number'],
+    ])('rejects %s root as a type error, not a mode error', (_name, input, received) => {
+      // A non-object document is not a config mapping at all — the diagnosis
+      // is the type, never the exactly-one-of contract.
+      const result = helioConfigSchema.safeParse(input)
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: [], message: `Invalid input: expected object, received ${received}` },
+      ])
+    })
+
+    it('rejects a config that sets neither upstream: nor upstreams:', () => {
+      const result = helioConfigSchema.safeParse({ version: '1', dashboard: { enabled: false } })
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: [],
+          message:
+            'Missing upstream configuration: set exactly one of "upstream:" (single ' +
+            'upstream) or "upstreams:" (named multi-upstream list).',
+        },
+      ])
+    })
+
+    it('rejects an empty upstreams: list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(namedMinimal({ upstreams: [] }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams'],
+          message:
+            'upstreams: must declare at least one upstream — an empty list would serve ' +
+            'nothing. For a single upstream you can keep the "upstream:" form.',
+        },
+      ])
+    })
+
+    it('emits named-mode top-level keys in the canonical section order', () => {
+      // Twin of the singular key-order pin: input keys deliberately reversed,
+      // upstreams in slot 2.
+      const result = helioConfigSchema.safeParse({
+        sdk: {},
+        dashboard: { enabled: false },
+        audit: {},
+        approval: {},
+        budgets: [],
+        policies: {},
+        session: {},
+        environment: 'production',
+        listen: {},
+        upstreams: [{ name: 'files', url: 'http://localhost:8081/mcp' }],
+        version: '1',
+      })
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(Object.keys(result.data)).toEqual([
+        'version',
+        'upstreams',
+        'listen',
+        'environment',
+        'session',
+        'policies',
+        'budgets',
+        'approval',
+        'audit',
+        'dashboard',
+        'sdk',
+      ])
+    })
+
+    it('forwards singular-arm issues verbatim through the dispatch', () => {
+      // The singular arm's error shape is the pre-#293 one — pinned so the
+      // dispatch encoding cannot bury or reword singular errors.
+      const result = helioConfigSchema.safeParse(minimalConfig({ upstream: {} }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstream', 'url'],
+          message: 'Invalid input: expected string, received undefined',
+        },
+      ])
+    })
+
+    it('narrows with the mode guards', () => {
+      const singular = helioConfigSchema.safeParse(minimalConfig())
+      const named = helioConfigSchema.safeParse(namedMinimal())
+      expect(singular.success).toBe(true)
+      expect(named.success).toBe(true)
+      if (!singular.success || !named.success) return
+      expect(isSingularConfig(singular.data)).toBe(true)
+      expect(isNamedConfig(singular.data)).toBe(false)
+      expect(isNamedConfig(named.data)).toBe(true)
+      expect(isSingularConfig(named.data)).toBe(false)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // match.upstreams vocabulary (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('match.upstreams vocabulary (issue #293)', () => {
+    const namedWithRules = (
+      rules: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      policies: { rules },
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    it('accepts a rule scoped to configured upstream names', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: ['files', 'search'] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects match.upstreams in singular mode', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          policies: { rules: [{ match: { tool: '*', upstreams: ['files'] }, action: 'deny' }] },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'Rule sets match.upstreams but the config declares a single "upstream:", which ' +
+            'has no name on purpose. Upstream-scoped rules require the named "upstreams:" list.',
+        },
+      ])
+    })
+
+    it('rejects an unknown upstream name at the entry index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: ['files', 'ghost'] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams', 1],
+          message:
+            'Rule names upstream "ghost" in match.upstreams but no configured upstream has ' +
+            'that name. Every entry must name an upstream from the upstreams: list.',
+        },
+      ])
+    })
+
+    it('rejects an empty match.upstreams list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([{ match: { tool: '*', upstreams: [] }, action: 'deny' }]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams must name at least one upstream — an empty list matches nothing.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with match.metadata', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([
+          {
+            match: { upstreams: ['files'], metadata: { channel_id: 'C1' } },
+            action: 'deny',
+          },
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams cannot be combined with match.metadata — metadata rules only ' +
+            'match on the sideband (host) path and upstream-scoped rules only on the MCP ' +
+            'path, so the combination can never match. Split it into two rules.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with limits.key sender_id', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules(
+          [
+            {
+              match: { tool: '*', upstreams: ['files'] },
+              action: 'allow',
+              limits: { key: 'sender_id', max_calls: 10, window: '60s' },
+            },
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'limits', 'key'],
+          message:
+            'limits.key "sender_id" cannot be combined with match.upstreams — an ' +
+            'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+            'and the key would silently collapse to tool scope.',
+        },
+      ])
+    })
+
+    it('rejects match.upstreams combined with limits.max_spend.key sender_id', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithRules(
+          [
+            {
+              match: { tool: '*', upstreams: ['files'] },
+              action: 'allow',
+              limits: {
+                max_spend: {
+                  field: '$.amount',
+                  limit: 100,
+                  currency: 'USD',
+                  window: '24h',
+                  key: 'sender_id',
+                },
+              },
+            },
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['policies', 'rules', 0, 'limits', 'max_spend', 'key'],
+          message:
+            'limits.max_spend.key "sender_id" cannot be combined with match.upstreams — an ' +
+            'upstream-scoped rule only matches on the MCP path, where sender_id is absent ' +
+            'and the key would silently collapse to tool scope.',
+        },
+      ])
+    })
+
+    it('adds no new rejection for agent keys on an upstream-scoped rule', () => {
+      // Pinned exemption: agent keys stay warn-only at compile time; the
+      // schema must not invent a rejection for them.
+      const result = helioConfigSchema.safeParse(
+        namedWithRules([
+          {
+            match: { tool: '*', upstreams: ['files'] },
+            action: 'allow',
+            limits: { key: 'agent', max_calls: 10, window: '60s' },
+          },
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Budget contributor upstreams scoping (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('budget contributor upstreams scoping (issue #293)', () => {
+    const namedWithBudgets = (
+      budgets: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [
+        { name: 'files', url: 'http://localhost:8081/mcp' },
+        { name: 'search', url: 'http://localhost:8082/mcp' },
+      ],
+      budgets,
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    const budget = (
+      contributors: unknown[],
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      name: 'cap',
+      limit: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global',
+      on_exceed: 'deny',
+      contributors,
+      ...overrides,
+    })
+
+    it('accepts a contributor scoped to configured upstream names', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([{ match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' }]),
+        ]),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('rejects a scoped contributor in singular mode', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          budgets: [
+            budget([{ match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' }]),
+          ],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams'],
+          message:
+            'Contributor sets match.upstreams but the config declares a single "upstream:", ' +
+            'which has no name on purpose. Upstream-scoped contributors require the named ' +
+            '"upstreams:" list.',
+        },
+      ])
+    })
+
+    it('rejects an unknown upstream name at the contributor entry index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([
+            { match: { tool: 'stripe_*', upstreams: ['files', 'ghost'] }, field: '$.amount' },
+          ]),
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams', 1],
+          message:
+            'Contributor names upstream "ghost" in match.upstreams but no configured ' +
+            'upstream has that name. Every entry must name an upstream from the upstreams: list.',
+        },
+      ])
+    })
+
+    it('rejects an empty contributor upstreams list with the pinned message', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets([
+          budget([{ match: { tool: 'stripe_*', upstreams: [] }, field: '$.amount' }]),
+        ]),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'contributors', 0, 'match', 'upstreams'],
+          message:
+            'match.upstreams must name at least one upstream — an empty list matches nothing.',
+        },
+      ])
+    })
+
+    it('rejects a sender_id budget whose contributors are all upstream-scoped', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets(
+          [
+            budget(
+              [
+                { match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' },
+                { match: { tool: 'paypal_*', upstreams: ['search'] }, field: '$.total' },
+              ],
+              { key: 'sender_id' },
+            ),
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['budgets', 0, 'key'],
+          message:
+            'budget key "sender_id" requires at least one contributor without an ' +
+            '"upstreams" scope — upstream-scoped contributors only match MCP calls, which ' +
+            'never carry a sender, so every charge would land in the shared "unknown" pot ' +
+            'while sideband calls (the only ones with real senders) never feed this budget.',
+        },
+      ])
+    })
+
+    it('accepts a sender_id budget with at least one unscoped contributor', () => {
+      const result = helioConfigSchema.safeParse(
+        namedWithBudgets(
+          [
+            budget(
+              [
+                { match: { tool: 'stripe_*', upstreams: ['files'] }, field: '$.amount' },
+                { match: { tool: 'paypal_*' }, field: '$.total' },
+              ],
+              { key: 'sender_id' },
+            ),
+          ],
+          { sdk: { enabled: true } },
+        ),
+      )
+      expect(result.success).toBe(true)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Named-mode legacy_header identity guard (issue #293)
+  // -------------------------------------------------------------------------
+
+  describe('named-mode legacy_header identity guard (issue #293)', () => {
+    const identityGuardMessage =
+      'session.identity includes "legacy_header" while named upstreams and evidence-gated ' +
+      'rules ("evidence"/"requires") are configured. On the legacy relay flow the ' +
+      'Mcp-Session-Id a client echoes was minted by the upstream itself, so with multiple ' +
+      'upstreams a hostile server could collide session identities across doors and ' +
+      "pollute another door's evidence gates. Remove legacy_header from session.identity " +
+      'and use a caller-owned source such as the default "x-helio-session-id" header.'
+
+    const namedConfig = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      version: '1',
+      upstreams: [{ name: 'files', url: 'http://localhost:8081/mcp' }],
+      dashboard: { enabled: false },
+      ...overrides,
+    })
+
+    const explicitLegacyChain = {
+      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+    }
+
+    it('rejects named + evidence rule + explicit legacy_header chain at the legacy index', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: ['session', 'identity', 1], message: identityGuardMessage },
+      ])
+    })
+
+    it('rejects named + bare requires rule under the DEFAULT session chain', () => {
+      // The default identity chain carries legacy_header at index 1 — the
+      // guard deliberately fires here too, and the message spells the remedy.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires: ['deploy_ticket'] }],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: ['session', 'identity', 1], message: identityGuardMessage },
+      ])
+    })
+
+    it('accepts singular + evidence rule + legacy_header', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + evidence rule + header-only chain', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: { identity: [{ source: 'header', name: 'x-helio-session-id' }] },
+          policies: {
+            rules: [
+              { match: { tool: '*' }, action: 'allow', evidence: { requires: ['fact-check'] } },
+            ],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + requires_success-only rule + legacy_header', () => {
+      // requires_success alone is inert at runtime — it only modifies a
+      // non-empty requires list, so it must not trip the guard.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires_success: true }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + empty evidence.requires + legacy_header (runtime-gate alignment)', () => {
+      // An empty requires list never gates at runtime; a key-presence
+      // predicate would reject configs the pipeline treats as ungated.
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', evidence: { requires: [] } }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('accepts named + empty bare requires + legacy_header (runtime-gate alignment)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedConfig({
+          session: explicitLegacyChain,
+          policies: {
+            rules: [{ match: { tool: '*' }, action: 'allow', requires: [] }],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
     })
   })
 
@@ -414,6 +1348,8 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.headers).toEqual({ Authorization: 'Bearer abc' })
     })
 
@@ -488,6 +1424,8 @@ describe('helioConfigSchema', () => {
       const result = helioConfigSchema.safeParse(minimalConfig())
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.protocol_version).toBe('auto')
     })
 
@@ -499,6 +1437,8 @@ describe('helioConfigSchema', () => {
       )
       expect(result.success).toBe(true)
       if (!result.success) return
+      expect(isSingularConfig(result.data)).toBe(true)
+      if (!isSingularConfig(result.data)) return
       expect(result.data.upstream.protocol_version).toBe(version)
     })
 

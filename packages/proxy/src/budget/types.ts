@@ -14,6 +14,13 @@ export interface CompiledBudgetContributor {
     /** Flattened conditions (one per path+operator); absent when unconditioned. */
     readonly input?: readonly InputCondition[]
   }
+  /**
+   * Configured upstream names the contributor is scoped to (issue #293);
+   * absent means every door contributes. A scoped contributor never
+   * participates when the charge context carries no upstream (sideband,
+   * singular mode).
+   */
+  readonly upstreams?: readonly string[]
   /** Dot-path into the tool arguments (e.g. "$.amount"), resolved per call. */
   readonly field: string
 }

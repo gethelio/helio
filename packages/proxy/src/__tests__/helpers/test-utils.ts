@@ -2,7 +2,7 @@ import type { AddressInfo } from 'node:net'
 import type { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
-import type { HelioConfig } from '../../config/index.js'
+import type { HelioConfig, SingularHelioConfig } from '../../config/index.js'
 
 /** A running server with its port and a close method. */
 export interface ManagedServer {
@@ -50,7 +50,7 @@ export function closeServer(server: ServerType): Promise<void> {
  */
 export function makeConfig(
   overrides: {
-    upstream?: Partial<HelioConfig['upstream']>
+    upstream?: Partial<SingularHelioConfig['upstream']>
     listen?: Partial<HelioConfig['listen']>
     dashboard?: Partial<HelioConfig['dashboard']>
     policies?: Partial<HelioConfig['policies']>
@@ -60,7 +60,7 @@ export function makeConfig(
     session?: Partial<HelioConfig['session']>
     sdk?: Partial<HelioConfig['sdk']>
   } = {},
-): HelioConfig {
+): SingularHelioConfig {
   return {
     version: '1',
     upstream: {
@@ -93,7 +93,7 @@ export function makeConfig(
       ...overrides.audit,
     },
     sdk: { enabled: false, port: 3200, host: '127.0.0.1', ...overrides.sdk },
-  } as HelioConfig
+  } as SingularHelioConfig
 }
 
 /**

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
+import { isNamedConfig, isSingularConfig } from './schema.js'
 import type { HelioConfig } from './schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
 import type { CompiledBudget } from '../budget/types.js'
@@ -25,8 +26,18 @@ export interface ReloadBoundaryDiff {
 export function diffReloadBoundary(previous: HelioConfig, next: HelioConfig): ReloadBoundaryDiff {
   const restartRequiredPaths: string[] = []
 
-  if (!isDeepStrictEqual(previous.upstream, next.upstream)) {
-    restartRequiredPaths.push('upstream')
+  if (isSingularConfig(previous) !== isSingularConfig(next)) {
+    // A mode switch edits both sections (one removed, one added) — naming
+    // only one label would misreport half the change.
+    restartRequiredPaths.push('upstream', 'upstreams')
+  } else if (isSingularConfig(previous) && isSingularConfig(next)) {
+    if (!isDeepStrictEqual(previous.upstream, next.upstream)) {
+      restartRequiredPaths.push('upstream')
+    }
+  } else if (isNamedConfig(previous) && isNamedConfig(next)) {
+    if (!isDeepStrictEqual(previous.upstreams, next.upstreams)) {
+      restartRequiredPaths.push('upstreams')
+    }
   }
   if (!isDeepStrictEqual(previous.listen, next.listen)) {
     restartRequiredPaths.push('listen')

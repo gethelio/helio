@@ -159,6 +159,18 @@ export function matchEnvironment(required: string, ctx: MatchContext): boolean {
 }
 
 /**
+ * Test whether the context's upstream name is in the rule's list (OR within
+ * the list; exact, case-sensitive — config validation pins the charset).
+ * Returns false when `ctx.upstream` is undefined: the sideband and singular
+ * mode carry no upstream name, so upstream-scoped rules are inert there by
+ * construction (issue #293).
+ */
+export function matchUpstreams(required: readonly string[], ctx: MatchContext): boolean {
+  if (ctx.upstream === undefined) return false
+  return required.includes(ctx.upstream)
+}
+
+/**
  * Test whether ALL metadata conditions match against the adapter-supplied context
  * (issue #13 — `match.metadata.*`). Conditions are AND'd; every condition must pass.
  *
@@ -213,6 +225,7 @@ export function matchRule(rule: CompiledPolicyRule, ctx: MatchContext): boolean 
   if (match.input !== undefined && !matchInput(match.input, ctx)) return false
   if (match.environment !== undefined && !matchEnvironment(match.environment, ctx)) return false
   if (match.metadata !== undefined && !matchMetadata(match.metadata, ctx)) return false
+  if (match.upstreams !== undefined && !matchUpstreams(match.upstreams, ctx)) return false
 
   return true
 }

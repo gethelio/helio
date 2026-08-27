@@ -36,6 +36,36 @@ Maintainer notes:
 
 ### Added
 
+- Named multi-upstream configuration (#293): `helio.yaml` accepts a
+  top-level `upstreams:` list of named upstream entries as an
+  alternative to the singular `upstream:` section; exactly one of the
+  two must be set. Each entry takes every `upstream.*` field plus a
+  required `name` (letters, digits, `_`, `-`; unique within the list).
+  `helio validate` fully validates named configs. `helio start` does
+  not serve them yet: it refuses named mode with an error pointing at
+  the composition work (#294). For library embedders, `HelioConfig` is
+  now a union of the two modes with `isSingularConfig` /
+  `isNamedConfig` guards exported, and `createApp` throws on a named
+  config, pointing at the upcoming `createMultiApp`. A mode switch is
+  restart-required at the reload boundary. Policy rules gain
+  `match.upstreams`, a non-empty list of configured upstream names
+  (exact match, OR within the list, AND with the other match
+  dimensions; inert on the sideband). Validation rejects the dead
+  combinations up front: `match.upstreams` in singular mode, unknown
+  names, combination with `match.metadata`, and combination with
+  sender-keyed limits. Budget contributors gain the same optional
+  `upstreams` scope: a scoped contributor only feeds its pot from the
+  named doors (never from the sideband), an unscoped contributor keeps
+  charging everywhere, and a `sender_id` budget must keep at least one
+  unscoped contributor. Named configs combining evidence-gated rules
+  with the `legacy_header` identity source are rejected with a message
+  naming the remedy (upstream-minted session ids could collide across
+  doors), and `helio validate` warns, without refusing, above 16
+  upstream entries.
+  `helio init` scaffolds a commented `# upstreams:` pointer beside the
+  singular section, and the docs samples guard understands both forms
+  (`upstreams` shares the canonical slot of `upstream`). Singular
+  configs parse exactly as before.
 - Upstream attribution substrate (#292): audit records gain a nullable
   `upstream` column (indexed, filterable, appended last in CSV
   exports), dashboard action, approval, limit-warning, and budget

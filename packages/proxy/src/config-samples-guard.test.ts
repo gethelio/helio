@@ -837,6 +837,174 @@ describe('config-samples guard', () => {
     },
   )
 
+  it('passes a named full-config fence (issue #293)', { timeout: 60_000 }, async () => {
+    const root = makeTree({
+      'docs/test.md': doc(
+        [
+          "version: '1'",
+          'upstreams:',
+          '  - name: files',
+          "    url: 'http://localhost:8081/mcp'",
+          '  - name: search',
+          "    url: 'http://localhost:8082/mcp'",
+          'dashboard:',
+          `  api_secret: '${FIXTURE_SECRET}'`,
+        ].join('\n'),
+      ),
+    })
+    const { code, output } = await runGuard(root)
+    expect(output).toContain('full-config')
+    expect(output).toContain('PASS')
+    expect(code).toBe(0)
+  })
+
+  it(
+    'passes a bare upstreams: fragment by displacing the harness upstream (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      const root = makeTree({
+        'docs/test.md': doc(
+          ['upstreams:', '  - name: files', "    url: 'http://localhost:8081/mcp'"].join('\n'),
+        ),
+      })
+      const { code, output } = await runGuard(root)
+      expect(output).toContain('fragment')
+      expect(output).toContain('PASS')
+      expect(code).toBe(0)
+    },
+  )
+
+  it(
+    'still fails a fragment carrying both upstream: and upstreams: (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      // Displacement replaces the HARNESS upstream only — a fence that
+      // itself declares both modes must keep both keys and fail the
+      // exactly-one-of contract loudly.
+      const root = makeTree({
+        'docs/test.md': doc(
+          [
+            'upstream:',
+            "  url: 'http://localhost:8080/mcp'",
+            'upstreams:',
+            '  - name: files',
+            "    url: 'http://localhost:8081/mcp'",
+          ].join('\n'),
+        ),
+      })
+      const { code, output } = await runGuard(root)
+      expect(code).toBe(1)
+      expect(output).toContain('FAIL')
+      expect(output).toContain('Set exactly one of')
+    },
+  )
+
+  it(
+    'still fails an upstreams: fragment carrying a bad entry name (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      // Overlay displacement must not mask a fence that should fail on its
+      // own content.
+      const root = makeTree({
+        'docs/test.md': doc(
+          ['upstreams:', "  - name: 'with:colon'", "    url: 'http://localhost:8081/mcp'"].join(
+            '\n',
+          ),
+        ),
+      })
+      const { code, output } = await runGuard(root)
+      expect(code).toBe(1)
+      expect(output).toContain('FAIL')
+      expect(output).toContain('Upstream names may only contain letters')
+    },
+  )
+
+  it(
+    'flags upstreams: after a later section as an order violation (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      const root = makeTree({
+        'examples/misordered/helio.yaml': [
+          "version: '1'",
+          'listen:',
+          '  port: 3000',
+          'upstreams:',
+          '  - name: files',
+          "    url: 'http://localhost:8081/mcp'",
+          'dashboard:',
+          `  api_secret: '${FIXTURE_SECRET}'`,
+          '',
+        ].join('\n'),
+      })
+      const { code, output } = await runGuard(root)
+      expect(code).toBe(0)
+      expect(output).toContain('top-level keys not in canonical order')
+      expect(output).toContain('upstream|upstreams')
+    },
+  )
+
+  it(
+    'accepts the upstream/upstreams slot pair in scaffold order and completeness (issue #293)',
+    { timeout: 60_000 },
+    async () => {
+      // The scaffold legitimately carries BOTH the singular section and the
+      // commented named-mode pointer stub in the same canonical slot; either
+      // key satisfies the slot in configuration.md too, so no uncommented
+      // upstreams: fence is demanded of the docs.
+      const completeConfig = [
+        "version: '1'",
+        'upstream:',
+        "  url: 'http://localhost:8080/mcp'",
+        'listen:',
+        '  port: 3000',
+        'environment: production',
+        'session:',
+        '  on_unresolved: deny',
+        'policies:',
+        '  rules: []',
+        'budgets: []',
+        'approval:',
+        "  timeout: '300s'",
+        'audit:',
+        "  retention: '90d'",
+        'dashboard:',
+        `  api_secret: '${FIXTURE_SECRET}'`,
+        'sdk:',
+        '  enabled: false',
+      ].join('\n')
+      const scaffoldWithBothStubs = [
+        'version: "1"',
+        'upstream:',
+        '  url: "x"',
+        '# upstreams:',
+        '#   - name: files',
+        '#     url: "http://localhost:8081/mcp"',
+        '# listen:',
+        '# environment:',
+        '# session:',
+        '# policies:',
+        '# budgets:',
+        '# approval:',
+        '# audit:',
+        '# dashboard:',
+        '# sdk:',
+        '',
+      ].join('\n')
+      const root = makeTree({
+        'scaffold.yaml': scaffoldWithBothStubs,
+        'docs/configuration.md': doc(completeConfig),
+      })
+      const { code, output } = await runGuard(root, [
+        '--scaffold-file',
+        join(root, 'scaffold.yaml'),
+        '--enforce-order',
+        '--enforce-completeness',
+      ])
+      expect(output).not.toContain('violation')
+      expect(code).toBe(0)
+    },
+  )
+
   it('passes a clean fixture tree with exit 0', { timeout: 120_000 }, async () => {
     const basicPolicies = [
       'policies:',
