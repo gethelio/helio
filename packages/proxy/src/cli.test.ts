@@ -10,6 +10,10 @@ import { AuditStore } from './audit/store.js'
 import type { AuditRecord } from './audit/types.js'
 import { BudgetLedger } from './budget/ledger.js'
 import type { BudgetLedgerRow } from './budget/engine.js'
+import {
+  startSessionEnforcingHttpMcpServer,
+  startModernOnlyHttpMcpServer,
+} from './__tests__/helpers/mcp-test-server.js'
 
 const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
 
@@ -611,6 +615,11 @@ dashboard:
           `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n      action: allow\n      requires: [deploy_ticket]\n${FOOTER}`,
           ['session.identity.1: session.identity includes "legacy_header"'],
         ],
+        [
+          'evidence.requires rule under the default legacy_header chain',
+          `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n      action: allow\n      evidence:\n        requires: [deploy_ticket]\n${FOOTER}`,
+          ['session.identity.1: session.identity includes "legacy_header"'],
+        ],
       ]
 
       it.each(rejectionCases)('rejects %s', async (_name, yamlBody, fragments) => {
@@ -624,6 +633,62 @@ dashboard:
           for (const fragment of fragments) {
             expect(stderr).toContain(fragment)
           }
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('accepts a singular config with an evidence-gated rule under the default chain', async () => {
+        // The guard is named-mode only: singular mode keeps legacy_header
+        // beside evidence-gated rules (wire sessions are proxy-relayed 1:1
+        // there, so the forgeability concern the guard exists for is moot).
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(
+          configPath,
+          'version: "1"\n' +
+            'upstream:\n' +
+            '  url: "http://localhost:8080/mcp"\n' +
+            'policies:\n' +
+            '  rules:\n' +
+            '    - match:\n' +
+            '        tool: "*"\n' +
+            '      action: allow\n' +
+            '      requires: [deploy_ticket]\n' +
+            FOOTER,
+        )
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(0)
+          expect(stderr).toContain(`Config is valid: ${configPath} (1 policy rule, 0 budgets)`)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('accepts a named config with an evidence.requires rule on a header-only chain', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(
+          configPath,
+          `${NAMED_HEADER}\n` +
+            'session:\n' +
+            '  identity:\n' +
+            '    - source: header\n' +
+            '      name: x-helio-session-id\n' +
+            'policies:\n' +
+            '  rules:\n' +
+            '    - match:\n' +
+            '        tool: "*"\n' +
+            '      action: allow\n' +
+            '      evidence:\n' +
+            '        requires: [deploy_ticket]\n' +
+            FOOTER,
+        )
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(0)
+          expect(stderr).toContain(`Config is valid: ${configPath} (1 policy rule, 0 budgets)`)
         } finally {
           rmSync(dir, { recursive: true, force: true })
         }
@@ -1083,6 +1148,184 @@ dashboard:
       } finally {
         if (child.exitCode === null) child.kill('SIGKILL')
         rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('boots a mixed-era two-HTTP-upstream config with per-door era detection (issue #296)', async () => {
+      // Two REAL HTTP fixtures — one legacy stateful, one 2026-07-28-only —
+      // served by the SHIPPED binary. The smoke covers what the in-process
+      // suite cannot: dist/cli.js composing two real HTTP upstreams, with
+      // both door-tagged era lines on real process stderr.
+      const legacy = await startSessionEnforcingHttpMcpServer()
+      const modern = await startModernOnlyHttpMcpServer()
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-mixed-era-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstreams:
+  - name: alpha
+    url: "http://127.0.0.1:${String(legacy.port)}/mcp"
+  - name: beta
+    url: "http://127.0.0.1:${String(modern.port)}/mcp"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+policies:
+  default: allow
+  rules:
+    - name: deny-probe
+      match:
+        tool: "denied_probe"
+      action: deny
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+      const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      try {
+        await Promise.race([
+          waitForProxyHealth(baseUrl, 8_000),
+          new Promise<never>((_, reject) => {
+            child.on('close', (code) => {
+              reject(
+                new Error(`helio start exited ${String(code)} before healthy. stderr:\n${stderr}`),
+              )
+            })
+          }),
+        ])
+
+        // One governed call per door. The legacy door needs its fixture's
+        // handshake: initialize, then the minted wire session on the call.
+        const initRes = await fetch(`${baseUrl}/mcp/alpha`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-06-18',
+              capabilities: {},
+              clientInfo: { name: 'cli-smoke', version: '1' },
+            },
+          }),
+        })
+        expect(initRes.status).toBe(200)
+        const wireSession = initRes.headers.get('mcp-session-id')
+        expect(wireSession).toBeTruthy()
+        await fetch(`${baseUrl}/mcp/alpha`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'mcp-session-id': wireSession as string,
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        })
+        const alphaCall = await fetch(`${baseUrl}/mcp/alpha`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'mcp-session-id': wireSession as string,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/call',
+            params: { name: 'get_weather', arguments: { city: 'Berlin' } },
+          }),
+        })
+        expect(alphaCall.status).toBe(200)
+        const alphaBody = (await alphaCall.json()) as {
+          error?: unknown
+          result?: { content: Array<{ text: string }> }
+        }
+        expect(alphaBody.error).toBeUndefined()
+        expect(alphaBody.result?.content[0]?.text).toBe('Sunny, 22°C in Berlin')
+
+        const betaCall = await fetch(`${baseUrl}/mcp/beta`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-helio-session-id': 'cli-smoke-s1',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 3,
+            method: 'tools/call',
+            params: { name: 'get_status', arguments: {} },
+          }),
+        })
+        expect(betaCall.status).toBe(200)
+        const betaBody = (await betaCall.json()) as {
+          error?: unknown
+          result?: { content: Array<{ text: string }> }
+        }
+        expect(betaBody.error).toBeUndefined()
+        expect(betaBody.result?.content[0]?.text).toContain('get_status executed')
+
+        // One deny probe per door: the mounts serve the GOVERNED forwarders.
+        for (const [door, id] of [
+          ['alpha', 4],
+          ['beta', 5],
+        ] as const) {
+          const deniedRes = await fetch(`${baseUrl}/mcp/${door}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-helio-session-id': 'cli-smoke-s1',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id,
+              method: 'tools/call',
+              params: { name: 'denied_probe', arguments: {} },
+            }),
+          })
+          const deniedBody = (await deniedRes.json()) as {
+            error?: { code: number; data?: { blocked?: boolean; rule?: string } }
+          }
+          expect(deniedBody.error?.code).toBe(-32001)
+          expect(deniedBody.error?.data?.blocked).toBe(true)
+          expect(deniedBody.error?.data?.rule).toBe('deny-probe')
+        }
+
+        // Both door-tagged era lines on the shipped binary's real stderr.
+        expect(stderr).toContain(
+          '[helio][alpha] Upstream MCP era detected: legacy (initialize handshake)',
+        )
+        expect(stderr).toContain(
+          '[helio][beta] Upstream MCP era detected: modern (2026-07-28, via server/discover)',
+        )
+
+        // Clean shutdown.
+        const exitCode = await new Promise<number | null>((resolve) => {
+          if (child.exitCode !== null) {
+            resolve(child.exitCode)
+            return
+          }
+          child.on('close', (code) => {
+            resolve(code)
+          })
+          child.kill('SIGTERM')
+        })
+        expect(exitCode).toBe(0)
+      } finally {
+        if (child.exitCode === null) child.kill('SIGKILL')
+        rmSync(dir, { recursive: true, force: true })
+        await legacy.close()
+        await modern.close()
       }
     }, 15_000)
 

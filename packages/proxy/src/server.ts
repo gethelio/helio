@@ -202,6 +202,14 @@ export interface CreateMultiAppOptions {
    * attribute it. Enforcement does not depend on it.
    */
   onHeaderMismatch?: (rejection: HeaderMismatchRejection, upstreamName: string) => void
+  /**
+   * @internal Test seam for the per-door concurrent-session cap on the
+   * `/sse/<name>` mounts (issue #232's cap, per-route by construction), so
+   * tests need not mint 1024 real streams per door. The same value goes to
+   * every door's route; the session maps stay per-route-instance. Not wired
+   * to config — absent means the hardcoded 1024.
+   */
+  sse?: { readonly maxConcurrentSessions?: number }
 }
 
 /**
@@ -279,6 +287,7 @@ export function createMultiApp(
         allowedOrigins,
         session,
         routeLabel: `/sse/${name}`,
+        maxConcurrentSessions: options?.sse?.maxConcurrentSessions,
       }),
     )
   }
