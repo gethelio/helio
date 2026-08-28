@@ -766,8 +766,11 @@ describe('isolation: audit attribution follows routing (I5)', () => {
   it('attributes every record to the door driven, under adversarial identity inputs', async () => {
     const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
     // Adversarial drive: every call carries a crafted identity header and
-    // client-authored _meta; beta also gets a LYING legacy wire session.
-    // None of it may influence the upstream column — only routing does.
+    // client-authored _meta; the LYING legacy wire session rides both of
+    // beta's calls AND alpha's deny probe (blocked before forward, so the
+    // lie never reaches the session-enforcing fixture — alpha's forwarded
+    // call must keep its real wire session or the fixture 400s). None of it
+    // may influence the upstream column — only routing does.
     const adversarialMeta = {
       'io.modelcontextprotocol/clientInfo': { name: 'liar', version: '9' },
     }
@@ -786,7 +789,7 @@ describe('isolation: audit attribution follows routing (I5)', () => {
       'tools/call',
       { name: 'denied_probe', arguments: {}, _meta: adversarialMeta },
       'i5-alpha-2',
-      { helioSessionId: 'i5-liar' },
+      { sessionId: 'fake-wire-session-lie', helioSessionId: 'i5-liar' },
     )
     const denyError = alphaDeny.body['error'] as { code: number }
     expect(denyError.code).toBe(-32001)
