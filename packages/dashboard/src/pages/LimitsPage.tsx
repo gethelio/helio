@@ -31,21 +31,57 @@ function formatWindow(ms: number): string {
   return `${String(m)}m`
 }
 
-function parseKeyLabel(key: string): { type: string; name: string } {
-  // Named-mode tool keys (`upstream:<door>:tool:<rest>`) render as the TOOL
-  // with the door as a qualifier, matching the singular rendering of the
-  // same tool. The full grouping/filter UX is issue #297; every other key
-  // shape keeps the first-colon split.
+/**
+ * Door name from an `upstream:<name>:`-prefixed bucket key, null otherwise.
+ * The dashboard-side twin of the proxy's upstreamFromLimitKey — the packages
+ * are deliberately decoupled at the API contract boundary. Session, sender,
+ * and singular tool keys are unprefixed by design and never get a door.
+ */
+function upstreamFromKey(key: string): string | null {
+  const match = /^upstream:([^:]+):/.exec(key)
+  return match?.[1] ?? null
+}
+
+function parseKeyLabel(key: string, grouped = false): { type: string; name: string } {
+  // Named-mode tool keys (`upstream:<door>:tool:<rest>`) render as the TOOL,
+  // matching the singular rendering of the same tool. Ungrouped (flat)
+  // positions qualify the label with the door; inside a door section the
+  // heading owns the qualifier, so the label drops it (issue #297). Every
+  // other key shape keeps the first-colon split.
   const upstreamTool = /^upstream:([^:]+):tool:(.*)$/.exec(key)
   if (upstreamTool) {
     const [, door, rest] = upstreamTool
     if (door !== undefined && rest !== undefined) {
-      return { type: 'tool', name: `${rest} (${door})` }
+      return { type: 'tool', name: grouped ? rest : `${rest} (${door})` }
     }
   }
   const idx = key.indexOf(':')
   if (idx === -1) return { type: '', name: key }
   return { type: key.slice(0, idx), name: key.slice(idx + 1) }
+}
+
+/**
+ * Split limiter key states into the unprefixed base block (rendered first,
+ * exactly as today) and one section per door, sorted by door name. Zero
+ * prefixed keys means zero door sections — the singular render is
+ * byte-identical.
+ */
+function groupByDoor<T extends { key: string }>(
+  states: readonly T[],
+): { base: T[]; doors: ReadonlyArray<[string, T[]]> } {
+  const base: T[] = []
+  const doors = new Map<string, T[]>()
+  for (const state of states) {
+    const door = upstreamFromKey(state.key)
+    if (door === null) {
+      base.push(state)
+    } else {
+      const list = doors.get(door) ?? []
+      list.push(state)
+      doors.set(door, list)
+    }
+  }
+  return { base, doors: [...doors.entries()].sort(([a], [b]) => a.localeCompare(b)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +191,8 @@ export function LimitsPage() {
 
   const rateLimits = data?.rate_limits ?? []
   const spendLimits = data?.spend_limits ?? []
+  const rateGroups = groupByDoor(rateLimits)
+  const spendGroups = groupByDoor(spendLimits)
 
   // -- Full empty state -----------------------------------------------------
   if (rateLimits.length === 0 && spendLimits.length === 0) {
@@ -200,16 +238,36 @@ export function LimitsPage() {
         {rateLimits.length === 0 ? (
           <p className="text-sm text-gray-500">No rate limits configured</p>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {rateLimits.map((rl) => (
-              <RateLimitCard
-                key={rl.key}
-                state={rl}
-                now={now}
-                highlighted={warningKeys.has(rl.key)}
-              />
+          <>
+            {rateGroups.base.length > 0 && (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {rateGroups.base.map((rl) => (
+                  <RateLimitCard
+                    key={rl.key}
+                    state={rl}
+                    now={now}
+                    highlighted={warningKeys.has(rl.key)}
+                  />
+                ))}
+              </div>
+            )}
+            {rateGroups.doors.map(([door, states], index) => (
+              <div key={door} className={index > 0 || rateGroups.base.length > 0 ? 'mt-4' : ''}>
+                <h3 className="mb-2 font-mono text-xs font-medium text-gray-400">{door}</h3>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {states.map((rl) => (
+                    <RateLimitCard
+                      key={rl.key}
+                      state={rl}
+                      now={now}
+                      highlighted={warningKeys.has(rl.key)}
+                      grouped
+                    />
+                  ))}
+                </div>
+              </div>
             ))}
-          </div>
+          </>
         )}
       </section>
 
@@ -219,16 +277,36 @@ export function LimitsPage() {
         {spendLimits.length === 0 ? (
           <p className="text-sm text-gray-500">No spend limits configured</p>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {spendLimits.map((sl) => (
-              <SpendLimitCard
-                key={sl.key}
-                state={sl}
-                now={now}
-                highlighted={warningKeys.has(sl.key)}
-              />
+          <>
+            {spendGroups.base.length > 0 && (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {spendGroups.base.map((sl) => (
+                  <SpendLimitCard
+                    key={sl.key}
+                    state={sl}
+                    now={now}
+                    highlighted={warningKeys.has(sl.key)}
+                  />
+                ))}
+              </div>
+            )}
+            {spendGroups.doors.map(([door, states], index) => (
+              <div key={door} className={index > 0 || spendGroups.base.length > 0 ? 'mt-4' : ''}>
+                <h3 className="mb-2 font-mono text-xs font-medium text-gray-400">{door}</h3>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {states.map((sl) => (
+                    <SpendLimitCard
+                      key={sl.key}
+                      state={sl}
+                      now={now}
+                      highlighted={warningKeys.has(sl.key)}
+                      grouped
+                    />
+                  ))}
+                </div>
+              </div>
             ))}
-          </div>
+          </>
         )}
       </section>
     </div>
@@ -243,12 +321,14 @@ function RateLimitCard({
   state,
   now,
   highlighted,
+  grouped = false,
 }: {
   state: RateLimitKeyState
   now: number
   highlighted: boolean
+  grouped?: boolean
 }) {
-  const { type, name } = parseKeyLabel(state.key)
+  const { type, name } = parseKeyLabel(state.key, grouped)
   const remaining = state.reset_at_ms - now
   const pct = usagePercent(state.current, state.limit)
 
@@ -298,12 +378,14 @@ function SpendLimitCard({
   state,
   now,
   highlighted,
+  grouped = false,
 }: {
   state: SpendLimitKeyState
   now: number
   highlighted: boolean
+  grouped?: boolean
 }) {
-  const { type, name } = parseKeyLabel(state.key)
+  const { type, name } = parseKeyLabel(state.key, grouped)
   const remaining = state.reset_at_ms - now
   const pct = usagePercent(state.current_spend, state.limit)
 
