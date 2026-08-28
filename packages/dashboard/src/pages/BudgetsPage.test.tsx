@@ -61,6 +61,7 @@ function eventRecord(overrides: Partial<BudgetEventRecord> = {}): BudgetEventRec
     timestamp: '2026-07-13T12:00:00.000Z',
     timestamp_ms: 1_800_000_000_000,
     created_at: '2026-07-13T12:00:00.001Z',
+    upstream: null,
     ...overrides,
   }
 }

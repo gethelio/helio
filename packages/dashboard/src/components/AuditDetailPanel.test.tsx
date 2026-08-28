@@ -14,6 +14,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     session_id: 'sess-abc-1234567890',
     session_source: 'header',
     protocol_version: null,
+    upstream: null,
     agent_id: null,
     environment: null,
     tool_name: 'send_email',

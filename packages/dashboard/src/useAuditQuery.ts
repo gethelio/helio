@@ -20,6 +20,8 @@ export interface AuditFilters {
   record_kind: string
   channel: string
   sender: string
+  upstream: string
+  session_source: string
 }
 
 export interface UseAuditQueryReturn {
@@ -53,6 +55,8 @@ const INITIAL_FILTERS: AuditFilters = {
   record_kind: '',
   channel: '',
   sender: '',
+  upstream: '',
+  session_source: '',
 }
 
 function parseOptionalInt(value: string): number | undefined {
@@ -72,6 +76,7 @@ export function useAuditQuery(): UseAuditQueryReturn {
   const [debouncedOrigin, setDebouncedOrigin] = useState('')
   const [debouncedChannel, setDebouncedChannel] = useState('')
   const [debouncedSender, setDebouncedSender] = useState('')
+  const [debouncedUpstream, setDebouncedUpstream] = useState('')
 
   const [data, setData] = useState<AuditListResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -123,6 +128,15 @@ export function useAuditQuery(): UseAuditQueryReturn {
     }
   }, [filters.sender])
 
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedUpstream(filters.upstream)
+    }, 300)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [filters.upstream])
+
   // -- Fetch on filter/page change ------------------------------------------
   useEffect(() => {
     let canceled = false
@@ -144,6 +158,8 @@ export function useAuditQuery(): UseAuditQueryReturn {
       record_kind: filters.record_kind || undefined,
       channel: debouncedChannel || undefined,
       sender: debouncedSender || undefined,
+      upstream: debouncedUpstream || undefined,
+      session_source: filters.session_source || undefined,
       offset: (page - 1) * limit,
       limit,
     })
@@ -175,6 +191,8 @@ export function useAuditQuery(): UseAuditQueryReturn {
     filters.record_kind,
     debouncedChannel,
     debouncedSender,
+    debouncedUpstream,
+    filters.session_source,
     page,
     limit,
     refreshToken,

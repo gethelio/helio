@@ -110,10 +110,14 @@ export function logoutDashboard(): Promise<{ ok: true }> {
 export interface FeedParams {
   limit?: number
   offset?: number
+  upstream?: string
 }
 
 export function fetchFeed(params?: FeedParams): Promise<FeedResponse> {
-  return apiFetch('/api/feed' + qs({ limit: params?.limit, offset: params?.offset }), getInit())
+  return apiFetch(
+    '/api/feed' + qs({ limit: params?.limit, offset: params?.offset, upstream: params?.upstream }),
+    getInit(),
+  )
 }
 
 export interface AuditParams {
@@ -133,6 +137,8 @@ export interface AuditParams {
   dry_run?: boolean
   upstream_status_min?: number
   upstream_status_max?: number
+  upstream?: string
+  session_source?: string
   offset?: number
   limit?: number
 }
@@ -157,6 +163,8 @@ export function fetchAudit(params?: AuditParams): Promise<AuditListResponse> {
         dry_run: params?.dry_run,
         upstream_status_min: params?.upstream_status_min,
         upstream_status_max: params?.upstream_status_max,
+        upstream: params?.upstream,
+        session_source: params?.session_source,
         offset: params?.offset,
         limit: params?.limit,
       }),

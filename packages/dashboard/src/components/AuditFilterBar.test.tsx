@@ -21,6 +21,8 @@ function defaultProps() {
       record_kind: '',
       channel: '',
       sender: '',
+      upstream: '',
+      session_source: '',
     },
     setFilter: vi.fn(),
     setBulkFilters: vi.fn(),

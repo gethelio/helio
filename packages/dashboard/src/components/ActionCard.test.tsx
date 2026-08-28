@@ -12,6 +12,7 @@ const baseRecord: ActionEvent = {
   session_id: 'sess-12345678901234',
   session_source: 'header',
   protocol_version: null,
+  upstream: null,
   agent_id: null,
   environment: null,
   timestamp: new Date().toISOString(),
