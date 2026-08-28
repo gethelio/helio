@@ -132,6 +132,7 @@ const auditExportQuerySchema = z.object({
   channel_id: optionalQueryString,
   sender_id: optionalQueryString,
   upstream: optionalQueryString,
+  session_source: optionalQueryString,
 })
 
 const auditQuerySchema = z.object({
@@ -154,6 +155,7 @@ const auditQuerySchema = z.object({
   channel_id: optionalQueryString,
   sender_id: optionalQueryString,
   upstream: optionalQueryString,
+  session_source: optionalQueryString,
 })
 
 const budgetEventsQuerySchema = z.object({
@@ -169,6 +171,7 @@ const budgetEventsExportQuerySchema = z.object({
 const analyticsQuerySchema = z.object({
   from: optionalQueryString,
   to: optionalQueryString,
+  upstream: optionalQueryString,
 })
 
 const authSessionBodySchema = z.object({
@@ -496,6 +499,7 @@ export function createDashboardAppWithLifecycle(
       channel_id: query.channel_id,
       sender_id: query.sender_id,
       upstream: query.upstream,
+      session_source: query.session_source,
     }
 
     const result = auditStore.listForExport(filters, limit)
@@ -549,6 +553,7 @@ export function createDashboardAppWithLifecycle(
       channel_id: query.channel_id,
       sender_id: query.sender_id,
       upstream: query.upstream,
+      session_source: query.session_source,
     }
 
     const result = auditStore.list(filters, { limit, offset, order: 'desc' })
@@ -664,7 +669,7 @@ export function createDashboardAppWithLifecycle(
     const from = query.from ?? defaultFrom
     const to = query.to ?? now.toISOString()
 
-    const stats = auditStore.aggregate(from, to)
+    const stats = auditStore.aggregate(from, to, { upstream: query.upstream })
     return c.json(stats)
   })
 

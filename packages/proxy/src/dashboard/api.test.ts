@@ -273,6 +273,34 @@ describe('upstream filters (issue #292)', () => {
   })
 })
 
+describe('session_source filter (issue #250)', () => {
+  it('filters /api/audit by session_source, exact match', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { session_id: 'run-a', session_source: 'header', tool_name: 'a' })
+    insertAuditRecord(auditStore, { session_id: 'oc-1', session_source: 'meta', tool_name: 'b' })
+
+    const res = await get('/api/audit?session_source=header')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.session_source).toBe('header')
+  })
+
+  it('filters /api/audit/export by session_source', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { session_id: 'run-a', session_source: 'header', tool_name: 'a' })
+    insertAuditRecord(auditStore, { session_id: 'oc-1', session_source: 'meta', tool_name: 'b' })
+
+    const res = await get('/api/audit/export?session_source=header')
+    expect(res.status).toBe(200)
+    const records = (await res.json()) as AuditRecord[]
+    expect(records).toHaveLength(1)
+    expect(records[0]?.session_source).toBe('header')
+  })
+})
+
 describe('GET /api/audit', () => {
   it('returns all records with no filters', async () => {
     const { get, auditStore } = setup()
@@ -1314,6 +1342,22 @@ describe('GET /api/analytics', () => {
     const res = await get('/api/analytics?from=2026-01-01T00:00:00Z')
     const body = (await res.json()) as { total: number }
     expect(body.total).toBe(1)
+  })
+
+  it('filters by upstream, scoping every aggregate to the one door (issue #297)', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { tool_name: 'search', upstream: 'alpha' })
+    insertAuditRecord(auditStore, { tool_name: 'search', upstream: 'beta' })
+
+    const res = await get('/api/analytics?upstream=alpha')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      total: number
+      top_tools: ReadonlyArray<{ tool_name: string; upstream: string | null; count: number }>
+    }
+    expect(body.total).toBe(1)
+    expect(body.top_tools).toEqual([{ tool_name: 'search', upstream: 'alpha', count: 1 }])
   })
 })
 
