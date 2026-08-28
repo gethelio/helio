@@ -95,6 +95,8 @@ async function composeTwoDoors(options: {
   environment?: string
   /** Await a direct annotation-cache prime per door (no prime-loop windows). */
   prime?: boolean
+  /** Per-door /sse concurrent-session cap (the issue #296 I4 seam). */
+  sse?: { maxConcurrentSessions?: number }
 }): Promise<TwoDoorComposition> {
   const config = makeNamedConfig(['alpha', 'beta'], {
     urls: {
@@ -175,6 +177,7 @@ async function composeTwoDoors(options: {
         buildHeaderMismatchAuditRecord(rejection, config.environment, upstreamName),
       )
     },
+    sse: options.sse,
   })
   const proxy = startOnDynamicPort(app)
   const base = `http://127.0.0.1:${String(proxy.port)}`
@@ -661,6 +664,84 @@ describe('isolation: tool limit buckets count per door (I3)', () => {
       { helioSessionId: 'i3-s1' },
     )
     expect(betaCall.body['error']).toBeUndefined()
+  })
+})
+
+describe('isolation: per-door /sse session caps (I4)', () => {
+  let comp: TwoDoorComposition
+  let errorSpy: MockInstance
+  const streams: AbortController[] = []
+
+  beforeAll(async () => {
+    errorSpy = vi.spyOn(console, 'error')
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [{ name: 'denied-probe', match: { tool: 'denied_probe' }, action: 'deny' }],
+      } as PoliciesConfig,
+      sse: { maxConcurrentSessions: 1 },
+    })
+  })
+
+  afterAll(async () => {
+    errorSpy.mockRestore()
+    // Abort held streams FIRST or the proxy close hangs on live connections.
+    for (const ac of streams) ac.abort()
+    await comp.close()
+  })
+
+  /**
+   * Open an /sse stream and HOLD it: cap occupancy is live map size (a
+   * disconnect deletes the entry), so the occupant must stay connected.
+   * Reads exactly the first chunk (the endpoint event) to guarantee the
+   * session registered server-side before the caller proceeds.
+   */
+  async function openHeldSseStream(url: string): Promise<Response> {
+    const ac = new AbortController()
+    streams.push(ac)
+    const res = await fetch(url, { signal: ac.signal })
+    if (res.status === 200 && res.body) {
+      const reader = res.body.getReader()
+      await reader.read()
+      reader.releaseLock()
+    }
+    return res
+  }
+
+  it('door A at cap refuses its second stream; door B still admits', async () => {
+    const first = await openHeldSseStream(comp.sseUrl('alpha'))
+    expect(first.status).toBe(200)
+    expect(first.headers.get('content-type')).toBe('text/event-stream')
+
+    const second = await openHeldSseStream(comp.sseUrl('alpha'))
+    expect(second.status).toBe(503)
+    expect(await second.json()).toEqual({ error: 'session capacity reached' })
+
+    // The refusal line names the door that refused.
+    const lines = errorSpy.mock.calls.map((args: unknown[]) => args.join(' '))
+    expect(lines).toContain(
+      '[helio] /sse/alpha at session cap (1); refusing new streams (1 refusals so far).',
+    )
+
+    // Door B's map is its own: its first stream admits while door A is full.
+    const betaStream = await openHeldSseStream(comp.sseUrl('beta'))
+    expect(betaStream.status).toBe(200)
+    expect(betaStream.headers.get('content-type')).toBe('text/event-stream')
+  })
+
+  it('the composition is governed: the deny probe blocks through the mcp mount', async () => {
+    const res = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'denied_probe', arguments: {} },
+      'i4-deny',
+      { helioSessionId: 'i4-s1' },
+    )
+    const error = res.body['error'] as { code: number; data: Record<string, unknown> }
+    expect(error.code).toBe(-32001)
+    expect(error.data['rule']).toBe('denied-probe')
   })
 })
 
