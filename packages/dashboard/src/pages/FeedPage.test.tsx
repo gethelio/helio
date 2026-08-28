@@ -390,8 +390,77 @@ describe('upstream attribution (issue #297)', () => {
         expect(screen.queryByText('seed_tool')).toBeNull()
       })
       expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+      // A zero-match refetch is a FILTER result, not an empty database —
+      // replace-and-reset must not flip the copy to the empty-DB message.
+      expect(screen.getByText('No matching actions')).toBeTruthy()
+      expect(screen.queryByText('No actions yet')).toBeNull()
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps the loaded feed when a filter refetch fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockFetchFeed
+        .mockResolvedValueOnce({
+          data: [feedRecord({ id: 'rec-a', tool_name: 'seed_tool', upstream: 'alpha' })],
+          total: 1,
+          limit: 200,
+          offset: 0,
+        })
+        .mockRejectedValue(new Error('proxy went away'))
+      renderFeedPage()
+
+      await waitFor(() => {
+        expect(screen.getByText('seed_tool')).toBeTruthy()
+      })
+      fireEvent.change(screen.getByPlaceholderText('Filter by upstream…'), {
+        target: { value: 'alpha' },
+      })
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      await waitFor(() => {
+        expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+      })
+
+      // The refetch failed AFTER a successful load: keep the last good
+      // data and the filter control — never the full-page error whose only
+      // Retry is a window reload.
+      expect(screen.getByText('seed_tool')).toBeTruthy()
+      expect(screen.queryByText('Retry')).toBeNull()
+      expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('recovers from a failed initial load when the reconnect backfill succeeds', async () => {
+    mockFetchFeed.mockRejectedValueOnce(new Error('Network error')).mockResolvedValue({
+      data: [feedRecord({ id: 'rec-a', tool_name: 'seed_tool' })],
+      total: 1,
+      limit: 200,
+      offset: 0,
+    })
+    const view = renderFeedPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('Network error')).toBeTruthy()
+    })
+
+    mockConnectionEpoch = 2
+    view.rerender(
+      <MemoryRouter>
+        <FeedPage />
+      </MemoryRouter>,
+    )
+
+    // The backfill replaced the records; a stale error must not pin the
+    // operator on the full-page error view.
+    await waitFor(() => {
+      expect(screen.getByText('seed_tool')).toBeTruthy()
+    })
+    expect(screen.queryByText('Network error')).toBeNull()
   })
 })

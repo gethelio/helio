@@ -100,6 +100,7 @@ export function FeedPage() {
         seenIdsRef.current = new Set(next.map((r) => r.id))
         setRecords(next)
         setLiveBuffer([])
+        setError(null)
         setInitialLoading(false)
       })
       .catch((err: unknown) => {
@@ -147,6 +148,7 @@ export function FeedPage() {
         setRecords(next)
         setLiveBuffer([])
         setIsLive(true)
+        setError(null)
       })
       .catch(() => {
         // Keep prior data if reconnect backfill fails.
@@ -273,7 +275,11 @@ export function FeedPage() {
   }
 
   // -- Error state ----------------------------------------------------------
-  if (error) {
+  // Full-page only when there is nothing to show: a refetch failure after a
+  // successful load keeps the last good data (the reconnect backfill's
+  // keep-prior-data posture) instead of replacing a live feed with an error
+  // whose only Retry is a window reload.
+  if (error && records.length === 0) {
     return <PageError error={error} />
   }
 
@@ -382,7 +388,10 @@ export function FeedPage() {
                 d="M3.75 13.5 14.25 2.25l-3 10.5h9L9.75 24l3-10.5h-9Z"
               />
             </svg>
-            {records.length === 0 ? (
+            {records.length === 0 && !debouncedFilterUpstream ? (
+              // The upstream filter is server-side: a zero-match refetch
+              // leaves records empty, which is a filter result, not an
+              // empty database.
               <>
                 <p className="text-sm font-medium">No actions yet</p>
                 <p className="text-xs text-gray-400">Start sending tool calls through Helio</p>

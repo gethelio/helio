@@ -127,6 +127,54 @@ describe('upstream attribution (issue #297)', () => {
     expect(screen.queryByText('Upstream')).toBeNull()
     expect(screen.queryByPlaceholderText('Filter by upstream…')).toBeNull()
   })
+
+  it('shows the no-match copy when a session_source filter matches zero records (issue #250)', async () => {
+    mockFetchAudit
+      .mockResolvedValueOnce({ data: [makeAuditRecord()], total: 1, limit: 25, offset: 0 })
+      .mockResolvedValue({ data: [], total: 0, limit: 25, offset: 0 })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('send_email')).toBeTruthy()
+    })
+    // The #250 question itself: which callers still resolve through the
+    // legacy header. Zero of them is a FILTER result, not an empty database.
+    fireEvent.change(screen.getByLabelText('Session Source'), {
+      target: { value: 'legacy_header' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('No records match the current filters')).toBeTruthy()
+    })
+    expect(screen.queryByText('No audit records yet')).toBeNull()
+  })
+
+  it('shows the no-match copy when an upstream filter matches zero records (issue #297)', async () => {
+    mockFetchAudit
+      .mockResolvedValueOnce({
+        data: [makeAuditRecord({ upstream: 'alpha' })],
+        total: 1,
+        limit: 25,
+        offset: 0,
+      })
+      .mockResolvedValue({ data: [], total: 0, limit: 25, offset: 0 })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+    })
+    fireEvent.change(screen.getByPlaceholderText('Filter by upstream…'), {
+      target: { value: 'ghost' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('No records match the current filters')).toBeTruthy()
+    })
+    expect(screen.queryByText('No audit records yet')).toBeNull()
+    // The page-level half of R18: the control that caused the zero-match
+    // result stays rendered.
+    expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+  })
 })
 
 describe('AuditPage', () => {

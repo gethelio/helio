@@ -37,10 +37,11 @@ Maintainer notes:
 ### Added
 
 - Dashboard upstream attribution (#297): named multi-upstream data
-  lights up across the pane of glass. The Feed and Audit views gain
-  an upstream column and card qualifier, an exact-match upstream
-  filter, and Upstream rows on the audit detail panel, expanded
-  action cards, and resolved approval details; the Limits page
+  lights up across the pane of glass. The Audit view gains an
+  upstream column, the Feed's action cards a door qualifier, and
+  both views an exact-match upstream filter, with Upstream rows on
+  the audit detail panel, expanded action cards, and resolved
+  approval details; the Limits page
   groups door-partitioned buckets into per-door sections with the
   singular block first; Budgets ledger rows carry a door qualifier;
   Analytics labels each top_tools bar as the tool with its door.
