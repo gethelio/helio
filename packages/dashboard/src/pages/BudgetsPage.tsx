@@ -611,6 +611,10 @@ function EventsPanel({ panel }: { panel: EventsPanelState }) {
         <div key={event.id} className="flex items-center justify-between gap-2 text-xs">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="truncate font-mono text-gray-700">{event.tool_name}</span>
+            {/* Upstream qualifier (issue #297) — nulls are ordinary
+                (pre-JOIN rows, singular mode, unresolved audit ids), never
+                an error state, and render exactly today's bare row. */}
+            {event.upstream && <span className="shrink-0 text-gray-400">({event.upstream})</span>}
             <KindBadge kind={event.kind} />
           </div>
           <div className="flex shrink-0 items-center gap-2 text-gray-500">

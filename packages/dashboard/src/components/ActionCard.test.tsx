@@ -12,6 +12,7 @@ const baseRecord: ActionEvent = {
   session_id: 'sess-12345678901234',
   session_source: 'header',
   protocol_version: null,
+  upstream: null,
   agent_id: null,
   environment: null,
   timestamp: new Date().toISOString(),
@@ -148,5 +149,67 @@ describe('ActionCard', () => {
     )
 
     expect(screen.getByText('Input payload preview is truncated for readability.')).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Upstream attribution (issue #297)
+// ---------------------------------------------------------------------------
+
+describe('upstream attribution (issue #297)', () => {
+  function expandedWithUpstream(upstream: string | null): AuditRecord {
+    return {
+      ...baseRecord,
+      upstream,
+      tool_input: {},
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: null,
+      upstream_error: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      block_reason: null,
+      protocol_version: null,
+      created_at: new Date().toISOString(),
+      metadata: null,
+    }
+  }
+
+  it('renders the door span on the summary row of a named-mode event', () => {
+    render(
+      <ActionCard
+        record={{ ...baseRecord, upstream: 'alpha' }}
+        expanded={false}
+        onToggle={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('alpha')).toBeTruthy()
+  })
+
+  it('renders an Upstream section in the expanded detail', () => {
+    render(
+      <ActionCard
+        record={{ ...baseRecord, upstream: 'alpha' }}
+        expanded={true}
+        onToggle={vi.fn()}
+        expandedRecord={expandedWithUpstream('alpha')}
+      />,
+    )
+    expect(screen.getByText('Upstream')).toBeTruthy()
+    expect(screen.getAllByText('alpha').length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('renders no door artifacts for an unattributed card', () => {
+    render(
+      <ActionCard
+        record={baseRecord}
+        expanded={true}
+        onToggle={vi.fn()}
+        expandedRecord={expandedWithUpstream(null)}
+      />,
+    )
+    expect(screen.queryByText('Upstream')).toBeNull()
+    expect(screen.queryByText('alpha')).toBeNull()
   })
 })

@@ -288,6 +288,49 @@ describe('useAuditQuery', () => {
     })
   })
 
+  it('debounces the upstream text filter by 300ms and passes it to fetchAudit (#297)', async () => {
+    const { result } = renderHook(() => useAuditQuery())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    mockFetchAudit.mockClear()
+
+    act(() => {
+      result.current.setFilter('upstream', 'alpha')
+    })
+    expect(mockFetchAudit).not.toHaveBeenCalledWith(expect.objectContaining({ upstream: 'alpha' }))
+
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+
+    await waitFor(() => {
+      expect(mockFetchAudit).toHaveBeenLastCalledWith(
+        expect.objectContaining({ upstream: 'alpha' }),
+      )
+    })
+  })
+
+  it('passes session_source to fetchAudit without debounce (#250)', async () => {
+    const { result } = renderHook(() => useAuditQuery())
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false)
+    })
+    mockFetchAudit.mockClear()
+
+    act(() => {
+      result.current.setFilter('session_source', 'legacy_header')
+    })
+
+    await waitFor(() => {
+      expect(mockFetchAudit).toHaveBeenCalledWith(
+        expect.objectContaining({ session_source: 'legacy_header' }),
+      )
+    })
+  })
+
   it('debounces channel/sender text filters by 300ms (#16)', async () => {
     const { result } = renderHook(() => useAuditQuery())
 

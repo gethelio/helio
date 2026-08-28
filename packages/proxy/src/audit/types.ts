@@ -119,6 +119,13 @@ export interface AuditQueryFilters {
   /** Filter by session ID (exact match). */
   readonly session_id?: string
   /**
+   * Filter by session identity source (exact match — the five-value
+   * `header` / `meta` / `legacy_header` / `transport` / `sideband`
+   * vocabulary, issue #250). SQL equality: rows whose session_source is
+   * NULL never match any filter value.
+   */
+  readonly session_source?: string
+  /**
    * Filter by upstream name (exact match). SQL equality: rows whose
    * upstream is NULL never match any filter value.
    */
@@ -199,9 +206,15 @@ export interface AuditAggregateStats {
     readonly reason: string
     readonly count: number
   }>
-  /** Top tools by call count (max 10). */
+  /**
+   * Top tools by call count (max 10 rows). Each row is a (tool, upstream)
+   * pair (issue #297): same-named tools on different upstreams stay
+   * distinct. Upstream is null in singular mode, so all-null groups reduce
+   * to exactly the pre-#297 per-tool rows.
+   */
   readonly top_tools: ReadonlyArray<{
     readonly tool_name: string
+    readonly upstream: string | null
     readonly count: number
   }>
   /** Approval rate (approved / total require_approval decisions), or null if none. */

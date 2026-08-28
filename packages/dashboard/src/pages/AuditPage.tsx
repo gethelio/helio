@@ -140,7 +140,12 @@ export function AuditPage() {
         </button>
       )}
 
-      <AuditFilterBar filters={filters} setFilter={setFilter} setBulkFilters={setBulkFilters} />
+      <AuditFilterBar
+        filters={filters}
+        setFilter={setFilter}
+        setBulkFilters={setBulkFilters}
+        hasAttributedRows={records.some((record) => record.upstream != null)}
+      />
 
       {/* Empty state */}
       {records.length === 0 && !loading && (
@@ -167,7 +172,13 @@ export function AuditPage() {
           !filters.from &&
           !filters.to &&
           !filters.upstream_status_min &&
-          !filters.upstream_status_max ? (
+          !filters.upstream_status_max &&
+          !filters.origin &&
+          !filters.record_kind &&
+          !filters.channel &&
+          !filters.sender &&
+          !filters.upstream &&
+          !filters.session_source ? (
             <>
               <p className="text-sm font-medium">No audit records yet</p>
               <p className="text-xs text-gray-400">Start sending tool calls through Helio</p>

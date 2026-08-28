@@ -61,6 +61,7 @@ function eventRecord(overrides: Partial<BudgetEventRecord> = {}): BudgetEventRec
     timestamp: '2026-07-13T12:00:00.000Z',
     timestamp_ms: 1_800_000_000_000,
     created_at: '2026-07-13T12:00:00.001Z',
+    upstream: null,
     ...overrides,
   }
 }
@@ -175,6 +176,34 @@ describe('BudgetsPage', () => {
       expect(screen.getByText('approved overage')).toBeTruthy()
       expect(container.querySelector('.bg-amber-100')).toBeTruthy()
       expect(screen.getByText('spend')).toBeTruthy()
+    })
+  })
+
+  it('renders a door qualifier on attributed ledger rows; nulls stay bare (issue #297)', async () => {
+    mockFetchBudgets.mockResolvedValue({ budgets: [budgetState()] })
+    mockFetchBudgetEvents.mockResolvedValue({
+      data: [
+        eventRecord({ id: 'evt-named', tool_name: 'search', upstream: 'alpha' }),
+        eventRecord({ id: 'evt-bare', tool_name: 'fetch', upstream: null }),
+      ],
+      total: 2,
+      limit: 20,
+      offset: 0,
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('daily-cap')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Recent events/))
+
+    await waitFor(() => {
+      expect(screen.getByText('search')).toBeTruthy()
+      expect(screen.getByText('(alpha)')).toBeTruthy()
+      // Nulls are ordinary — pre-JOIN rows, singular mode, unresolved audit
+      // ids — never an error state, and never a qualifier.
+      expect(screen.getByText('fetch')).toBeTruthy()
+      expect(screen.queryByText(/\(null\)/)).toBeNull()
     })
   })
 

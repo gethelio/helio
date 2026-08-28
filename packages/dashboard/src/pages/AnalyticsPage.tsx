@@ -116,6 +116,14 @@ export function AnalyticsPage() {
     tool_name: formatLabel(reasonCount.reason),
     count: reasonCount.count,
   }))
+  // Each top_tools row is a (tool, upstream) pair (issue #297); attributed
+  // rows label as `tool (door)` so same-named tools on different upstreams
+  // stay distinct bars. Null (singular mode) and absent (older proxies)
+  // upstreams keep the bare tool label byte-identically.
+  const topTools = data.top_tools.map((row) => ({
+    tool_name: row.upstream ? `${row.tool_name} (${row.upstream})` : row.tool_name,
+    count: row.count,
+  }))
   const approvalRateDisplay =
     data.approval_rate != null ? `${String(Math.round(data.approval_rate * 100))}%` : '\u2014'
 
@@ -165,8 +173,8 @@ export function AnalyticsPage() {
         <section>
           <h2 className="mb-3 text-sm font-medium text-gray-500">Top Tools</h2>
           <div className="rounded-md border border-gray-200 bg-white p-4">
-            {data.top_tools.length > 0 ? (
-              <TopToolsChart data={data.top_tools} />
+            {topTools.length > 0 ? (
+              <TopToolsChart data={topTools} />
             ) : (
               <p className="py-8 text-center text-sm text-gray-400">No tool data</p>
             )}

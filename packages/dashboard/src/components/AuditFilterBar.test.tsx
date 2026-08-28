@@ -21,9 +21,12 @@ function defaultProps() {
       record_kind: '',
       channel: '',
       sender: '',
+      upstream: '',
+      session_source: '',
     },
     setFilter: vi.fn(),
     setBulkFilters: vi.fn(),
+    hasAttributedRows: false,
   } as const
 }
 
@@ -193,6 +196,67 @@ describe('AuditFilterBar', () => {
     if (!lastAll) throw new Error('no "All" buttons found')
     fireEvent.click(lastAll)
     expect(props.setBulkFilters).toHaveBeenCalledWith({ from: '', to: '' })
+  })
+
+  it('renders the upstream input when the current page has attributed rows (issue #297)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter, hasAttributedRows: true })
+    const input = screen.getByPlaceholderText('Filter by upstream…')
+    fireEvent.change(input, { target: { value: 'alpha' } })
+    expect(setFilter).toHaveBeenCalledWith('upstream', 'alpha')
+  })
+
+  it('hides the upstream input for all-null data with no filter set (issue #297)', () => {
+    renderBar()
+    expect(screen.queryByPlaceholderText('Filter by upstream…')).toBeNull()
+  })
+
+  it('keeps the upstream input rendered when its filter matches zero rows (issue #297)', () => {
+    // The disappearing-control trap: filtering to a door with no rows must
+    // not hide the control that caused the empty result set.
+    renderBar({ filters: { upstream: 'ghost' } })
+    expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+  })
+
+  it('renders the session source select with the five identity sources (issue #250)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    expect(screen.getByRole('option', { name: 'All Sources' })).toBeTruthy()
+    for (const value of ['header', 'meta', 'legacy_header', 'transport', 'sideband']) {
+      expect(screen.getByRole('option', { name: value })).toBeTruthy()
+    }
+    const select = screen.getByLabelText('Session Source')
+    fireEvent.change(select, { target: { value: 'legacy_header' } })
+    expect(setFilter).toHaveBeenCalledWith('session_source', 'legacy_header')
+  })
+
+  it('includes upstream and session_source in the export URL (issues #297/#250)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('[]', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+    const createObjectURLMock = vi.fn(() => 'blob:http://localhost/fake')
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: createObjectURLMock,
+      revokeObjectURL: vi.fn(),
+    })
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined)
+
+    renderBar({ filters: { upstream: 'alpha', session_source: 'header' } })
+    fireEvent.click(screen.getByText('Export'))
+    fireEvent.click(screen.getByText('Export JSON'))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('upstream=alpha'))
+    })
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('session_source=header'))
+
+    clickSpy.mockRestore()
   })
 
   it('exposes an Install Denied block-reason option (#16)', () => {

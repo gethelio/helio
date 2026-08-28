@@ -125,6 +125,24 @@ describe('budget_exceeded outcome', () => {
 })
 
 // ---------------------------------------------------------------------------
+// rejected decision fallback (issue #276)
+// ---------------------------------------------------------------------------
+
+describe('rejected decision fallback', () => {
+  it('renders a rejected record with an unrecognized block_reason as Rejected, never Allow', () => {
+    // The hazard class #276 closes: every future rejection reason was born
+    // rendering as Allow until someone remembered to pin it. The decision-first
+    // fallback makes the invariant structural, whatever the reason value.
+    const outcome = deriveDisplayOutcome({
+      policy_decision: 'rejected',
+      block_reason: 'some_future_rejection_class',
+    })
+    expect(outcome).toBe('rejected')
+    expect(formatDisplayOutcome(outcome)).toBe('Rejected')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // session_unresolved (issue #218)
 // ---------------------------------------------------------------------------
 

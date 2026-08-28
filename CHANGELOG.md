@@ -36,6 +36,30 @@ Maintainer notes:
 
 ### Added
 
+- Dashboard upstream attribution (#297): named multi-upstream data
+  lights up across the pane of glass. The Audit view gains an
+  upstream column, the Feed's action cards a door qualifier, and
+  both views an exact-match upstream filter, with Upstream rows on
+  the audit detail panel, expanded action cards, and resolved
+  approval details; the Limits page
+  groups door-partitioned buckets into per-door sections with the
+  singular block first; Budgets ledger rows carry a door qualifier;
+  Analytics labels each top_tools bar as the tool with its door.
+  The Audit view also gains the session_source filter control and a
+  source chip beside session-resolved identities (#250). Singular
+  mode renders byte-identically everywhere.
+- Analytics upstream dimension and filter (#297): `top_tools` rows in
+  the `/api/analytics` response are now (tool, upstream) pairs —
+  same-named tools on different upstreams no longer merge into one
+  row; `upstream` is null in singular mode, leaving the rows exactly
+  as before. The endpoint gains an optional `upstream` query filter
+  that scopes every aggregate in the response to one named upstream.
+- Audit `session_source` filter (#250): `GET /api/audit` and
+  `GET /api/audit/export` accept a `session_source` query param
+  (exact match on `header`, `meta`, `legacy_header`, `transport`, or
+  `sideband`) so an operator can isolate the callers one session
+  identity strategy produced — for example, which callers still
+  resolve through the legacy header during a deprecation migration.
 - Named multi-upstream configuration (#293): `helio.yaml` accepts a
   top-level `upstreams:` list of named upstream entries as an
   alternative to the singular `upstream:` section; exactly one of the
@@ -133,6 +157,11 @@ Maintainer notes:
 
 ### Fixed
 
+- Rejected audit records with an unrecognized `block_reason` no longer
+  render as Allow in the dashboard (#276): outcome derivation now
+  classifies on `policy_decision` first, so a record whose decision is
+  `rejected` shows the Rejected badge whatever its reason value, and
+  future rejection classes are born rendering correctly.
 - Diagnosed startup failures now exit cleanly instead of crash-dumping
   (#233): when `helio start` refuses to boot for a stated reason — an
   audit database from an older build with a mismatched schema, or an

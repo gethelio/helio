@@ -35,6 +35,8 @@ export interface AuditRecord {
    * the request carried no header or the record has no MCP wire.
    */
   readonly protocol_version: string | null
+  /** Upstream attribution (issue #292), or null — singular mode, sideband records, pre-column rows. */
+  readonly upstream: string | null
   readonly agent_id: string | null
   readonly environment: string | null
   readonly tool_name: string
@@ -196,6 +198,12 @@ export interface BudgetEventRecord {
   readonly timestamp: string
   readonly timestamp_ms: number
   readonly created_at: string
+  /**
+   * Upstream attribution joined from the referenced audit record (issue
+   * #292), or null — singular mode, unresolved or null audit ids, rows
+   * predating the audit column. Nulls are ordinary, never an error state.
+   */
+  readonly upstream: string | null
 }
 
 export interface BudgetEventsResponse {
@@ -219,6 +227,13 @@ export interface DecisionCount {
 
 export interface ToolCount {
   readonly tool_name: string
+  /**
+   * Upstream half of the (tool, upstream) pair (issue #297): null in
+   * singular mode. Optional — unlike the record/event mirrors — because
+   * older proxies omit it and this surface has an explicit degradation
+   * idiom (the `by_block_reason` precedent in AnalyticsPage).
+   */
+  readonly upstream?: string | null
   readonly count: number
 }
 
@@ -268,6 +283,8 @@ export interface ActionEvent {
   // intentionally omitted here — the Feed fetches the full AuditRecord on card expand.
   readonly record_kind: AuditRecord['record_kind']
   readonly origin: string
+  /** Upstream attribution from the audit record (issue #292), or null. */
+  readonly upstream: string | null
 }
 
 export interface ApprovalRequestedEvent {
@@ -275,6 +292,8 @@ export interface ApprovalRequestedEvent {
   readonly tool_name: string
   readonly channel: string
   readonly requested_at: string
+  /** Upstream attribution from the ticket (issue #292), or null. */
+  readonly upstream: string | null
 }
 
 export interface ApprovalResolvedEvent {
@@ -304,6 +323,11 @@ export interface LimitWarningEvent {
   readonly current: number
   readonly limit: number
   readonly utilization: number
+  /**
+   * Upstream name parsed from a partitioned bucket key (issue #292), or
+   * null — session keys, singular tool keys, and sideband keys have no door.
+   */
+  readonly upstream: string | null
 }
 
 export interface BudgetUpdateEvent {
@@ -316,6 +340,8 @@ export interface BudgetUpdateEvent {
   readonly limit: number
   readonly currency: string
   readonly utilization: number
+  /** The charging door's upstream attribution (issue #292), or null. */
+  readonly upstream: string | null
 }
 
 export interface BudgetBreachedEvent {
@@ -326,6 +352,8 @@ export interface BudgetBreachedEvent {
   readonly spent: number
   readonly limit: number
   readonly currency: string
+  /** The charging door's upstream attribution (issue #292), or null. */
+  readonly upstream: string | null
 }
 
 export type DashboardEventType =

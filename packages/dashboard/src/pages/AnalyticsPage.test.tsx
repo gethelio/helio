@@ -32,6 +32,20 @@ vi.mock('../api', () => ({
   fetchAnalytics: (...args: unknown[]): unknown => mockFetchAnalytics(...args),
 }))
 
+// Prop-capturing TopToolsChart mock (issue #297): recharts is module-mocked
+// above, so bar labels NEVER render in jsdom — the only observable surface
+// for the label mapping is the chart component's data prop. The mock records
+// every invocation; the page renders Top Tools first, Blocked-by-Reason
+// second, so calls[0] is the Top Tools data.
+const topToolsChartSpy = vi.fn<(data: unknown) => void>()
+
+vi.mock('../components/TopToolsChart', () => ({
+  TopToolsChart: ({ data }: { data: unknown }) => {
+    topToolsChartSpy(data)
+    return <div data-testid="top-tools-chart" />
+  },
+}))
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -73,6 +87,7 @@ function analyticsData() {
 
 beforeEach(() => {
   mockFetchAnalytics.mockReset()
+  topToolsChartSpy.mockClear()
 })
 
 afterEach(() => {
@@ -90,6 +105,51 @@ function renderPage() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('upstream attribution (issue #297)', () => {
+  it('maps top_tools rows to tool (door) labels for the Top Tools chart', async () => {
+    mockFetchAnalytics.mockResolvedValue({
+      ...analyticsData(),
+      top_tools: [
+        { tool_name: 'search', upstream: 'alpha', count: 3 },
+        { tool_name: 'search', upstream: 'beta', count: 2 },
+      ],
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(topToolsChartSpy).toHaveBeenCalled()
+    })
+    // FIRST invocation — Top Tools renders before Blocked-by-Reason; the
+    // mapped `tool (door)` labels guard the pick, since no reason mapping
+    // produces them.
+    const firstData = topToolsChartSpy.mock.calls[0]?.[0]
+    expect(firstData).toEqual([
+      { tool_name: 'search (alpha)', count: 3 },
+      { tool_name: 'search (beta)', count: 2 },
+    ])
+  })
+
+  it('passes all-null top_tools rows through with byte-identical labels', async () => {
+    mockFetchAnalytics.mockResolvedValue({
+      ...analyticsData(),
+      top_tools: [
+        { tool_name: 'send_email', upstream: null, count: 50 },
+        { tool_name: 'create_payment', upstream: null, count: 30 },
+      ],
+    })
+    renderPage()
+
+    await waitFor(() => {
+      expect(topToolsChartSpy).toHaveBeenCalled()
+    })
+    const firstData = topToolsChartSpy.mock.calls[0]?.[0]
+    expect(firstData).toEqual([
+      { tool_name: 'send_email', count: 50 },
+      { tool_name: 'create_payment', count: 30 },
+    ])
+  })
+})
 
 describe('AnalyticsPage', () => {
   it('renders stat cards with correct values', async () => {

@@ -224,6 +224,20 @@ describe('read endpoints', () => {
     expect('page' in res).toBe(false)
   })
 
+  it('fetchFeed passes the upstream filter (#297)', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 200, offset: 0 }))
+    await fetchFeed({ limit: 200, upstream: 'alpha' })
+    expect(calledUrl()).toContain('upstream=alpha')
+  })
+
+  it('fetchAudit serializes upstream and session_source into the query (#297, #250)', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
+    await fetchAudit({ upstream: 'alpha', session_source: 'header' })
+    const url = calledUrl()
+    expect(url).toContain('upstream=alpha')
+    expect(url).toContain('session_source=header')
+  })
+
   it('fetchAudit serializes origin/record_kind/channel/sender into the query (#16)', async () => {
     mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
     await fetchAudit({

@@ -259,6 +259,75 @@ describe('ApprovalsPage', () => {
     })
   })
 
+  it('renders the Upstream section in an expanded resolved row (issue #297)', async () => {
+    const resolvedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-resolved-upstream',
+      tool_name: 'stripe_charge',
+      status: 'approved',
+      resolved_at: new Date().toISOString(),
+      resolved_by: 'alice',
+      upstream: 'github',
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [], total: 0, limit: 1000, offset: 0 }
+          : { data: [resolvedTicket], total: 1, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/Resolved/)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Resolved/))
+
+    await waitFor(() => {
+      expect(screen.getByText('stripe_charge')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('stripe_charge'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Upstream')).toBeTruthy()
+      expect(screen.getByText('github')).toBeTruthy()
+    })
+  })
+
+  it('renders no Upstream section in a resolved row without one (issue #297)', async () => {
+    const resolvedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-resolved-plain',
+      tool_name: 'stripe_charge',
+      status: 'approved',
+      resolved_at: new Date().toISOString(),
+      resolved_by: 'alice',
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [], total: 0, limit: 1000, offset: 0 }
+          : { data: [resolvedTicket], total: 1, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/Resolved/)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Resolved/))
+
+    await waitFor(() => {
+      expect(screen.getByText('stripe_charge')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('stripe_charge'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Requested At')).toBeTruthy()
+    })
+    expect(screen.queryByText('Upstream')).toBeNull()
+  })
+
   it('shows error state on fetch failure', async () => {
     mockFetchApprovals.mockRejectedValue(new Error('Server down'))
     renderPage()
