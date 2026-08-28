@@ -15,7 +15,8 @@
  * mistake fails those loudly instead of silently bypassing policy.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import type { MockInstance } from 'vitest'
 import { createMultiApp } from '../server.js'
 import { createForwarderFromConfig } from '../cli-forwarder.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
@@ -313,5 +314,460 @@ describe('two-door composition', () => {
       .slice(betaSeenBefore)
       .filter((req) => req.method === 'tools/call')
     expect(newBetaCalls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Isolation family (issue #296 bullets I1, I2, I3, I5; I4 has its own
+// describe below once the cap seam exists). Each assertion owns its
+// composition: annotation caches, drift baselines, era caches, and limit
+// counters all live per composition, so a fresh one is the cheapest way to
+// guarantee no cross-test contamination.
+// ---------------------------------------------------------------------------
+
+describe('isolation: era caches classify independently (I1)', () => {
+  let comp: TwoDoorComposition
+  let errorSpy: MockInstance
+
+  beforeAll(async () => {
+    // Installed before the composition so both era-detected lines land in it.
+    errorSpy = vi.spyOn(console, 'error')
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [{ name: 'denied-probe', match: { tool: 'denied_probe' }, action: 'deny' }],
+      } as PoliciesConfig,
+    })
+  })
+
+  afterAll(async () => {
+    errorSpy.mockRestore()
+    await comp.close()
+  })
+
+  it('classifies one legacy and one modern door in the same process, beta first', async () => {
+    const betaSeenBefore = betaFixture.receivedRequests.length
+
+    // The order is the counterfactual's: beta's first relay (its era probe)
+    // runs BEFORE alpha's handshake. A shared era cache would classify alpha
+    // modern, strip its session, and the session-enforcing fixture would
+    // answer the relayed call with HTTP 400 -32000 instead of 200.
+    const betaCall = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      'era-beta-1',
+      { helioSessionId: 'era-s1' },
+    )
+    expect(betaCall.status).toBe(200)
+    expect(betaCall.body['error']).toBeUndefined()
+
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    const alphaCall = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'era-alpha-1',
+      { sessionId: wireSession },
+    )
+    expect(alphaCall.status).toBe(200)
+    expect(alphaCall.body['error']).toBeUndefined()
+
+    // Every send to the modern door was sessionless and modern-versioned —
+    // the behavioral half of beta's classification.
+    const betaSeen = betaFixture.receivedRequests.slice(betaSeenBefore)
+    expect(betaSeen.length).toBeGreaterThan(0)
+    for (const received of betaSeen) {
+      expect(received.headers['mcp-session-id']).toBeUndefined()
+      expect(received.headers['mcp-protocol-version']).toBe('2026-07-28')
+    }
+
+    // Both door-tagged era lines appeared, in ONE process, simultaneously.
+    const eraLines = errorSpy.mock.calls.map((args: unknown[]) => args.join(' '))
+    expect(eraLines).toContain(
+      '[helio][beta] Upstream MCP era detected: modern (2026-07-28, via server/discover)',
+    )
+    expect(eraLines).toContain(
+      '[helio][alpha] Upstream MCP era detected: legacy (initialize handshake)',
+    )
+  })
+
+  it('the composition is governed: the deny probe blocks on the alpha door', async () => {
+    const res = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'denied_probe', arguments: {} },
+      'era-deny',
+      { helioSessionId: 'era-s1' },
+    )
+    const error = res.body['error'] as { code: number; data: Record<string, unknown> }
+    expect(error.code).toBe(-32001)
+    expect(error.data['rule']).toBe('denied-probe')
+  })
+})
+
+// The modern fixture's startup tool set, verbatim (mcp-test-server.ts) — any
+// test that calls setTools on the SHARED file-scope fixture restores this
+// afterward, or a later family loses get_status.
+const ORIGINAL_BETA_TOOLS: Record<string, unknown>[] = [
+  {
+    name: 'get_status',
+    description: 'Report the current server status',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  },
+  {
+    name: 'Hello, 世界',
+    description: 'Report status with a non-ASCII display name',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  },
+]
+
+/** A same-named twin of alpha's get_weather, advertised by beta via setTools. */
+function betaWeatherTwin(overrides?: Record<string, unknown>): Record<string, unknown> {
+  return {
+    name: 'get_weather',
+    description: 'Get the current weather for a city (beta twin)',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    ...overrides,
+  }
+}
+
+describe('isolation: annotation caches match per door (I2, annotation half)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    // Beta's twin is genuinely destructive by ITS OWN advertised annotations;
+    // alpha's get_weather is annotated {readOnlyHint: true, destructiveHint:
+    // false} by the SDK fixture. Set before compose so the primed caches see
+    // each door's real definitions. This composition never drifts.
+    betaFixture.setTools([
+      ...ORIGINAL_BETA_TOOLS,
+      betaWeatherTwin({ annotations: { readOnlyHint: false, destructiveHint: true } }),
+    ])
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [
+          {
+            name: 'block-destructive',
+            match: { annotations: { destructiveHint: true } },
+            action: 'deny',
+          },
+        ],
+      } as PoliciesConfig,
+      prime: true,
+    })
+  })
+
+  afterAll(async () => {
+    betaFixture.setTools(ORIGINAL_BETA_TOOLS)
+    await comp.close()
+  })
+
+  it("denies beta's destructive twin while alpha's read-only twin passes", async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    const alphaCall = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2a-alpha',
+      { sessionId: wireSession },
+    )
+    expect(alphaCall.body['error']).toBeUndefined()
+    const alphaResult = alphaCall.body['result'] as { content: { text: string }[] }
+    expect(alphaResult.content[0]?.text).toBe('Sunny, 22°C in Berlin')
+
+    // The SAME tool name on beta is denied — by beta's own primed cache, not
+    // alpha's. A shared cache would give both doors one verdict.
+    const betaCall = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2a-beta',
+      { helioSessionId: 'i2a-s1' },
+    )
+    const error = betaCall.body['error'] as { code: number; data: Record<string, unknown> }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.data['reason']).toBe('policy_denied')
+    expect(error.data['rule']).toBe('block-destructive')
+  })
+})
+
+describe('isolation: drift baselines gate per door (I2, drift half)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    // A benign twin first — the pre-drift baseline. NO annotation rule in
+    // this policy (the drift override discards matchedRule, so an annotation
+    // assertion could never be read off a drifted cache); this half owns
+    // revalidation deliberately and leaves tool_revalidation at its default.
+    betaFixture.setTools([...ORIGINAL_BETA_TOOLS, betaWeatherTwin()])
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        on_tool_drift: 'block',
+        rules: [{ name: 'denied-probe', match: { tool: 'denied_probe' }, action: 'deny' }],
+      } as PoliciesConfig,
+      prime: true,
+    })
+  })
+
+  afterAll(async () => {
+    betaFixture.setTools(ORIGINAL_BETA_TOOLS)
+    await comp.close()
+  })
+
+  it('a drifted tool on beta gates beta only; alpha keeps serving', async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+
+    // Pre-drift baseline: BOTH doors serve get_weather (the red step this
+    // drift lever flips — valid because this policy has no annotation rule).
+    const alphaPre = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2b-alpha-pre',
+      { sessionId: wireSession },
+    )
+    expect(alphaPre.body['error']).toBeUndefined()
+    const betaPre = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2b-beta-pre',
+      { helioSessionId: 'i2b-s1' },
+    )
+    expect(betaPre.body['error']).toBeUndefined()
+
+    // Drift beta's twin out from under its baseline and re-prime BETA only
+    // (stand-in for the scheduled revalidation tick).
+    betaFixture.setTools([
+      ...ORIGINAL_BETA_TOOLS,
+      betaWeatherTwin({ description: 'Get the current weather for a city (beta twin, v2)' }),
+    ])
+    const reprimed = await comp.governed.beta.primeAnnotationCache()
+    expect(reprimed.success).toBe(true)
+
+    // Beta gates on ITS drift...
+    const betaPost = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2b-beta-post',
+      { helioSessionId: 'i2b-s1' },
+    )
+    const error = betaPost.body['error'] as {
+      code: number
+      message: string
+      data: Record<string, unknown>
+    }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Tool definition drift: "get_weather" changed after baseline')
+    expect(error.data['reason']).toBe('tool_definition_drift')
+
+    // ...while alpha's same-named tool keeps serving from ITS baseline.
+    const alphaPost = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i2b-alpha-post',
+      { sessionId: wireSession },
+    )
+    expect(alphaPost.body['error']).toBeUndefined()
+
+    // The drift event and the drift deny are both attributed to beta.
+    comp.auditWriter.flush()
+    const betaRecords = comp.auditStore.list({ upstream: 'beta' }).records
+    expect(betaRecords.some((r) => r.record_kind === 'drift_event')).toBe(true)
+    expect(
+      betaRecords.some(
+        (r) => r.record_kind === 'tool_call' && r.block_reason === 'tool_definition_drift',
+      ),
+    ).toBe(true)
+    const alphaRecords = comp.auditStore.list({ upstream: 'alpha' }).records
+    expect(alphaRecords.some((r) => r.record_kind === 'drift_event')).toBe(false)
+    expect(alphaRecords.some((r) => r.block_reason === 'tool_definition_drift')).toBe(false)
+  })
+})
+
+describe('isolation: tool limit buckets count per door (I3)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    // An undrifted composition: same-named get_weather on both doors, one
+    // rate_limit rule keyed on the tool.
+    betaFixture.setTools([...ORIGINAL_BETA_TOOLS, betaWeatherTwin()])
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [
+          {
+            name: 'limit-weather',
+            match: { tool: 'get_weather' },
+            action: 'rate_limit',
+            limits: { max_calls: 1, window: '60s' },
+          },
+        ],
+      } as PoliciesConfig,
+    })
+  })
+
+  afterAll(async () => {
+    betaFixture.setTools(ORIGINAL_BETA_TOOLS)
+    await comp.close()
+  })
+
+  it("exhausting alpha's get_weather bucket leaves beta's untouched", async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+
+    const first = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i3-alpha-1',
+      { sessionId: wireSession },
+    )
+    expect(first.body['error']).toBeUndefined()
+
+    // The second alpha call trips ALPHA's bucket — the deny message embeds
+    // the full partitioned key, the cheapest wire-visible observable.
+    const second = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i3-alpha-2',
+      { sessionId: wireSession },
+    )
+    const error = second.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Rate limit exceeded for upstream:alpha:tool:get_weather:rule:0')
+
+    // Beta's same-named bucket has its own count: its first call passes.
+    const betaCall = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'i3-beta-1',
+      { helioSessionId: 'i3-s1' },
+    )
+    expect(betaCall.body['error']).toBeUndefined()
+  })
+})
+
+describe('isolation: audit attribution follows routing (I5)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [{ name: 'denied-probe', match: { tool: 'denied_probe' }, action: 'deny' }],
+      } as PoliciesConfig,
+    })
+  })
+
+  afterAll(async () => {
+    await comp.close()
+  })
+
+  it('attributes every record to the door driven, under adversarial identity inputs', async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    // Adversarial drive: every call carries a crafted identity header and
+    // client-authored _meta; beta also gets a LYING legacy wire session.
+    // None of it may influence the upstream column — only routing does.
+    const adversarialMeta = {
+      'io.modelcontextprotocol/clientInfo': { name: 'liar', version: '9' },
+    }
+
+    const alphaCall = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' }, _meta: adversarialMeta },
+      'i5-alpha-1',
+      { sessionId: wireSession, helioSessionId: 'i5-liar' },
+    )
+    expect(alphaCall.body['error']).toBeUndefined()
+
+    const alphaDeny = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'denied_probe', arguments: {}, _meta: adversarialMeta },
+      'i5-alpha-2',
+      { helioSessionId: 'i5-liar' },
+    )
+    const denyError = alphaDeny.body['error'] as { code: number }
+    expect(denyError.code).toBe(-32001)
+
+    for (const id of ['i5-beta-1', 'i5-beta-2']) {
+      const betaCall = await sendMcpRequest(
+        comp.mcpUrl('beta'),
+        'tools/call',
+        { name: 'get_status', arguments: {}, _meta: adversarialMeta },
+        id,
+        { sessionId: 'fake-wire-session-lie', helioSessionId: 'i5-liar' },
+      )
+      expect(betaCall.body['error']).toBeUndefined()
+    }
+
+    comp.auditWriter.flush()
+    const alphaRecords = comp.auditStore.list({ upstream: 'alpha' }).records
+    const betaRecords = comp.auditStore.list({ upstream: 'beta' }).records
+    expect(alphaRecords.map((r) => r.tool_name).sort()).toEqual(['denied_probe', 'get_weather'])
+    expect(betaRecords.map((r) => r.tool_name)).toEqual(['get_status', 'get_status'])
+  })
+
+  it('a null-upstream record matches neither door filter (exclusion arm)', () => {
+    // A synthetic upstream: null record makes the exclusion assertion
+    // non-vacuous — without one in the store it would assert nothing.
+    comp.auditWriter.push({
+      timestamp: new Date().toISOString(),
+      session_id: null,
+      session_source: null,
+      agent_id: null,
+      environment: null,
+      tool_name: 'synthetic_null_probe',
+      tool_input: {},
+      policy_decision: 'allow',
+      block_reason: null,
+      matched_rule: null,
+      matched_rule_index: null,
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: null,
+      upstream_error: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      total_duration_ms: 0,
+      approval_wait_ms: 0,
+      proxy_compute_ms: 0,
+      flagged_destructive: false,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
+      protocol_version: null,
+      upstream: null,
+    })
+    comp.auditWriter.flush()
+
+    const all = comp.auditStore.list({}).records
+    expect(all.some((r) => r.tool_name === 'synthetic_null_probe')).toBe(true)
+    for (const door of ['alpha', 'beta'] as const) {
+      const filtered = comp.auditStore.list({ upstream: door }).records
+      expect(filtered.some((r) => r.tool_name === 'synthetic_null_probe')).toBe(false)
+    }
   })
 })
