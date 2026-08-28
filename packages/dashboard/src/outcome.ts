@@ -65,23 +65,16 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       // dedicated chip. Pinned here so a blocked install never falls through to
       // "allow" regardless of policy_decision.
       return 'deny'
-    case 'missing_tool_name':
-      // Nameless tools/call rejection (issue #132). Its own outcome, distinct
-      // from a governed deny so an operator can tell a fail-closed structural
-      // rejection apart from a rule-matched deny. Pinned before the
-      // policy_decision fallthrough.
-      return 'rejected'
-    case 'header_mismatch':
-      // Inbound header/body agreement rejection (issue #226). The same
-      // fail-closed structural class as missing_tool_name; pinned here
-      // because the fallthrough below renders any unpinned rejected record
-      // as Allow.
-      return 'rejected'
     default:
       break
   }
 
   if (record.policy_decision === 'deny') return 'deny'
+  // Decision-first fallback (issue #276): a rejected record must never render
+  // as Allow, whatever its block_reason. Reason pins above exist only where a
+  // distinct outcome needs its own rendering; structural rejections
+  // (missing_tool_name, header_mismatch, and every future class) land here.
+  if (record.policy_decision === 'rejected') return 'rejected'
   return 'allow'
 }
 

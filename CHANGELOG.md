@@ -133,6 +133,11 @@ Maintainer notes:
 
 ### Fixed
 
+- Rejected audit records with an unrecognized `block_reason` no longer
+  render as Allow in the dashboard (#276): outcome derivation now
+  classifies on `policy_decision` first, so a record whose decision is
+  `rejected` shows the Rejected badge whatever its reason value, and
+  future rejection classes are born rendering correctly.
 - Diagnosed startup failures now exit cleanly instead of crash-dumping
   (#233): when `helio start` refuses to boot for a stated reason — an
   audit database from an older build with a mismatched schema, or an
