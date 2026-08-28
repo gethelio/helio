@@ -259,6 +259,10 @@ function buildWhereClause(filters: AuditQueryFilters): {
     conditions.push('session_id = ?')
     params.push(filters.session_id)
   }
+  if (filters.session_source !== undefined) {
+    conditions.push('session_source = ?')
+    params.push(filters.session_source)
+  }
   if (filters.upstream !== undefined) {
     conditions.push('upstream = ?')
     params.push(filters.upstream)
@@ -655,9 +659,14 @@ export class AuditStore {
     return result.total
   }
 
-  /** Get aggregate statistics for a time range. */
-  aggregate(from?: string, to?: string): AuditAggregateStats {
-    const rangeFilters: AuditQueryFilters = { from, to }
+  /**
+   * Get aggregate statistics for a time range. The optional upstream filter
+   * scopes EVERY sub-aggregate (totals, by_decision, by_block_reason,
+   * top_tools, approval_rate, per_hour) — "analytics for this door", not one
+   * filtered chart. Exact match: null-upstream rows never match any value.
+   */
+  aggregate(from?: string, to?: string, filters: { upstream?: string } = {}): AuditAggregateStats {
+    const rangeFilters: AuditQueryFilters = { from, to, upstream: filters.upstream }
     const { clause, params } = buildWhereClause(rangeFilters)
 
     const totals = this.db
@@ -708,13 +717,13 @@ export class AuditStore {
       : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
     const top_tools = this.db
       .prepare(
-        `SELECT tool_name, COUNT(*) as count
+        `SELECT tool_name, upstream, COUNT(*) as count
          FROM audit_records ${toolsClause}
-         GROUP BY tool_name
+         GROUP BY tool_name, upstream
          ORDER BY count DESC
          LIMIT 10`,
       )
-      .all(...params) as Array<{ tool_name: string; count: number }>
+      .all(...params) as Array<{ tool_name: string; upstream: string | null; count: number }>
 
     // Approval rate
     const approvalFilters: AuditQueryFilters = {

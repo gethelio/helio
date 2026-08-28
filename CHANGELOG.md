@@ -36,6 +36,18 @@ Maintainer notes:
 
 ### Added
 
+- Analytics upstream dimension and filter (#297): `top_tools` rows in
+  the `/api/analytics` response are now (tool, upstream) pairs —
+  same-named tools on different upstreams no longer merge into one
+  row; `upstream` is null in singular mode, leaving the rows exactly
+  as before. The endpoint gains an optional `upstream` query filter
+  that scopes every aggregate in the response to one named upstream.
+- Audit `session_source` filter (#250): `GET /api/audit` and
+  `GET /api/audit/export` accept a `session_source` query param
+  (exact match on `header`, `meta`, `legacy_header`, `transport`, or
+  `sideband`) so an operator can isolate the callers one session
+  identity strategy produced — for example, which callers still
+  resolve through the legacy header during a deprecation migration.
 - Named multi-upstream configuration (#293): `helio.yaml` accepts a
   top-level `upstreams:` list of named upstream entries as an
   alternative to the singular `upstream:` section; exactly one of the

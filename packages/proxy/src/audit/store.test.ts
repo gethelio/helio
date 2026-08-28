@@ -412,6 +412,21 @@ CREATE TABLE IF NOT EXISTS audit_records (
       }
     })
 
+    it('filters by session_source with exact match; null rows never match (issue #250)', () => {
+      const store = createStore()
+      try {
+        store.insert(makeRecord({ session_id: 'run-a', session_source: 'header' }))
+        store.insert(makeRecord({ session_id: 'oc-1', session_source: 'meta' }))
+        store.insert(makeRecord({ session_id: null, session_source: null }))
+
+        const result = store.list({ session_source: 'header' })
+        expect(result.total).toBe(1)
+        expect(result.records[0]?.session_source).toBe('header')
+      } finally {
+        store.close()
+      }
+    })
+
     it.runIf(process.platform !== 'win32')(
       'creates the audit database file with 0600 permissions',
       () => {
@@ -1192,9 +1207,9 @@ CREATE TABLE IF NOT EXISTS audit_records (
       store.insert(makeRecord({ tool_name: 'beta' }))
       store.insert(makeRecord({ tool_name: 'gamma' }))
       const stats = store.aggregate()
-      expect(stats.top_tools[0]).toEqual({ tool_name: 'alpha', count: 3 })
-      expect(stats.top_tools[1]).toEqual({ tool_name: 'beta', count: 2 })
-      expect(stats.top_tools[2]).toEqual({ tool_name: 'gamma', count: 1 })
+      expect(stats.top_tools[0]).toEqual({ tool_name: 'alpha', upstream: null, count: 3 })
+      expect(stats.top_tools[1]).toEqual({ tool_name: 'beta', upstream: null, count: 2 })
+      expect(stats.top_tools[2]).toEqual({ tool_name: 'gamma', upstream: null, count: 1 })
     })
 
     it('calculates approval rate', () => {
@@ -1275,7 +1290,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
       expect(stats.total).toBe(3) // drift events remain visible in totals
       expect(stats.allowed_total).toBe(1) // but do not count as allowed calls
       expect(stats.blocked_total).toBe(0)
-      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', count: 1 }])
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', upstream: null, count: 1 }])
       expect(stats.by_decision).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ decision: 'tool_drift', count: 1 }),
@@ -1303,7 +1318,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
       expect(stats.total).toBe(2) // rejected records remain visible in totals
       expect(stats.allowed_total).toBe(1) // rejected is not an allowed call
       expect(stats.blocked_total).toBe(1) // rejected has a non-null block_reason
-      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', count: 1 }])
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', upstream: null, count: 1 }])
       expect(stats.by_decision).toEqual(
         expect.arrayContaining([expect.objectContaining({ decision: 'rejected', count: 1 })]),
       )
@@ -1314,6 +1329,63 @@ CREATE TABLE IF NOT EXISTS audit_records (
       )
 
       s.close()
+    })
+  })
+
+  describe('aggregate upstream dimension (issue #297)', () => {
+    it('keeps same-named tools on different upstreams as distinct top_tools rows', () => {
+      const s = createStore()
+      try {
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'alpha' }))
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'alpha' }))
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'alpha' }))
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'beta' }))
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'beta' }))
+        s.insert(makeRecord({ tool_name: 'fetch', upstream: 'beta' }))
+
+        const stats = s.aggregate()
+        // All counts distinct, so ORDER BY count DESC fully pins the array.
+        expect(stats.top_tools).toEqual([
+          { tool_name: 'search', upstream: 'alpha', count: 3 },
+          { tool_name: 'search', upstream: 'beta', count: 2 },
+          { tool_name: 'fetch', upstream: 'beta', count: 1 },
+        ])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('applies the upstream filter to every sub-aggregate; null rows never match', () => {
+      const s = createStore()
+      try {
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'alpha', policy_decision: 'allow' }))
+        s.insert(makeRecord({ tool_name: 'search', upstream: 'alpha', policy_decision: 'allow' }))
+        s.insert(
+          makeRecord({
+            tool_name: 'search',
+            upstream: 'alpha',
+            policy_decision: 'deny',
+            block_reason: 'policy_denied',
+          }),
+        )
+        s.insert(makeRecord({ tool_name: 'fetch', upstream: 'beta', policy_decision: 'allow' }))
+        s.insert(makeRecord({ tool_name: 'fetch', upstream: null, policy_decision: 'allow' }))
+
+        const stats = s.aggregate(undefined, undefined, { upstream: 'alpha' })
+        expect(stats.total).toBe(3)
+        expect(stats.allowed_total).toBe(2)
+        expect(stats.blocked_total).toBe(1)
+        expect(stats.top_tools).toEqual([{ tool_name: 'search', upstream: 'alpha', count: 3 }])
+        expect(stats.by_decision).toEqual(
+          expect.arrayContaining([
+            { decision: 'allow', count: 2 },
+            { decision: 'deny', count: 1 },
+          ]),
+        )
+        expect(stats.by_block_reason).toEqual([{ reason: 'policy_denied', count: 1 }])
+      } finally {
+        s.close()
+      }
     })
   })
 
