@@ -1140,3 +1140,331 @@ describe('sharing: a cross-door requires dependency satisfies (S3)', () => {
     expect(error.data['rule']).toBe('gate-status-on-weather')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Identity family (issue #296 bullets D2, D3; D1's validate matrix lives in
+// cli.test.ts beside its precedents). Assertions read bucket and store
+// BEHAVIOR, never the once-per-process warning lines.
+// ---------------------------------------------------------------------------
+
+describe('identity: on_unresolved anonymous pools limits and budgets (D2)', () => {
+  let pooled: TwoDoorComposition
+  let denyMode: TwoDoorComposition
+
+  const anonLimitRule = {
+    name: 'pool-anon-calls',
+    match: { tool: 'get_*' },
+    action: 'rate_limit',
+    limits: { max_calls: 2, window: '60s', key: 'session' },
+  }
+
+  beforeAll(async () => {
+    pooled = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [anonLimitRule],
+      } as PoliciesConfig,
+      session: {
+        identity: [{ source: 'header', name: 'x-helio-session-id' }],
+        on_unresolved: 'anonymous',
+      },
+      budgets: [
+        {
+          name: 'anon-pot',
+          limit: 150,
+          currency: 'USD',
+          window: '24h',
+          key: 'session',
+          on_exceed: 'deny',
+          contributors: [{ match: { tool: 'create_payment' }, field: '$.amount' }],
+        },
+        {
+          name: 'anon-scoped-pot',
+          limit: 150,
+          currency: 'USD',
+          window: '24h',
+          key: 'session',
+          on_exceed: 'deny',
+          contributors: [
+            { match: { tool: 'lookup_order', upstreams: ['alpha'] }, field: '$.amount' },
+          ],
+        },
+      ] as HelioConfig['budgets'],
+    })
+    denyMode = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [anonLimitRule],
+      } as PoliciesConfig,
+      session: {
+        identity: [{ source: 'header', name: 'x-helio-session-id' }],
+        on_unresolved: 'deny',
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await pooled.close()
+    await denyMode.close()
+  })
+
+  it('identity-less calls on both doors pool the session:unknown limit bucket', async () => {
+    const wireSession = await initializeLegacyDoor(pooled.mcpUrl('alpha'))
+    // The wire session relays upstream but is NOT identity (header-only
+    // chain): these calls resolve nothing and pool as anonymous.
+    const alpha1 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'd2-a1',
+      { sessionId: wireSession },
+    )
+    expect(alpha1.body['error']).toBeUndefined()
+    const beta1 = await sendMcpRequest(pooled.mcpUrl('beta'), 'tools/call', {
+      name: 'get_status',
+      arguments: {},
+    })
+    expect(beta1.body['error']).toBeUndefined()
+
+    const beta2 = await sendMcpRequest(
+      pooled.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      'd2-b2',
+    )
+    const error = beta2.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Rate limit exceeded for session:unknown:rule:0')
+  })
+
+  it('identity-less charges on both doors drain one session:unknown budget pot', async () => {
+    const payment = { amount: 60, currency: 'USD' }
+    const wireSession = await initializeLegacyDoor(pooled.mcpUrl('alpha'))
+    const alpha1 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'create_payment', arguments: payment },
+      'd2-p1',
+      { sessionId: wireSession },
+    )
+    expect(alpha1.body['error']).toBeUndefined()
+    const beta1 = await sendMcpRequest(pooled.mcpUrl('beta'), 'tools/call', {
+      name: 'create_payment',
+      arguments: payment,
+    })
+    expect(beta1.body['error']).toBeUndefined()
+
+    // Both doors drained ONE pot, keyed by the anonymous session.
+    const potState = pooled.budgetEngine.listStates().find((s) => s.name === 'anon-pot')
+    expect(potState?.buckets.map((b) => b.bucket_key)).toEqual(['budget:anon-pot:session:unknown'])
+    expect(potState?.buckets[0]?.spent).toBe(120)
+
+    const alpha2 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'create_payment', arguments: payment },
+      'd2-p3',
+      { sessionId: wireSession },
+    )
+    const error = alpha2.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Budget exceeded: "anon-pot"')
+  })
+
+  it("scoped-contributor control: beta's anonymous charge never enters the alpha-scoped pot", async () => {
+    const beta = await sendMcpRequest(pooled.mcpUrl('beta'), 'tools/call', {
+      name: 'lookup_order',
+      arguments: { order_id: 'o-1', amount: 60 },
+    })
+    expect(beta.body['error']).toBeUndefined()
+    expect(pooled.budgetEngine.hasBucket('budget:anon-scoped-pot:session:unknown')).toBe(false)
+    const potState = pooled.budgetEngine.listStates().find((s) => s.name === 'anon-scoped-pot')
+    expect(potState?.buckets).toEqual([])
+  })
+
+  it('deny-mode control: the same identity-less call is denied outright', async () => {
+    const denied = await sendMcpRequest(denyMode.mcpUrl('beta'), 'tools/call', {
+      name: 'get_status',
+      arguments: {},
+    })
+    const error = denied.body['error'] as {
+      code: number
+      message: string
+      data: Record<string, unknown>
+    }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe(
+      'No session identity resolved (tried: header "x-helio-session-id") — a session-keyed ' +
+        'limit or budget requires one. See session.identity in helio.yaml.',
+    )
+    expect(error.data['reason']).toBe('session_unresolved')
+
+    // The rule itself is live: a resolved identity passes.
+    const resolved = await sendMcpRequest(
+      denyMode.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      'd2-deny-ok',
+      { helioSessionId: 'd2-resolved' },
+    )
+    expect(resolved.body['error']).toBeUndefined()
+  })
+})
+
+describe('identity: anonymous can neither record nor satisfy evidence (D2)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [
+          {
+            name: 'gate-status-on-weather',
+            match: { tool: 'get_status' },
+            action: 'allow',
+            requires: ['get_weather'],
+          },
+        ],
+      } as PoliciesConfig,
+      session: {
+        identity: [{ source: 'header', name: 'x-helio-session-id' }],
+        on_unresolved: 'anonymous',
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await comp.close()
+  })
+
+  it('an anonymous dependency call records nothing and satisfies nothing', async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    const dependency = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      'd2e-a1',
+      { sessionId: wireSession },
+    )
+    expect(dependency.body['error']).toBeUndefined()
+
+    // "Cannot record" proven as STORE ABSENCE, asserted BEFORE any
+    // resolved-session call could create a session and blur the count.
+    expect(comp.evidenceStore.getSessionState('unknown').completed_tools).toEqual([])
+    expect(comp.evidenceStore.sessionCount).toBe(0)
+
+    // The gated call denies for the anonymous caller — grounding denies
+    // unresolved identity in BOTH on_unresolved modes. The session-blocked
+    // path carries the grounding message RAW (no "Evidence grounding
+    // failed:" prefix — that belongs to the evidence/dependency reasons).
+    const anonymousGated = await sendMcpRequest(comp.mcpUrl('beta'), 'tools/call', {
+      name: 'get_status',
+      arguments: {},
+    })
+    const anonError = anonymousGated.body['error'] as { code: number; message: string }
+    expect(anonError).toBeDefined()
+    expect(anonError.code).toBe(-32001)
+    expect(anonError.message).toBe(
+      'No session identity resolved (tried: header "x-helio-session-id") — rules using ' +
+        'evidence.requires or requires need one. See session.identity in helio.yaml.',
+    )
+
+    // And a RESOLVED identity is still unsatisfied — the anonymous
+    // dependency call recorded for nobody.
+    const resolvedGated = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      'd2e-b2',
+      { helioSessionId: 'd2-ev' },
+    )
+    const resolvedError = resolvedGated.body['error'] as { code: number; message: string }
+    expect(resolvedError).toBeDefined()
+    expect(resolvedError.message).toBe(
+      'Evidence grounding failed: Required tool calls not completed: get_weather',
+    )
+  })
+})
+
+describe('identity: the meta source behaves as caller-class input (D3)', () => {
+  let comp: TwoDoorComposition
+
+  const clientMeta = (name: string): Record<string, unknown> => ({
+    'io.modelcontextprotocol/clientInfo': { name, version: '1' },
+  })
+
+  beforeAll(async () => {
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [
+          {
+            name: 'pool-meta-calls',
+            match: { tool: 'get_*' },
+            action: 'rate_limit',
+            limits: { max_calls: 2, window: '60s', key: 'session' },
+          },
+        ],
+      } as PoliciesConfig,
+      session: { identity: [{ source: 'meta' }], on_unresolved: 'deny' },
+    })
+  })
+
+  afterAll(async () => {
+    await comp.close()
+  })
+
+  it('the same _meta clientInfo pools across doors exactly like a caller header', async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    const alpha1 = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' }, _meta: clientMeta('agent-x') },
+      'd3-a1',
+      { sessionId: wireSession },
+    )
+    expect(alpha1.body['error']).toBeUndefined()
+    const beta1 = await sendMcpRequest(comp.mcpUrl('beta'), 'tools/call', {
+      name: 'get_status',
+      arguments: {},
+      _meta: clientMeta('agent-x'),
+    })
+    expect(beta1.body['error']).toBeUndefined()
+
+    const beta2 = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {}, _meta: clientMeta('agent-x') },
+      'd3-b2',
+    )
+    const error = beta2.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Rate limit exceeded for session:clientinfo:agent-x@1:rule:0')
+  })
+
+  it('a different _meta identity partitions — caller-class, not upstream-derived', async () => {
+    // agent-x's bucket is exhausted; agent-y's is untouched. Nothing the
+    // UPSTREAM sends can enter resolveSession — its inputs are the caller's
+    // headers and _meta only (the born-green non-influence half).
+    const other = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {}, _meta: clientMeta('agent-y') },
+      'd3-b3',
+    )
+    expect(other.body['error']).toBeUndefined()
+  })
+})

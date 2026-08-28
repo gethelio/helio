@@ -611,6 +611,11 @@ dashboard:
           `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n      action: allow\n      requires: [deploy_ticket]\n${FOOTER}`,
           ['session.identity.1: session.identity includes "legacy_header"'],
         ],
+        [
+          'evidence.requires rule under the default legacy_header chain',
+          `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n      action: allow\n      evidence:\n        requires: [deploy_ticket]\n${FOOTER}`,
+          ['session.identity.1: session.identity includes "legacy_header"'],
+        ],
       ]
 
       it.each(rejectionCases)('rejects %s', async (_name, yamlBody, fragments) => {
@@ -624,6 +629,62 @@ dashboard:
           for (const fragment of fragments) {
             expect(stderr).toContain(fragment)
           }
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('accepts a singular config with an evidence-gated rule under the default chain', async () => {
+        // The guard is named-mode only: singular mode keeps legacy_header
+        // beside evidence-gated rules (wire sessions are proxy-relayed 1:1
+        // there, so the forgeability concern the guard exists for is moot).
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(
+          configPath,
+          'version: "1"\n' +
+            'upstream:\n' +
+            '  url: "http://localhost:8080/mcp"\n' +
+            'policies:\n' +
+            '  rules:\n' +
+            '    - match:\n' +
+            '        tool: "*"\n' +
+            '      action: allow\n' +
+            '      requires: [deploy_ticket]\n' +
+            FOOTER,
+        )
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(0)
+          expect(stderr).toContain(`Config is valid: ${configPath} (1 policy rule, 0 budgets)`)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+
+      it('accepts a named config with an evidence.requires rule on a header-only chain', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(
+          configPath,
+          `${NAMED_HEADER}\n` +
+            'session:\n' +
+            '  identity:\n' +
+            '    - source: header\n' +
+            '      name: x-helio-session-id\n' +
+            'policies:\n' +
+            '  rules:\n' +
+            '    - match:\n' +
+            '        tool: "*"\n' +
+            '      action: allow\n' +
+            '      evidence:\n' +
+            '        requires: [deploy_ticket]\n' +
+            FOOTER,
+        )
+        try {
+          const { code, stderr } = await runCli(['validate', '-c', configPath])
+          expect(code).toBe(0)
+          expect(stderr).toContain(`Config is valid: ${configPath} (1 policy rule, 0 budgets)`)
         } finally {
           rmSync(dir, { recursive: true, force: true })
         }
