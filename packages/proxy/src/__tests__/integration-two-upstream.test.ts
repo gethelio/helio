@@ -852,3 +852,291 @@ describe('isolation: audit attribution follows routing (I5)', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Sharing family (issue #296 bullets S1, S2, S3): what must POOL across
+// doors. Each claim runs beside its permanent negative control — the
+// deliberately scoped variant whose non-pooling is the config-lever red.
+// ---------------------------------------------------------------------------
+
+describe('sharing: un-scoped session limits pool across doors (S1)', () => {
+  let pooled: TwoDoorComposition
+  let scoped: TwoDoorComposition
+
+  const sessionLimitRule = (upstreams?: string[]): Record<string, unknown> => ({
+    name: 'pool-session-calls',
+    match: { tool: 'get_*', ...(upstreams ? { upstreams } : {}) },
+    action: 'rate_limit',
+    limits: { max_calls: 2, window: '60s', key: 'session' },
+  })
+
+  beforeAll(async () => {
+    pooled = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [sessionLimitRule()],
+      } as PoliciesConfig,
+    })
+    scoped = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [sessionLimitRule(['alpha'])],
+      } as PoliciesConfig,
+    })
+  })
+
+  afterAll(async () => {
+    await pooled.close()
+    await scoped.close()
+  })
+
+  it("one session's calls pool across both doors", async () => {
+    const wireSession = await initializeLegacyDoor(pooled.mcpUrl('alpha'))
+    const alpha1 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      's1-a1',
+      { sessionId: wireSession, helioSessionId: 's1-pool' },
+    )
+    expect(alpha1.body['error']).toBeUndefined()
+    const beta1 = await sendMcpRequest(
+      pooled.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      's1-b1',
+      { helioSessionId: 's1-pool' },
+    )
+    expect(beta1.body['error']).toBeUndefined()
+
+    // The third call — back on ALPHA, which has only one call of its own —
+    // denies: beta's call fed the SAME session bucket. The un-prefixed key
+    // in the message is the design: session identity is proxy-owned.
+    const alpha2 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      's1-a2',
+      { sessionId: wireSession, helioSessionId: 's1-pool' },
+    )
+    const error = alpha2.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Rate limit exceeded for session:s1-pool:rule:0')
+  })
+
+  it('negative control: the alpha-scoped rule never pools beta calls', async () => {
+    const wireSession = await initializeLegacyDoor(scoped.mcpUrl('alpha'))
+    const drive = async (door: DoorName, id: string) =>
+      sendMcpRequest(
+        scoped.mcpUrl(door),
+        'tools/call',
+        door === 'alpha'
+          ? { name: 'get_weather', arguments: { city: 'Berlin' } }
+          : { name: 'get_status', arguments: {} },
+        id,
+        door === 'alpha'
+          ? { sessionId: wireSession, helioSessionId: 's1-scope' }
+          : { helioSessionId: 's1-scope' },
+      )
+
+    // The exact sequence the pooled variant denies on: alpha, beta, alpha.
+    expect((await drive('alpha', 's1s-a1')).body['error']).toBeUndefined()
+    expect((await drive('beta', 's1s-b1')).body['error']).toBeUndefined()
+    // Here the third call passes — beta's call never fed the scoped bucket.
+    expect((await drive('alpha', 's1s-a2')).body['error']).toBeUndefined()
+    // Beta keeps passing however often it calls...
+    expect((await drive('beta', 's1s-b2')).body['error']).toBeUndefined()
+    // ...and the scoped rule is no dead rule: alpha's own third call trips it.
+    const alpha3 = await drive('alpha', 's1s-a3')
+    const error = alpha3.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.message).toBe('Rate limit exceeded for session:s1-scope:rule:0')
+  })
+})
+
+describe('sharing: one budget pot spans both doors (S2)', () => {
+  let pooled: TwoDoorComposition
+  let scoped: TwoDoorComposition
+
+  const potBudget = (name: string, upstreams?: string[]): Record<string, unknown> => ({
+    name,
+    limit: 150,
+    currency: 'USD',
+    window: '24h',
+    key: 'global',
+    on_exceed: 'deny',
+    contributors: [
+      { match: { tool: 'create_payment', ...(upstreams ? { upstreams } : {}) }, field: '$.amount' },
+    ],
+  })
+
+  const allowAllPolicies = {
+    default: 'allow',
+    dry_run: false,
+    tool_revalidation: { enabled: false },
+    rules: [],
+  } as unknown as PoliciesConfig
+
+  beforeAll(async () => {
+    pooled = await composeTwoDoors({
+      policies: allowAllPolicies,
+      budgets: [potBudget('shared-pot')] as HelioConfig['budgets'],
+    })
+    scoped = await composeTwoDoors({
+      policies: allowAllPolicies,
+      budgets: [potBudget('scoped-pot', ['alpha'])] as HelioConfig['budgets'],
+    })
+  })
+
+  afterAll(async () => {
+    await pooled.close()
+    await scoped.close()
+  })
+
+  const payment = { amount: 60, currency: 'USD' }
+
+  it('charges from both doors drain one pot until it denies', async () => {
+    const wireSession = await initializeLegacyDoor(pooled.mcpUrl('alpha'))
+    const alpha1 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'create_payment', arguments: payment },
+      's2-a1',
+      { sessionId: wireSession, helioSessionId: 's2-1' },
+    )
+    expect(alpha1.body['error']).toBeUndefined()
+    const beta1 = await sendMcpRequest(
+      pooled.mcpUrl('beta'),
+      'tools/call',
+      { name: 'create_payment', arguments: payment },
+      's2-b1',
+      { helioSessionId: 's2-1' },
+    )
+    expect(beta1.body['error']).toBeUndefined()
+
+    // Third charge on ALPHA (alpha alone would sit at 120 of 150): the deny
+    // proves beta's 60 drained the same pot.
+    const alpha2 = await sendMcpRequest(
+      pooled.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'create_payment', arguments: payment },
+      's2-a2',
+      { sessionId: wireSession, helioSessionId: 's2-1' },
+    )
+    const error = alpha2.body['error'] as { code: number; message: string }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Budget exceeded: "shared-pot"')
+  })
+
+  it("negative control: an alpha-scoped contributor never charges beta's calls", async () => {
+    const wireSession = await initializeLegacyDoor(scoped.mcpUrl('alpha'))
+    const drive = async (door: DoorName, id: string) =>
+      sendMcpRequest(
+        scoped.mcpUrl(door),
+        'tools/call',
+        { name: 'create_payment', arguments: payment },
+        id,
+        door === 'alpha'
+          ? { sessionId: wireSession, helioSessionId: 's2-2' }
+          : { helioSessionId: 's2-2' },
+      )
+    const potSpent = (): number => {
+      const state = scoped.budgetEngine.listStates().find((s) => s.name === 'scoped-pot')
+      return state?.buckets.find((b) => b.bucket_key === 'budget:scoped-pot:global')?.spent ?? 0
+    }
+
+    expect((await drive('alpha', 's2s-a1')).body['error']).toBeUndefined()
+    expect(potSpent()).toBe(60)
+    // Beta's charge leaves the pot untouched...
+    expect((await drive('beta', 's2s-b1')).body['error']).toBeUndefined()
+    expect(potSpent()).toBe(60)
+    // ...so the call the pooled pot denied passes here.
+    expect((await drive('alpha', 's2s-a2')).body['error']).toBeUndefined()
+    expect(potSpent()).toBe(120)
+  })
+})
+
+describe('sharing: a cross-door requires dependency satisfies (S3)', () => {
+  let comp: TwoDoorComposition
+
+  beforeAll(async () => {
+    // requires-gated rules make the identity chain header-only: the #293
+    // guard rejects legacy_header beside evidence-gated rules in named mode,
+    // and this suite's configs mirror what an operator could actually load.
+    comp = await composeTwoDoors({
+      policies: {
+        default: 'allow',
+        dry_run: false,
+        tool_revalidation: { enabled: false },
+        rules: [
+          {
+            name: 'gate-status-on-weather',
+            match: { tool: 'get_status' },
+            action: 'allow',
+            requires: ['get_weather'],
+          },
+        ],
+      } as PoliciesConfig,
+      session: {
+        identity: [{ source: 'header', name: 'x-helio-session-id' }],
+        on_unresolved: 'deny',
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await comp.close()
+  })
+
+  it('a dependency completed on door A satisfies the gate on door B', async () => {
+    const wireSession = await initializeLegacyDoor(comp.mcpUrl('alpha'))
+    const dependency = await sendMcpRequest(
+      comp.mcpUrl('alpha'),
+      'tools/call',
+      { name: 'get_weather', arguments: { city: 'Berlin' } },
+      's3-a1',
+      { sessionId: wireSession, helioSessionId: 's3-1' },
+    )
+    expect(dependency.body['error']).toBeUndefined()
+
+    const gated = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      's3-b1',
+      { helioSessionId: 's3-1' },
+    )
+    expect(gated.body['error']).toBeUndefined()
+    const result = gated.body['result'] as { content: { text: string }[] }
+    expect(result.content[0]?.text).toContain('get_status executed')
+  })
+
+  it('negative control: a fresh identity is denied with the dependency-missing envelope', async () => {
+    const denied = await sendMcpRequest(
+      comp.mcpUrl('beta'),
+      'tools/call',
+      { name: 'get_status', arguments: {} },
+      's3-b2',
+      { helioSessionId: 's3-2' },
+    )
+    const error = denied.body['error'] as {
+      code: number
+      message: string
+      data: Record<string, unknown>
+    }
+    expect(error).toBeDefined()
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe(
+      'Evidence grounding failed: Required tool calls not completed: get_weather',
+    )
+    expect(error.data['reason']).toBe('dependency_missing')
+    expect(error.data['missing_dependencies']).toEqual(['get_weather'])
+    expect(error.data['rule']).toBe('gate-status-on-weather')
+  })
+})
