@@ -97,6 +97,63 @@ export function makeConfig(
 }
 
 /**
+ * Build a valid named-mode (upstreams:) HelioConfig for the given entry
+ * names. Pass per-entry URLs and section overrides to customize, the same
+ * way makeConfig does for singular configs; without a `urls` entry a name
+ * gets a placeholder URL (fine for routing tests that never dial out).
+ */
+export function makeNamedConfig(
+  names: string[],
+  overrides: {
+    /** Real per-entry URL by name — two-upstream suites point these at live fixtures. */
+    urls?: Record<string, string>
+    listen?: Partial<HelioConfig['listen']>
+    environment?: string
+    session?: Partial<HelioConfig['session']>
+    policies?: Partial<HelioConfig['policies']>
+    budgets?: HelioConfig['budgets']
+  } = {},
+): HelioConfig {
+  return {
+    version: '1',
+    upstreams: names.map((name) => ({
+      name,
+      url: overrides.urls?.[name] ?? `http://localhost:8081/${name}`,
+      transport: 'streamable-http',
+      protocol_version: 'auto',
+      connect_timeout: '10s',
+      request_timeout: '30s',
+      forward_headers: [],
+      headers: {},
+    })),
+    listen: { port: 3000, host: '127.0.0.1', allowed_origins: [], ...overrides.listen },
+    dashboard: {
+      enabled: false,
+      port: 3100,
+      host: '127.0.0.1',
+      allow_open_mode: false,
+      sse_heartbeat_interval: '30s',
+    },
+    environment: overrides.environment,
+    session: {
+      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
+      on_unresolved: 'deny',
+      ...overrides.session,
+    },
+    policies: { default: 'allow', dry_run: false, rules: [], ...overrides.policies },
+    approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
+    audit: {
+      storage: 'sqlite',
+      path: './helio-audit.db',
+      retention: '90d',
+      include_responses: true,
+    },
+    sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
+    budgets: overrides.budgets ?? [],
+  } as HelioConfig
+}
+
+/**
  * Send a JSON-RPC request to a proxy/server URL.
  * Returns the HTTP status and parsed JSON body.
  */

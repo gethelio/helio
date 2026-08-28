@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { Hono } from 'hono'
 import { createMultiApp } from '../server.js'
-import { makeConfig } from './helpers/test-utils.js'
-import type { HelioConfig } from '../config/index.js'
+import { makeConfig, makeNamedConfig } from './helpers/test-utils.js'
 import type { McpForwarder, McpRequest } from '../mcp/types.js'
 
 // ---------------------------------------------------------------------------
@@ -34,45 +33,6 @@ function stubForwarder(toolName: string): McpForwarder & { calls: McpRequest[] }
       })
     },
   }
-}
-
-/** Build a validated-shape named config for the given entry names. */
-function makeNamedConfig(names: string[]): HelioConfig {
-  return {
-    version: '1',
-    upstreams: names.map((name) => ({
-      name,
-      url: `http://localhost:8081/${name}`,
-      transport: 'streamable-http',
-      protocol_version: 'auto',
-      connect_timeout: '10s',
-      request_timeout: '30s',
-      forward_headers: [],
-      headers: {},
-    })),
-    listen: { port: 3000, host: '127.0.0.1', allowed_origins: [] },
-    dashboard: {
-      enabled: false,
-      port: 3100,
-      host: '127.0.0.1',
-      allow_open_mode: false,
-      sse_heartbeat_interval: '30s',
-    },
-    session: {
-      identity: [{ source: 'header', name: 'x-helio-session-id' }, { source: 'legacy_header' }],
-      on_unresolved: 'deny',
-    },
-    policies: { default: 'allow', dry_run: false, rules: [] },
-    approval: { timeout: '300s', default_on_timeout: 'deny', channels: [] },
-    audit: {
-      storage: 'sqlite',
-      path: './helio-audit.db',
-      retention: '90d',
-      include_responses: true,
-    },
-    sdk: { enabled: false, port: 3200, host: '127.0.0.1', evaluation_ttl: '10m' },
-    budgets: [],
-  } as HelioConfig
 }
 
 const MCP_CATCH_ALL_MESSAGE =
