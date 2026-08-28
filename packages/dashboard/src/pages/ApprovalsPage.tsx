@@ -682,6 +682,14 @@ function ResolvedRow({
 
               <BreachedBudgets ticket={ticket} />
 
+              {/* Upstream attribution (issue #297) — parity with the pending
+                  card's expanded detail; same DTO, same field. */}
+              {ticket.upstream && (
+                <DetailSection label="Upstream">
+                  <span className="font-mono text-xs">{ticket.upstream}</span>
+                </DetailSection>
+              )}
+
               <DetailSection label="Requested At">
                 <span className="text-xs tabular-nums">{formatTimestamp(ticket.requested_at)}</span>
               </DetailSection>

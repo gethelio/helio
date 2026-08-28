@@ -173,8 +173,8 @@ Denied calls always have a null `upstream_response` since no upstream request wa
 
 The dashboard provides two views for audit data:
 
-- **Feed tab** — A real-time stream of tool calls as they happen, powered by Server-Sent Events. Each action card shows the tool name, policy decision, timing, and matched rule. An **Origin** badge (MCP or the adapter slug) identifies where the call originated. For non-`tool_call` records, a **record-kind chip** (Install Scan, Drift, or Expired) appears alongside the badge. Adapter-origin cards also surface context such as `channel_id` and `sender_id` from the record's metadata.
-- **Audit tab** — A searchable, filterable, paginated log of all recorded actions. An **Origin** column shows the enforcement origin (MCP or adapter) with a record-kind chip for non-`tool_call` entries. **Channel ID** and **Sender ID** columns show adapter metadata and are visible at wider viewports. Click any record to see full details including tool arguments, upstream response, and evidence chain.
+- **Feed tab** — A real-time stream of tool calls as they happen, powered by Server-Sent Events. Each action card shows the tool name, policy decision, timing, and matched rule. An **Origin** badge (MCP or the adapter slug) identifies where the call originated. For non-`tool_call` records, a **record-kind chip** (Install Scan, Drift, or Expired) appears alongside the badge. Adapter-origin cards also surface context such as `channel_id` and `sender_id` from the record's metadata. In named multi-upstream mode, attributed cards carry the upstream name beside the tool, an **Upstream** row in the expanded detail, and the feed gains an upstream filter (exact match, applied to both the fetch window and live events).
+- **Audit tab** — A searchable, filterable, paginated log of all recorded actions. An **Origin** column shows the enforcement origin (MCP or adapter) with a record-kind chip for non-`tool_call` entries. **Channel ID** and **Sender ID** columns show adapter metadata and are visible at wider viewports. When the current page contains attributed records, an **Upstream** column appears after Tool. The **Session / Agent** column marks session-resolved identities with a small source chip (`header`, `legacy_header`, …). Click any record to see full details including tool arguments, upstream response, and evidence chain; attributed records add an **Upstream** row above Session.
 
 ![Dashboard Audit](./images/dashboard-audit.png)
 
@@ -187,9 +187,11 @@ The dashboard provides two views for audit data:
 - Record kind (`tool_call`, `install_scan`, `drift_event`, `evaluation_expired`)
 - Time range (presets or a custom from/to)
 - Session ID
+- Session source (`header`, `meta`, `legacy_header`, `transport`, `sideband`)
 - Channel ID (`metadata.channel_id`)
 - Sender ID (`metadata.sender_id`)
 - Upstream HTTP status range (min/max)
+- Upstream name (exact match; the input appears when the current page has attributed records or the filter is set)
 
 The outcome pills filter by what actually happened to the call, not the raw `policy_decision` value — an approved `require_approval` call shows under Allow. Filtering by agent ID or the destructive flag is not exposed in the UI; both are available as `/api/audit` query parameters (`agent`, `destructive`).
 

@@ -34,6 +34,8 @@ function buildExportUrl(
     record_kind: string
     channel: string
     sender: string
+    upstream: string
+    session_source: string
   },
 ): string {
   const outcomeParams = outcomeFilterToAuditParams(filters.decision)
@@ -54,6 +56,8 @@ function buildExportUrl(
   if (filters.record_kind) params.set('record_kind', filters.record_kind)
   if (filters.channel) params.set('channel_id', filters.channel)
   if (filters.sender) params.set('sender_id', filters.sender)
+  if (filters.upstream) params.set('upstream', filters.upstream)
+  if (filters.session_source) params.set('session_source', filters.session_source)
   return `/api/audit/export?${params.toString()}`
 }
 
@@ -83,13 +87,20 @@ interface AuditFilterBarProps {
   filters: AuditFilters
   setFilter: <K extends keyof AuditFilters>(key: K, value: AuditFilters[K]) => void
   setBulkFilters: (patch: Partial<AuditFilters>) => void
+  /** Whether any row on the current page carries upstream attribution (issue #297). */
+  hasAttributedRows: boolean
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function AuditFilterBar({ filters, setFilter, setBulkFilters }: AuditFilterBarProps) {
+export function AuditFilterBar({
+  filters,
+  setFilter,
+  setBulkFilters,
+  hasAttributedRows,
+}: AuditFilterBarProps) {
   // -- Time range preset state ----------------------------------------------
   const [timePreset, setTimePreset] = useState<number | null | 'custom'>(null)
 
@@ -245,6 +256,25 @@ export function AuditFilterBar({ filters, setFilter, setBulkFilters }: AuditFilt
           <option value="drift_event">Drift</option>
           <option value="evaluation_expired">Expired</option>
         </select>
+
+        {/* Session identity source (issue #250) — the raw five-value config
+            vocabulary, always visible (session_source exists in singular
+            mode too). */}
+        <select
+          aria-label="Session Source"
+          value={filters.session_source}
+          onChange={(e) => {
+            setFilter('session_source', e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 focus:border-gray-300 focus:outline-none"
+        >
+          <option value="">All Sources</option>
+          <option value="header">header</option>
+          <option value="meta">meta</option>
+          <option value="legacy_header">legacy_header</option>
+          <option value="transport">transport</option>
+          <option value="sideband">sideband</option>
+        </select>
       </div>
 
       {/* Row 2: time range + session + export */}
@@ -313,6 +343,21 @@ export function AuditFilterBar({ filters, setFilter, setBulkFilters }: AuditFilt
           }}
           className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
         />
+
+        {/* Upstream (issue #297) — exact match, like Session ID. Visibility
+            ORs in a non-empty filter value so filtering to a door with zero
+            rows cannot hide the control that caused it. */}
+        {(hasAttributedRows || filters.upstream !== '') && (
+          <input
+            type="text"
+            placeholder="Filter by upstream…"
+            value={filters.upstream}
+            onChange={(e) => {
+              setFilter('upstream', e.target.value)
+            }}
+            className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+          />
+        )}
 
         <input
           type="text"

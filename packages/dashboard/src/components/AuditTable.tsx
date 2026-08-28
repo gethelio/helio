@@ -41,6 +41,12 @@ export function AuditTable({
     return null
   }
 
+  // Column presence is data-driven from the CURRENT page's rows (issue #297):
+  // the dashboard has no config knowledge, so attribution in the data is the
+  // only named-mode signal. All-null pages render byte-identically to the
+  // pre-attribution table.
+  const showUpstream = records.some((record) => record.upstream != null)
+
   return (
     <>
       {/* Loading overlay for filter changes */}
@@ -62,6 +68,11 @@ export function AuditTable({
                 <th scope="col" className="pb-2 pr-4 font-medium">
                   Tool
                 </th>
+                {showUpstream && (
+                  <th scope="col" className="hidden pb-2 pr-4 font-medium md:table-cell">
+                    Upstream
+                  </th>
+                )}
                 <th scope="col" className="pb-2 pr-4 font-medium">
                   Origin
                 </th>
@@ -102,6 +113,11 @@ export function AuditTable({
                   <td className="py-2.5 pr-4 font-mono text-sm text-gray-900">
                     {record.tool_name}
                   </td>
+                  {showUpstream && (
+                    <td className="hidden py-2.5 pr-4 font-mono text-xs text-gray-500 md:table-cell">
+                      {record.upstream}
+                    </td>
+                  )}
                   <td className="py-2.5 pr-4">
                     <OriginBadge origin={record.origin} recordKind={record.record_kind} />
                   </td>
@@ -115,6 +131,14 @@ export function AuditTable({
                   </td>
                   <td className="hidden py-2.5 pr-4 text-xs text-gray-500 sm:table-cell">
                     {truncateId(record.agent_id ?? record.session_id)}
+                    {/* Session-identity provenance (issue #250). Suppressed
+                        beside agent ids: the source annotates how the SESSION
+                        resolved, which would mislead next to an agent id. */}
+                    {!record.agent_id && record.session_source && (
+                      <span className="ml-1.5 rounded bg-gray-100 px-1 py-0.5 text-[10px] text-gray-500">
+                        {record.session_source}
+                      </span>
+                    )}
                   </td>
                   <td className="hidden py-2.5 pr-4 text-xs text-gray-500 md:table-cell">
                     {typeof record.metadata?.channel_id === 'string'

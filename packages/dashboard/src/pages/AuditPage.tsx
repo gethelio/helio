@@ -140,7 +140,12 @@ export function AuditPage() {
         </button>
       )}
 
-      <AuditFilterBar filters={filters} setFilter={setFilter} setBulkFilters={setBulkFilters} />
+      <AuditFilterBar
+        filters={filters}
+        setFilter={setFilter}
+        setBulkFilters={setBulkFilters}
+        hasAttributedRows={records.some((record) => record.upstream != null)}
+      />
 
       {/* Empty state */}
       {records.length === 0 && !loading && (

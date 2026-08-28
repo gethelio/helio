@@ -93,6 +93,42 @@ function renderPage() {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('upstream attribution (issue #297)', () => {
+  it('surfaces the upstream column and filter input from attributed data', async () => {
+    mockFetchAudit.mockResolvedValue({
+      data: [makeAuditRecord({ upstream: 'alpha' })],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    })
+
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('Upstream')).toBeTruthy()
+      expect(screen.getByText('alpha')).toBeTruthy()
+      expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
+    })
+  })
+
+  it('renders no upstream artifacts for singular data', async () => {
+    mockFetchAudit.mockResolvedValue({
+      data: [makeAuditRecord()],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    })
+
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('send_email')).toBeTruthy()
+    })
+    expect(screen.queryByText('Upstream')).toBeNull()
+    expect(screen.queryByPlaceholderText('Filter by upstream…')).toBeNull()
+  })
+})
+
 describe('AuditPage', () => {
   it('renders audit records after fetch', async () => {
     mockFetchAudit.mockResolvedValue({

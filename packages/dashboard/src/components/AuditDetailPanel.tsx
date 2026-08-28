@@ -106,6 +106,14 @@ export function AuditDetailPanel({
                 />
               </DetailSection>
 
+              {/* Upstream attribution (issue #297): placed above Session,
+                  matching the approvals expanded-detail order. */}
+              {selectedRecord.upstream && (
+                <DetailSection label="Upstream">
+                  <span className="font-mono text-xs">{selectedRecord.upstream}</span>
+                </DetailSection>
+              )}
+
               {/* Session identity (issue #218): id plus the strategy that
                   resolved it; unresolved records show what was tried. */}
               <DetailSection label="Session">

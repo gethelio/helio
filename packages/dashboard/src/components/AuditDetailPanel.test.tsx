@@ -83,6 +83,37 @@ describe('AuditDetailPanel', () => {
     expect(screen.getByText('Input Parameters')).toBeTruthy()
   })
 
+  it('renders a conditional Upstream section above Session (issue #297)', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord({ upstream: 'alpha' })}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    const upstream = screen.getByText('Upstream')
+    expect(screen.getByText('alpha')).toBeTruthy()
+    const session = screen.getByText('Session')
+    // Placement parity with the approvals expanded detail: Upstream above
+    // the Session section.
+    expect(
+      upstream.compareDocumentPosition(session) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it('renders no Upstream section for an unattributed record (issue #297)', () => {
+    render(
+      <AuditDetailPanel
+        selectedRecord={makeRecord()}
+        detailLoading={false}
+        detailError={null}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(screen.queryByText('Upstream')).toBeNull()
+  })
+
   it('renders error message when detailError is set', () => {
     render(
       <AuditDetailPanel

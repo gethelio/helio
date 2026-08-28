@@ -39,6 +39,8 @@ export function FeedPage() {
   const [expandedError, setExpandedError] = useState<string | null>(null)
   const [filterTool, setFilterTool] = useState('')
   const [debouncedFilterTool, setDebouncedFilterTool] = useState('')
+  const [filterUpstream, setFilterUpstream] = useState('')
+  const [debouncedFilterUpstream, setDebouncedFilterUpstream] = useState('')
   const [filterDecision, setFilterDecision] = useState<OutcomeFilterValue | null>(null)
   const [isLive, setIsLive] = useState(true)
   const [initialLoading, setInitialLoading] = useState(true)
@@ -48,6 +50,12 @@ export function FeedPage() {
   const sentinelRef = useRef<HTMLDivElement>(null)
   const seenIdsRef = useRef(new Set<string>())
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The reconnect backfill reads the upstream filter through this ref so the
+  // filter never becomes a dep of the reconnect effect — with it as a dep,
+  // every filter change after the first reconnect would fire BOTH effects
+  // (two fetches, two replace-and-resets). The load effect owns filter
+  // changes; the reconnect effect owns reconnects.
+  const filterUpstreamRef = useRef('')
 
   const { subscribe, connectionEpoch } = useEventSourceContext()
 
@@ -62,14 +70,36 @@ export function FeedPage() {
     }
   }, [filterTool])
 
-  // -- Initial data load ----------------------------------------------------
+  // -- Debounced upstream filter (issue #297) -------------------------------
+  // A separate local timer: sharing debounceRef with the tool filter would
+  // cancel its in-flight debounce.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      setDebouncedFilterUpstream(filterUpstream)
+    }, 300)
+    return () => {
+      clearTimeout(id)
+    }
+  }, [filterUpstream])
+
+  useEffect(() => {
+    filterUpstreamRef.current = debouncedFilterUpstream
+  }, [debouncedFilterUpstream])
+
+  // -- Load + filter-change refetch (issue #297) ----------------------------
+  // Owns the initial fetch AND upstream-filter refetches: the filter is a
+  // server param so a busy door cannot flood the fixed fetch window, and a
+  // filter change replaces the record set wholesale — records, seen ids, and
+  // the live buffer — the reconnect backfill's replace semantics.
   useEffect(() => {
     let canceled = false
-    fetchFeed({ limit: INITIAL_FETCH_LIMIT })
+    fetchFeed({ limit: INITIAL_FETCH_LIMIT, upstream: debouncedFilterUpstream || undefined })
       .then((res) => {
         if (canceled) return
-        for (const r of res.data) seenIdsRef.current.add(r.id)
-        setRecords(res.data as FeedItem[])
+        const next = res.data as FeedItem[]
+        seenIdsRef.current = new Set(next.map((r) => r.id))
+        setRecords(next)
+        setLiveBuffer([])
         setInitialLoading(false)
       })
       .catch((err: unknown) => {
@@ -80,7 +110,7 @@ export function FeedPage() {
     return () => {
       canceled = true
     }
-  }, [])
+  }, [debouncedFilterUpstream])
 
   // -- SSE subscription -----------------------------------------------------
   useEffect(() => {
@@ -110,7 +140,7 @@ export function FeedPage() {
   // canonical feed snapshot from REST whenever the stream re-opens.
   useEffect(() => {
     if (connectionEpoch <= 1) return
-    fetchFeed({ limit: INITIAL_FETCH_LIMIT })
+    fetchFeed({ limit: INITIAL_FETCH_LIMIT, upstream: filterUpstreamRef.current || undefined })
       .then((res) => {
         const next = res.data as FeedItem[]
         seenIdsRef.current = new Set(next.map((r) => r.id))
@@ -223,10 +253,13 @@ export function FeedPage() {
         !r.tool_name.toLowerCase().includes(debouncedFilterTool.toLowerCase())
       )
         return false
+      // Live SSE items obey the upstream filter between fetches (exact
+      // match — SSE cannot be server-filtered).
+      if (debouncedFilterUpstream && r.upstream !== debouncedFilterUpstream) return false
       if (filterDecision && !matchesOutcomeFilter(r, filterDecision)) return false
       return true
     })
-  }, [records, debouncedFilterTool, filterDecision])
+  }, [records, debouncedFilterTool, debouncedFilterUpstream, filterDecision])
 
   // -- Loading state --------------------------------------------------------
   if (initialLoading) {
@@ -265,6 +298,21 @@ export function FeedPage() {
           }}
           className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
         />
+
+        {/* Upstream filter (issue #297) — exact match; rendered when the
+            current data is attributed, OR the filter itself is non-empty so
+            a zero-match value cannot hide the control that caused it. */}
+        {(records.some((r) => r.upstream != null) || filterUpstream !== '') && (
+          <input
+            type="text"
+            placeholder="Filter by upstream…"
+            value={filterUpstream}
+            onChange={(e) => {
+              setFilterUpstream(e.target.value)
+            }}
+            className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
+          />
+        )}
 
         {/* Decision pills */}
         <div className="flex flex-wrap gap-1.5">

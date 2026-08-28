@@ -70,6 +70,56 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('upstream attribution (issue #297)', () => {
+  it('renders the Upstream column when any current row is attributed', () => {
+    render(
+      <AuditTable
+        {...defaultProps()}
+        records={[makeRecord({ upstream: 'alpha' }), makeRecord({ id: 'rec-002', upstream: null })]}
+      />,
+    )
+    expect(screen.getByText('Upstream')).toBeTruthy()
+    expect(screen.getByText('alpha')).toBeTruthy()
+  })
+
+  it('renders no Upstream column when every current row is unattributed', () => {
+    // Column presence is computed from the CURRENT page's rows — a page of
+    // all-null rows hides the column even when another page would show it.
+    // The cross-page flicker is the accepted cost of data-driven rendering;
+    // a sticky-column implementation fails this absence half.
+    render(
+      <AuditTable
+        {...defaultProps()}
+        records={[makeRecord({ upstream: null }), makeRecord({ id: 'rec-002', upstream: null })]}
+      />,
+    )
+    expect(screen.queryByText('Upstream')).toBeNull()
+  })
+})
+
+describe('session source chip (issue #250)', () => {
+  it('shows the source chip beside session-resolved ids and never beside agent ids', () => {
+    render(
+      <AuditTable
+        {...defaultProps()}
+        records={[
+          makeRecord({ session_id: 'sess-1', session_source: 'legacy_header', agent_id: null }),
+          makeRecord({
+            id: 'rec-002',
+            session_id: 'sess-2',
+            session_source: 'meta',
+            agent_id: 'agent-9',
+          }),
+        ]}
+      />,
+    )
+    // The chip annotates session-identity provenance; beside an AGENT id the
+    // session_source would mislead, so the agent row stays chip-free.
+    expect(screen.getByText('legacy_header')).toBeTruthy()
+    expect(screen.queryByText('meta')).toBeNull()
+  })
+})
+
 describe('AuditTable', () => {
   it('renders table with record data', () => {
     render(<AuditTable {...defaultProps()} />)

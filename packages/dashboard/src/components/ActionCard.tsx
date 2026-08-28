@@ -106,6 +106,13 @@ export const ActionCard = memo(function ActionCard({
           {record.tool_name}
         </span>
 
+        {/* Upstream attribution (issue #297) — per-card, only when present. */}
+        {record.upstream && (
+          <span className="hidden shrink-0 truncate font-mono text-xs text-gray-400 md:block md:max-w-24">
+            {record.upstream}
+          </span>
+        )}
+
         <span className="hidden w-20 shrink-0 truncate text-xs text-gray-500 sm:block">
           {truncateId(record.agent_id ?? record.session_id)}
         </span>
@@ -158,6 +165,13 @@ export const ActionCard = memo(function ActionCard({
                   </p>
                 )}
               </DetailSection>
+
+              {/* Upstream attribution (issue #297) */}
+              {detail.upstream && (
+                <DetailSection label="Upstream">
+                  <span className="font-mono text-xs">{detail.upstream}</span>
+                </DetailSection>
+              )}
 
               {/* Matched rule */}
               {detail.matched_rule && (
