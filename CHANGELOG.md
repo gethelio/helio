@@ -36,6 +36,17 @@ Maintainer notes:
 
 ### Added
 
+- Dashboard upstream attribution (#297): named multi-upstream data
+  lights up across the pane of glass. The Feed and Audit views gain
+  an upstream column and card qualifier, an exact-match upstream
+  filter, and Upstream rows on the audit detail panel, expanded
+  action cards, and resolved approval details; the Limits page
+  groups door-partitioned buckets into per-door sections with the
+  singular block first; Budgets ledger rows carry a door qualifier;
+  Analytics labels each top_tools bar as the tool with its door.
+  The Audit view also gains the session_source filter control and a
+  source chip beside session-resolved identities (#250). Singular
+  mode renders byte-identically everywhere.
 - Analytics upstream dimension and filter (#297): `top_tools` rows in
   the `/api/analytics` response are now (tool, upstream) pairs —
   same-named tools on different upstreams no longer merge into one
