@@ -175,6 +175,27 @@ describe('upstream attribution (issue #297)', () => {
     // result stays rendered.
     expect(screen.getByPlaceholderText('Filter by upstream…')).toBeTruthy()
   })
+
+  it('shows the no-match copy when a record_kind filter matches zero records (#16 keys)', async () => {
+    mockFetchAudit
+      .mockResolvedValueOnce({ data: [makeAuditRecord()], total: 1, limit: 25, offset: 0 })
+      .mockResolvedValue({ data: [], total: 0, limit: 25, offset: 0 })
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('send_email')).toBeTruthy()
+    })
+    // One pin for the pre-existing #16 hole closed alongside the new
+    // filters: a zero-match select filter is a filter result too.
+    fireEvent.change(screen.getByLabelText('Record Kind'), {
+      target: { value: 'install_scan' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('No records match the current filters')).toBeTruthy()
+    })
+    expect(screen.queryByText('No audit records yet')).toBeNull()
+  })
 })
 
 describe('AuditPage', () => {
