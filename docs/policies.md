@@ -166,6 +166,60 @@ policies:
 
 Changing top-level `environment` on a running process is restart-required. Hot-reload keeps the startup environment label and logs a restart warning.
 
+### upstreams
+
+Match calls routed through specific named upstreams. The value is a non-empty list of exact upstream names — no globs. The rule matches when the call arrived through any door named in the list (OR within the list), AND-combined with the rest of the `match` block. Like `match.environment` above, the condition is only valid when the top-level context exists — here the named [`upstreams:`](./configuration.md#upstreams) list, which the fragment carries:
+
+```yaml
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+
+policies:
+  rules:
+    - name: deny-payments-writes
+      match:
+        upstreams: [payments]
+        annotations:
+          destructiveHint: true
+      action: deny
+```
+
+Upstream attribution exists only on the MCP path — a call that came through `/mcp/<name>` or `/sse/<name>` — so a rule with `match.upstreams` is **inert on the sideband path**: it never matches there and is skipped, not denied (the mirror image of `match.metadata`, below, which is inert on the MCP path).
+
+Validation enforces these semantics instead of letting a dead rule sit silently. Each rejection below fires at startup, on `helio validate`, and during hot-reload.
+
+A `match.upstreams` rule in a singular-mode config:
+
+```
+  policies.rules.0.match.upstreams: Rule sets match.upstreams but the config declares a single "upstream:", which has no name on purpose. Upstream-scoped rules require the named "upstreams:" list.
+```
+
+A name no configured upstream carries:
+
+```
+  policies.rules.0.match.upstreams.0: Rule names upstream "search" in match.upstreams but no configured upstream has that name. Every entry must name an upstream from the upstreams: list.
+```
+
+An empty list (`match.upstreams: []`) is rejected with `match.upstreams must name at least one upstream — an empty list matches nothing.`
+
+Combining `match.upstreams` with `match.metadata` — the two conditions live on different paths, so the rule could never match:
+
+```
+  policies.rules.0.match.upstreams: match.upstreams cannot be combined with match.metadata — metadata rules only match on the sideband (host) path and upstream-scoped rules only on the MCP path, so the combination can never match. Split it into two rules.
+```
+
+Keying an upstream-scoped rule's limits by `sender_id` — senders exist only on the sideband, upstream scoping only on the MCP path. This rejection co-fires with the pre-existing rule that `sender_id` keys require the SDK sideband, so a config without `sdk.enabled: true` reports both:
+
+```
+  policies.rules.0.limits.key: limits.key "sender_id" requires the SDK sideband (sdk.enabled: true) — sender_id is supplied by hook adapters and is absent on the MCP path.
+  policies.rules.0.limits.key: limits.key "sender_id" cannot be combined with match.upstreams — an upstream-scoped rule only matches on the MCP path, where sender_id is absent and the key would silently collapse to tool scope.
+```
+
+Budget contributors accept the same `upstreams` list in their `match` blocks, with the same validation — see [Scoping contributors by upstream](./configuration.md#scoping-contributors-by-upstream).
+
 ### metadata
 
 Match against the adapter-supplied **context** of a call — who sent it, in which channel, and so on. This is populated only on the **host-enforced (sideband) path** (see the [Adapter Governance API](./adapter-api.md)); MCP requests carry no metadata, so a rule with `match.metadata` is **inert on the MCP path** (it never matches there, and is skipped — not denied).
@@ -361,7 +415,7 @@ Rate limits use a **sliding window** algorithm to track calls per key. Configure
 
 **Key scoping:**
 
-- `tool` (default) — One shared limit per tool name, across all sessions.
+- `tool` (default) — One shared limit per tool name, across all sessions. With named [`upstreams`](./configuration.md#upstreams), MCP-path buckets are keyed `upstream:<name>:tool:<t>` — one limit per (upstream, tool), so a same-named tool on two upstreams tracks two buckets — while sideband calls keep the unprefixed `tool:<t>` key. `session` keys never carry the upstream prefix.
 - `session` — Each resolved [session identity](./configuration.md#session) has its own independent limit.
 - `sender_id` — One limit per adapter-supplied `sender_id` (host-enforced path). Requires the SDK sideband (`sdk.enabled: true`) — Helio **rejects** the config otherwise, since a sender-keyed limit is meaningless without a sender. On the MCP path (which has no sender) it falls back to `tool` with a one-time warning.
 - `agent` — Currently unsupported on MCP requests; Helio logs a warning and falls back to `tool`.
@@ -505,7 +559,7 @@ The [configuration reference](./configuration.md#budgets) has the full schema an
 
 ### How a budget depletes
 
-A call participates in a budget when a contributor's `match.tool` glob matches the tool name and every `match.input` condition holds (absent `input` means the glob alone decides); the amount comes from the first matching contributor's `field` dot-path, in config order (first match wins over the combined predicate, like rules). One call depletes **every** budget whose contributors match, so overlapping caps compose: a $50 session pot and a $500 daily pot both charge, and whichever runs out first stops the call.
+A call participates in a budget when a contributor's `match.tool` glob matches the tool name, every `match.input` condition holds, and — if the contributor is scoped with `upstreams` — the call arrived through a listed door (absent `input` and `upstreams`, the glob alone decides; see [Scoping contributors by upstream](./configuration.md#scoping-contributors-by-upstream)); the amount comes from the first matching contributor's `field` dot-path, in config order (first match wins over the combined predicate, like rules). One call depletes **every** budget whose contributors match, so overlapping caps compose: a $50 session pot and a $500 daily pot both charge, and whichever runs out first stops the call.
 
 A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`, and nothing is consumed. This is the honest boundary of the feature: budgets govern tools that expose what they are spending in an argument field. Fixed-cost tools without an amount field are `rate_limit` territory, and costs metered downstream after the call are a stated gap.
 

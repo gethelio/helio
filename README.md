@@ -62,7 +62,7 @@ This single package includes the built-in dashboard UI bundle.
 
 ### 2. Configure
 
-`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. Helio proxies a single upstream MCP server.
+`npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. The singular `upstream:` form stays fully supported; to govern more than one MCP server, declare a named `upstreams:` list in its place (set exactly one of the two). Tool sets are never merged: each named upstream is served at its own `/mcp/<name>` door. See the [Configuration Reference](./docs/configuration.md#upstreams).
 
 > **Heads up — Helio starts in audit-only mode.** `init` scaffolds the `policies` section **commented out**, so out of the box Helio runs with `default: allow` and **zero rules**: it records every tool call to the audit trail but **blocks nothing**. Uncomment and edit `policies` (or paste your own rules) to start enforcing. See the [Policy Guide](./docs/policies.md) for rule syntax.
 
@@ -363,6 +363,7 @@ Ready-made configurations for common patterns:
 - **[Slack Approvals](./examples/slack-approvals/)**: Route destructive actions to Slack
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
 - **[Budgets](./examples/budgets/)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
+- **[Multi-Upstream](./examples/multi-upstream/)**: Two named upstreams behind one proxy, with a door-scoped rate limit and budget
 
 ## Contributing
 

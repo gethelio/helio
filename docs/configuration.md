@@ -120,11 +120,14 @@ sdk:
 
 ### upstream
 
-Connection to the MCP server that Helio proxies.
-
-> **v0.1 proxies exactly one upstream MCP server.** `upstream` is a single
-> object, not a list — multiple/named upstreams and routing are not yet
-> supported.
+Connection to the MCP server that Helio proxies. This is the singular form —
+one `upstream` object, served at `/mcp` and `/sse` — and it stays fully
+supported. To govern more than one MCP server from a single proxy, declare
+the named [`upstreams`](#upstreams) list in its place: a config sets exactly
+one of the two forms, and declaring both, or neither, fails validation (the
+error text is quoted under [upstreams](#upstreams)). Tool sets are never
+merged across upstreams — each named upstream is served at its own
+`/mcp/<name>` door.
 
 | Field              | Type     | Required    | Default           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------ | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -185,7 +188,7 @@ Before its first upstream request in `auto` mode — Helio's own internal traffi
 - **modern** — the upstream answered `server/discover` and lists `2026-07-28` among its supported versions. That revision removed the handshake, so Helio holds no upstream session for its own internal traffic and sends no `Mcp-Session-Id` on it.
 - **legacy** — the upstream answered the probe with an ordinary JSON-RPC error (an unimplemented method, say), an empty body, or anything else that is not a modern discovery result. Helio establishes its internal session the way it always has, with `initialize` followed by `notifications/initialized`, and reuses the session id the upstream mints.
 
-The answer is cached per process and shared by both kinds of traffic — concurrent callers join a single in-flight probe, whichever path asks first — so classification normally costs one extra round trip per era conclusion, not per request. With `tool_revalidation` on (the default), startup priming normally settles the era before any relayed request arrives. Dropping the internal session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
+The answer is cached per upstream connection — with named [`upstreams`](#upstreams), each entry probes and caches its own era independently — and shared by both kinds of traffic to that upstream; concurrent callers join a single in-flight probe, whichever path asks first, so classification normally costs one extra round trip per era conclusion, not per request. With `tool_revalidation` on (the default), startup priming normally settles the era before any relayed request arrives. Dropping the internal session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
 
 A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/`5xx` reply — caches no era. On the internal path it surfaces as an ordinary upstream failure and the next attempt probes again; a relayed request instead proceeds under a per-request legacy presumption and is never failed by the probe, with re-probing throttled for 30 seconds so a relay burst cannot turn into a probe storm. This is deliberate: an auth-gated or briefly unavailable modern upstream must never be recorded as legacy, and a deployment whose probe can never succeed (per-client credentials, below) must keep working exactly as it does today.
 
@@ -235,6 +238,114 @@ If upstream is unavailable or slow, Helio continues boot, logs a fail-closed war
 
 While cache data is unknown, policy annotation matching still uses MCP defaults (`destructiveHint: true`, etc.), preserving fail-closed behavior.
 
+### upstreams
+
+Named multi-upstream mode: a non-empty list of upstream entries, each the
+full singular `upstream` shape plus a required, unique `name`. In the
+canonical section order, `upstreams` occupies the same slot as `upstream`
+(after `version`, before `listen`) — a config carries one form or the other
+in that position, never both. Declaring both fails validation:
+
+```
+  upstreams: Set exactly one of "upstream:" (single upstream) or "upstreams:" (named multi-upstream list) — not both. To migrate, move the upstream: fields into an upstreams: entry and give it a name.
+```
+
+as does declaring neither:
+
+```
+  (top level): Missing upstream configuration: set exactly one of "upstream:" (single upstream) or "upstreams:" (named multi-upstream list).
+```
+
+Each entry accepts every field of the [`upstream`](#upstream) section with
+identical semantics, defaults, and validation — the entry schema reuses the
+singular schema and its refinements verbatim — plus `name`:
+
+| Field              | Type     | Required    | Default           | Description                                                                                                                                                                                               |
+| ------------------ | -------- | ----------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | string   | Yes         | —                 | Unique entry name; becomes the door path (`/mcp/<name>`, `/sse/<name>`) and the limiter/audit attribution key. Letters, digits, `_` and `-` only; 1–64 characters.                                        |
+| `url`              | string   | Yes         | —                 | URL of this entry's upstream MCP server (e.g. `http://localhost:8080/mcp`).                                                                                                                               |
+| `transport`        | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio` — identical to [`upstream.transport`](#upstream).                                                                                                |
+| `protocol_version` | string   | No          | `auto`            | MCP revision spoken to this entry's upstream — identical to [`upstream.protocol_version`](#upstream). Each entry probes, pins, and caches its own era (see [era detection](#upstream-mcp-era-detection)). |
+| `command`          | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                                                                                |
+| `args`             | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                                                                                                                                                           |
+| `connect_timeout`  | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                                                                                                                                                        |
+| `request_timeout`  | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                                                                                                                                                              |
+| `forward_headers`  | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward to this entry's upstream.                                                                                                                           |
+| `headers`          | object   | No          | `{}`              | Static headers sent on every request to this entry's upstream — same `${VAR}` interpolation and reserved-header rejections as [`upstream.headers`](#static-request-headers).                              |
+
+> **Note:** As in the singular form, an entry's `url` is required by the
+> schema but ignored when `transport` is `stdio`. Any value (e.g. `stdio://`)
+> works as a placeholder. Issue #313 tracks lifting the requirement for
+> stdio entries.
+
+Names may only contain letters, digits, `_` and `-` (1–64 characters), must
+be unique within the list, and the list itself must be non-empty. The
+charset is deliberate: names embed in mount paths (`/mcp/<name>`),
+rate/spend limiter keys (`upstream:<name>:tool:<t>`), and audit records'
+`upstream` column, so they must stay URL-literal and delimiter-free.
+
+```yaml
+version: '1'
+
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+    request_timeout: '45s'
+    headers:
+      Authorization: 'Bearer ${UPSTREAM_TOKEN}'
+
+dashboard:
+  enabled: false
+```
+
+#### Per-name doors
+
+Each named upstream is served at its own pair of mounts: `/mcp/<name>` for
+MCP Streamable HTTP and `/sse/<name>` for the deprecated HTTP+SSE listener.
+Tool sets are never merged — a client connects to exactly one door and sees
+exactly that upstream's tools. In named mode the bare `/mcp` and `/sse`
+paths answer nothing: a request to either, or to a name that is not
+configured, is refused with HTTP `404` and an id-omitting JSON-RPC `-32600`
+envelope naming the expected shape:
+
+```
+{"jsonrpc":"2.0","error":{"code":-32600,"message":"No MCP endpoint answers this request: this Helio serves named upstreams at /mcp/<name>."}}
+```
+
+The `/sse` variant of the envelope names `/sse/<name>`.
+
+**Mount permanence.** Door paths derive from entry names, so renaming an
+entry moves that upstream's public URL: every client pointed at the old
+door breaks, and rate/spend limiter buckets and audit attribution re-key
+under the new name going forward. Treat a name as a permanent public
+contract — see
+[Migrating to Named Upstreams](#migrating-to-named-upstreams) for the
+operational consequences.
+
+#### Per-upstream runtime
+
+[Era detection](#upstream-mcp-era-detection),
+[annotation cache priming](#startup-annotation-cache-priming), and drift
+baselines all run per upstream connection — one instance per entry, the
+singular machinery multiplied. Startup and detection log lines carry the
+entry name:
+
+```
+[helio][files] Upstream MCP era detected: legacy (initialize handshake)
+[helio][payments] Upstream MCP era detected: legacy (initialize handshake)
+```
+
+Because each entry runs its own upstream connection or child process plus
+an annotation prime loop, configuring more than 16 upstreams draws a
+warning — at `helio validate` and again at `helio start` — while the config
+stays valid:
+
+```
+[helio] Warning: 17 upstreams configured. Each upstream runs its own upstream connection or child process plus an annotation prime loop; consider whether one proxy should govern this many.
+```
+
 ### listen
 
 Where the proxy listens for incoming MCP requests.
@@ -257,12 +368,17 @@ hostname in its origin while that hostname resolves to the proxy, so the
 browser treats the request as same-origin. A `POST` carries an `Origin`
 regardless, and its value is still the attacker's hostname, so the request
 is refused. Stream establishment on
-`GET /sse` is the residual: a browser omits `Origin` on a same-origin `GET`
-(including from a rebound page) and on a no-cors `GET` such as an `<img>`
-load, so neither can be gated here. The session such a `GET` mints is now
-bounded: `/sse` caps concurrent sessions globally and refuses new streams
-with `503` past the cap, never dropping a live stream, so the residual is
-bounded stream establishment rather than unbounded minting. A cross-origin
+the SSE listener is the residual: a browser omits `Origin` on a same-origin
+`GET` (including from a rebound page) and on a no-cors `GET` such as an
+`<img>` load, so neither can be gated here. In singular mode that listener
+is `GET /sse`; with named [`upstreams`](#upstreams) it is `GET /sse/<name>`,
+because a bare `GET /sse` matches no door and is refused with `404`,
+minting nothing. The session such a `GET` mints is bounded either way: each
+SSE route caps its concurrent sessions at 1024 and refuses new streams with
+`503` past the cap, never dropping a live stream, so the residual is
+bounded stream establishment rather than unbounded minting. The cap is per
+door — every named route has its own session map — so total capacity is the
+number of doors × 1024. A cross-origin
 `EventSource` or cors-mode `fetch` does send `Origin` and is refused.
 Closing the Origin-less path completely still needs `Host` validation,
 tracked in issue #231.
@@ -436,25 +552,26 @@ budgets:
     contributors:
       - match:
           tool: 'stripe_*' # picomatch glob, same engine as match.tool
+          # upstreams: [payments] # named upstreams mode only (see below)
         field: '$.amount' # dot-path into the tool arguments
       - match:
           tool: 'paypal_*'
         field: '$.total'
 ```
 
-| Field          | Type     | Required | Default  | Description                                                                                                                                                                                                                                 |
-| -------------- | -------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`         | string   | Yes      | —        | Unique budget identity; preserves accrued spend across config edits. Charset: `[A-Za-z0-9_-]`, ≤64.                                                                                                                                         |
-| `limit`        | number   | Yes      | —        | Maximum cumulative spend within the window. Must be positive.                                                                                                                                                                               |
-| `currency`     | string   | Yes      | —        | Display/validation currency. Whether tools actually charge in it is the operator's assertion.                                                                                                                                               |
-| `window`       | string   | Yes      | —        | A [duration](#duration-strings) (sliding window) or `session` (never replenishes on a timer).                                                                                                                                               |
-| `key`          | string   | No       | `global` | Bucket scope: one shared pot (`global`), per session, or per adapter-supplied sender.                                                                                                                                                       |
-| `on_exceed`    | string   | No       | `deny`   | What a breach does: `deny` blocks the call; `require_approval` raises one composite break-glass ticket per call. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets).                                               |
-| `approval`     | object   | No       | —        | Break-glass ticket routing (`channel`, optional `timeout` / escalation fields — same shape as rule-level `approval`). Only valid with `on_exceed: require_approval`; omitted means the dashboard channel and the global `approval.timeout`. |
-| `idle_ttl`     | duration | No       | `24h`    | Session windows only: idle time before an inactive session pot is collected.                                                                                                                                                                |
-| `contributors` | list     | Yes      | —        | Non-empty. Which tools feed the budget and which argument field carries the amount (first match wins).                                                                                                                                      |
+| Field          | Type     | Required | Default  | Description                                                                                                                                                                                                                                          |
+| -------------- | -------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`         | string   | Yes      | —        | Unique budget identity; preserves accrued spend across config edits. Charset: `[A-Za-z0-9_-]`, ≤64.                                                                                                                                                  |
+| `limit`        | number   | Yes      | —        | Maximum cumulative spend within the window. Must be positive.                                                                                                                                                                                        |
+| `currency`     | string   | Yes      | —        | Display/validation currency. Whether tools actually charge in it is the operator's assertion.                                                                                                                                                        |
+| `window`       | string   | Yes      | —        | A [duration](#duration-strings) (sliding window) or `session` (never replenishes on a timer).                                                                                                                                                        |
+| `key`          | string   | No       | `global` | Bucket scope: one shared pot (`global`), per session, or per adapter-supplied sender. A `sender_id` budget needs at least one contributor without an `upstreams` scope — see [Scoping contributors by upstream](#scoping-contributors-by-upstream).  |
+| `on_exceed`    | string   | No       | `deny`   | What a breach does: `deny` blocks the call; `require_approval` raises one composite break-glass ticket per call. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets).                                                        |
+| `approval`     | object   | No       | —        | Break-glass ticket routing (`channel`, optional `timeout` / escalation fields — same shape as rule-level `approval`). Only valid with `on_exceed: require_approval`; omitted means the dashboard channel and the global `approval.timeout`.          |
+| `idle_ttl`     | duration | No       | `24h`    | Session windows only: idle time before an inactive session pot is collected.                                                                                                                                                                         |
+| `contributors` | list     | Yes      | —        | Non-empty. Which tools feed the budget and which argument field carries the amount (first match wins). In named mode a contributor can also scope to specific upstreams — see [Scoping contributors by upstream](#scoping-contributors-by-upstream). |
 
-Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true`; `approval` is only valid with `on_exceed: require_approval`, and its `channel`/`delegates` must reference configured approval channels. Any budget with `on_exceed: require_approval` requires `dashboard.api_secret`, exactly like a `require_approval` rule. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`.
+Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true` and at least one contributor without an `upstreams` scope (see [Scoping contributors by upstream](#scoping-contributors-by-upstream)); `approval` is only valid with `on_exceed: require_approval`, and its `channel`/`delegates` must reference configured approval channels. Any budget with `on_exceed: require_approval` requires `dashboard.api_secret`, exactly like a `require_approval` rule. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`.
 
 Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors`, including their `input` conditions, preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure).
 
@@ -487,6 +604,36 @@ budgets:
 
 - **Umbrella budget.** One call feeds every budget whose contributors match, so put a coarse total cap (bare `tool` glob, no input conditions) alongside the category pot. An unlabeled call escapes the category pot but still charges the total.
 - **Category allow-list.** Rules decide before budgets deplete. `allow` rules matching the known category values above a `deny` on the bare tool force every call to declare a valid category. Constraining the field itself is the access-control layer's job; budgets stay a money gate.
+
+#### Scoping contributors by upstream
+
+With named [`upstreams`](#upstreams), a contributor's `match` block also accepts `upstreams` — the same exact-name list as a rule's [`match.upstreams`](./policies.md#upstreams), with the same validation: named mode only, every name configured, and a non-empty list. A scoped contributor participates only for MCP calls routed through a listed door:
+
+```yaml
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+
+budgets:
+  - name: payments-cap
+    limit: 100
+    currency: USD
+    window: 24h
+    contributors:
+      - match:
+          tool: 'charge_*'
+          upstreams: [payments]
+        field: '$.amount'
+```
+
+Sideband (adapter) calls carry no upstream and never match a scoped contributor. That is why a sender-keyed budget cannot be fed exclusively by upstream-scoped contributors: sideband calls — the only ones with real senders — would never feed the budget, while every MCP charge would land in the shared `unknown` pot. Validation rejects the combination, co-firing with the pre-existing rule that `sender_id` keys require the SDK sideband when that is also missing:
+
+```
+  budgets.0.key: budget key "sender_id" requires the SDK sideband (sdk.enabled: true) — sender_id is supplied by hook adapters and is absent on the MCP path.
+  budgets.0.key: budget key "sender_id" requires at least one contributor without an "upstreams" scope — upstream-scoped contributors only match MCP calls, which never carry a sender, so every charge would land in the shared "unknown" pot while sideband calls (the only ones with real senders) never feed this budget.
+```
 
 ### approval
 
@@ -595,6 +742,110 @@ An environment-provided token is acknowledged without its value (`SDK token: reu
 The tokens are scoped: `HELIO_SDK_TOKEN` authorizes the evidence/context routes, and `HELIO_ADAPTER_TOKEN` authorizes the governance routes (`/evaluate`, `/audit`, `/install-scan`, `/approval/:id/resolve`). An SDK client cannot drive policy decisions, and an adapter cannot write evidence. Both are written into `process.env` so child processes inherit them. Every sideband request except `GET /healthz` must carry the matching `Authorization: Bearer <token>`; mismatches return `401`. The sideband rejects any request carrying an `Origin` header (including `Origin: null`), blocks `OPTIONS` preflights with `403`, and rejects request bodies over 1 MiB with `413`.
 
 Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of generating one, and does not echo it to stderr. Rotation, revocation, and key management are not part of the v0.1.0 trust model; a restart with a new token is the rotation primitive.
+
+## Migrating to Named Upstreams
+
+The singular `upstream:` form stays fully supported — migrate when one
+proxy should govern more than one MCP server. The switch is a
+restart-shaped edit (both upstream forms are startup-bound — see
+[Reload boundary](#reload-boundary)), and it carries three
+operator-visible discontinuities. Plan for all three before flipping the
+config.
+
+### The client URLs move
+
+In named mode nothing is served at bare `/mcp` or `/sse`: every upstream
+gets its own doors, `/mcp/<name>` and `/sse/<name>`, and every client must
+be repointed at its upstream's door. A client left on the old URL gets
+HTTP `404` with an id-omitting JSON-RPC `-32600` envelope:
+
+```
+{"jsonrpc":"2.0","error":{"code":-32600,"message":"No MCP endpoint answers this request: this Helio serves named upstreams at /mcp/<name>."}}
+```
+
+The `/sse` variant names `/sse/<name>`. Seeing this envelope in a client's
+error log after a migration means that client is still pointed at the bare
+path.
+
+### The MCP tool buckets split
+
+Rate and spend limits with `key: tool` (the default) track buckets keyed
+`tool:<t>` in singular mode. In named mode, MCP traffic charges
+`upstream:<name>:tool:<t>` instead — one bucket per (upstream, tool) —
+while sideband (adapter) traffic keeps the unprefixed `tool:<t>` key and
+session-keyed buckets are unchanged (see
+[Rate Limits](./policies.md#rate-limits)). Two consequences land at the
+switch:
+
+- A tool-scope pot previously shared by MCP and sideband callers splits
+  into per-door pots alongside the sideband pot.
+- In-window MCP counters effectively start fresh: accrued counts live
+  under the old unprefixed keys, and the first post-migration MCP call
+  charges a new, empty `upstream:<name>:tool:<t>` bucket.
+
+### Evidence gates reject the default identity chain
+
+If any rule uses `evidence.requires` or `requires`, a named config must
+set an explicit `session.identity` chain without `legacy_header`. The
+default chain ends in `legacy_header`, so a config that omits `session:`
+entirely fails validation the moment named upstreams and evidence-gated
+rules coexist — by design:
+
+```
+  session.identity.1: session.identity includes "legacy_header" while named upstreams and evidence-gated rules ("evidence"/"requires") are configured. On the legacy relay flow the Mcp-Session-Id a client echoes was minted by the upstream itself, so with multiple upstreams a hostile server could collide session identities across doors and pollute another door's evidence gates. Remove legacy_header from session.identity and use a caller-owned source such as the default "x-helio-session-id" header.
+```
+
+The remedy is in the message — declare the chain explicitly with a
+caller-owned source:
+
+```yaml
+session:
+  identity:
+    - source: header
+      name: x-helio-session-id
+```
+
+### The mechanical steps
+
+The move itself is field-preserving: wrap the existing `upstream:` fields
+in a single-entry list, give the entry a `name`, and repoint clients.
+Leaving both forms in the file fails validation with the XOR message
+quoted under [upstreams](#upstreams). Before:
+
+```yaml
+version: '1'
+
+upstream:
+  url: 'http://localhost:8080/mcp'
+  request_timeout: '45s'
+
+dashboard:
+  enabled: false
+```
+
+After — the same fields, moved verbatim into a named entry:
+
+```yaml
+version: '1'
+
+upstreams:
+  - name: files
+    url: 'http://localhost:8080/mcp'
+    request_timeout: '45s'
+
+dashboard:
+  enabled: false
+```
+
+Both configs validate as-is with `helio validate`.
+
+### A rename is a breaking change
+
+Door paths derive from names (see
+[Per-name doors](#per-name-doors)), so renaming an entry later repeats the
+first two discontinuities for that upstream: its clients' URLs break, and
+its limiter buckets and audit attribution re-key under the new name going
+forward. Choose names as permanent public identifiers, not display labels.
 
 ## Duration Strings
 
@@ -764,12 +1015,19 @@ Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections 
 | `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
 | `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |
 | `upstream.*`                   | No               | Upstream transport/client initialized at startup.                                                                                      |
+| `upstreams.*`                  | No               | Per-entry upstream transports/clients and door mounts initialized at startup; any edit to the named list logs the warning below.       |
 | `listen.*`                     | No               | Proxy listener socket bound at startup.                                                                                                |
 | `dashboard.*`                  | No               | Dashboard server/session settings initialized at startup.                                                                              |
 | `approval.*`                   | No               | Router/channels/timeouts initialized at startup.                                                                                       |
 | `audit.*`                      | No               | SQLite store path/settings initialized at startup.                                                                                     |
 | `sdk.*`                        | No               | Sideband listener/token behavior initialized at startup.                                                                               |
 
-When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields.
+When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields:
+
+```
+[helio] Restart required: non-reloadable fields changed (upstreams). The running process still uses startup values for these fields.
+```
+
+A mode switch between `upstream:` and `upstreams:` reports both labels in that warning (`upstream, upstreams`) — the edit removes one section and adds the other, and naming only one would misreport half the change.
 
 The reloadable and startup-bound halves cannot contradict each other: a reload whose policies or budgets reference approval routing that only exists in the NEW file — a channel added to `approval.channels` in the same edit, or dashboard-routed break-glass while the running process has no dashboard server — is rejected as a whole (`Config reload failed (keeping current configuration)`), because the running approval registry is startup-bound and the referenced channel could never notify or resolve a ticket. Apply such changes with a restart. The reverse holds at startup: a config whose rules, budgets, or `require_approval` escalations route approvals to the dashboard while `dashboard.enabled` is false is rejected by `helio validate` and `helio start` — it can no longer boot into a state every reload would reject.
