@@ -74,7 +74,7 @@ const protocolVersionSchema = z.enum(['auto', '2025-06-18', '2026-07-28'])
 
 const upstreamObjectSchema = z
   .object({
-    url: z.string(),
+    url: z.string().optional(),
     transport: transportSchema.default('streamable-http'),
     protocol_version: protocolVersionSchema.default('auto'),
     command: z.string().optional(),
@@ -98,6 +98,14 @@ function upstreamEntryChecks(
       code: 'custom',
       path: ['command'],
       message: '"command" is required when transport is "stdio"',
+    })
+  }
+
+  if (data.transport !== 'stdio' && data.url === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['url'],
+      message: `"url" is required when transport is "${data.transport}"`,
     })
   }
 
@@ -1433,7 +1441,7 @@ export type NamedHelioConfig = z.output<typeof namedConfigSchema>
 /**
  * Route a raw config document to exactly one mode arm (issue #293). A plain
  * z.union cannot do this job: zod's arm selection is heuristic, and a common
- * mistake like a named entry missing `url` surfaces as a buried
+ * mistake like a named entry missing `name` surfaces as a buried
  * "(top level): Invalid input" instead of its real issue. The dispatch owns
  * the exactly-one-of contract and forwards the chosen arm's issues verbatim,
  * so every error keeps its real path and message.

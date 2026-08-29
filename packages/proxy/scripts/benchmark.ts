@@ -328,7 +328,7 @@ async function main(): Promise<void> {
   const config1 = makeConfig({
     upstream: { url: upstreamUrl, transport: 'streamable-http' },
   })
-  const forwarder1 = new UpstreamForwarder({ url: config1.upstream.url })
+  const forwarder1 = new UpstreamForwarder({ url: config1.upstream.url as string })
   const app1 = createApp(config1, forwarder1)
   const proxy1 = startOnDynamicPort(app1)
   const proxyUrl1 = `http://127.0.0.1:${String(proxy1.port)}/mcp`
@@ -363,7 +363,7 @@ async function main(): Promise<void> {
       ],
     },
   })
-  const forwarder2 = new UpstreamForwarder({ url: config2.upstream.url })
+  const forwarder2 = new UpstreamForwarder({ url: config2.upstream.url as string })
   const { policy } = compilePolicies(config2.policies)
   const auditStore = new AuditStore({
     path: ':memory:',

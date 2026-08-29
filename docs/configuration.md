@@ -131,7 +131,7 @@ merged across upstreams — each named upstream is served at its own
 
 | Field              | Type     | Required    | Default           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------ | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `url`              | string   | Yes         | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`).                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `url`              | string   | Conditional | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`). **Required** when `transport` is `streamable-http` or `sse` (the default is `streamable-http`); optional and ignored for `stdio`.                                                                                                                                                                                                                                                                                        |
 | `transport`        | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio`.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `protocol_version` | string   | No          | `auto`            | MCP revision spoken to the upstream: `auto` (probe and detect, see [era detection](#upstream-mcp-era-detection)), `2025-06-18` (pin legacy), or `2026-07-28` (pin modern; requires `transport: streamable-http`). A dated pin trusts the operator and skips era probing entirely — it exists for upstreams the probe cannot classify, such as a modern-only server gated behind per-client `Authorization` pass-through, where the probe is refused forever while relayed requests succeed. |
 | `command`          | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -155,10 +155,9 @@ upstream:
   transport: stdio
   command: npx
   args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']
-  url: 'stdio://'
 ```
 
-> **Note:** The `url` field is required by the schema but ignored when `transport` is `stdio`. Any value (e.g. `stdio://`) works as a placeholder.
+> **Note:** The `url` field may be omitted when `transport` is `stdio`; a present value (e.g. a legacy `stdio://` placeholder) is accepted and ignored.
 
 #### Static request headers
 
@@ -260,23 +259,20 @@ Each entry accepts every field of the [`upstream`](#upstream) section with
 identical semantics, defaults, and validation — the entry schema reuses the
 singular schema and its refinements verbatim — plus `name`:
 
-| Field              | Type     | Required    | Default           | Description                                                                                                                                                                                               |
-| ------------------ | -------- | ----------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`             | string   | Yes         | —                 | Unique entry name; becomes the door path (`/mcp/<name>`, `/sse/<name>`) and the limiter/audit attribution key. Letters, digits, `_` and `-` only; 1–64 characters.                                        |
-| `url`              | string   | Yes         | —                 | URL of this entry's upstream MCP server (e.g. `http://localhost:8080/mcp`).                                                                                                                               |
-| `transport`        | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio` — identical to [`upstream.transport`](#upstream).                                                                                                |
-| `protocol_version` | string   | No          | `auto`            | MCP revision spoken to this entry's upstream — identical to [`upstream.protocol_version`](#upstream). Each entry probes, pins, and caches its own era (see [era detection](#upstream-mcp-era-detection)). |
-| `command`          | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                                                                                |
-| `args`             | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                                                                                                                                                           |
-| `connect_timeout`  | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                                                                                                                                                        |
-| `request_timeout`  | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                                                                                                                                                              |
-| `forward_headers`  | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward to this entry's upstream.                                                                                                                           |
-| `headers`          | object   | No          | `{}`              | Static headers sent on every request to this entry's upstream — same `${VAR}` interpolation and reserved-header rejections as [`upstream.headers`](#static-request-headers).                              |
+| Field              | Type     | Required    | Default           | Description                                                                                                                                                                                                   |
+| ------------------ | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | string   | Yes         | —                 | Unique entry name; becomes the door path (`/mcp/<name>`, `/sse/<name>`) and the limiter/audit attribution key. Letters, digits, `_` and `-` only; 1–64 characters.                                            |
+| `url`              | string   | Conditional | —                 | URL of this entry's upstream MCP server (e.g. `http://localhost:8080/mcp`). **Required** when `transport` is `streamable-http` or `sse` (the default is `streamable-http`); optional and ignored for `stdio`. |
+| `transport`        | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio` — identical to [`upstream.transport`](#upstream).                                                                                                    |
+| `protocol_version` | string   | No          | `auto`            | MCP revision spoken to this entry's upstream — identical to [`upstream.protocol_version`](#upstream). Each entry probes, pins, and caches its own era (see [era detection](#upstream-mcp-era-detection)).     |
+| `command`          | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                                                                                    |
+| `args`             | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                                                                                                                                                               |
+| `connect_timeout`  | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                                                                                                                                                            |
+| `request_timeout`  | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                                                                                                                                                                  |
+| `forward_headers`  | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward to this entry's upstream.                                                                                                                               |
+| `headers`          | object   | No          | `{}`              | Static headers sent on every request to this entry's upstream — same `${VAR}` interpolation and reserved-header rejections as [`upstream.headers`](#static-request-headers).                                  |
 
-> **Note:** As in the singular form, an entry's `url` is required by the
-> schema but ignored when `transport` is `stdio`. Any value (e.g. `stdio://`)
-> works as a placeholder. Issue #313 tracks lifting the requirement for
-> stdio entries.
+> **Note:** As in the singular form, a stdio entry may omit `url`.
 
 Names may only contain letters, digits, `_` and `-` (1–64 characters), must
 be unique within the list, and the list itself must be non-empty. The
@@ -908,7 +904,7 @@ On failure, Helio reports the exact path and error:
 
 ```
 Invalid config: Invalid configuration (1 error)
-  upstream.url: Invalid input: expected string, received undefined
+  upstream.url: "url" is required when transport is "streamable-http"
 ```
 
 The whole file is strict, at every level: an unknown or misplaced key — a `rules:` block at the top level instead of nested under `policies:`, a singular `policy:` or `budget:` typo, a misspelled field inside a section like `upstream.request_timout` or `dashboard.api_secrett`, or an unknown key inside an approval channel entry — is a hard error naming the key and its path, not a silently ignored no-op. `helio start` refuses to boot on such a config, and a hot reload that introduces one is rejected while the proxy keeps its current configuration (see [Hot Reload](#hot-reload)).

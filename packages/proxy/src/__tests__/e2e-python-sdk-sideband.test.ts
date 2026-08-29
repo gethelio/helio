@@ -91,7 +91,7 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
       },
     })
 
-    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const { policy } = compilePolicies(config.policies)
     const governed = new GovernedForwarder(forwarder, policy, { evidenceStore })
     const app = createApp(config, governed)
