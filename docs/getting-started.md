@@ -129,7 +129,7 @@ The final `Watching` line prints once the config watcher is armed — an edit to
 
 ## Step 4: Point Your MCP Client at Helio
 
-Instead of connecting your MCP client directly to the upstream server, point it at the proxy on `http://localhost:3000/mcp`.
+Instead of connecting your MCP client directly to the upstream server, point it at the proxy on `http://localhost:3000/mcp`. With a named [`upstreams:`](./configuration.md#upstreams) list, each upstream is served at its own door instead — point the client at `http://localhost:3000/mcp/<name>`.
 
 **Claude Desktop** (`claude_desktop_config.json`):
 
@@ -170,9 +170,9 @@ The dashboard has six tabs:
 - **Feed** — Real-time stream of tool calls and policy decisions
 - **Approvals** — Pending approval queue (for `require_approval` rules)
 - **Audit** — Searchable log of every recorded action with filters
-- **Limits** — Current rate and spend limit status per tool
+- **Limits** — Current rate and spend limit status per tool. With named upstreams, MCP tool gauges group by upstream door, while unprefixed keys (session, sideband, and singular tool buckets) stay in a leading block
 - **Budgets** — Named cross-tool spend pots with live depletion and the spend ledger
-- **Analytics** — Charts showing action volume, decision breakdown, and top tools
+- **Analytics** — Charts showing action volume, decision breakdown, and top tools. Each top-tools row is a (tool, upstream) pair — a same-named tool on two named upstreams stays two rows — and upstream is null in singular mode
 
 ## Step 6: Send a Test Tool Call
 
