@@ -1,0 +1,79 @@
+# Multi-upstream configuration
+#
+# Two named upstreams served at their own doors (/mcp/files and
+# /mcp/payments), one cross-cutting deny rule, one rate limit scoped
+# to the payments door, and one upstream-scoped budget contributor.
+# See README.md for the walkthrough.
+
+version: '1'
+
+upstreams:
+  - name: files
+    url: 'http://localhost:8080/mcp'
+    transport: streamable-http
+  - name: payments
+    url: 'http://localhost:8081/mcp'
+    transport: streamable-http
+
+listen:
+  port: 3000
+  host: '127.0.0.1'
+
+policies:
+  default: allow
+  rules:
+    # No upstreams scope: applies on every door.
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny
+      feedback:
+        message: 'Destructive operations are blocked by policy.'
+        suggestion: 'Use a non-destructive alternative or request manual action.'
+
+    # Scoped: matches only calls routed through /mcp/payments.
+    - name: rate-limit-payments-door
+      match:
+        upstreams: [payments]
+        tool: 'create_payment'
+      action: rate_limit
+      limits:
+        max_calls: 3
+        window: 1m
+        key: tool
+      feedback:
+        message: 'The payments door is rate limited.'
+        suggestion: 'Wait for the window to reset before retrying.'
+
+budgets:
+  # Only stripe_charge calls that arrive through /mcp/payments feed
+  # this pot; the same tool on /mcp/files does not.
+  - name: payments-door-cap
+    limit: 500
+    currency: USD
+    window: 24h
+    on_exceed: deny
+    contributors:
+      - match:
+          tool: 'stripe_charge'
+          upstreams: [payments]
+        field: '$.amount'
+
+approval:
+  timeout: 300s
+  default_on_timeout: deny
+  channels:
+    - type: dashboard
+
+audit:
+  storage: sqlite
+  path: ./helio-audit.db
+  retention: 90d
+  include_responses: true
+
+dashboard:
+  enabled: true
+  port: 3100
+  # Local demo mode: allow unauthenticated dashboard access on loopback only.
+  allow_open_mode: true

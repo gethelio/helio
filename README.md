@@ -363,6 +363,7 @@ Ready-made configurations for common patterns:
 - **[Slack Approvals](./examples/slack-approvals/)**: Route destructive actions to Slack
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
 - **[Budgets](./examples/budgets/)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
+- **[Multi-Upstream](./examples/multi-upstream/)**: Two named upstreams behind one proxy, with a door-scoped rate limit and budget
 
 ## Contributing
 

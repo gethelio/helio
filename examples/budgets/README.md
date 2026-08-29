@@ -51,7 +51,7 @@ This starts:
 2. The Helio proxy on port 3000
 3. The dashboard on port 3100
 
-> **Note:** All examples use the same ports (8080, 3000, 3100). Stop any running example before starting another.
+> **Note:** This example uses ports 8080, 3000, and 3100. Stop any running example before starting another.
 
 Open [http://localhost:3100](http://localhost:3100), log in with the secret from `.env`, and go to the **Budgets** tab. Both pots are already there at full headroom — configured budgets appear before any spend.
 

@@ -365,6 +365,7 @@ Ready-made configurations for common patterns:
 - **[Slack Approvals](https://github.com/gethelio/helio/tree/main/examples/slack-approvals)**: Route destructive actions to Slack
 - **[Spend Limits](https://github.com/gethelio/helio/tree/main/examples/spend-limits)**: Govern payment tool usage
 - **[Budgets](https://github.com/gethelio/helio/tree/main/examples/budgets)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
+- **[Multi-Upstream](https://github.com/gethelio/helio/tree/main/examples/multi-upstream)**: Two named upstreams behind one proxy, with a door-scoped rate limit and budget
 
 ## Contributing
 

@@ -269,4 +269,4 @@ The quickstart above is safe by default on a single-operator workstation. Before
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard
 - [Audit Trail](./audit.md) — What's recorded, how to search, and how to export
-- [Examples](../examples/) — Four runnable configurations: basic, slack-approvals, spend-limits, budgets
+- [Examples](../examples/) — Five runnable configurations: basic, slack-approvals, spend-limits, budgets, multi-upstream

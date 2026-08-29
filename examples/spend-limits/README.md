@@ -33,7 +33,7 @@ This starts:
 2. The Helio proxy on port 3000
 3. The dashboard on port 3100
 
-> **Note:** All examples use the same ports (8080, 3000, 3100). Stop any running example before starting another.
+> **Note:** This example uses ports 8080, 3000, and 3100. Stop any running example before starting another.
 >
 > This example enables dashboard local open mode (`dashboard.allow_open_mode: true`) so `pnpm start` works without secret setup. Keep this loopback-only.
 

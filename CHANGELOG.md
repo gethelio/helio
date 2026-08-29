@@ -36,6 +36,17 @@ Maintainer notes:
 
 ### Added
 
+- Multi-upstream documentation and example (#298): the configuration
+  reference gains a full `upstreams` section (entry shape, name rules,
+  the mode XOR, per-name doors and their 404 envelope, mount
+  permanence, the many-upstreams warning) and a Migrating to Named
+  Upstreams guide leading with the three operator-visible
+  discontinuities of the switch; the policy guide documents
+  `match.upstreams` and budget contributor scoping with every
+  dead-combination rejection quoted; both READMEs drop the
+  single-upstream limitation line; and `examples/multi-upstream/`
+  ships a runnable two-door example with a door-scoped rate limit
+  and budget.
 - Dashboard upstream attribution (#297): named multi-upstream data
   lights up across the pane of glass. The Audit view gains an
   upstream column, the Feed's action cards a door qualifier, and
