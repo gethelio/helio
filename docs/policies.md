@@ -559,7 +559,7 @@ The [configuration reference](./configuration.md#budgets) has the full schema an
 
 ### How a budget depletes
 
-A call participates in a budget when a contributor's `match.tool` glob matches the tool name and every `match.input` condition holds (absent `input` means the glob alone decides); the amount comes from the first matching contributor's `field` dot-path, in config order (first match wins over the combined predicate, like rules). One call depletes **every** budget whose contributors match, so overlapping caps compose: a $50 session pot and a $500 daily pot both charge, and whichever runs out first stops the call.
+A call participates in a budget when a contributor's `match.tool` glob matches the tool name, every `match.input` condition holds, and — if the contributor is scoped with `upstreams` — the call arrived through a listed door (absent `input` and `upstreams`, the glob alone decides; see [Scoping contributors by upstream](./configuration.md#scoping-contributors-by-upstream)); the amount comes from the first matching contributor's `field` dot-path, in config order (first match wins over the combined predicate, like rules). One call depletes **every** budget whose contributors match, so overlapping caps compose: a $50 session pot and a $500 daily pot both charge, and whichever runs out first stops the call.
 
 A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`, and nothing is consumed. This is the honest boundary of the feature: budgets govern tools that expose what they are spending in an argument field. Fixed-cost tools without an amount field are `rate_limit` territory, and costs metered downstream after the call are a stated gap.
 
