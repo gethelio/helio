@@ -552,25 +552,26 @@ budgets:
     contributors:
       - match:
           tool: 'stripe_*' # picomatch glob, same engine as match.tool
+          # upstreams: [payments] # named upstreams mode only (see below)
         field: '$.amount' # dot-path into the tool arguments
       - match:
           tool: 'paypal_*'
         field: '$.total'
 ```
 
-| Field          | Type     | Required | Default  | Description                                                                                                                                                                                                                                 |
-| -------------- | -------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`         | string   | Yes      | —        | Unique budget identity; preserves accrued spend across config edits. Charset: `[A-Za-z0-9_-]`, ≤64.                                                                                                                                         |
-| `limit`        | number   | Yes      | —        | Maximum cumulative spend within the window. Must be positive.                                                                                                                                                                               |
-| `currency`     | string   | Yes      | —        | Display/validation currency. Whether tools actually charge in it is the operator's assertion.                                                                                                                                               |
-| `window`       | string   | Yes      | —        | A [duration](#duration-strings) (sliding window) or `session` (never replenishes on a timer).                                                                                                                                               |
-| `key`          | string   | No       | `global` | Bucket scope: one shared pot (`global`), per session, or per adapter-supplied sender.                                                                                                                                                       |
-| `on_exceed`    | string   | No       | `deny`   | What a breach does: `deny` blocks the call; `require_approval` raises one composite break-glass ticket per call. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets).                                               |
-| `approval`     | object   | No       | —        | Break-glass ticket routing (`channel`, optional `timeout` / escalation fields — same shape as rule-level `approval`). Only valid with `on_exceed: require_approval`; omitted means the dashboard channel and the global `approval.timeout`. |
-| `idle_ttl`     | duration | No       | `24h`    | Session windows only: idle time before an inactive session pot is collected.                                                                                                                                                                |
-| `contributors` | list     | Yes      | —        | Non-empty. Which tools feed the budget and which argument field carries the amount (first match wins).                                                                                                                                      |
+| Field          | Type     | Required | Default  | Description                                                                                                                                                                                                                                          |
+| -------------- | -------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`         | string   | Yes      | —        | Unique budget identity; preserves accrued spend across config edits. Charset: `[A-Za-z0-9_-]`, ≤64.                                                                                                                                                  |
+| `limit`        | number   | Yes      | —        | Maximum cumulative spend within the window. Must be positive.                                                                                                                                                                                        |
+| `currency`     | string   | Yes      | —        | Display/validation currency. Whether tools actually charge in it is the operator's assertion.                                                                                                                                                        |
+| `window`       | string   | Yes      | —        | A [duration](#duration-strings) (sliding window) or `session` (never replenishes on a timer).                                                                                                                                                        |
+| `key`          | string   | No       | `global` | Bucket scope: one shared pot (`global`), per session, or per adapter-supplied sender. A `sender_id` budget needs at least one contributor without an `upstreams` scope — see [Scoping contributors by upstream](#scoping-contributors-by-upstream).  |
+| `on_exceed`    | string   | No       | `deny`   | What a breach does: `deny` blocks the call; `require_approval` raises one composite break-glass ticket per call. See [Budget break-glass tickets](./approvals.md#budget-break-glass-tickets).                                                        |
+| `approval`     | object   | No       | —        | Break-glass ticket routing (`channel`, optional `timeout` / escalation fields — same shape as rule-level `approval`). Only valid with `on_exceed: require_approval`; omitted means the dashboard channel and the global `approval.timeout`.          |
+| `idle_ttl`     | duration | No       | `24h`    | Session windows only: idle time before an inactive session pot is collected.                                                                                                                                                                         |
+| `contributors` | list     | Yes      | —        | Non-empty. Which tools feed the budget and which argument field carries the amount (first match wins). In named mode a contributor can also scope to specific upstreams — see [Scoping contributors by upstream](#scoping-contributors-by-upstream). |
 
-Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true`; `approval` is only valid with `on_exceed: require_approval`, and its `channel`/`delegates` must reference configured approval channels. Any budget with `on_exceed: require_approval` requires `dashboard.api_secret`, exactly like a `require_approval` rule. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`.
+Validation: budget names must be unique; `window: session` requires `key: session` or `key: sender_id`; `idle_ttl` is only valid with `window: session`; `key: sender_id` requires `sdk.enabled: true` and at least one contributor without an `upstreams` scope (see [Scoping contributors by upstream](#scoping-contributors-by-upstream)); `approval` is only valid with `on_exceed: require_approval`, and its `channel`/`delegates` must reference configured approval channels. Any budget with `on_exceed: require_approval` requires `dashboard.api_secret`, exactly like a `require_approval` rule. A matched contributor whose amount field is missing, non-numeric, negative, or non-finite fails closed — the call is denied regardless of `on_exceed`.
 
 Budget state lives in buckets keyed `budget:<name>:<scope>` — visible in audit records' `evidence_chain.budgets`. Budgets hot-reload by name identity: edits to `contributors`, including their `input` conditions, preserve accrued spend (they do not change what was already spent), while a change to `limit`, `currency`, `window`, or `key` resets the budget's buckets (a different pool or scope structure).
 
@@ -603,6 +604,36 @@ budgets:
 
 - **Umbrella budget.** One call feeds every budget whose contributors match, so put a coarse total cap (bare `tool` glob, no input conditions) alongside the category pot. An unlabeled call escapes the category pot but still charges the total.
 - **Category allow-list.** Rules decide before budgets deplete. `allow` rules matching the known category values above a `deny` on the bare tool force every call to declare a valid category. Constraining the field itself is the access-control layer's job; budgets stay a money gate.
+
+#### Scoping contributors by upstream
+
+With named [`upstreams`](#upstreams), a contributor's `match` block also accepts `upstreams` — the same exact-name list as a rule's [`match.upstreams`](./policies.md#upstreams), with the same validation: named mode only, every name configured, and a non-empty list. A scoped contributor participates only for MCP calls routed through a listed door:
+
+```yaml
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+
+budgets:
+  - name: payments-cap
+    limit: 100
+    currency: USD
+    window: 24h
+    contributors:
+      - match:
+          tool: 'charge_*'
+          upstreams: [payments]
+        field: '$.amount'
+```
+
+Sideband (adapter) calls carry no upstream and never match a scoped contributor. That is why a sender-keyed budget cannot be fed exclusively by upstream-scoped contributors: sideband calls — the only ones with real senders — would never feed the budget, while every MCP charge would land in the shared `unknown` pot. Validation rejects the combination, co-firing with the pre-existing rule that `sender_id` keys require the SDK sideband when that is also missing:
+
+```
+  budgets.0.key: budget key "sender_id" requires the SDK sideband (sdk.enabled: true) — sender_id is supplied by hook adapters and is absent on the MCP path.
+  budgets.0.key: budget key "sender_id" requires at least one contributor without an "upstreams" scope — upstream-scoped contributors only match MCP calls, which never carry a sender, so every charge would land in the shared "unknown" pot while sideband calls (the only ones with real senders) never feed this budget.
+```
 
 ### approval
 
