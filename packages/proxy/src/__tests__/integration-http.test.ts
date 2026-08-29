@@ -27,7 +27,7 @@ describe('Streamable HTTP integration', () => {
     })
 
     const forwarder = new StreamableHttpForwarder({
-      url: config.upstream.url,
+      url: config.upstream.url as string,
       headers: {},
     })
 
@@ -191,7 +191,7 @@ describe('Streamable HTTP integration', () => {
       },
     })
 
-    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const app = createApp(config, forwarder)
     const badProxy = startOnDynamicPort(app)
 
@@ -227,7 +227,7 @@ describe('Streamable HTTP integration', () => {
         transport: 'streamable-http',
       },
     })
-    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const forwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const app = createApp(config, forwarder)
     const proxy = startOnDynamicPort(app)
 
@@ -281,7 +281,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
       },
       policies: policiesConfig as ReturnType<typeof makeConfig>['policies'],
     })
-    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const { policy } = compilePolicies(config.policies)
     const governed = new GovernedForwarder(rawForwarder, policy, {
       environment: config.environment,
@@ -445,7 +445,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
       },
       policies: policiesConfig as ReturnType<typeof makeConfig>['policies'],
     })
-    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const { policy } = compilePolicies(config.policies)
 
     const auditStore = new AuditStore({

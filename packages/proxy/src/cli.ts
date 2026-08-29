@@ -627,13 +627,13 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       if (entry.transport === 'stdio') {
         console.error(`Upstream[${entry.name}]: ${entry.command ?? ''} (stdio)`)
       } else {
-        console.error(`Upstream[${entry.name}]: ${entry.url} (${entry.transport})`)
+        console.error(`Upstream[${entry.name}]: ${entry.url ?? ''} (${entry.transport})`)
       }
     }
   } else if (config.upstream.transport === 'stdio') {
     console.error(`Upstream: ${config.upstream.command ?? ''} (stdio)`)
   } else {
-    console.error(`Upstream: ${config.upstream.url} (${config.upstream.transport})`)
+    console.error(`Upstream: ${config.upstream.url ?? ''} (${config.upstream.transport})`)
   }
   console.error(`Audit: ${config.audit.path} (retention: ${config.audit.retention})`)
   if (sidebandHandle) {

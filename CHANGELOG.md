@@ -159,6 +159,16 @@ Maintainer notes:
 
 ### Changed
 
+- `upstream.url` is now optional when `transport` is `stdio` (#313):
+  the stdio forwarder spawns `command` and never reads a URL, so a
+  stdio upstream (singular or any named `upstreams:` entry) no longer
+  needs a placeholder. A present value is still accepted and ignored,
+  so existing placeholder-carrying configs validate unchanged. The
+  HTTP transports still require the field, and a missing `url` now
+  fails with a message naming the transport
+  (`"url" is required when transport is "streamable-http"`). For
+  library embedders, the inferred `HelioConfig` upstream shape marks
+  `url` optional.
 - First use of the ratified additive-migration path (#292): a v0.12.0
   audit database missing only the new `upstream` column is migrated in
   place on first open with a single `ALTER TABLE` and one stderr

@@ -53,7 +53,7 @@ function createGovernedProxyWithAudit(
     environment: options?.environment,
   })
 
-  const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+  const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
   const { policy } = compilePolicies(config.policies)
 
   const auditStore = new AuditStore({
@@ -365,7 +365,7 @@ policies:
       upstream: { url: upstreamUrl, transport: 'streamable-http' },
       policies: { default: 'allow', rules: [] },
     })
-    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url })
+    const rawForwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const { policy } = compilePolicies(config.policies)
 
     auditStore = new AuditStore({

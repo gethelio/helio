@@ -169,7 +169,6 @@ function writeStdioStartConfig(requestTimeout: string): {
     `
 version: "1"
 upstream:
-  url: "http://127.0.0.1:1/mcp"
   transport: stdio
   command: "node"
   args:
@@ -596,6 +595,11 @@ dashboard:
           ['upstreams.0.command: "command" is required when transport is "stdio"'],
         ],
         [
+          'entry missing url on the default transport',
+          `version: "1"\nupstreams:\n  - name: files\n${FOOTER}`,
+          ['upstreams.0.url: "url" is required when transport is "streamable-http"'],
+        ],
+        [
           'rule naming an unknown upstream',
           `${NAMED_HEADER}\npolicies:\n  rules:\n    - match:\n        tool: "*"\n        upstreams: [ghost]\n      action: deny\n${FOOTER}`,
           ['policies.rules.0.match.upstreams.0: Rule names upstream "ghost"'],
@@ -777,9 +781,8 @@ dashboard:
       const configPath = join(dir, 'helio.yaml')
 
       // upstream present but upstream.url omitted → exactly one error, on the
-      // scalar. Pins the rendered CLI output so a future Zod message change (as
-      // happened on the v3→v4 upgrade) fails here instead of silently drifting
-      // from docs/configuration.md.
+      // scalar. Pins the rendered CLI output so a future message change fails
+      // here instead of silently drifting from docs/configuration.md.
       writeFileSync(
         configPath,
         'version: "1"\nupstream:\n  transport: streamable-http\ndashboard:\n  enabled: false\n',
@@ -789,7 +792,9 @@ dashboard:
         const { code, stderr } = await runCli(['validate', '-c', configPath])
         expect(code).toBe(1)
         expect(stderr).toContain('Invalid config: Invalid configuration (1 error)')
-        expect(stderr).toContain('upstream.url: Invalid input: expected string, received undefined')
+        expect(stderr).toContain(
+          'upstream.url: "url" is required when transport is "streamable-http"',
+        )
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -2234,6 +2239,11 @@ audit:
         // If stdio ignored request_timeout, this would hang near the default
         // 30s and trip the 5s client timeout above.
         expect(elapsedMs).toBeLessThan(4_000)
+
+        // The url-less singular summary line (issue #313). It prints after the
+        // listen banner, so it can race the ready marker — asserted here, after
+        // the health wait, where stderr has kept accumulating.
+        expect(stderr).toContain('Upstream: node (stdio)')
       } finally {
         if (child.exitCode === null && child.signalCode === null) {
           child.kill('SIGTERM')

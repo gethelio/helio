@@ -314,6 +314,51 @@ describe('helioConfigSchema', () => {
         },
       ])
     })
+
+    it('emits every co-firable issue family, url first, for a url-less sse upstream (issue #313)', () => {
+      // The HTTP-side sibling of the pin above: url and protocol_version can
+      // co-fire only on sse (the modern pin never fires on streamable-http),
+      // so this is the one fixture that observes the url arm's position among
+      // every family it can co-fire with.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            transport: 'sse',
+            protocol_version: '2026-07-28',
+            forward_headers: ['nope'],
+            headers: { 'content-type': 'y' },
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(
+        result.error.issues.map((i) => ({ code: i.code, path: i.path, message: i.message })),
+      ).toStrictEqual([
+        {
+          code: 'custom',
+          path: ['upstream', 'url'],
+          message: '"url" is required when transport is "sse"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'protocol_version'],
+          message:
+            'protocol_version "2026-07-28" requires transport "streamable-http" — ' +
+            'the SSE upstream transport is the deprecated legacy transport.',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'forward_headers', 0],
+          message: 'Forwarded caller headers must start with "x-"',
+        },
+        {
+          code: 'custom',
+          path: ['upstream', 'headers', 'content-type'],
+          message: 'upstream.headers must not set reserved header "content-type"',
+        },
+      ])
+    })
   })
 
   describe('upstreamNameSchema (issue #293)', () => {
@@ -652,15 +697,39 @@ describe('helioConfigSchema', () => {
     })
 
     it('forwards singular-arm issues verbatim through the dispatch', () => {
-      // The singular arm's error shape is the pre-#293 one — pinned so the
-      // dispatch encoding cannot bury or reword singular errors.
+      // Pinned so the dispatch encoding cannot bury or reword singular errors.
       const result = helioConfigSchema.safeParse(minimalConfig({ upstream: {} }))
       expect(result.success).toBe(false)
       if (result.success) return
       expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
         {
           path: ['upstream', 'url'],
-          message: 'Invalid input: expected string, received undefined',
+          message: '"url" is required when transport is "streamable-http"',
+        },
+      ])
+    })
+
+    it('accepts a stdio entry with command and no url (issue #313)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [{ name: 'files', transport: 'stdio', command: 'node' }],
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('forwards the named sse missing-url issue with its full path (issue #313)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [{ name: 'files', transport: 'sse' }],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'url'],
+          message: '"url" is required when transport is "sse"',
         },
       ])
     })
@@ -1285,9 +1354,36 @@ describe('helioConfigSchema', () => {
   // -------------------------------------------------------------------------
 
   describe('upstream', () => {
-    it('rejects missing url', () => {
+    it('rejects missing url for sse transport with the transport-naming message (issue #313)', () => {
       const result = helioConfigSchema.safeParse(minimalConfig({ upstream: { transport: 'sse' } }))
       expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstream', 'url'],
+          message: '"url" is required when transport is "sse"',
+        },
+      ])
+    })
+
+    it('reports both the missing url and sibling violations in one parse (issue #313)', () => {
+      // Pre-#313 the missing-url failure happened at base object parse, which
+      // masked every superRefine family until the url was supplied.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ upstream: { forward_headers: ['nope'] } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      const issues = result.error.issues.map((i) => ({ path: i.path, message: i.message }))
+      expect(issues).toHaveLength(2)
+      expect(issues).toContainEqual({
+        path: ['upstream', 'url'],
+        message: '"url" is required when transport is "streamable-http"',
+      })
+      expect(issues).toContainEqual({
+        path: ['upstream', 'forward_headers', 0],
+        message: 'Forwarded caller headers must start with "x-"',
+      })
     })
 
     it('rejects stdio transport without command', () => {
@@ -1311,6 +1407,55 @@ describe('helioConfigSchema', () => {
         }),
       )
       expect(result.success).toBe(true)
+    })
+
+    it('accepts stdio transport with command and no url (issue #313)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            transport: 'stdio',
+            command: 'node',
+            args: ['server.js'],
+          },
+        }),
+      )
+      expect(result.success).toBe(true)
+    })
+
+    it('reports the missing command, not url, for a stdio upstream with neither (issue #313)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ upstream: { transport: 'stdio' } }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstream', 'command'],
+          message: '"command" is required when transport is "stdio"',
+        },
+      ])
+    })
+
+    it('reports sibling violations for a url-less stdio upstream (issue #313)', () => {
+      // The operator is told about the real problem, never about a field the
+      // stdio transport does not use.
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: {
+            transport: 'stdio',
+            command: 'node',
+            forward_headers: ['nope'],
+          },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstream', 'forward_headers', 0],
+          message: 'Forwarded caller headers must start with "x-"',
+        },
+      ])
     })
 
     it('accepts allowlisted forwarded caller headers that start with x-', () => {

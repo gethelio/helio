@@ -204,7 +204,7 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 ```yaml
 version: '1'
 upstream:
-  url: 'http://localhost:8080/mcp' # required
+  url: 'http://localhost:8080/mcp' # required when transport is streamable-http or sse
   transport: 'streamable-http' # streamable-http | sse | stdio
   command: 'node' # required when transport is stdio
   args: ['server.js'] # stdio only

@@ -27,7 +27,7 @@ export async function createForwarderFromConfig(
       // upstream.connect_timeout does not apply to this transport — the
       // initialize handshake is bounded by request_timeout instead.
       const http = new StreamableHttpForwarder({
-        url: config.upstream.url,
+        url: config.upstream.url as string,
         headers: config.upstream.headers,
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
         protocolVersion: config.upstream.protocol_version,
@@ -47,7 +47,7 @@ export async function createForwarderFromConfig(
     }
     case 'sse': {
       const sse = new SseUpstreamForwarder({
-        url: config.upstream.url,
+        url: config.upstream.url as string,
         headers: config.upstream.headers,
         connectTimeoutMs: parseDuration(config.upstream.connect_timeout),
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
