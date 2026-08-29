@@ -712,6 +712,110 @@ The tokens are scoped: `HELIO_SDK_TOKEN` authorizes the evidence/context routes,
 
 Operators who need a stable token across restarts can set `HELIO_SDK_TOKEN` explicitly in the proxy's environment — the proxy respects a pre-set value instead of generating one, and does not echo it to stderr. Rotation, revocation, and key management are not part of the v0.1.0 trust model; a restart with a new token is the rotation primitive.
 
+## Migrating to Named Upstreams
+
+The singular `upstream:` form stays fully supported — migrate when one
+proxy should govern more than one MCP server. The switch is a
+restart-shaped edit (both upstream forms are startup-bound — see
+[Reload boundary](#reload-boundary)), and it carries three
+operator-visible discontinuities. Plan for all three before flipping the
+config.
+
+### The client URLs move
+
+In named mode nothing is served at bare `/mcp` or `/sse`: every upstream
+gets its own doors, `/mcp/<name>` and `/sse/<name>`, and every client must
+be repointed at its upstream's door. A client left on the old URL gets
+HTTP `404` with an id-omitting JSON-RPC `-32600` envelope:
+
+```
+{"jsonrpc":"2.0","error":{"code":-32600,"message":"No MCP endpoint answers this request: this Helio serves named upstreams at /mcp/<name>."}}
+```
+
+The `/sse` variant names `/sse/<name>`. Seeing this envelope in a client's
+error log after a migration means that client is still pointed at the bare
+path.
+
+### The MCP tool buckets split
+
+Rate and spend limits with `key: tool` (the default) track buckets keyed
+`tool:<t>` in singular mode. In named mode, MCP traffic charges
+`upstream:<name>:tool:<t>` instead — one bucket per (upstream, tool) —
+while sideband (adapter) traffic keeps the unprefixed `tool:<t>` key and
+session-keyed buckets are unchanged (see
+[Rate Limits](./policies.md#rate-limits)). Two consequences land at the
+switch:
+
+- A tool-scope pot previously shared by MCP and sideband callers splits
+  into per-door pots alongside the sideband pot.
+- In-window MCP counters effectively start fresh: accrued counts live
+  under the old unprefixed keys, and the first post-migration MCP call
+  charges a new, empty `upstream:<name>:tool:<t>` bucket.
+
+### Evidence gates reject the default identity chain
+
+If any rule uses `evidence.requires` or `requires`, a named config must
+set an explicit `session.identity` chain without `legacy_header`. The
+default chain ends in `legacy_header`, so a config that omits `session:`
+entirely fails validation the moment named upstreams and evidence-gated
+rules coexist — by design:
+
+```
+  session.identity.1: session.identity includes "legacy_header" while named upstreams and evidence-gated rules ("evidence"/"requires") are configured. On the legacy relay flow the Mcp-Session-Id a client echoes was minted by the upstream itself, so with multiple upstreams a hostile server could collide session identities across doors and pollute another door's evidence gates. Remove legacy_header from session.identity and use a caller-owned source such as the default "x-helio-session-id" header.
+```
+
+The remedy is in the message — declare the chain explicitly with a
+caller-owned source:
+
+```yaml
+session:
+  identity:
+    - source: header
+      name: x-helio-session-id
+```
+
+### The mechanical steps
+
+The move itself is field-preserving: wrap the existing `upstream:` fields
+in a single-entry list, give the entry a `name`, and repoint clients.
+Leaving both forms in the file fails validation with the XOR message
+quoted under [upstreams](#upstreams). Before:
+
+```yaml
+version: '1'
+
+upstream:
+  url: 'http://localhost:8080/mcp'
+  request_timeout: '45s'
+
+dashboard:
+  enabled: false
+```
+
+After — the same fields, moved verbatim into a named entry:
+
+```yaml
+version: '1'
+
+upstreams:
+  - name: files
+    url: 'http://localhost:8080/mcp'
+    request_timeout: '45s'
+
+dashboard:
+  enabled: false
+```
+
+Both configs validate as-is with `helio validate`.
+
+### A rename is a breaking change
+
+Door paths derive from names (see
+[Per-name doors](#per-name-doors)), so renaming an entry later repeats the
+first two discontinuities for that upstream: its clients' URLs break, and
+its limiter buckets and audit attribution re-key under the new name going
+forward. Choose names as permanent public identifiers, not display labels.
+
 ## Duration Strings
 
 Several fields accept duration strings in the format `<number><unit>`:
