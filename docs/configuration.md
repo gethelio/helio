@@ -120,11 +120,14 @@ sdk:
 
 ### upstream
 
-Connection to the MCP server that Helio proxies.
-
-> **v0.1 proxies exactly one upstream MCP server.** `upstream` is a single
-> object, not a list — multiple/named upstreams and routing are not yet
-> supported.
+Connection to the MCP server that Helio proxies. This is the singular form —
+one `upstream` object, served at `/mcp` and `/sse` — and it stays fully
+supported. To govern more than one MCP server from a single proxy, declare
+the named [`upstreams`](#upstreams) list in its place: a config sets exactly
+one of the two forms, and declaring both, or neither, fails validation (the
+error text is quoted under [upstreams](#upstreams)). Tool sets are never
+merged across upstreams — each named upstream is served at its own
+`/mcp/<name>` door.
 
 | Field              | Type     | Required    | Default           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------ | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -185,7 +188,7 @@ Before its first upstream request in `auto` mode — Helio's own internal traffi
 - **modern** — the upstream answered `server/discover` and lists `2026-07-28` among its supported versions. That revision removed the handshake, so Helio holds no upstream session for its own internal traffic and sends no `Mcp-Session-Id` on it.
 - **legacy** — the upstream answered the probe with an ordinary JSON-RPC error (an unimplemented method, say), an empty body, or anything else that is not a modern discovery result. Helio establishes its internal session the way it always has, with `initialize` followed by `notifications/initialized`, and reuses the session id the upstream mints.
 
-The answer is cached per process and shared by both kinds of traffic — concurrent callers join a single in-flight probe, whichever path asks first — so classification normally costs one extra round trip per era conclusion, not per request. With `tool_revalidation` on (the default), startup priming normally settles the era before any relayed request arrives. Dropping the internal session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
+The answer is cached per upstream connection — with named [`upstreams`](#upstreams), each entry probes and caches its own era independently — and shared by both kinds of traffic to that upstream; concurrent callers join a single in-flight probe, whichever path asks first, so classification normally costs one extra round trip per era conclusion, not per request. With `tool_revalidation` on (the default), startup priming normally settles the era before any relayed request arrives. Dropping the internal session — an upstream restart, or a `404` telling Helio its managed session expired — clears the cached era as well, so a second era line later in the log means Helio re-established the session and re-probed. An upstream upgraded in place is picked up that way, with no restart and no configuration change.
 
 A probe that concludes nothing — a network error, a timeout, or a `401`/`403`/`5xx` reply — caches no era. On the internal path it surfaces as an ordinary upstream failure and the next attempt probes again; a relayed request instead proceeds under a per-request legacy presumption and is never failed by the probe, with re-probing throttled for 30 seconds so a relay burst cannot turn into a probe storm. This is deliberate: an auth-gated or briefly unavailable modern upstream must never be recorded as legacy, and a deployment whose probe can never succeed (per-client credentials, below) must keep working exactly as it does today.
 
@@ -235,6 +238,114 @@ If upstream is unavailable or slow, Helio continues boot, logs a fail-closed war
 
 While cache data is unknown, policy annotation matching still uses MCP defaults (`destructiveHint: true`, etc.), preserving fail-closed behavior.
 
+### upstreams
+
+Named multi-upstream mode: a non-empty list of upstream entries, each the
+full singular `upstream` shape plus a required, unique `name`. In the
+canonical section order, `upstreams` occupies the same slot as `upstream`
+(after `version`, before `listen`) — a config carries one form or the other
+in that position, never both. Declaring both fails validation:
+
+```
+  upstreams: Set exactly one of "upstream:" (single upstream) or "upstreams:" (named multi-upstream list) — not both. To migrate, move the upstream: fields into an upstreams: entry and give it a name.
+```
+
+as does declaring neither:
+
+```
+  (top level): Missing upstream configuration: set exactly one of "upstream:" (single upstream) or "upstreams:" (named multi-upstream list).
+```
+
+Each entry accepts every field of the [`upstream`](#upstream) section with
+identical semantics, defaults, and validation — the entry schema reuses the
+singular schema and its refinements verbatim — plus `name`:
+
+| Field              | Type     | Required    | Default           | Description                                                                                                                                                                                               |
+| ------------------ | -------- | ----------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | string   | Yes         | —                 | Unique entry name; becomes the door path (`/mcp/<name>`, `/sse/<name>`) and the limiter/audit attribution key. Letters, digits, `_` and `-` only; 1–64 characters.                                        |
+| `url`              | string   | Yes         | —                 | URL of this entry's upstream MCP server (e.g. `http://localhost:8080/mcp`).                                                                                                                               |
+| `transport`        | string   | No          | `streamable-http` | Transport protocol: `streamable-http`, `sse`, or `stdio` — identical to [`upstream.transport`](#upstream).                                                                                                |
+| `protocol_version` | string   | No          | `auto`            | MCP revision spoken to this entry's upstream — identical to [`upstream.protocol_version`](#upstream). Each entry probes, pins, and caches its own era (see [era detection](#upstream-mcp-era-detection)). |
+| `command`          | string   | Conditional | —                 | Command to spawn the MCP server. **Required** when `transport` is `stdio`.                                                                                                                                |
+| `args`             | string[] | No          | —                 | Arguments passed to the `command` (stdio only).                                                                                                                                                           |
+| `connect_timeout`  | duration | No          | `10s`             | Timeout for establishing SSE upstream connections.                                                                                                                                                        |
+| `request_timeout`  | duration | No          | `30s`             | Timeout for upstream HTTP/SSE POST requests.                                                                                                                                                              |
+| `forward_headers`  | string[] | No          | `[]`              | Explicit allowlist of caller `x-*` headers to forward to this entry's upstream.                                                                                                                           |
+| `headers`          | object   | No          | `{}`              | Static headers sent on every request to this entry's upstream — same `${VAR}` interpolation and reserved-header rejections as [`upstream.headers`](#static-request-headers).                              |
+
+> **Note:** As in the singular form, an entry's `url` is required by the
+> schema but ignored when `transport` is `stdio`. Any value (e.g. `stdio://`)
+> works as a placeholder. Issue #313 tracks lifting the requirement for
+> stdio entries.
+
+Names may only contain letters, digits, `_` and `-` (1–64 characters), must
+be unique within the list, and the list itself must be non-empty. The
+charset is deliberate: names embed in mount paths (`/mcp/<name>`),
+rate/spend limiter keys (`upstream:<name>:tool:<t>`), and audit records'
+`upstream` column, so they must stay URL-literal and delimiter-free.
+
+```yaml
+version: '1'
+
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+    request_timeout: '45s'
+    headers:
+      Authorization: 'Bearer ${UPSTREAM_TOKEN}'
+
+dashboard:
+  enabled: false
+```
+
+#### Per-name doors
+
+Each named upstream is served at its own pair of mounts: `/mcp/<name>` for
+MCP Streamable HTTP and `/sse/<name>` for the deprecated HTTP+SSE listener.
+Tool sets are never merged — a client connects to exactly one door and sees
+exactly that upstream's tools. In named mode the bare `/mcp` and `/sse`
+paths answer nothing: a request to either, or to a name that is not
+configured, is refused with HTTP `404` and an id-omitting JSON-RPC `-32600`
+envelope naming the expected shape:
+
+```
+{"jsonrpc":"2.0","error":{"code":-32600,"message":"No MCP endpoint answers this request: this Helio serves named upstreams at /mcp/<name>."}}
+```
+
+The `/sse` variant of the envelope names `/sse/<name>`.
+
+**Mount permanence.** Door paths derive from entry names, so renaming an
+entry moves that upstream's public URL: every client pointed at the old
+door breaks, and rate/spend limiter buckets and audit attribution re-key
+under the new name going forward. Treat a name as a permanent public
+contract — see
+[Migrating to Named Upstreams](#migrating-to-named-upstreams) for the
+operational consequences.
+
+#### Per-upstream runtime
+
+[Era detection](#upstream-mcp-era-detection),
+[annotation cache priming](#startup-annotation-cache-priming), and drift
+baselines all run per upstream connection — one instance per entry, the
+singular machinery multiplied. Startup and detection log lines carry the
+entry name:
+
+```
+[helio][files] Upstream MCP era detected: legacy (initialize handshake)
+[helio][payments] Upstream MCP era detected: legacy (initialize handshake)
+```
+
+Because each entry runs its own upstream connection or child process plus
+an annotation prime loop, configuring more than 16 upstreams draws a
+warning — at `helio validate` and again at `helio start` — while the config
+stays valid:
+
+```
+[helio] Warning: 17 upstreams configured. Each upstream runs its own upstream connection or child process plus an annotation prime loop; consider whether one proxy should govern this many.
+```
+
 ### listen
 
 Where the proxy listens for incoming MCP requests.
@@ -257,12 +368,17 @@ hostname in its origin while that hostname resolves to the proxy, so the
 browser treats the request as same-origin. A `POST` carries an `Origin`
 regardless, and its value is still the attacker's hostname, so the request
 is refused. Stream establishment on
-`GET /sse` is the residual: a browser omits `Origin` on a same-origin `GET`
-(including from a rebound page) and on a no-cors `GET` such as an `<img>`
-load, so neither can be gated here. The session such a `GET` mints is now
-bounded: `/sse` caps concurrent sessions globally and refuses new streams
-with `503` past the cap, never dropping a live stream, so the residual is
-bounded stream establishment rather than unbounded minting. A cross-origin
+the SSE listener is the residual: a browser omits `Origin` on a same-origin
+`GET` (including from a rebound page) and on a no-cors `GET` such as an
+`<img>` load, so neither can be gated here. In singular mode that listener
+is `GET /sse`; with named [`upstreams`](#upstreams) it is `GET /sse/<name>`,
+because a bare `GET /sse` matches no door and is refused with `404`,
+minting nothing. The session such a `GET` mints is bounded either way: each
+SSE route caps its concurrent sessions at 1024 and refuses new streams with
+`503` past the cap, never dropping a live stream, so the residual is
+bounded stream establishment rather than unbounded minting. The cap is per
+door — every named route has its own session map — so total capacity is the
+number of doors × 1024. A cross-origin
 `EventSource` or cors-mode `fetch` does send `Origin` and is refused.
 Closing the Origin-less path completely still needs `Host` validation,
 tracked in issue #231.
@@ -764,12 +880,19 @@ Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections 
 | `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
 | `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |
 | `upstream.*`                   | No               | Upstream transport/client initialized at startup.                                                                                      |
+| `upstreams.*`                  | No               | Per-entry upstream transports/clients and door mounts initialized at startup; any edit to the named list logs the warning below.       |
 | `listen.*`                     | No               | Proxy listener socket bound at startup.                                                                                                |
 | `dashboard.*`                  | No               | Dashboard server/session settings initialized at startup.                                                                              |
 | `approval.*`                   | No               | Router/channels/timeouts initialized at startup.                                                                                       |
 | `audit.*`                      | No               | SQLite store path/settings initialized at startup.                                                                                     |
 | `sdk.*`                        | No               | Sideband listener/token behavior initialized at startup.                                                                               |
 
-When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields.
+When non-reloadable fields change on save, Helio logs an explicit restart-required warning and keeps using startup values for those fields:
+
+```
+[helio] Restart required: non-reloadable fields changed (upstreams). The running process still uses startup values for these fields.
+```
+
+A mode switch between `upstream:` and `upstreams:` reports both labels in that warning (`upstream, upstreams`) — the edit removes one section and adds the other, and naming only one would misreport half the change.
 
 The reloadable and startup-bound halves cannot contradict each other: a reload whose policies or budgets reference approval routing that only exists in the NEW file — a channel added to `approval.channels` in the same edit, or dashboard-routed break-glass while the running process has no dashboard server — is rejected as a whole (`Config reload failed (keeping current configuration)`), because the running approval registry is startup-bound and the referenced channel could never notify or resolve a ticket. Apply such changes with a restart. The reverse holds at startup: a config whose rules, budgets, or `require_approval` escalations route approvals to the dashboard while `dashboard.enabled` is false is rejected by `helio validate` and `helio start` — it can no longer boot into a state every reload would reject.
