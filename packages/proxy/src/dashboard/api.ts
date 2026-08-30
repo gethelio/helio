@@ -114,9 +114,12 @@ const clampedQueryInt = (fallback: number, min: number, max: number) =>
 const feedQuerySchema = z.object({
   limit: clampedQueryInt(50, 1, 200),
   offset: clampedQueryInt(0, 0, Number.MAX_SAFE_INTEGER),
-  // The feed's first (and so far only) filter (issue #292): attribution is
-  // the one dimension a live view needs server-side once upstreams multiply.
+  // The feed's server-side filters (issues #292, #316): attribution and
+  // session identity source must narrow the fetch window itself, because
+  // slicing an unfiltered newest-N window client-side would miss rare
+  // matches on a busy stream.
   upstream: optionalQueryString,
+  session_source: optionalQueryString,
 })
 
 const auditExportQuerySchema = z.object({
@@ -495,7 +498,10 @@ export function createDashboardAppWithLifecycle(
     const limit = query.limit
     const offset = query.offset
 
-    const result = auditStore.list({ upstream: query.upstream }, { limit, offset, order: 'desc' })
+    const result = auditStore.list(
+      { upstream: query.upstream, session_source: query.session_source },
+      { limit, offset, order: 'desc' },
+    )
     return c.json({
       data: result.records,
       total: result.total,

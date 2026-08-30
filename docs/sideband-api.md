@@ -416,15 +416,16 @@ See [Audit Trail](./audit.md) for the full audit record field reference and CLI 
 
 #### GET /api/feed
 
-Most recent audit records, newest-first. Designed for a live "activity feed" view; its only server-side filter is `upstream` (issue #292) — every other dimension stays client-side.
+Most recent audit records, newest-first. Designed for a live "activity feed" view; its server-side filters are `upstream` (issue #292) and `session_source` (issue #316) — every other dimension stays client-side.
 
 **Query parameters:**
 
-| Parameter  | Default | Range      | Description                            |
-| ---------- | ------- | ---------- | -------------------------------------- |
-| `limit`    | `50`    | `[1, 200]` | Maximum records per response.          |
-| `offset`   | `0`     | `[0, ∞)`   | Number of records to skip.             |
-| `upstream` | —       | —          | Filter by upstream name (exact match). |
+| Parameter        | Default | Range      | Description                                                                                                  |
+| ---------------- | ------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `limit`          | `50`    | `[1, 200]` | Maximum records per response.                                                                                |
+| `offset`         | `0`     | `[0, ∞)`   | Number of records to skip.                                                                                   |
+| `upstream`       | —       | —          | Filter by upstream name (exact match).                                                                       |
+| `session_source` | —       | —          | Filter by session identity source (`header`, `meta`, `legacy_header`, `transport`, `sideband`; exact match). |
 
 **Response (200):**
 
