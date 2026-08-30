@@ -128,7 +128,7 @@ The dashboard displays sensitive governance data — tool call details, policy d
 - **All API calls go through `apiFetch()`** which sets `credentials: 'same-origin'`, parses JSON, and normalizes errors into `ApiError`. Never use raw `fetch()` for API endpoints.
 - **Auth state lives in `api.ts`, not in storage.** The CSRF token from the session response is held in a module variable (`setCsrfToken`) and attached to mutating approval calls via the `x-helio-csrf` header; a 401 invokes the unauthorized handler so the UI re-locks. The token is never persisted.
 - **API errors are handled gracefully.** Network failures, 4xx responses, and malformed JSON all result in user-visible error states (`PageError`, `ErrorBoundary`), never unhandled exceptions or blank screens.
-- **SSE reconnection** is handled by the browser's native EventSource, which reconnects automatically on connection loss. The dashboard shows connection status in the header and a stale-data banner in the layout.
+- **SSE reconnection** is handled by the browser's native EventSource, which reconnects automatically on connection loss but treats an HTTP error response (such as the 503 the server sends past its connection cap) as terminal — the source closes permanently and only a page reload reconnects. The dashboard shows connection status in the header and a stale-data banner in the layout.
 
 ### Data Handling
 
