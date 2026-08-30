@@ -111,11 +111,18 @@ export interface FeedParams {
   limit?: number
   offset?: number
   upstream?: string
+  session_source?: string
 }
 
 export function fetchFeed(params?: FeedParams): Promise<FeedResponse> {
   return apiFetch(
-    '/api/feed' + qs({ limit: params?.limit, offset: params?.offset, upstream: params?.upstream }),
+    '/api/feed' +
+      qs({
+        limit: params?.limit,
+        offset: params?.offset,
+        upstream: params?.upstream,
+        session_source: params?.session_source,
+      }),
     getInit(),
   )
 }

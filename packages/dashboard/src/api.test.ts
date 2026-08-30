@@ -230,6 +230,12 @@ describe('read endpoints', () => {
     expect(calledUrl()).toContain('upstream=alpha')
   })
 
+  it('fetchFeed passes the session_source filter (#316)', async () => {
+    mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 200, offset: 0 }))
+    await fetchFeed({ limit: 200, session_source: 'header' })
+    expect(calledUrl()).toContain('session_source=header')
+  })
+
   it('fetchAudit serializes upstream and session_source into the query (#297, #250)', async () => {
     mockFetch.mockReturnValue(okJson({ data: [], total: 0, limit: 50, offset: 0 }))
     await fetchAudit({ upstream: 'alpha', session_source: 'header' })

@@ -36,6 +36,11 @@ Maintainer notes:
 
 ### Added
 
+- Feed `session_source` filter (#316): `GET /api/feed` accepts a
+  `session_source` query param (exact match), and the Feed view gains
+  the same five-value source select as the Audit view, applied to the
+  fetch window, filter refetches, and live SSE events. Completes the
+  #250 remainder.
 - The dashboard SSE stream now caps concurrent connections (#285):
   `GET /api/events` past 256 concurrent connections is refused with
   `503` and a plain JSON body, mints nothing, and never displaces an

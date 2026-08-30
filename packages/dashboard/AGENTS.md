@@ -78,7 +78,7 @@ The dashboard talks to the proxy's sideband API (default port 3100):
 | `GET /api/auth/session`                | Current session state (`auth_required`, `authenticated`, `csrf_token`) |
 | `POST /api/auth/session`               | Log in with the dashboard secret                                       |
 | `POST /api/auth/logout`                | Log out / clear the session                                            |
-| `GET /api/feed`                        | Recent action records (limit/offset)                                   |
+| `GET /api/feed`                        | Recent action records (limit/offset/upstream/session_source)           |
 | `GET /api/audit`                       | Paginated audit log (tool/decision/session/date filters)               |
 | `GET /api/audit/:id`                   | Single audit record detail                                             |
 | `GET /api/approvals`                   | Approval tickets (filter by status)                                    |
