@@ -1367,6 +1367,7 @@ audit:
         expect(result.code).toBe(1)
         expect(result.stderr).toContain('upstream "backend": ')
         expect(result.stderr).toContain('is unreachable (ECONNREFUSED)')
+        expect(result.stderr).toContain('(or upstreams[].url)')
         expect(result.stderr).not.toContain('Unhandled promise rejection')
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -1471,6 +1472,7 @@ audit:
         const result = await runCli(['start', '-c', configPath])
         expect(result.code).toBe(1)
         expect(result.stderr).toContain('is unreachable (ECONNREFUSED)')
+        expect(result.stderr).toContain('(or upstreams[].url)')
         // Singular mode: the underlying message alone — no minted upstream
         // name, no crash dump.
         expect(result.stderr).not.toContain('upstream "')

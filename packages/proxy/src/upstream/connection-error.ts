@@ -5,8 +5,9 @@
  * terse `TypeError: fetch failed`, hiding the URL and the real cause behind a
  * nested `.cause`. When Helio surfaces that verbatim — for example while
  * priming the annotation cache at startup — operators see "fetch failed" with
- * no hint that the actual problem is "nothing is listening at upstream.url".
- * This helper translates those failures into a clear, URL-aware message.
+ * no hint that the actual problem is "nothing is listening at the configured
+ * upstream url". This helper translates those failures into a clear, URL-aware
+ * message.
  */
 
 /** Docs link surfaced when the upstream MCP server cannot be reached. */
@@ -67,7 +68,8 @@ export function describeUnreachableUpstream(error: unknown, url: string): Error 
   const codeSuffix = code ? ` (${code})` : ''
   return new Error(
     `Upstream MCP server at ${url} is unreachable${codeSuffix} — is it running? ` +
-      `Helio proxies an existing MCP server: set upstream.url in helio.yaml to a ` +
-      `reachable server, or start the server it points at. See ${UPSTREAM_DOCS_URL}`,
+      `Helio proxies an existing MCP server: set upstream.url (or upstreams[].url) ` +
+      `in helio.yaml to a reachable server, or start the server it points at. ` +
+      `See ${UPSTREAM_DOCS_URL}`,
   )
 }

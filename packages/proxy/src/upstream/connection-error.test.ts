@@ -20,6 +20,16 @@ describe('describeUnreachableUpstream', () => {
     expect(result?.message).toContain('upstream.url')
   })
 
+  it('pins the full ECONNREFUSED message, naming both config forms (issue #320)', () => {
+    const result = describeUnreachableUpstream(fetchFailed('ECONNREFUSED'), URL)
+    expect(result?.message).toBe(
+      `Upstream MCP server at ${URL} is unreachable (ECONNREFUSED) — is it running? ` +
+        'Helio proxies an existing MCP server: set upstream.url (or upstreams[].url) in ' +
+        'helio.yaml to a reachable server, or start the server it points at. ' +
+        'See https://github.com/gethelio/helio/blob/main/docs/getting-started.md',
+    )
+  })
+
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH', 'ETIMEDOUT'])(
     'recognizes %s as unreachable',
     (code) => {

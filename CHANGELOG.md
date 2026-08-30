@@ -240,6 +240,11 @@ Maintainer notes:
   the wire. This covers the constructor and caller vectors reachable
   through direct library use; yaml config is rejected at validation
   per the breaking entry above.
+- The unreachable-upstream hint now names both config forms (#320):
+  the remedy reads `set upstream.url (or upstreams[].url) in helio.yaml`
+  instead of naming only `upstream.url`, a field named-mode configs
+  cannot contain. The message head is unchanged; the new tail appears
+  in both singular and named modes.
 
 ## [0.12.0] - 2026-08-17
 
