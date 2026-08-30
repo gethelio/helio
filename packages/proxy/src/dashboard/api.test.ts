@@ -300,6 +300,35 @@ describe('session_source filter (issue #250)', () => {
     expect(records).toHaveLength(1)
     expect(records[0]?.session_source).toBe('header')
   })
+
+  it('filters /api/feed by session_source, exact match', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { session_id: 'run-a', session_source: 'header', tool_name: 'a' })
+    insertAuditRecord(auditStore, { session_id: 'oc-1', session_source: 'meta', tool_name: 'b' })
+    insertAuditRecord(auditStore, { session_source: null, tool_name: 'c' })
+
+    const res = await get('/api/feed?session_source=header')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.session_source).toBe('header')
+  })
+
+  it('composes with the upstream filter as independent arms', async () => {
+    const { get, auditStore } = setup()
+    cleanup.push(auditStore)
+    insertAuditRecord(auditStore, { upstream: 'github', session_source: 'header', tool_name: 'a' })
+    insertAuditRecord(auditStore, { upstream: 'github', session_source: 'meta', tool_name: 'b' })
+    insertAuditRecord(auditStore, { upstream: null, session_source: 'header', tool_name: 'c' })
+
+    const res = await get('/api/feed?upstream=github&session_source=header')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { data: AuditRecord[]; total: number }
+    expect(body.total).toBe(1)
+    expect(body.data[0]?.upstream).toBe('github')
+    expect(body.data[0]?.session_source).toBe('header')
+  })
 })
 
 describe('GET /api/audit', () => {

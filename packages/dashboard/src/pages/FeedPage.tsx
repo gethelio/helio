@@ -41,6 +41,9 @@ export function FeedPage() {
   const [debouncedFilterTool, setDebouncedFilterTool] = useState('')
   const [filterUpstream, setFilterUpstream] = useState('')
   const [debouncedFilterUpstream, setDebouncedFilterUpstream] = useState('')
+  // Un-debounced (issue #316): a select commits atomically, one change event
+  // per user decision — there is no keystroke stream to smooth.
+  const [filterSessionSource, setFilterSessionSource] = useState('')
   const [filterDecision, setFilterDecision] = useState<OutcomeFilterValue | null>(null)
   const [isLive, setIsLive] = useState(true)
   const [initialLoading, setInitialLoading] = useState(true)
@@ -50,12 +53,14 @@ export function FeedPage() {
   const sentinelRef = useRef<HTMLDivElement>(null)
   const seenIdsRef = useRef(new Set<string>())
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // The reconnect backfill reads the upstream filter through this ref so the
-  // filter never becomes a dep of the reconnect effect — with it as a dep,
-  // every filter change after the first reconnect would fire BOTH effects
-  // (two fetches, two replace-and-resets). The load effect owns filter
-  // changes; the reconnect effect owns reconnects.
+  // The reconnect backfill reads the upstream and session-source filters
+  // through these refs so neither filter becomes a dep of the reconnect
+  // effect — with one as a dep, every change to that filter after the first
+  // reconnect would fire BOTH effects (two fetches, two replace-and-resets).
+  // The load effect owns filter changes; the reconnect effect owns
+  // reconnects.
   const filterUpstreamRef = useRef('')
+  const filterSessionSourceRef = useRef('')
 
   const { subscribe, connectionEpoch } = useEventSourceContext()
 
@@ -86,14 +91,22 @@ export function FeedPage() {
     filterUpstreamRef.current = debouncedFilterUpstream
   }, [debouncedFilterUpstream])
 
-  // -- Load + filter-change refetch (issue #297) ----------------------------
-  // Owns the initial fetch AND upstream-filter refetches: the filter is a
-  // server param so a busy door cannot flood the fixed fetch window, and a
-  // filter change replaces the record set wholesale — records, seen ids, and
-  // the live buffer — the reconnect backfill's replace semantics.
+  useEffect(() => {
+    filterSessionSourceRef.current = filterSessionSource
+  }, [filterSessionSource])
+
+  // -- Load + filter-change refetch (issues #297, #316) ---------------------
+  // Owns the initial fetch AND filter refetches: the filters are server
+  // params so a busy door cannot flood the fixed fetch window, and a filter
+  // change replaces the record set wholesale — records, seen ids, and the
+  // live buffer — the reconnect backfill's replace semantics.
   useEffect(() => {
     let canceled = false
-    fetchFeed({ limit: INITIAL_FETCH_LIMIT, upstream: debouncedFilterUpstream || undefined })
+    fetchFeed({
+      limit: INITIAL_FETCH_LIMIT,
+      upstream: debouncedFilterUpstream || undefined,
+      session_source: filterSessionSource || undefined,
+    })
       .then((res) => {
         if (canceled) return
         const next = res.data as FeedItem[]
@@ -111,7 +124,7 @@ export function FeedPage() {
     return () => {
       canceled = true
     }
-  }, [debouncedFilterUpstream])
+  }, [debouncedFilterUpstream, filterSessionSource])
 
   // -- SSE subscription -----------------------------------------------------
   useEffect(() => {
@@ -141,7 +154,11 @@ export function FeedPage() {
   // canonical feed snapshot from REST whenever the stream re-opens.
   useEffect(() => {
     if (connectionEpoch <= 1) return
-    fetchFeed({ limit: INITIAL_FETCH_LIMIT, upstream: filterUpstreamRef.current || undefined })
+    fetchFeed({
+      limit: INITIAL_FETCH_LIMIT,
+      upstream: filterUpstreamRef.current || undefined,
+      session_source: filterSessionSourceRef.current || undefined,
+    })
       .then((res) => {
         const next = res.data as FeedItem[]
         seenIdsRef.current = new Set(next.map((r) => r.id))
@@ -255,13 +272,14 @@ export function FeedPage() {
         !r.tool_name.toLowerCase().includes(debouncedFilterTool.toLowerCase())
       )
         return false
-      // Live SSE items obey the upstream filter between fetches (exact
+      // Live SSE items obey the server-side filters between fetches (exact
       // match — SSE cannot be server-filtered).
       if (debouncedFilterUpstream && r.upstream !== debouncedFilterUpstream) return false
+      if (filterSessionSource && r.session_source !== filterSessionSource) return false
       if (filterDecision && !matchesOutcomeFilter(r, filterDecision)) return false
       return true
     })
-  }, [records, debouncedFilterTool, debouncedFilterUpstream, filterDecision])
+  }, [records, debouncedFilterTool, debouncedFilterUpstream, filterSessionSource, filterDecision])
 
   // -- Loading state --------------------------------------------------------
   if (initialLoading) {
@@ -319,6 +337,25 @@ export function FeedPage() {
             className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none"
           />
         )}
+
+        {/* Session identity source (issue #316) — the raw five-value config
+            vocabulary, always visible (session_source exists in singular
+            mode too). */}
+        <select
+          aria-label="Session Source"
+          value={filterSessionSource}
+          onChange={(e) => {
+            setFilterSessionSource(e.target.value)
+          }}
+          className="rounded-md border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 focus:border-gray-300 focus:outline-none"
+        >
+          <option value="">All Sources</option>
+          <option value="header">header</option>
+          <option value="meta">meta</option>
+          <option value="legacy_header">legacy_header</option>
+          <option value="transport">transport</option>
+          <option value="sideband">sideband</option>
+        </select>
 
         {/* Decision pills */}
         <div className="flex flex-wrap gap-1.5">
@@ -388,10 +425,10 @@ export function FeedPage() {
                 d="M3.75 13.5 14.25 2.25l-3 10.5h9L9.75 24l3-10.5h-9Z"
               />
             </svg>
-            {records.length === 0 && !debouncedFilterUpstream ? (
-              // The upstream filter is server-side: a zero-match refetch
-              // leaves records empty, which is a filter result, not an
-              // empty database.
+            {records.length === 0 && !debouncedFilterUpstream && !filterSessionSource ? (
+              // The upstream and session-source filters are server-side: a
+              // zero-match refetch leaves records empty, which is a filter
+              // result, not an empty database.
               <>
                 <p className="text-sm font-medium">No actions yet</p>
                 <p className="text-xs text-gray-400">Start sending tool calls through Helio</p>

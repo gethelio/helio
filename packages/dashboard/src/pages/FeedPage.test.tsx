@@ -464,3 +464,190 @@ describe('upstream attribution (issue #297)', () => {
     expect(screen.queryByText('Network error')).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// session_source filter (issue #316)
+// ---------------------------------------------------------------------------
+
+describe('session_source filter (issue #316)', () => {
+  it('renders the always-visible Session Source select with All Sources and the five values', async () => {
+    mockFetchFeed.mockResolvedValue({ data: [], total: 0, limit: 200, offset: 0 })
+    renderFeedPage()
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Session Source')).toBeTruthy()
+    })
+    expect(screen.getByRole('option', { name: 'All Sources' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'header' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'meta' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'legacy_header' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'transport' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'sideband' })).toBeTruthy()
+  })
+
+  it('refetches on source change with the param and replaces the record set', async () => {
+    mockFetchFeed
+      .mockResolvedValueOnce({
+        data: [feedRecord({ id: 'rec-a', tool_name: 'seed_tool', session_source: 'meta' })],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+      .mockResolvedValue({
+        data: [feedRecord({ id: 'rec-b', tool_name: 'header_tool', session_source: 'header' })],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+    renderFeedPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('seed_tool')).toBeTruthy()
+    })
+    // The mount fetch carries no source: the empty select sends no param.
+    const mountCallArg = mockFetchFeed.mock.calls[0]?.[0] as { session_source?: string } | undefined
+    expect(mountCallArg?.session_source).toBeUndefined()
+
+    // Un-debounced: a select commits atomically, so ONE change means ONE
+    // refetch with the param, no timer to advance.
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'header' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+    })
+    expect(mockFetchFeed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session_source: 'header' }),
+    )
+    // Replace-and-reset: the old record set is gone, the new one renders.
+    await waitFor(() => {
+      expect(screen.getByText('header_tool')).toBeTruthy()
+    })
+    expect(screen.queryByText('seed_tool')).toBeNull()
+  })
+
+  it('live SSE events obey the source filter at render time, both directions', async () => {
+    mockFetchFeed.mockResolvedValue({ data: [], total: 0, limit: 200, offset: 0 })
+    renderFeedPage()
+
+    await waitFor(() => {
+      expect(mockSubscribe).toHaveBeenCalledWith('action', expect.any(Function))
+    })
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'header' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+    })
+
+    const handler = actionHandler()
+    act(() => {
+      handler(actionEvent({ id: 'evt-meta', tool_name: 'meta_tool', session_source: 'meta' }))
+      handler(actionEvent({ id: 'evt-header', tool_name: 'header_tool', session_source: 'header' }))
+    })
+    await waitFor(() => {
+      expect(screen.getByText('header_tool')).toBeTruthy()
+    })
+    expect(screen.queryByText('meta_tool')).toBeNull()
+  })
+
+  it('carries the source across reconnect via the ref and never double-fetches', async () => {
+    mockFetchFeed.mockResolvedValue({ data: [], total: 0, limit: 200, offset: 0 })
+    const view = renderFeedPage()
+
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(1)
+    })
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'header' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+    })
+
+    // SSE reconnect: the backfill reads the source through the ref.
+    mockConnectionEpoch = 2
+    view.rerender(
+      <MemoryRouter>
+        <FeedPage />
+      </MemoryRouter>,
+    )
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(3)
+    })
+    expect(mockFetchFeed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session_source: 'header' }),
+    )
+
+    // Change the source after the reconnect: EXACTLY one more fetch — an
+    // implementation that gives the reconnect effect the source as a dep
+    // fires both effects here and fails the exact call count.
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'meta' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(4)
+    })
+    expect(mockFetchFeed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session_source: 'meta' }),
+    )
+  })
+
+  it('renders the filter-result empty state on a zero-match source refetch', async () => {
+    mockFetchFeed
+      .mockResolvedValueOnce({
+        data: [feedRecord({ id: 'rec-a', tool_name: 'seed_tool', session_source: 'meta' })],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+      .mockResolvedValue({ data: [], total: 0, limit: 200, offset: 0 })
+    renderFeedPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('seed_tool')).toBeTruthy()
+    })
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'header' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+    })
+    await waitFor(() => {
+      expect(screen.queryByText('seed_tool')).toBeNull()
+    })
+    // A zero-match refetch is a FILTER result, not an empty database.
+    expect(screen.getByText('No matching actions')).toBeTruthy()
+    expect(screen.queryByText('No actions yet')).toBeNull()
+  })
+
+  it('keeps last good data when a source refetch fails, then renders the filter empty state when the next one resolves empty', async () => {
+    // The seed's source matches the filter the test sets: the kept-last-good
+    // card must survive the render-time memo arm to stay visible.
+    mockFetchFeed
+      .mockResolvedValueOnce({
+        data: [feedRecord({ id: 'rec-a', tool_name: 'seed_tool', session_source: 'header' })],
+        total: 1,
+        limit: 200,
+        offset: 0,
+      })
+      .mockRejectedValueOnce(new Error('proxy went away'))
+      .mockResolvedValue({ data: [], total: 0, limit: 200, offset: 0 })
+    renderFeedPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('seed_tool')).toBeTruthy()
+    })
+
+    // The source refetch fails AFTER a successful load: keep the last good
+    // data — never the full-page error whose only Retry is a reload.
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'header' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(2)
+    })
+    expect(screen.getByText('seed_tool')).toBeTruthy()
+    expect(screen.queryByText('Retry')).toBeNull()
+
+    // The NEXT source refetch resolves empty: success must clear the stale
+    // error, so the zero-match filter copy renders, never PageError.
+    fireEvent.change(screen.getByLabelText('Session Source'), { target: { value: 'meta' } })
+    await waitFor(() => {
+      expect(mockFetchFeed).toHaveBeenCalledTimes(3)
+    })
+    await waitFor(() => {
+      expect(screen.getByText('No matching actions')).toBeTruthy()
+    })
+    expect(screen.queryByText('Retry')).toBeNull()
+    expect(screen.queryByText('proxy went away')).toBeNull()
+  })
+})
