@@ -36,6 +36,16 @@ Maintainer notes:
 
 ### Added
 
+- The dashboard SSE stream now caps concurrent connections (#285):
+  `GET /api/events` past 256 concurrent connections is refused with
+  `503` and a plain JSON body, mints nothing, and never displaces an
+  established stream — the operator-port twin of the agent-edge
+  `/sse` session cap. Slots free when a client disconnects or on
+  shutdown drain; refusal logging is time-bounded to one line per
+  window. There is no configuration surface. A browser `EventSource`
+  treats the refusal as terminal (no auto-reconnect): a refused
+  dashboard tab shows the disconnected banner and keeps its
+  last-loaded data until reloaded.
 - Multi-upstream documentation and example (#298): the configuration
   reference gains a full `upstreams` section (entry shape, name rules,
   the mode XOR, per-name doors and their 404 envelope, mount

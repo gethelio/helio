@@ -70,6 +70,12 @@ export interface DashboardAppOptions {
   readonly staticDir?: string
   /** SSE heartbeat interval in milliseconds. Defaults to 30 000 (30s). */
   readonly sseHeartbeatMs?: number
+  /**
+   * @internal Test seam for the concurrent-connection cap (issue #285), so
+   * tests need not mint 256 real streams. Not wired to config — the cap is
+   * a hardcoded invariant (see MAX_SSE_CONNECTIONS).
+   */
+  readonly maxSseConnections?: number
 }
 
 /** Lifecycle handle for dashboard app startup and shutdown. */
@@ -252,6 +258,32 @@ function isPrivateIpv4(host: string): boolean {
   if (a > 255 || b > 255 || c > 255 || d > 255) return false
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
 }
+
+// ---------------------------------------------------------------------------
+// SSE connection cap (issue #285)
+// ---------------------------------------------------------------------------
+
+// Hard cap on concurrent GET /api/events streams. Generous relative to
+// realistic operator-dashboard tab counts: one browser profile holds at
+// most ~6 concurrent streams over HTTP/1.1, so 256 covers 40+ simultaneous
+// browser profiles plus scripted consumers. Hardcoded on purpose (no
+// config knob), mirroring the transport /sse session cap: a knob that
+// raises or disables the cap silently disables a resource bound.
+//
+// Unlike /sse — where lastActivity refreshes only on successful writes, so
+// a held-open unproven session goes idle and is swept — this endpoint
+// heartbeats its connections and refreshes lastWrite on every RESOLVED
+// write, so held-open authorized tabs pin the cap BY DESIGN: anyone who
+// can pin it already holds the operator credential (or local access in
+// explicitly-enabled open mode) on an auth-gated loopback port, and
+// keeping live operator views alive is the heartbeat's entire purpose.
+// The operator remedy is closing tabs or a restart.
+const MAX_SSE_CONNECTIONS = 256
+
+// Cap-refusal log window: time-based, one summary line per window, so log
+// volume does not scale with a refused client's retry rate (mirroring the
+// transport /sse cap's throttle).
+const REFUSAL_LOG_WINDOW_MS = 10_000
 
 // ---------------------------------------------------------------------------
 // Dashboard API factory
@@ -697,6 +729,7 @@ export function createDashboardAppWithLifecycle(
   const heartbeatMs = Math.max(options?.sseHeartbeatMs ?? 30_000, 1_000)
   const staleThresholdMs = heartbeatMs * 3
   const sweepIntervalMs = Math.max(heartbeatMs * 2, 10_000)
+  const maxSseConnections = options?.maxSseConnections ?? MAX_SSE_CONNECTIONS
 
   const sweepInterval = setInterval(() => {
     const now = Date.now()
@@ -719,7 +752,34 @@ export function createDashboardAppWithLifecycle(
     activeConnections.clear()
   }
 
+  // Time-based cap-refusal throttle (mirroring the transport /sse cap's):
+  // the first refusal logs immediately, then at most one summary per
+  // window carrying the cumulative count.
+  let refusalCount = 0
+  let lastRefusalLogAt: number | null = null
+
+  const logRefusal = (): void => {
+    refusalCount += 1
+    const now = Date.now()
+    if (lastRefusalLogAt !== null && now - lastRefusalLogAt < REFUSAL_LOG_WINDOW_MS) return
+    lastRefusalLogAt = now
+    // eslint-disable-next-line no-console -- operational error logging
+    console.error(
+      `[helio] /api/events at connection cap (${String(maxSseConnections)}); refusing new streams (${String(refusalCount)} refusals so far).`,
+    )
+  }
+
   app.get('/api/events', (c) => {
+    // Refuse-new at the cap, never evict: an established stream is a live
+    // operator view, and evicting one would silently kill it, while
+    // refuse-new fails the newcomer loudly. The refusal is an HTTP-level
+    // capacity condition and mints nothing — no connId, no map entry, no
+    // stream, no SSE headers.
+    if (activeConnections.size >= maxSseConnections) {
+      logRefusal()
+      return c.json({ error: 'connection capacity reached' }, 503)
+    }
+
     return streamSSE(c, async (stream) => {
       if (closed) return
 
@@ -740,6 +800,21 @@ export function createDashboardAppWithLifecycle(
         activeConnections.delete(connId)
         releaseStream()
       }
+
+      // Belt for the cap check above: unreachable under hono@4.12.34,
+      // where streamSSE runs this callback synchronously up to its first
+      // await (helper/streaming/sse.js:29-31, :62) — the initial heartbeat
+      // write below, AFTER this set — so no interleaved request can be
+      // admitted between the outer check and this registration. It guards
+      // a future Hono that defers the callback, where two requests could
+      // pass the outer check before either registers. The loser already
+      // carries SSE headers (set before the callback runs, sse.js:58-62),
+      // so it cannot become a 503 — close it immediately by returning; do
+      // NOT hold the stream open, which would occupy the very resource
+      // being refused and invite a reconnect storm. Degrade chain: one
+      // immediately-closed empty 200 stream → one EventSource retry → the
+      // outer check's terminal 503.
+      if (activeConnections.size >= maxSseConnections) return
 
       activeConnections.set(connId, { cleanup, lastWrite: Date.now() })
 

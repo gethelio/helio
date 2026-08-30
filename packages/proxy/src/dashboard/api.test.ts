@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import type { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -1652,6 +1653,266 @@ describe('GET /api/events', () => {
     expect(closeOutcome).toBe('read')
 
     await reader.cancel()
+  })
+})
+
+describe('GET /api/events — concurrent connection cap (issue #285)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function makeCappedApp(options: { maxSseConnections: number; apiSecret?: string }) {
+    const auditStore = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const approvalQueue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const channels = new Map([['dashboard', new QueueChannel()]])
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels,
+      queue: approvalQueue,
+    })
+    const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+    const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+    const evidenceStore = new EvidenceStore({ cleanupIntervalMs: 0 })
+    const eventBus = new DashboardEventBus()
+    const lifecycle = createDashboardAppWithLifecycle(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter,
+        spendLimiter,
+        evidenceStore,
+        eventBus,
+      },
+      { maxSseConnections: options.maxSseConnections, apiSecret: options.apiSecret },
+    )
+    cleanup.push(
+      auditStore,
+      approvalQueue,
+      rateLimiter,
+      spendLimiter,
+      evidenceStore,
+      eventBus,
+      lifecycle,
+    )
+    return { app: lifecycle.app, eventBus }
+  }
+
+  const readFrame = async (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    ms: number,
+  ): Promise<string> => {
+    const decoder = new TextDecoder()
+    return await Promise.race([
+      reader.read().then((chunk) => {
+        if (!chunk.value) return ''
+        return decoder.decode(chunk.value)
+      }),
+      new Promise<string>((_resolve, reject) => {
+        setTimeout(() => {
+          reject(new Error('timeout'))
+        }, ms)
+      }),
+    ])
+  }
+
+  // Open one stream and read the initial heartbeat, so the handler has
+  // resumed past its abort-cleanup registration before any later cancel.
+  async function openEventStream(app: Hono): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+    const res = await app.request('/api/events')
+    expect(res.status).toBe(200)
+    expect(res.body).not.toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
+    const reader = res.body!.getReader()
+    const initial = await readFrame(reader, 1000)
+    expect(initial).toContain('event: heartbeat')
+    return reader
+  }
+
+  // Drive one event through the production mapper path (issue #292): the
+  // factory's onPersist is what the composition roots wire, never a
+  // hand-built event literal.
+  function emitActionEvent(eventBus: DashboardEventBus, id: string): void {
+    dashboardEventCallbacks(eventBus).onPersist(
+      {
+        timestamp: '2026-04-02T12:00:00Z',
+        session_id: null,
+        session_source: null,
+        protocol_version: null,
+        upstream: null,
+        agent_id: null,
+        environment: null,
+        tool_name: 'test_tool',
+        tool_input: {},
+        policy_decision: 'allow',
+        block_reason: null,
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: 5,
+        approval_wait_ms: 0,
+        proxy_compute_ms: 5,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      },
+      id,
+    )
+  }
+
+  function capLogLines(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.includes('at connection cap'))
+  }
+
+  it('admits connections up to the cap and refuses past it without minting', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { app, eventBus } = makeCappedApp({ maxSseConnections: 3 })
+
+    const readers = [
+      await openEventStream(app),
+      await openEventStream(app),
+      await openEventStream(app),
+    ]
+
+    const refused = await app.request('/api/events')
+    expect(refused.status).toBe(503)
+    expect(refused.headers.get('content-type')).toContain('application/json')
+    expect(refused.headers.get('content-type')).not.toContain('text/event-stream')
+    expect(await refused.json()).toEqual({ error: 'connection capacity reached' })
+
+    // The refused GET minted nothing and displaced nothing: all three
+    // pre-cap streams still receive events.
+    emitActionEvent(eventBus, 'evt-cap-1')
+    for (const reader of readers) {
+      const frame = await readFrame(reader, 1000)
+      expect(frame).toContain('event: action')
+    }
+
+    for (const reader of readers) {
+      await reader.cancel()
+    }
+    errorSpy.mockRestore()
+  })
+
+  it('never evicts a live connection under refusal pressure', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { app, eventBus } = makeCappedApp({ maxSseConnections: 3 })
+
+    const oldest = await openEventStream(app)
+    const second = await openEventStream(app)
+    const third = await openEventStream(app)
+
+    for (let i = 0; i < 5; i++) {
+      const refused = await app.request('/api/events')
+      expect(refused.status).toBe(503)
+    }
+
+    // The OLDEST stream survived — refuse-new evicted nobody (LRU would
+    // have dropped it).
+    emitActionEvent(eventBus, 'evt-cap-2')
+    const frame = await readFrame(oldest, 1000)
+    expect(frame).toContain('event: action')
+
+    for (const reader of [oldest, second, third]) {
+      await reader.cancel()
+    }
+    errorSpy.mockRestore()
+  })
+
+  it('frees capacity when a client disconnects', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { app } = makeCappedApp({ maxSseConnections: 1 })
+
+    // openEventStream reads the initial heartbeat BEFORE the cancel below —
+    // load-bearing ordering: canceling before the handler resumes past that
+    // write would abort before the handler subscribes its cleanup.
+    const reader = await openEventStream(app)
+
+    const refused = await app.request('/api/events')
+    expect(refused.status).toBe(503)
+
+    // Client disconnect: cancel reaches the response stream's cancel hook,
+    // which aborts the SSE stream and runs cleanup synchronously, no timer.
+    await reader.cancel()
+
+    const readmitted = await app.request('/api/events')
+    expect(readmitted.status).toBe(200)
+    expect(readmitted.headers.get('content-type')).toContain('text/event-stream')
+    expect(readmitted.body).not.toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
+    await readmitted.body!.cancel()
+    errorSpy.mockRestore()
+  })
+
+  it('bounds refusal logging to one line per window with a cumulative count', async () => {
+    vi.useFakeTimers()
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // Self-contained history: vi.spyOn returns the shared spy instance, and
+    // a prior failing test never reaches its mockRestore.
+    errorSpy.mockClear()
+    const { app } = makeCappedApp({ maxSseConnections: 0 })
+
+    // First refusal logs immediately.
+    const first = await app.request('/api/events')
+    expect(first.status).toBe(503)
+    expect(capLogLines(errorSpy)).toHaveLength(1)
+
+    // Further refusals inside the same window are suppressed regardless of
+    // count — the bound is time-based, not per-N.
+    for (let i = 0; i < 5; i++) {
+      const refused = await app.request('/api/events')
+      expect(refused.status).toBe(503)
+    }
+    expect(capLogLines(errorSpy)).toHaveLength(1)
+
+    // One window later, the next refusal carries the one summary line for
+    // the window, with the cumulative count (1 + 5 + 1 = 7).
+    await vi.advanceTimersByTimeAsync(10_000)
+    const afterWindow = await app.request('/api/events')
+    expect(afterWindow.status).toBe(503)
+    const lines = capLogLines(errorSpy)
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain('7 refusals')
+    errorSpy.mockRestore()
+  })
+
+  it('emits the byte-exact cap-refusal line', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    errorSpy.mockClear()
+    const { app } = makeCappedApp({ maxSseConnections: 0 })
+
+    const refused = await app.request('/api/events')
+    expect(refused.status).toBe(503)
+    expect(capLogLines(errorSpy)).toEqual([
+      '[helio] /api/events at connection cap (0); refusing new streams (1 refusals so far).',
+    ])
+    errorSpy.mockRestore()
+  })
+
+  it('auth precedes the cap: unauthenticated GET at cap gets 401', async () => {
+    // GREEN placement pin, not a RED: the auth middleware registers before
+    // the events route, so this discriminates against a future refactor
+    // hoisting the cap check above auth (which would leak capacity state to
+    // unauthenticated callers).
+    const { app } = makeCappedApp({ maxSseConnections: 0, apiSecret: 'test-secret' })
+    const res = await app.request('/api/events')
+    expect(res.status).toBe(401)
   })
 })
 

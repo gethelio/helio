@@ -9,8 +9,11 @@ import { fetchAuthSession } from './api'
 // Exposes a `connected` boolean for the status indicator, and typed
 // subscribe/unsubscribe methods for page-level event listeners.
 //
-// EventSource provides automatic reconnection out of the box — when the
-// connection drops, the browser reconnects after a short delay.
+// EventSource reconnects automatically only after a DROPPED connection —
+// the browser retries after a short delay. An HTTP error response (such
+// as the 503 the server sends past its connection cap) instead fails the
+// connection permanently: the source closes and never retries, so only a
+// page reload reconnects.
 // ---------------------------------------------------------------------------
 
 type Listener<K extends DashboardEventType> = (data: DashboardEventMap[K]) => void
