@@ -383,8 +383,10 @@ export class BudgetEngine {
 
     // One context for every contributor predicate of this call. Only
     // toolName/toolArguments exist here — the charge context has no
-    // annotations, environment, or metadata, which is why the contributor
-    // match schema admits only tool + input.
+    // annotations, environment, or metadata, so tool and input are the
+    // only contributor matchers evaluated through it. The match schema's
+    // third field, upstreams (issue #293), is tested against ctx.upstream
+    // directly in the find() below, never through this context.
     const matchCtx = {
       toolName: ctx.toolName,
       ...(ctx.toolArguments !== undefined && { toolArguments: ctx.toolArguments }),
