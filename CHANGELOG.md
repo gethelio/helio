@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-31
+
 ### Breaking changes
 
 - **BREAKING: `upstream.headers` may no longer set `Accept` (#304).**
@@ -1231,7 +1233,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/gethelio/helio/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/gethelio/helio/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/gethelio/helio/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/gethelio/helio/compare/v0.10.0...v0.11.0
