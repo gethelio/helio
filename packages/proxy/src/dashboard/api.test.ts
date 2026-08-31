@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
+import { SSEStreamingApi } from 'hono/streaming'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -1943,6 +1945,197 @@ describe('GET /api/events — concurrent connection cap (issue #285)', () => {
     const res = await app.request('/api/events')
     expect(res.status).toBe(401)
   })
+})
+
+describe('GET /api/events — write liveness and sweep-time sever (issue #327)', () => {
+  function makeLivenessApp(options: {
+    sseHeartbeatMs: number
+    maxSseConnections: number
+    sweepIntervalMs?: number
+  }) {
+    const auditStore = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const approvalQueue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const channels = new Map([['dashboard', new QueueChannel()]])
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels,
+      queue: approvalQueue,
+    })
+    const rateLimiter = new RateLimiter({ cleanupIntervalMs: 0 })
+    const spendLimiter = new SpendLimiter({ cleanupIntervalMs: 0 })
+    const evidenceStore = new EvidenceStore({ cleanupIntervalMs: 0 })
+    const eventBus = new DashboardEventBus()
+    const lifecycle = createDashboardAppWithLifecycle(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter,
+        spendLimiter,
+        evidenceStore,
+        eventBus,
+      },
+      options,
+    )
+    cleanup.push(
+      auditStore,
+      approvalQueue,
+      rateLimiter,
+      spendLimiter,
+      evidenceStore,
+      eventBus,
+      lifecycle,
+    )
+    return { app: lifecycle.app, eventBus }
+  }
+
+  // Fill the in-process stream slack so subsequent writes (bus events and
+  // heartbeats alike) PEND and lastWrite stops refreshing. The exact slack
+  // is a stream-internals detail (~2-3 chunks observed); a 12-event burst
+  // clears it with margin without encoding the number.
+  async function fillStreamSlack(eventBus: DashboardEventBus): Promise<void> {
+    for (let i = 0; i < 12; i++) {
+      eventBus.emit('budget_update', {
+        name: `liveness-${String(i)}`,
+        bucket_key: 'budget:liveness',
+        kind: 'spend',
+        amount: 1,
+        spent: 1,
+        remaining: 0,
+        limit: 1,
+        currency: 'USD',
+        utilization: 1,
+        upstream: null,
+      })
+      await sleep(10)
+    }
+  }
+
+  // Open a stream, read the initial heartbeat (so the handler is past its
+  // abort-cleanup registration), then hand the reader back — the caller
+  // stops reading from there, which is the stalled-consumer premise.
+  async function openStalledStream(app: Hono): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+    const res = await app.request('/api/events')
+    expect(res.status).toBe(200)
+    expect(res.body).not.toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
+    const reader: ReadableStreamDefaultReader<Uint8Array> = res.body!.getReader()
+    const initial = await reader.read()
+    expect(initial.done).toBe(false)
+    expect(new TextDecoder().decode(initial.value)).toContain('event: heartbeat')
+    return reader
+  }
+
+  // Poll the capped slot until a probe is admitted; cancels nothing on 503
+  // (a refusal mints no stream) and returns the admitted response.
+  async function pollForReadmission(app: Hono, deadlineMs: number): Promise<Response | null> {
+    const deadline = Date.now() + deadlineMs
+    while (Date.now() < deadline) {
+      const probe = await app.request('/api/events')
+      if (probe.status === 200) return probe
+      await sleep(250)
+    }
+    return null
+  }
+
+  it('swallow canary: writeSSE on an aborted stream resolves, never rejects', async () => {
+    // Dependency pin, not a behavior test: hono@4.12.34's StreamingApi.write
+    // wraps the writer in a bare try/catch and resolves regardless
+    // (utils/stream.js), so a write to a dead stream cannot reject. The
+    // handler's cleanup-on-reject belts, the resolution-driven lastWrite
+    // refresh, and the documented sweeper story all rest on that swallow.
+    // A hono upgrade that surfaces writer failures fails this canary and
+    // forces re-examining all three.
+    const ts = new TransformStream<Uint8Array, Uint8Array>()
+    const sse = new SSEStreamingApi(ts.writable, ts.readable)
+    sse.abort()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const outcome = await Promise.race([
+      sse.writeSSE({ data: 'probe', event: 'probe' }).then(
+        () => 'resolved',
+        () => 'rejected',
+      ),
+      new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve('pended')
+        }, 2000)
+      }),
+    ])
+    expect(outcome).toBe('resolved')
+  })
+
+  it('sweep severs the stream: a stalled reader that resumes sees end-of-stream, no backlog', async () => {
+    const { app, eventBus } = makeLivenessApp({
+      sseHeartbeatMs: 1000,
+      maxSseConnections: 1,
+      sweepIntervalMs: 250,
+    })
+    const reader = await openStalledStream(app)
+    await fillStreamSlack(eventBus)
+
+    // Slot-reclaim pin (green before and after the sever): once no write
+    // has completed for three heartbeat intervals, a sweep tick frees the
+    // slot. The ceiling is generous by design (staleness 3 s + tick
+    // alignment + CI slack).
+    const readmitted = await pollForReadmission(app, 13_000)
+    expect(readmitted).not.toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
+    await readmitted!.body?.cancel()
+
+    // The swept connection was SEVERED, not merely uncounted: abort
+    // discarded the queued backlog, so the stalled reader resumes to a
+    // prompt end of stream — not the stale buffered backlog. One caveat
+    // observed live: hono's responseReadable is a pull wrapper with its
+    // own one-chunk staging queue, and a single already-staged frame is
+    // beyond abort's reach, so the reader may receive at most that
+    // staging slack (one ~230-byte frame observed) before done. The
+    // byte bound discriminates: the 12-event backlog is ~2.7 KB.
+    let resumedBytes = 0
+    for (;;) {
+      const resumed = await Promise.race([
+        reader.read(),
+        sleep(2000).then(() => 'still-pending' as const),
+      ])
+      expect(resumed).not.toBe('still-pending')
+      if (resumed === 'still-pending' || resumed.done) break
+      resumedBytes += resumed.value.length
+    }
+    expect(resumedBytes).toBeLessThan(500)
+  }, 20_000)
+
+  it('default sweep interval keeps the 10 s production floor and still reclaims', async () => {
+    // Two-sided pin on the DEFAULT sweep cadence (no sweepIntervalMs
+    // override): a floorless heartbeatMs * 2 default would sweep by ~4 s
+    // (failing the first assert), a never-runs default would hold the
+    // slot forever (failing the second). The ~13 s wall cost of pinning
+    // the production floor is accepted once, here only.
+    const t0 = Date.now()
+    const { app, eventBus } = makeLivenessApp({
+      sseHeartbeatMs: 1000,
+      maxSseConnections: 1,
+    })
+    await openStalledStream(app)
+    await fillStreamSlack(eventBus)
+
+    // At ~5 s: past staleness (3 s), but the 10 s sweep floor must not
+    // have ticked yet — the slot is still held.
+    await sleep(Math.max(0, t0 + 5000 - Date.now()))
+    const early = await app.request('/api/events')
+    expect(early.status).toBe(503)
+
+    // By ~13-14 s the floor tick has run and the slot frees.
+    const readmitted = await pollForReadmission(app, Math.max(0, t0 + 14_000 - Date.now()))
+    expect(readmitted).not.toBeNull()
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- asserted above
+    await readmitted!.body?.cancel()
+  }, 20_000)
 })
 
 // ---------------------------------------------------------------------------

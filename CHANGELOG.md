@@ -45,9 +45,10 @@ Maintainer notes:
   `GET /api/events` past 256 concurrent connections is refused with
   `503` and a plain JSON body, mints nothing, and never displaces an
   established stream — the operator-port twin of the agent-edge
-  `/sse` session cap. Slots free when a client disconnects or on
-  shutdown drain; refusal logging is time-bounded to one line per
-  window. There is no configuration surface. A browser `EventSource`
+  `/sse` session cap. Slots free when a client disconnects, when the
+  stale-connection sweeper severs a dead connection, or on shutdown
+  drain; refusal logging is time-bounded to one line per window.
+  There is no configuration surface. A browser `EventSource`
   treats the refusal as terminal (no auto-reconnect): a refused
   dashboard tab shows the disconnected banner and keeps its
   last-loaded data until reloaded.
@@ -193,6 +194,18 @@ Maintainer notes:
 
 ### Fixed
 
+- The `/api/events` stale-connection sweeper now severs the
+  connections it evicts (#327): a client that stopped reading without
+  disconnecting previously had only its cap slot reclaimed — the dead
+  socket, its queued chunks, and the server response survived until
+  process shutdown, and a swept client that later caught up drained a
+  stale backlog and then hung forever on a stream nothing would ever
+  end. A swept connection is now closed: its SSE stream is aborted
+  (queued chunks discarded) and the underlying socket destroyed, so
+  the client observes the close on its next read. Ordinary
+  disconnects are unaffected — they release their slot immediately
+  with no sweeper involved — and the shutdown drain still ends
+  streams gracefully.
 - Rejected audit records with an unrecognized `block_reason` no longer
   render as Allow in the dashboard (#276): outcome derivation now
   classifies on `policy_decision` first, so a record whose decision is
