@@ -761,6 +761,25 @@ dashboard:
       }
     })
 
+    it('warns while still validating when a stdio upstream sets a url (issue #324)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const configPath = join(dir, 'helio.yaml')
+
+      writeFileSync(
+        configPath,
+        'version: "1"\nupstream:\n  transport: stdio\n  command: node\n  url: "stdio://legacy"\ndashboard:\n  enabled: false\n',
+      )
+
+      try {
+        const { code, stderr } = await runCli(['validate', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain('upstream.url is ignored when transport is "stdio"')
+        expect(stderr).toContain('Config is valid')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('rejects invalid config (missing upstream.url)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const configPath = join(dir, 'helio.yaml')
@@ -1399,6 +1418,38 @@ audit:
         expect(warningIndex).toBeGreaterThanOrEqual(0)
         expect(failureIndex).toBeGreaterThanOrEqual(0)
         // The operator hears the warning even though entry 1 fails: it
+        // prints BEFORE the connect loop.
+        expect(warningIndex).toBeLessThan(failureIndex)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('warns before spawning when a stdio upstream sets a url (issue #324)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-stdio-url-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      // An absolute path under the tmpdir: a bare name would resolve through
+      // PATH, and a found-but-exiting binary hits the stdio wrapper's retry
+      // loop instead of failing fast with ENOENT.
+      const missingCommand = join(dir, 'nonexistent-helio-stdio-324')
+      writeFileSync(
+        configPath,
+        `version: "1"\nupstream:\n  transport: stdio\n  command: "${missingCommand}"\n  url: "stdio://legacy"\nlisten:\n  port: ${String(listenPort)}\n  host: 127.0.0.1\ndashboard:\n  enabled: false\naudit:\n  path: "${join(dir, 'audit.db')}"\n`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        const warningIndex = result.stderr.indexOf(
+          '[helio] Warning: upstream.url is ignored when transport is "stdio"',
+        )
+        // ENOENT, never `spawn`: the warning text itself says "spawns", so a
+        // `spawn` needle would match inside the warning line and tautologize
+        // the ordering assert below.
+        const failureIndex = result.stderr.indexOf('ENOENT')
+        expect(warningIndex).toBeGreaterThanOrEqual(0)
+        expect(failureIndex).toBeGreaterThanOrEqual(0)
+        // The operator hears the warning even though the spawn fails: it
         // prints BEFORE the connect loop.
         expect(warningIndex).toBeLessThan(failureIndex)
       } finally {

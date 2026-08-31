@@ -36,6 +36,14 @@ Maintainer notes:
 
 ### Added
 
+- Stdio ignored-`url` warning (#324): `helio validate` and `helio start`
+  warn when a stdio upstream carries a `url`, naming the field's dotted
+  path (`upstream.url`, or `upstreams.0.url` for a named entry). The
+  stdio forwarder spawns `command` and never reads a URL, so a present
+  value is a silent dead field that can mislead a reader into thinking
+  the proxy talks to that address. Warning-only: the config stays
+  valid, exit codes are unchanged, and removing the field silences it.
+
 - Feed `session_source` filter (#316): `GET /api/feed` accepts a
   `session_source` query param (exact match), and the Feed view gains
   the same five-value source select as the Audit view, applied to the
@@ -179,9 +187,10 @@ Maintainer notes:
   the stdio forwarder spawns `command` and never reads a URL, so a
   stdio upstream (singular or any named `upstreams:` entry) no longer
   needs a placeholder. A present value is still accepted and ignored,
-  so existing placeholder-carrying configs validate unchanged. The
-  HTTP transports still require the field, and a missing `url` now
-  fails with a message naming the transport
+  so existing placeholder-carrying configs validate unchanged; it now
+  draws a warning naming the field (#324). The HTTP transports still
+  require the field, and a missing `url` now fails with a message
+  naming the transport
   (`"url" is required when transport is "streamable-http"`). For
   library embedders, the inferred `HelioConfig` upstream shape marks
   `url` optional.
