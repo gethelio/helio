@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { verifyBearer } from '../auth/bearer.js'
 import { cors } from 'hono/cors'
 import { serveStatic } from '@hono/node-server/serve-static'
+import type { HttpBindings } from '@hono/node-server'
 import { streamSSE } from 'hono/streaming'
 import { VERSION } from '../version.js'
 import type { AuditStore } from '../audit/store.js'
@@ -76,6 +77,14 @@ export interface DashboardAppOptions {
    * a hardcoded invariant (see MAX_SSE_CONNECTIONS).
    */
   readonly maxSseConnections?: number
+  /**
+   * @internal Test seam for the stale-connection sweep cadence (issue
+   * #327), so sweeper tests need not wait out the production floor. `0`
+   * DISABLES the sweeper entirely (the repo-wide sweep-interval
+   * convention). Not wired to config — the 10 s floor stays the
+   * production default.
+   */
+  readonly sweepIntervalMs?: number
 }
 
 /** Lifecycle handle for dashboard app startup and shutdown. */
@@ -273,8 +282,8 @@ function isPrivateIpv4(host: string): boolean {
 // config knob), mirroring the transport /sse session cap: a knob that
 // raises or disables the cap silently disables a resource bound.
 //
-// Unlike /sse — where lastActivity refreshes only on successful writes, so
-// a held-open unproven session goes idle and is swept — this endpoint
+// Unlike /sse — which has no heartbeat, so a held-open unproven session
+// receives no writes at all, goes idle, and is swept — this endpoint
 // heartbeats its connections and refreshes lastWrite on every RESOLVED
 // write, so held-open authorized tabs pin the cap BY DESIGN: anyone who
 // can pin it already holds the operator credential (or local access in
@@ -724,29 +733,45 @@ export function createDashboardAppWithLifecycle(
   // -------------------------------------------------------------------------
   // Events — SSE stream for real-time updates
   //
-  // Connections are tracked in a map for stale connection sweeping. A
-  // background interval periodically removes connections that have not
-  // had a successful write in over 90 seconds (3 missed heartbeats).
+  // Connections are tracked in a map for stale-connection sweeping.
+  // Ordinary client disconnects reclaim their slot immediately via abort
+  // (stream.onAbort below); the sweeper is the backstop for clients that
+  // died WITHOUT disconnecting — stopped reading, socket open, no FIN or
+  // RST. Writes to such a client PEND once its transport buffers fill;
+  // they never reject (hono's StreamingApi.write swallows writer
+  // failures), so staleness means "no write has COMPLETED for three
+  // heartbeat intervals". The sweeper drops a stale entry from the map
+  // AND severs its transport. Between buffer-fill and the sweep, queued
+  // chunks accumulate in JS memory on the dead connection — unbounded by
+  // size but bounded in time by stale + sweep — and the sever discards
+  // them and releases the socket.
   // -------------------------------------------------------------------------
 
-  const activeConnections = new Map<string, { readonly cleanup: () => void; lastWrite: number }>()
+  const activeConnections = new Map<
+    string,
+    { readonly cleanup: () => void; readonly sever: () => void; lastWrite: number }
+  >()
   let closed = false
 
   const heartbeatMs = Math.max(options?.sseHeartbeatMs ?? 30_000, 1_000)
   const staleThresholdMs = heartbeatMs * 3
-  const sweepIntervalMs = Math.max(heartbeatMs * 2, 10_000)
+  const sweepIntervalMs = options?.sweepIntervalMs ?? Math.max(heartbeatMs * 2, 10_000)
   const maxSseConnections = options?.maxSseConnections ?? MAX_SSE_CONNECTIONS
 
-  const sweepInterval = setInterval(() => {
-    const now = Date.now()
-    for (const [id, conn] of activeConnections) {
-      if (now - conn.lastWrite > staleThresholdMs) {
-        conn.cleanup()
-        activeConnections.delete(id)
+  let sweepInterval: NodeJS.Timeout | undefined
+  if (sweepIntervalMs > 0) {
+    sweepInterval = setInterval(() => {
+      const now = Date.now()
+      for (const [id, conn] of activeConnections) {
+        if (now - conn.lastWrite > staleThresholdMs) {
+          conn.cleanup()
+          conn.sever()
+          activeConnections.delete(id)
+        }
       }
-    }
-  }, sweepIntervalMs)
-  sweepInterval.unref()
+    }, sweepIntervalMs)
+    sweepInterval.unref()
+  }
 
   const close = () => {
     if (closed) return
@@ -807,6 +832,21 @@ export function createDashboardAppWithLifecycle(
         releaseStream()
       }
 
+      // Sweep-time sever: abort the SSE stream (discards queued chunks and
+      // settles any pended write) and destroy the Node server response
+      // beneath it, releasing the socket. c.env is the @hono/node-server
+      // adapter binding ({ incoming, outgoing }); in-process fixtures
+      // (app.request) have no outgoing and degrade to abort-only, which is
+      // a full in-process sever. The cast is a narrow local one on purpose:
+      // re-typing the app's env generic would ripple through exported
+      // types. ONLY the sweeper calls this — ordinary disconnects are
+      // already dying transports, and the shutdown drain must keep ending
+      // streams gracefully.
+      const sever = () => {
+        stream.abort()
+        ;(c.env as Partial<HttpBindings> | undefined)?.outgoing?.destroy()
+      }
+
       // Belt for the cap check above: unreachable under hono@4.12.34,
       // where streamSSE runs this callback synchronously up to its first
       // await (helper/streaming/sse.js:29-31, :62) — the initial heartbeat
@@ -822,9 +862,14 @@ export function createDashboardAppWithLifecycle(
       // outer check's terminal 503.
       if (activeConnections.size >= maxSseConnections) return
 
-      activeConnections.set(connId, { cleanup, lastWrite: Date.now() })
+      activeConnections.set(connId, { cleanup, sever, lastWrite: Date.now() })
 
-      // Send initial heartbeat
+      // Send initial heartbeat. The catch is a belt: unreachable for
+      // disconnects under hono@4.12.34, whose StreamingApi.write swallows
+      // writer failures (utils/stream.js:36-45 resolves regardless). Kept
+      // for a future hono that surfaces rejections: cleanup() must run
+      // BEFORE streamSSE's finally { stream.close() }, so the map entry
+      // cannot outlive the stream.
       try {
         await stream.writeSSE({ data: '', event: 'heartbeat' })
       } catch {
@@ -845,7 +890,14 @@ export function createDashboardAppWithLifecycle(
             if (conn) conn.lastWrite = Date.now()
           })
           .catch(() => {
-            // Expected on client disconnect — stream already closed
+            // Belt: unreachable for disconnects under hono@4.12.34, whose
+            // StreamingApi.write swallows writer failures
+            // (utils/stream.js:36-45 resolves regardless); disconnects
+            // surface via onAbort, and dead-but-unaborted clients make
+            // writes pend for the sweeper. Kept so a future hono that
+            // surfaces rejections still cleans up — and so a surfaced
+            // rejection on this void chain can never become an unhandled
+            // rejection.
             cleanup()
           })
       })
@@ -860,7 +912,14 @@ export function createDashboardAppWithLifecycle(
             if (conn) conn.lastWrite = Date.now()
           })
           .catch(() => {
-            // Expected on client disconnect — stream already closed
+            // Belt: unreachable for disconnects under hono@4.12.34, whose
+            // StreamingApi.write swallows writer failures
+            // (utils/stream.js:36-45 resolves regardless); disconnects
+            // surface via onAbort, and dead-but-unaborted clients make
+            // writes pend for the sweeper. Kept so a future hono that
+            // surfaces rejections still cleans up — and so a surfaced
+            // rejection on this void chain can never become an unhandled
+            // rejection.
             cleanup()
           })
       }, heartbeatMs)
