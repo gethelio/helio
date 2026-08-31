@@ -55,6 +55,7 @@ import {
   warnIfNoEnforcement,
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
+  warnIfStdioUrlIgnored,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -312,6 +313,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   if (isNamedConfig(config)) {
     warnIfManyUpstreams(config)
   }
+  warnIfStdioUrlIgnored(config)
 
   // Phase 1 of per-upstream assembly: connect EVERY upstream before any
   // shared service is constructed — a bad upstream fails boot with no side
@@ -813,6 +815,7 @@ async function validateCommand(configPath: string): Promise<void> {
     if (isNamedConfig(config)) {
       warnIfManyUpstreams(config)
     }
+    warnIfStdioUrlIgnored(config)
 
     if (config.dashboard.enabled && !getBundledDashboardDistPath()) {
       console.error(

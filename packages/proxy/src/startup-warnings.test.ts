@@ -6,6 +6,7 @@ import {
   warnIfNoEnforcement,
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
+  warnIfStdioUrlIgnored,
 } from './startup-warnings.js'
 
 describe('warnIfManyUpstreams', () => {
@@ -30,6 +31,112 @@ describe('warnIfManyUpstreams', () => {
   it('does not warn at exactly 16 entries', () => {
     const messages: string[] = []
     const warned = warnIfManyUpstreams({ upstreams: upstreams(16) }, (m) => messages.push(m))
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+})
+
+describe('warnIfStdioUrlIgnored', () => {
+  it('warns when a singular stdio upstream carries a url', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored(
+      { upstream: { transport: 'stdio', url: 'stdio://legacy' } },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toBe(
+      '[helio] Warning: upstream.url is ignored when transport is "stdio" (the stdio ' +
+        'forwarder spawns "command"). Remove the field to silence this warning.',
+    )
+  })
+
+  it('warns on an empty-string url — the field is present even when falsy', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored({ upstream: { transport: 'stdio', url: '' } }, (m) =>
+      messages.push(m),
+    )
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toBe(
+      '[helio] Warning: upstream.url is ignored when transport is "stdio" (the stdio ' +
+        'forwarder spawns "command"). Remove the field to silence this warning.',
+    )
+  })
+
+  it('warns per offending named entry with the dotted index path', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored(
+      {
+        upstreams: [
+          { transport: 'stdio', url: 'stdio://a' },
+          { transport: 'streamable-http', url: 'http://localhost:9000/mcp' },
+          { transport: 'stdio', url: 'stdio://c' },
+        ],
+      },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toBe(
+      '[helio] Warning: upstreams.0.url is ignored when transport is "stdio" (the stdio ' +
+        'forwarder spawns "command"). Remove the field to silence this warning.',
+    )
+    expect(messages[1]).toBe(
+      '[helio] Warning: upstreams.2.url is ignored when transport is "stdio" (the stdio ' +
+        'forwarder spawns "command"). Remove the field to silence this warning.',
+    )
+  })
+
+  it('does not warn for a singular stdio upstream without a url', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored({ upstream: { transport: 'stdio' } }, (m) =>
+      messages.push(m),
+    )
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn for a singular streamable-http upstream with a url', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored(
+      { upstream: { transport: 'streamable-http', url: 'http://localhost:9000/mcp' } },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn for a named stdio entry without a url', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored({ upstreams: [{ transport: 'stdio' }] }, (m) =>
+      messages.push(m),
+    )
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn for named all-HTTP entries with urls', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored(
+      {
+        upstreams: [
+          { transport: 'streamable-http', url: 'http://localhost:9000/mcp' },
+          { transport: 'sse', url: 'http://localhost:9001/sse' },
+        ],
+      },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn for a singular sse upstream with a url — url is required there', () => {
+    const messages: string[] = []
+    const warned = warnIfStdioUrlIgnored(
+      { upstream: { transport: 'sse', url: 'http://localhost:9001/sse' } },
+      (m) => messages.push(m),
+    )
     expect(warned).toBe(false)
     expect(messages).toHaveLength(0)
   })

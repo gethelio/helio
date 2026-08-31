@@ -67,6 +67,39 @@ export function warnIfManyUpstreams(
 }
 
 /**
+ * Emit a warning for every stdio upstream entry that carries a `url`. The
+ * stdio forwarder spawns `command` and never reads a URL, so a present value
+ * (tolerated since issue #313 for legacy placeholder configs) is a silent
+ * dead field that can mislead a reader into thinking the proxy talks to that
+ * address. Warning-only: the config stays valid and nothing refuses to run.
+ */
+export function warnIfStdioUrlIgnored(
+  config: {
+    upstream?: { transport: string; url?: string }
+    upstreams?: ReadonlyArray<{ transport: string; url?: string }>
+  },
+  log: (message: string) => void = console.error,
+): boolean {
+  let warned = false
+  const warn = (path: string): void => {
+    log(
+      `[helio] Warning: ${path} is ignored when transport is "stdio" (the stdio ` +
+        'forwarder spawns "command"). Remove the field to silence this warning.',
+    )
+    warned = true
+  }
+  if (config.upstream?.transport === 'stdio' && config.upstream.url !== undefined) {
+    warn('upstream.url')
+  }
+  config.upstreams?.forEach((entry, index) => {
+    if (entry.transport === 'stdio' && entry.url !== undefined) {
+      warn(`upstreams.${String(index)}.url`)
+    }
+  })
+  return warned
+}
+
+/**
  * Emit a startup warning if a webhook approval channel is configured while
  * the dashboard sideband is bound to localhost only. Webhook callbacks
  * originate from outside the host, so they cannot reach
