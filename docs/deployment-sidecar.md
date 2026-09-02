@@ -1,8 +1,11 @@
 # Running Helio as a Sidecar
 
-This is a **deployment pattern, not a tutorial.** It shows the one topology that
-makes Helio's governance impossible for an agent to bypass, with a copy-paste
-Docker Compose setup that implements it.
+This is a **deployment pattern, not a tutorial.** It shows the topology that
+makes Helio's governance non-bypassable on the network axis, with a copy-paste
+Docker Compose setup that implements it. The process axis, keeping the config
+off the agent's filesystem, is stated in
+[SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) and is not yet
+part of this recipe.
 
 **Who it's for:** you already know roughly what Helio does — if not, start with
 the [README](../README.md) or [Getting Started](./getting-started.md) — and you
@@ -11,8 +14,11 @@ the [5-minute demo](../docker/README.md).
 
 **What you get:** every MCP (Model Context Protocol) tool call the agent makes is
 forced through Helio's policy engine, approvals, and audit trail. The agent can't "just do the thing";
-it has to go through governance. Everything below exists to guarantee that one
-property.
+it has to go through governance. Everything below exists to give you that
+property on the network axis. Until this page also covers the filesystem
+axis, keep `helio.sidecar.yaml` and the compose file out of any directory
+mounted into the agent container: a write from the agent reaches the proxy
+through the `:ro` bind mount below and survives a `docker restart`.
 
 ## Why a sidecar — the one rule that makes it work
 
@@ -214,7 +220,7 @@ must go through Helio.
 > hands the agent a direct path to the upstream and defeats the point of the
 > sidecar.
 
-## Verifying the agent can't bypass Helio
+## Verifying the agent can't bypass Helio on the network
 
 From inside the agent / dev container, confirm the upstream is unreachable
 directly but reachable through Helio:
