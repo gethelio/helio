@@ -77,7 +77,7 @@ Action versions are pinned to major version tags (e.g., `@v4`). Dependabot propo
 
 The `pnpm-workspace.yaml` file includes overrides to patch known vulnerabilities in transitive dependencies when upstream packages haven't released fixes yet.
 
-Current security-patch overrides include `axios` pinned at `1.18.1` for its Node-adapter advisories inherited via `@slack/web-api`, `fast-uri` at `3.1.5` for `GHSA-7p8r-x3mc-p8w7` and its two predecessors, and `ip-address` at `10.3.1` for `GHSA-mwp4-54f8-5fhr` (needed because `express-rate-limit`, inherited via `@modelcontextprotocol/sdk`, depends on an exact `10.1.0`, so no range resolution reaches the fix).
+Current security-patch overrides include `axios` pinned at `1.18.1` for its Node-adapter advisories inherited via `@slack/web-api`, `fast-uri` lifted to `3.1.6` through a ranged override (`fast-uri@<3.1.6`) for four host-confusion and SSRF advisories patched in `3.1.6`, on top of the three the earlier `3.1.5` pin covered, and `ip-address` at `10.3.1` for `GHSA-mwp4-54f8-5fhr` (needed because `express-rate-limit`, inherited via `@modelcontextprotocol/sdk`, depends on an exact `10.1.0`, so no range resolution reaches the fix).
 
 `brace-expansion` is lifted to `1.1.18` and `5.0.9`, which clears both `GHSA-mh99-v99m-4gvg` and `GHSA-rgw5-rvv9-x895`, the latter being a bypass of the former's mitigation. The 1.x line gained a patched release (`1.1.17`, then `1.1.18`) after the original override was written, so `GHSA-mh99-v99m-4gvg` is no longer an audit ignore.
 
