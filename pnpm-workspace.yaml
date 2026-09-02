@@ -26,6 +26,15 @@ overrides:
   # express-rate-limit (via @modelcontextprotocol/sdk) depends on an EXACT
   # ip-address 10.1.0, so no range resolution can reach the fix.
   ip-address: 10.3.1 # GHSA-mwp4-54f8-5fhr
+  # browserslist prototype write and uncaught crash via untrusted
+  # browserslist-stats.json (GHSA-c83g-rgw3-j3cx, GHSA-73wf-gq98-2v4g,
+  # both patched 4.28.7). Every path is a dev-only transitive through
+  # @babel/core, whose @babel/helper-compilation-targets declares
+  # ^4.24.0, a range that already admits the fix. The lockfile was
+  # simply pinned at 4.28.2, and pnpm has no scoped transitive refresh,
+  # so the ranged override carries it; the range self-retires once
+  # natural resolution reaches 4.28.7 or later.
+  'browserslist@<4.28.7': 4.28.8
 
 # pnpm 11 reads settings from this file only; the package.json "pnpm" field
 # is ignored. The GHSA below is triaged and tracked (esbuild dev-server: #64).
