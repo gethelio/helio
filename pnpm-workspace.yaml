@@ -8,7 +8,17 @@ packages:
 overrides:
   path-to-regexp: 8.4.2
   axios: 1.18.1
-  fast-uri: 3.1.5 # GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx, GHSA-7p8r-x3mc-p8w7
+  # fast-uri host confusion and SSRF via IDN canonicalization, IPv6
+  # normalization, percent-decoding, and scheme handling
+  # (GHSA-5jgf-p345-68v8, GHSA-f65p-4m7j-42xc, GHSA-fph4-wmhf-6fwf,
+  # GHSA-jqff-g426-hqxp, all patched 3.1.6), on top of the three the 3.1.5
+  # pin covered (GHSA-4c8g-83qw-93j6, GHSA-v2hh-gcrm-f6hx,
+  # GHSA-7p8r-x3mc-p8w7). Dev-only path through @modelcontextprotocol/sdk
+  # and ajv, whose ^3.0.1 already admits the fix; the ranged override
+  # carries it and self-retires once natural resolution reaches 3.1.6 or
+  # later. 3.1.7 closes two more (GHSA-qw65-cvwx-89v3, GHSA-58mr-gqgx-xq4g)
+  # and is the next lift once it clears the release-age guard.
+  'fast-uri@<3.1.6': 3.1.6
   follow-redirects: 1.16.0
   # Both brace-expansion advisories at once: GHSA-mh99-v99m-4gvg (patched 1.1.17
   # / 5.0.8) and GHSA-rgw5-rvv9-x895, which bypasses that mitigation (patched
