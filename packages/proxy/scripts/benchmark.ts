@@ -10,7 +10,6 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { cpus, totalmem, platform, arch } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createApp } from '../src/server.js'
@@ -20,6 +19,19 @@ import { startOnDynamicPort, makeConfig } from '../src/__tests__/helpers/test-ut
 import { compilePolicies } from '../src/policy/index.js'
 import { GovernedForwarder } from '../src/policy/governed-forwarder.js'
 import { AuditStore, AuditWriter } from '../src/audit/index.js'
+import {
+  P99_TARGET_MS,
+  collectAuditLatencies,
+  computeStats,
+  evaluateGate,
+  fmt,
+  fmtInt,
+  formatGateSummary,
+  generateMarkdownReport,
+  type BenchmarkResults,
+  type LatencyStats,
+  type MemorySnapshot,
+} from './benchmark-report.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,62 +40,10 @@ import { AuditStore, AuditWriter } from '../src/audit/index.js'
 const WARMUP_COUNT = 50
 const MEASURE_COUNT_TRANSPARENT = 1_000
 const MEASURE_COUNT_GOVERNED = 10_000
-const P99_TARGET_MS = 5
-const AUDIT_PAGE_SIZE = 1_000
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface LatencyStats {
-  count: number
-  p50: number
-  p95: number
-  p99: number
-  max: number
-  avg: number
-}
-
-interface MemorySnapshot {
-  label: string
-  heapUsedMB: number
-  rssMB: number
-}
-
-interface BenchmarkResults {
-  transparent: { stats: LatencyStats; throughput: number }
-  governed: {
-    external: { stats: LatencyStats; throughput: number }
-    proxyInternal: LatencyStats
-    upstreamInternal: LatencyStats
-    overhead: LatencyStats
-  }
-  memory: MemorySnapshot[]
-  sqlite: { records: number; durationMs: number; throughput: number }
-  gcExposed: boolean
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function percentile(sorted: number[], p: number): number {
-  const idx = Math.ceil((p / 100) * sorted.length) - 1
-  return sorted[Math.max(0, idx)]!
-}
-
-function computeStats(durations: number[]): LatencyStats {
-  const sorted = [...durations].sort((a, b) => a - b)
-  const avg = durations.reduce((sum, d) => sum + d, 0) / durations.length
-  return {
-    count: durations.length,
-    p50: percentile(sorted, 50),
-    p95: percentile(sorted, 95),
-    p99: percentile(sorted, 99),
-    max: sorted[sorted.length - 1] ?? 0,
-    avg,
-  }
-}
 
 function measureMemory(label: string): MemorySnapshot {
   if (typeof globalThis.gc === 'function') {
@@ -115,32 +75,6 @@ async function sendRequest(url: string, method = 'tools/call'): Promise<number> 
   })
   await res.json()
   return performance.now() - start
-}
-
-/**
- * Paginate through audit records and extract latency arrays.
- * Skips the first `offset` records (warmup) and reads `count` records.
- */
-function collectAuditLatencies(
-  store: AuditStore,
-  count: number,
-  warmupOffset: number,
-): { proxyLatencies: number[]; upstreamLatencies: number[]; overheadLatencies: number[] } {
-  const proxyLatencies: number[] = []
-  const upstreamLatencies: number[] = []
-  const overheadLatencies: number[] = []
-
-  for (let offset = warmupOffset; offset < warmupOffset + count; offset += AUDIT_PAGE_SIZE) {
-    const page = store.list({}, { limit: AUDIT_PAGE_SIZE, offset, order: 'asc' })
-    for (const record of page.records) {
-      proxyLatencies.push(record.proxy_compute_ms)
-      const upstream = record.upstream_latency_ms ?? 0
-      upstreamLatencies.push(upstream)
-      overheadLatencies.push(record.proxy_compute_ms)
-    }
-  }
-
-  return { proxyLatencies, upstreamLatencies, overheadLatencies }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,136 +111,6 @@ function printMemory(snapshots: MemorySnapshot[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// Markdown report generation
-// ---------------------------------------------------------------------------
-
-function fmt(n: number, decimals = 2): string {
-  return n.toFixed(decimals)
-}
-
-function fmtInt(n: number): string {
-  return n.toLocaleString('en-US')
-}
-
-function generateMarkdownReport(results: BenchmarkResults): string {
-  const now = new Date().toISOString()
-  const cpu = cpus()
-  const cpuModel = cpu[0]?.model ?? 'unknown'
-  const cpuCount = cpu.length
-  const totalMemGB = (totalmem() / 1024 / 1024 / 1024).toFixed(0)
-
-  const t = results.transparent
-  const g = results.governed
-  const mem = results.memory
-  const sq = results.sqlite
-
-  const lines: string[] = [
-    '# Helio Proxy Performance Benchmark',
-    '',
-    `> Generated: ${now} | Node ${process.version} | ${platform()} ${arch()}`,
-    '',
-    '## Environment',
-    '',
-    '| Property | Value |',
-    '| --- | --- |',
-    `| Node.js | ${process.version} |`,
-    `| Platform | ${platform()} ${arch()} |`,
-    `| CPU | ${cpuModel} (${String(cpuCount)} cores) |`,
-    `| Memory | ${totalMemGB} GB |`,
-    `| GC exposed | ${results.gcExposed ? 'yes' : 'no'} |`,
-    '',
-    `## 1. Transparent Proxy (${fmtInt(t.stats.count)} requests)`,
-    '',
-    'Baseline: no policy evaluation, no audit writing.',
-    '',
-    '| Metric | Value |',
-    '| --- | --- |',
-    `| p50 | ${fmt(t.stats.p50)}ms |`,
-    `| p95 | ${fmt(t.stats.p95)}ms |`,
-    `| p99 | ${fmt(t.stats.p99)}ms |`,
-    `| max | ${fmt(t.stats.max)}ms |`,
-    `| avg | ${fmt(t.stats.avg)}ms |`,
-    `| Throughput | ${fmtInt(Math.round(t.throughput))} req/s |`,
-    '',
-    `## 2. Governed Proxy \u2014 External Round-Trip (${fmtInt(g.external.stats.count)} requests)`,
-    '',
-    'Full governance pipeline: policy evaluation + upstream forward + audit write.',
-    'Measured from the benchmark client (includes client\u2194proxy network overhead).',
-    '',
-    '| Metric | Value |',
-    '| --- | --- |',
-    `| p50 | ${fmt(g.external.stats.p50)}ms |`,
-    `| p95 | ${fmt(g.external.stats.p95)}ms |`,
-    `| p99 | ${fmt(g.external.stats.p99)}ms |`,
-    `| max | ${fmt(g.external.stats.max)}ms |`,
-    `| avg | ${fmt(g.external.stats.avg)}ms |`,
-    `| Throughput | ${fmtInt(Math.round(g.external.throughput))} req/s |`,
-    '',
-    '## 3. Latency Overhead Decomposition (from audit records)',
-    '',
-    'Internal proxy timing extracted from audit records. Overhead = proxy total \u2212 upstream.',
-    '',
-    '| Percentile | Proxy Total | Upstream | Overhead |',
-    '| --- | --- | --- | --- |',
-    `| p50 | ${fmt(g.proxyInternal.p50)}ms | ${fmt(g.upstreamInternal.p50)}ms | ${fmt(g.overhead.p50)}ms |`,
-    `| p95 | ${fmt(g.proxyInternal.p95)}ms | ${fmt(g.upstreamInternal.p95)}ms | ${fmt(g.overhead.p95)}ms |`,
-    `| p99 | ${fmt(g.proxyInternal.p99)}ms | ${fmt(g.upstreamInternal.p99)}ms | ${fmt(g.overhead.p99)}ms |`,
-    `| max | ${fmt(g.proxyInternal.max)}ms | ${fmt(g.upstreamInternal.max)}ms | ${fmt(g.overhead.max)}ms |`,
-    `| avg | ${fmt(g.proxyInternal.avg)}ms | ${fmt(g.upstreamInternal.avg)}ms | ${fmt(g.overhead.avg)}ms |`,
-    '',
-    '## 4. Memory Usage',
-    '',
-  ]
-
-  if (mem.length >= 4) {
-    lines.push('| Checkpoint | Heap Used | RSS |', '| --- | --- | --- |')
-    for (const s of mem) {
-      lines.push(`| ${s.label} | ${fmt(s.heapUsedMB, 1)} MB | ${fmt(s.rssMB, 1)} MB |`)
-    }
-    const memAfterWarmup = mem[1]!
-    const memAfter10K = mem[2]!
-    const heapDelta = memAfter10K.heapUsedMB - memAfterWarmup.heapUsedMB
-    const rssDelta = memAfter10K.rssMB - memAfterWarmup.rssMB
-    lines.push(
-      `| **Delta (warmup \u2192 10K)** | **${heapDelta >= 0 ? '+' : ''}${fmt(heapDelta, 1)} MB** | **${rssDelta >= 0 ? '+' : ''}${fmt(rssDelta, 1)} MB** |`,
-    )
-  }
-
-  lines.push(
-    '',
-    '## 5. SQLite Audit Write Throughput',
-    '',
-    'Effective throughput: audit writes interleaved with request processing (real-world scenario).',
-    'Audit records are batched by AuditWriter and flushed to SQLite in transactions.',
-    '',
-    '| Metric | Value |',
-    '| --- | --- |',
-    `| Records written | ${fmtInt(sq.records)} |`,
-    `| Wall clock time | ${fmt(sq.durationMs / 1000, 2)}s |`,
-    `| Throughput | ${fmtInt(Math.round(sq.throughput))} records/s |`,
-    '',
-    '## Pass/Fail',
-    '',
-    '| Check | Target | Actual | Status |',
-    '| --- | --- | --- | --- |',
-  )
-
-  const checks: Array<{ label: string; target: number; actual: number }> = [
-    { label: 'Transparent p99', target: P99_TARGET_MS, actual: t.stats.p99 },
-    { label: 'Governed p99 (external)', target: P99_TARGET_MS, actual: g.external.stats.p99 },
-    { label: 'Governed p99 (overhead)', target: P99_TARGET_MS, actual: g.overhead.p99 },
-  ]
-
-  for (const c of checks) {
-    const status = c.actual < c.target ? 'PASS' : 'FAIL'
-    lines.push(`| ${c.label} | < ${String(c.target)}ms | ${fmt(c.actual)}ms | **${status}** |`)
-  }
-
-  lines.push('')
-  return lines.join('\n')
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -315,7 +119,7 @@ async function main(): Promise<void> {
   console.log(`  Transparent: ${fmtInt(MEASURE_COUNT_TRANSPARENT)} requests`)
   console.log(`  Governed:    ${fmtInt(MEASURE_COUNT_GOVERNED)} requests`)
   console.log(`  Warmup:      ${String(WARMUP_COUNT)} requests each`)
-  console.log(`  Target:      p99 < ${String(P99_TARGET_MS)}ms`)
+  console.log(`  Gate:        Governed (overhead) p99 < ${String(P99_TARGET_MS)}ms`)
 
   // Start upstream MCP server
   const upstream = await startHttpMcpServer()
@@ -514,25 +318,10 @@ async function main(): Promise<void> {
   // -----------------------------------------------------------------------
 
   console.log('\n' + '='.repeat(58))
-  let pass = true
-
-  const checks: Array<{ label: string; p99: number }> = [
-    { label: 'Transparent', p99: results.transparent.stats.p99 },
-    { label: 'Governed (external)', p99: results.governed.external.stats.p99 },
-    { label: 'Governed (overhead)', p99: results.governed.overhead.p99 },
-  ]
-
-  for (const c of checks) {
-    if (c.p99 < P99_TARGET_MS) {
-      console.log(`  ${c.label}: p99 (${c.p99.toFixed(2)}ms) < ${String(P99_TARGET_MS)}ms PASS`)
-    } else {
-      console.log(`  ${c.label}: p99 (${c.p99.toFixed(2)}ms) >= ${String(P99_TARGET_MS)}ms FAIL`)
-      pass = false
-    }
-  }
-
+  const gate = evaluateGate(results, P99_TARGET_MS)
+  console.log(formatGateSummary(gate))
   console.log('='.repeat(58))
-  process.exit(pass ? 0 : 1)
+  process.exit(gate.pass ? 0 : 1)
 }
 
 void main()

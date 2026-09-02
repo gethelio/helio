@@ -41,7 +41,7 @@
     "build": "pnpm run build:dashboard && pnpm run build:proxy && pnpm run bundle:dashboard-assets && pnpm run check:dashboard-assets",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p scripts/tsconfig.json",
     "benchmark": "tsx scripts/benchmark.ts",
     "prepack": "pnpm run check:dashboard-assets"
   },
