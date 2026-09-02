@@ -19,6 +19,7 @@ SOURCE_DRIFT_PATTERNS=(
   '^packages/proxy/src/transport/.*\.ts$'
   '^packages/proxy/src/upstream/.*\.ts$'
   '^packages/proxy/scripts/benchmark\.ts$'
+  '^packages/proxy/scripts/benchmark-report\.ts$'
   '^packages/python-sdk/src/helio/__init__\.py$'
   '^packages/python-sdk/src/helio/client\.py$'
   '^packages/python-sdk/src/helio/context\.py$'

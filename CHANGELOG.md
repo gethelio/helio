@@ -19,6 +19,25 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **The benchmark runs in CI and at the release gate (#333).** Every
+  push and pull request runs `pnpm --filter @gethelio/proxy benchmark`
+  after the test suite, and the release workflow runs it again before
+  it publishes, so a tag cannot ship past a performance regression.
+  Each run publishes its report to the job summary.
+
+### Changed
+
+- **Benchmark gate keys on governance overhead only (#333).** The
+  benchmark's pass/fail status now depends on one check, the governed
+  overhead p99 against the 5ms budget. The transparent and governed
+  end-to-end p99s are still measured and reported, but as context:
+  both are taken from the benchmark client and include the mock
+  upstream, which exceeds the budget on its own on a loaded machine.
+  The latency decomposition's `Proxy Total` column now reports
+  `total_duration_ms` rather than repeating the overhead figure.
+
 ## [0.13.0] - 2026-08-31
 
 ### Breaking changes

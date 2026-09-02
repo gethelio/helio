@@ -132,6 +132,25 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # After Test on purpose: a failure here reads as a performance
+      # regression on an otherwise green tree. Exit 1 comes from the
+      # one gate in packages/proxy/scripts/benchmark.ts (governed
+      # overhead p99 < 5ms); the end-to-end numbers never fail it.
+      - name: Benchmark
+        run: pnpm --filter @gethelio/proxy benchmark
+
+      # The report is written before the gate is evaluated, so a FAIL
+      # still publishes its numbers. !cancelled() rather than always()
+      # so a run superseded by the concurrency group does not start
+      # this step; guarded so an earlier failure (no report on disk)
+      # does not add a second red step.
+      - name: Publish the benchmark report to the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f docs/benchmark-results.md ]; then
+            cat docs/benchmark-results.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   docker:
     name: Docker Build
     runs-on: ubuntu-latest

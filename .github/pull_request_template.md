@@ -30,7 +30,7 @@ Closes #
 - [ ] My code follows the existing style (ESLint + Prettier pass)
 - [ ] TypeScript strict mode — no `any` types or `@ts-ignore` without justification
 - [ ] I have added or updated tests for my changes
-- [ ] All CI checks pass (`pnpm secrets:scan`, `pnpm docs:check:ci`, `pnpm audit --audit-level=high`, `pnpm build`, `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test`)
+- [ ] All CI checks pass (`pnpm secrets:scan`, `pnpm docs:check:ci`, `pnpm audit --audit-level=high`, `pnpm build`, `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test`, `pnpm --filter @gethelio/proxy benchmark`)
 - [ ] I have updated documentation if this changes user-facing behavior
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat:`, `fix:`, `docs:`)
 

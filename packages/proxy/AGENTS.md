@@ -230,7 +230,7 @@ The proxy is the single enforcement point for all governance decisions. Security
 ```bash
 pnpm --filter @gethelio/proxy test        # Run all proxy tests (vitest run)
 pnpm --filter @gethelio/proxy test:watch  # Vitest watch mode
-pnpm --filter @gethelio/proxy typecheck   # tsc --noEmit
+pnpm --filter @gethelio/proxy typecheck   # tsc --noEmit && tsc -p scripts/tsconfig.json
 pnpm --filter @gethelio/proxy build       # Build library + CLI (tsup)
 pnpm --filter @gethelio/proxy dev         # Dev mode with watch (tsup --watch)
 pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scripts/benchmark.ts)
@@ -260,6 +260,6 @@ pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scrip
 These are hard requirements — every change must preserve them:
 
 - Policy evaluation: <1ms
-- Total proxy overhead: <5ms p99
+- Total proxy overhead: <5ms p99 (the benchmark gates on the governed overhead p99 — `proxy_compute_ms`, the pipeline inside the forwarder net of the upstream call)
 - Audit writes: 0ms impact on request path (must be async/non-blocking)
 - Pass-through (non-tool methods): <0.5ms
