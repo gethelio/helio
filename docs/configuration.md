@@ -998,6 +998,8 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 [helio] Hot-reload disabled — config changes to helio.yaml will require a restart
 ```
 
+The other reason to disable it is the process and filesystem boundary: while hot reload is on, any process that can write this file changes policy on the running proxy, and the proxy does not check who wrote it. Disabling hot reload moves the change to the next restart, which closes nothing for a process that can also restart the proxy. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) for the deployments that close it.
+
 ### Reload boundary
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.
@@ -1011,6 +1013,7 @@ Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections 
 | `policies.on_tool_drift`       | Yes              | Takes effect immediately on the next request.                                                                                          |
 | `policies.tool_revalidation.*` | Yes              | Takes effect on the next tick: the timer is retimed, started, or stopped live, and the `ttlMs` clamp applies to the next `tools/list`. |
 | `policies.dry_run`             | Yes              | Takes effect immediately on the next request.                                                                                          |
+| `policies.install`             | Yes              | Recompiled with the rules; applies to the next `/install-scan` on the SDK sideband.                                                    |
 | `policies.hot_reload`          | No               | Controls watcher startup behavior; changing it on a running process requires restart.                                                  |
 | `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
 | `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |

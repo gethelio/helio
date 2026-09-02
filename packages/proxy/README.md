@@ -46,9 +46,11 @@ Two integration paths:
 
 Helio governs at the strongest grade each path physically allows, and records it per call:
 
-- **Structural** (stdio MCP) — Helio owns the only path to the tool; the agent cannot route around it.
+- **Structural** (stdio MCP) — Helio owns the child process it spawned, so nothing on the MCP path routes around it; a co-located process that can run the same command line is outside this grade (see the note below).
 - **Network** (HTTP MCP) — structural given you control the upstream's egress.
 - **Host-enforced** (hook adapters via the [adapter API](https://github.com/gethelio/helio/blob/main/docs/adapter-api.md), e.g. OpenClaw) — for frameworks that run tools in-process and expose hooks rather than an MCP transport. The framework's hook gate enforces; Helio decides. This is a cooperative, lower grade than the proxy path, and Helio labels it as such rather than overclaiming. Helio's decisions still cannot be evicted from the agent's context or prompt-injected, and any attempt to route around them is visible in the audit trail.
+
+All three grades assume the proxy's config, secret, and audit store are outside the agent's reach. In the default local install they are not: the proxy runs as the same user as the agent. [SECURITY.md](https://github.com/gethelio/helio/blob/main/SECURITY.md#process-and-filesystem-boundaries) states the boundary and the deployments that close it.
 
 ## Quick Start (5 minutes)
 

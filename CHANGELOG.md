@@ -37,6 +37,16 @@ Maintainer notes:
   upstream, which exceeds the budget on its own on a loaded machine.
   The latency decomposition's `Proxy Total` column now reports
   `total_duration_ms` rather than repeating the overhead figure.
+- **SECURITY.md states the process and filesystem boundary.** A new
+  section describes what a process sharing the proxy's user or
+  filesystem can do (change policy live through hot reload, read the
+  config), what the audit trail shows today, the four questions that
+  decide which tier a deployment is on, and the residuals. The
+  sidecar, quickstart, getting-started, and README enforcement-grade
+  copy scope their non-bypass claims to that boundary, the production
+  checklist gains a separate-user bullet, the reload table lists
+  `policies.install`, and the policy guide documents evidence
+  grounding as cooperative.
 
 ## [0.13.0] - 2026-08-31
 

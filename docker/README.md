@@ -9,9 +9,11 @@ audit feed. No MCP server or agent of your own is required.
 
 > **This is a demo, not a deployment.** To run Helio in its own
 > container next to a coding agent or dev container, with network
-> isolation so the agent can't bypass governance, and pointed at your
-> own MCP server, see
-> [Running Helio as a Sidecar](../docs/deployment-sidecar.md).
+> isolation so the agent cannot reach the upstream except through
+> Helio, and pointed at your own MCP server, see
+> [Running Helio as a Sidecar](../docs/deployment-sidecar.md). What
+> that isolation does and does not cover is in
+> [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries).
 
 ## Setup (one-time)
 

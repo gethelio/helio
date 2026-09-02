@@ -253,7 +253,7 @@ To run Helio in its own container **next to a coding agent or dev container** �
 
 ## Production Checklist
 
-The quickstart above is safe by default on a single-operator workstation. Before running Helio anywhere reachable from other people or machines, work through this checklist:
+The local steps above (`helio start`) run the proxy as the same user as your agent. That is the detection-only tier described in [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries): any process running as that user, including a coding agent with file and shell tools, can change policy live and read the dashboard secret. That is fine for trying Helio on your own machine. Before trusting it against an adversarial or prompt-injected agent, and before running it anywhere reachable from other people or machines, work through this checklist:
 
 - **Generate and store a strong `dashboard.api_secret`.** `helio init` writes a fresh 256-bit hex value into `helio.yaml`; if you authored the file by hand, run `openssl rand -hex 32` and paste it into `dashboard.api_secret`. This value is stable until you rotate it. Treat it like a password-manager secret: if you lose it, you must generate a new one, update `helio.yaml`, and restart the proxy.
 - **Understand browser login behavior.** The dashboard UI now uses a manual secret login screen: enter `dashboard.api_secret` once, then the browser uses a short-lived HttpOnly session cookie. The raw secret is not injected into frontend JS anymore.
@@ -261,11 +261,12 @@ The quickstart above is safe by default on a single-operator workstation. Before
 - **Keep the audit database on local disk.** Helio's audit sqlite file is created with mode `0600` (owner read/write only) — if you move it to a shared filesystem or back it up into an unencrypted bucket, you lose that isolation. Audit records contain tool inputs and upstream responses, often including PII and credentials.
 - **Rotate secrets deliberately and expect session invalidation.** The proxy reads `dashboard.api_secret` from disk at startup only. If you change it while the proxy is running, Helio logs a restart-required warning and keeps using the startup value (see the [reload boundary](./configuration.md#reload-boundary)). Change the value in `helio.yaml`, then restart to rotate. Existing dashboard sessions are revoked and users must log in again with the new secret.
 - **Keep the main MCP port behind the same trust boundary as the dashboard.** `listen.host` defaults to `127.0.0.1`; if you need remote agents, use a reverse proxy or SSH tunnel rather than binding to `0.0.0.0`. The main port does not carry the dashboard secret — it accepts MCP traffic based on network reachability alone.
+- **Run the proxy as its own user for anything adversarial.** Give the proxy a dedicated OS user or its own container, keep `helio.yaml`, the audit database, and the dashboard secret out of every directory your agent can reach, and, if you moved the live file, delete the copy of `helio.yaml` you initialized in the workspace. Your agent keeps only the network hop. A tested step-by-step recipe is tracked in #342; until then, the [sidecar recipe](./deployment-sidecar.md) is the documented separation on the network axis, and [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) lists the four questions that tell you which tier you are on.
 
 ## Next Steps
 
 - [Configuration Reference](./configuration.md) — Every `helio.yaml` field with defaults and types
-- [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent / dev container so it can't bypass governance
+- [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent or dev container with the upstream out of its reach
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard
 - [Audit Trail](./audit.md) — What's recorded, how to search, and how to export

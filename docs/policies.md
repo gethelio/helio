@@ -630,6 +630,8 @@ Unlike rule-level limits, budget spend **persists across restarts**: every charg
 
 Evidence grounding lets you require that certain information has been gathered before a tool call is allowed. Evidence is submitted by the [Python SDK](../packages/python-sdk/) via the sideband API.
 
+Evidence is a cooperative control. The proxy verifies that an evidence key from the policy allowlist was posted for the session and has not expired; it does not verify what the SDK observed. The SDK token lives in the agent's process, so treat an evidence gate as a guard against a step being skipped by mistake, not against an agent that intends to skip it. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries).
+
 ```yaml
 - name: require-order-before-refund
   match:
