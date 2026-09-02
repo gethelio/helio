@@ -129,7 +129,7 @@ test(proxy): add rate limiter edge case coverage
 ### Pull Request Process
 
 - PRs require at least one approving review from a maintainer before merge.
-- CI must pass (secret scan, docs drift check, dependency audit, build, lint, format:check, typecheck, tests, Docker build).
+- CI must pass (secret scan, docs drift check, dependency audit, build, lint, format:check, typecheck, tests, benchmark, Docker build).
 - Keep PRs focused - one logical change per PR. If you're fixing a bug and also refactoring nearby code, split them into two PRs.
 - We aim to review PRs within 48 hours. If yours is waiting longer, comment on the PR or open a discussion.
 

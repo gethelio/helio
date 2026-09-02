@@ -19,6 +19,14 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **The benchmark runs in CI and at the release gate (#333).** Every
+  push and pull request runs `pnpm --filter @gethelio/proxy benchmark`
+  after the test suite, and the release workflow runs it again before
+  it publishes, so a tag cannot ship past a performance regression.
+  Each run publishes its report to the job summary.
+
 ### Changed
 
 - **Benchmark gate keys on governance overhead only (#333).** The

@@ -170,7 +170,7 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 2. **Hot-reload without restart.** Config watcher re-parses and atomically swaps rules on file change. Invalid config keeps the old rules and logs the error — never crash.
 3. **Evidence grounding is per-session.** The evidence cache is keyed by the proxy-resolved session identity (`session.identity`, issue #218). Evidence expires when the session ends.
 4. **Approval timeout defaults to deny.** Configurable, but the safe default is to block on timeout.
-5. **Performance is a hard requirement.** Policy evaluation < 1ms. Total proxy overhead < 5ms p99. The benchmark gates on the governed overhead p99 (`proxy_compute_ms`: the pipeline inside the forwarder, net of the upstream call). Benchmark on every release.
+5. **Performance is a hard requirement.** Policy evaluation < 1ms. Total proxy overhead < 5ms p99. The benchmark gates on the governed overhead p99 (`proxy_compute_ms`: the pipeline inside the forwarder, net of the upstream call). It runs in CI on every push and pull request, and again in the release gate.
 
 ## File Patterns
 
