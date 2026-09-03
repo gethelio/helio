@@ -72,6 +72,13 @@ describe('App auth gate', () => {
     expect(screen.getByLabelText('Dashboard secret')).toBeTruthy()
   })
 
+  it('tells the operator to enter the secret itself, not a stored digest', async () => {
+    mockFetchAuthSession.mockResolvedValue({ auth_required: true, authenticated: false })
+    render(<App />)
+    await screen.findByText('Dashboard Locked')
+    expect(screen.getByText(/enter the secret behind it, not the config value/i)).toBeTruthy()
+  })
+
   it('unlocks and renders dashboard routes after successful login', async () => {
     mockFetchAuthSession.mockResolvedValue({
       auth_required: true,

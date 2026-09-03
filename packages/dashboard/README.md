@@ -62,7 +62,7 @@ pnpm --filter @gethelio/proxy dev
 pnpm --filter @gethelio/dashboard dev
 ```
 
-Open the Vite URL (default `http://localhost:5173`). If your proxy has `dashboard.api_secret` set, the app shows the lock screen first; enter the secret and the proxy establishes a cookie session automatically. If your proxy has no `api_secret` configured (which the config schema only allows with `dashboard.allow_open_mode: true` on a loopback host), the app goes straight to the dashboard.
+Open the Vite URL (default `http://localhost:5173`). If your proxy has `dashboard.api_secret` set, the app shows the lock screen first; enter the secret itself (not the `sha256:` digest the config may store) and the proxy establishes a cookie session automatically. If your proxy has no `api_secret` configured (which the config schema only allows with `dashboard.allow_open_mode: true` on a loopback host), the app goes straight to the dashboard.
 
 ## Scripts
 
