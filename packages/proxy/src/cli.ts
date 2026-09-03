@@ -6,7 +6,13 @@ import { randomBytes } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
-import { loadConfig, ConfigError, ConfigWatcher, isNamedConfig } from './config/index.js'
+import {
+  loadConfig,
+  loadConfigWithMeta,
+  ConfigError,
+  ConfigWatcher,
+  isNamedConfig,
+} from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { secretDigest } from './auth/bearer.js'
@@ -57,6 +63,7 @@ import {
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
+  warnIfDashboardSecretLiteral,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -291,8 +298,11 @@ interface StartOptions {
 
 async function startCommand(configPath: string, options: StartOptions): Promise<void> {
   let config
+  let interpolatedPaths: readonly string[] = []
   try {
-    config = await loadConfig(configPath)
+    const loaded = await loadConfigWithMeta(configPath)
+    config = loaded.config
+    interpolatedPaths = loaded.interpolatedPaths
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
@@ -669,6 +679,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   warnIfWebhookChannelUnreachable(config)
   warnIfSdkSidebandExposed(config)
   warnIfDashboardOpenMode(config)
+  warnIfDashboardSecretLiteral(config, { configPath, interpolatedPaths })
   warnIfBudgetWindowExceedsRetention(config)
   const channelCount = config.approval.channels.length
   console.error(

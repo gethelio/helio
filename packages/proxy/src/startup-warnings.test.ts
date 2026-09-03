@@ -7,6 +7,7 @@ import {
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
+  warnIfDashboardSecretLiteral,
 } from './startup-warnings.js'
 
 describe('warnIfManyUpstreams', () => {
@@ -466,5 +467,57 @@ describe('warnIfBudgetWindowExceedsRetention', () => {
 
     expect(warned).toBe(true)
     expect(messages).toHaveLength(2)
+  })
+})
+
+describe('warnIfDashboardSecretLiteral', () => {
+  const source = { configPath: '/etc/helio/helio.yaml', interpolatedPaths: [] as readonly string[] }
+  function makeConfig(apiSecret: string | undefined, enabled = true) {
+    return { dashboard: { enabled, api_secret: apiSecret } }
+  }
+
+  it('warns when the secret is a plaintext literal in the file', () => {
+    const messages: string[] = []
+    const warned = warnIfDashboardSecretLiteral(makeConfig('plain-secret'), source, (m) =>
+      messages.push(m),
+    )
+    expect(warned).toBe(true)
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toContain(
+      'dashboard.api_secret is stored as plaintext in /etc/helio/helio.yaml',
+    )
+    expect(messages[0]).toContain('helio secret')
+  })
+
+  it('does not warn for a stored digest', () => {
+    const messages: string[] = []
+    expect(
+      warnIfDashboardSecretLiteral(makeConfig(`sha256:${'a'.repeat(64)}`), source, (m) =>
+        messages.push(m),
+      ),
+    ).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn when the value came from the environment', () => {
+    const messages: string[] = []
+    const fromEnv = { ...source, interpolatedPaths: ['dashboard.api_secret'] }
+    expect(
+      warnIfDashboardSecretLiteral(makeConfig('plain-secret'), fromEnv, (m) => messages.push(m)),
+    ).toBe(false)
+    expect(messages).toHaveLength(0)
+  })
+
+  it('does not warn when the secret is unset or the dashboard is disabled', () => {
+    const messages: string[] = []
+    expect(
+      warnIfDashboardSecretLiteral(makeConfig(undefined), source, (m) => messages.push(m)),
+    ).toBe(false)
+    expect(
+      warnIfDashboardSecretLiteral(makeConfig('plain-secret', false), source, (m) =>
+        messages.push(m),
+      ),
+    ).toBe(false)
+    expect(messages).toHaveLength(0)
   })
 })

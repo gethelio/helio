@@ -1059,6 +1059,36 @@ dashboard:
   // --- helio start ---
 
   describe('start', () => {
+    it('warns when the dashboard secret is a plaintext literal in the file', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const stderr = await startAndCaptureStderr(['-c', configPath], {
+          readyMarker: /Approvals:/,
+        })
+        expect(stderr).toContain(`dashboard.api_secret is stored as plaintext in ${configPath}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('does not warn when the dashboard secret comes from the environment', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const original = readFileSync(configPath, 'utf-8')
+        writeFileSync(
+          configPath,
+          original.replace(/api_secret: ".*"/, 'api_secret: "${HELIO_DASHBOARD_SECRET}"'),
+        )
+        const stderr = await startAndCaptureStderr(['-c', configPath], {
+          readyMarker: /Approvals:/,
+          env: { ...process.env, HELIO_DASHBOARD_SECRET: 'from-the-environment' },
+        })
+        expect(stderr).not.toContain('stored as plaintext')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
     it('watches the config file for policy changes by default', async () => {
       const { dir, configPath } = writeStartConfig()
       try {
