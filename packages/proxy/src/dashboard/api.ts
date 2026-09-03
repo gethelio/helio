@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
@@ -325,7 +325,10 @@ export function createDashboardAppWithLifecycle(
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
-    ? new DashboardSessionStore({ secret: apiSecret, ttlMs: SESSION_TTL_MS })
+    ? new DashboardSessionStore({
+        signingKey: randomBytes(32).toString('hex'),
+        ttlMs: SESSION_TTL_MS,
+      })
     : undefined
 
   const app = new Hono<{ Variables: { auth?: DashboardAuthState } }>()

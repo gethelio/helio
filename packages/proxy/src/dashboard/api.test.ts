@@ -3,6 +3,7 @@ import type { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { SSEStreamingApi } from 'hono/streaming'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { createHmac } from 'node:crypto'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -2905,5 +2906,24 @@ describe('stored digest secret', () => {
   it('POST /api/auth/session rejects the digest presented as the secret', async () => {
     const { post } = setup({ apiSecret: digest })
     expect((await post('/api/auth/session', { secret: digest })).status).toBe(401)
+  })
+
+  it('signs the session cookie with a key that no reader of the config can derive', async () => {
+    const { post } = setup({ apiSecret: digest })
+    const login = await post('/api/auth/session', { secret: plaintext })
+    const token = decodeURIComponent(
+      /helio_session=([^;]+)/.exec(login.headers.get('set-cookie') ?? '')?.[1] ?? '',
+    )
+    const [id, signature] = token.split('.')
+    expect(id).toBeTruthy()
+    expect(signature).toBeTruthy()
+    const forgedFromDigest = createHmac('sha256', digest)
+      .update(id ?? '')
+      .digest('base64url')
+    const forgedFromPlaintext = createHmac('sha256', plaintext)
+      .update(id ?? '')
+      .digest('base64url')
+    expect(signature).not.toBe(forgedFromDigest)
+    expect(signature).not.toBe(forgedFromPlaintext)
   })
 })

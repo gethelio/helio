@@ -4,7 +4,7 @@ import { DashboardSessionStore } from './session.js'
 describe('DashboardSessionStore', () => {
   it('creates and validates a session token', () => {
     const store = new DashboardSessionStore({
-      secret: 'test-secret',
+      signingKey: 'test-key',
       cleanupIntervalMs: 0,
     })
 
@@ -19,7 +19,7 @@ describe('DashboardSessionStore', () => {
 
   it('rejects tampered session tokens', () => {
     const store = new DashboardSessionStore({
-      secret: 'test-secret',
+      signingKey: 'test-key',
       cleanupIntervalMs: 0,
     })
 
@@ -31,7 +31,7 @@ describe('DashboardSessionStore', () => {
   it('expires sessions based on ttl', () => {
     let now = 1_000
     const store = new DashboardSessionStore({
-      secret: 'test-secret',
+      signingKey: 'test-key',
       ttlMs: 1_000,
       now: () => now,
       cleanupIntervalMs: 0,
@@ -46,7 +46,7 @@ describe('DashboardSessionStore', () => {
 
   it('revokes sessions explicitly', () => {
     const store = new DashboardSessionStore({
-      secret: 'test-secret',
+      signingKey: 'test-key',
       cleanupIntervalMs: 0,
     })
 

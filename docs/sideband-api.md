@@ -84,7 +84,7 @@ When `dashboard.api_secret` is set in `helio.yaml` (default secure mode), authen
 
 1. **Browser dashboard flow (recommended for operators)**
    - `POST /api/auth/session` with `{ "secret": "<secret>" }`
-   - Server returns an HttpOnly `helio_session` cookie and a CSRF token in JSON (sessions last 8 hours)
+   - Server returns an HttpOnly `helio_session` cookie, signed with a key the proxy generates at startup, and a CSRF token in JSON (sessions last 8 hours and never survive a proxy restart)
    - Browser then calls `/api/*` with cookie credentials (no secret exposed in JS runtime)
 2. **Machine client flow (backward compatible)**
    - Send `Authorization: Bearer <secret>` on protected `/api/*` calls
