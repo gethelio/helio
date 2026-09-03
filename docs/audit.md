@@ -285,10 +285,11 @@ curl -s -H "Authorization: Bearer $HELIO_DASHBOARD_SECRET" \
   "http://localhost:3100/api/audit/export?format=csv&decision=deny&limit=500" > denied.csv
 ```
 
-With `dashboard.api_secret` enabled, browser dashboard sessions authenticate via
+With `dashboard.api_secret` set, browser dashboard sessions authenticate via
 `POST /api/auth/session` + HttpOnly cookie. Non-browser clients may continue to
-use `Authorization: Bearer <api_secret>` for protected `/api/*` calls (everything
-except `/api/health`, `/api/auth/session`, and `/api/auth/logout`).
+use `Authorization: Bearer <secret>` (the secret itself, even when the config stores
+its `sha256:` digest) for protected `/api/*` calls (everything except `/api/health`,
+`/api/auth/session`, and `/api/auth/logout`).
 The export response includes a `Content-Disposition` header for browser downloads.
 
 ## CSV Format

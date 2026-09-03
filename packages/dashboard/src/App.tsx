@@ -67,7 +67,7 @@ export function App() {
   async function handleLogin(event: SyntheticEvent<HTMLFormElement, SubmitEvent>): Promise<void> {
     event.preventDefault()
     if (!secretInput.trim()) {
-      setAuthMessage('Enter the dashboard secret from your Helio config.')
+      setAuthMessage('Enter the dashboard secret.')
       return
     }
     setViewState('authenticating')
@@ -82,7 +82,9 @@ export function App() {
       setCsrfToken(undefined)
       setViewState('locked')
       if (error instanceof ApiError && error.status === 401) {
-        setAuthMessage('Invalid dashboard secret. Check your Helio config and try again.')
+        setAuthMessage(
+          'Invalid dashboard secret. Enter the secret itself, not the sha256: digest stored in your Helio config.',
+        )
       } else {
         setAuthMessage('Sign in failed due to a network or server error. Try again.')
       }
@@ -122,9 +124,10 @@ export function App() {
         >
           <h1 className="text-lg font-semibold text-gray-900">Dashboard Locked</h1>
           <p className="mt-2 text-sm text-gray-600">
-            Enter your dashboard secret, the <code>dashboard.api_secret</code> value from your Helio
-            config. If that is an env placeholder (for example{' '}
-            <code>{'${HELIO_DASHBOARD_SECRET}'}</code>), enter the value it resolves to.
+            Enter your dashboard secret, the value <code>helio init</code> printed. If{' '}
+            <code>dashboard.api_secret</code> in your Helio config is a <code>sha256:</code> digest
+            or an env placeholder (for example <code>{'${HELIO_DASHBOARD_SECRET}'}</code>), enter
+            the secret behind it, not the config value.
           </p>
           <label
             htmlFor="dashboard-secret"

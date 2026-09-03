@@ -223,11 +223,21 @@ browser. The dashboard sideband (3100) is the
 `/api/health`, `/api/auth/session`, and `/api/auth/logout` requires
 authentication via either:
 
-- `Authorization: Bearer <HELIO_DASHBOARD_SECRET>` (machine clients), or
+- `Authorization: Bearer <secret>` (machine clients; the secret itself,
+  even when `HELIO_DASHBOARD_SECRET` holds its digest), or
 - a dashboard session cookie established after logging in with the secret.
 
 This covers both operator reads (audit, evidence, limits) and approval
 mutations (approve / deny / break-glass).
+
+`docker/.env` lives inside the checkout. Anything that can read the
+checkout, including a coding agent working in it, can read
+`HELIO_DASHBOARD_SECRET` from that file. Past the demo, keep the env
+file outside the checkout and point Compose at it
+(`docker compose --env-file /path/outside/.env up`). The variable may
+hold either the secret or the `sha256:` digest that `helio secret`
+prints; the dashboard login and the Bearer header always take the
+secret itself.
 
 ## Opting in to LAN or remote access
 

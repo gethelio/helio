@@ -92,7 +92,7 @@ If you use the `${HELIO_DASHBOARD_SECRET}` placeholder above, export it before s
 export HELIO_DASHBOARD_SECRET="$(openssl rand -hex 32)"
 ```
 
-If you started from `helio init`, the generated `helio.yaml` already includes a secret, so you can keep that value instead.
+If you started from `helio init`, the generated `helio.yaml` already stores the digest of a secret that `init` printed once; keep that secret and skip the export.
 
 See the [Configuration Reference](./configuration.md) for all available fields and defaults.
 
@@ -161,7 +161,7 @@ For requests that pass JSON-RPC ingress validation at `/mcp`, Helio always retur
 
 ## Step 5: Open the Dashboard
 
-Navigate to [http://localhost:3100](http://localhost:3100) to open the governance dashboard. If `dashboard.api_secret` is set (recommended/default), enter that secret on the login screen first.
+Navigate to [http://localhost:3100](http://localhost:3100) to open the governance dashboard. If `dashboard.api_secret` is set (recommended/default), enter the dashboard secret on the login screen first: the value `helio init` printed, never the `sha256:` digest stored in the file.
 
 ![Dashboard Feed](./images/dashboard-feed.png)
 
@@ -253,13 +253,13 @@ To run Helio in its own container **next to a coding agent or dev container** �
 
 ## Production Checklist
 
-The local steps above (`helio start`) run the proxy as the same user as your agent. That is the detection-only tier described in [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries): any process running as that user, including a coding agent with file and shell tools, can change policy live and read the dashboard secret. That is fine for trying Helio on your own machine. Before trusting it against an adversarial or prompt-injected agent, and before running it anywhere reachable from other people or machines, work through this checklist:
+The local steps above (`helio start`) run the proxy as the same user as your agent. That is the detection-only tier described in [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries): any process running as that user, including a coding agent with file and shell tools, can change policy live and read the config file; a `helio init` config holds only the digest of the dashboard secret, so the file no longer yields the secret, but a plaintext value in the file, or one supplied through the proxy's environment, is still readable. That is fine for trying Helio on your own machine. Before trusting it against an adversarial or prompt-injected agent, and before running it anywhere reachable from other people or machines, work through this checklist:
 
-- **Generate and store a strong `dashboard.api_secret`.** `helio init` writes a fresh 256-bit hex value into `helio.yaml`; if you authored the file by hand, run `openssl rand -hex 32` and paste it into `dashboard.api_secret`. This value is stable until you rotate it. Treat it like a password-manager secret: if you lose it, you must generate a new one, update `helio.yaml`, and restart the proxy.
-- **Understand browser login behavior.** The dashboard UI now uses a manual secret login screen: enter `dashboard.api_secret` once, then the browser uses a short-lived HttpOnly session cookie. The raw secret is not injected into frontend JS anymore.
+- **Generate and store a strong dashboard secret.** `helio init` prints a fresh 256-bit secret once and writes only its SHA-256 digest (`sha256:...`) into `helio.yaml`; if you authored the file by hand, run `helio secret` and paste the printed `digest:` value into `dashboard.api_secret`. The secret itself is what you type at the login screen and send as the Bearer credential; the file never needs to hold it. Treat it like a password-manager secret: if you lose it, run `helio secret` again, replace the digest, and restart the proxy. A plaintext value in the file still works and draws a startup warning.
+- **Understand browser login behavior.** The dashboard UI uses a manual secret login screen: enter the dashboard secret once (the secret itself, never the `sha256:` digest from the file), then the browser uses a short-lived HttpOnly session cookie. The raw secret is not injected into frontend JS.
 - **Keep `dashboard.host` on `127.0.0.1`.** The dashboard sideband assumes a single trust boundary and has no identity layer of its own. If you need to reach it remotely, put it behind a reverse proxy (nginx, Caddy, Cloudflare Access, Tailscale Serve) that terminates TLS and adds per-user authentication before forwarding to `127.0.0.1:3100`. Do not bind `dashboard.host` to `0.0.0.0` directly.
 - **Keep the audit database on local disk.** Helio's audit sqlite file is created with mode `0600` (owner read/write only) — if you move it to a shared filesystem or back it up into an unencrypted bucket, you lose that isolation. Audit records contain tool inputs and upstream responses, often including PII and credentials.
-- **Rotate secrets deliberately and expect session invalidation.** The proxy reads `dashboard.api_secret` from disk at startup only. If you change it while the proxy is running, Helio logs a restart-required warning and keeps using the startup value (see the [reload boundary](./configuration.md#reload-boundary)). Change the value in `helio.yaml`, then restart to rotate. Existing dashboard sessions are revoked and users must log in again with the new secret.
+- **Rotate secrets deliberately and expect session invalidation.** The proxy reads `dashboard.api_secret` from disk at startup only. If you change it while the proxy is running, Helio logs a restart-required warning and keeps using the startup value (see the [reload boundary](./configuration.md#reload-boundary)). Run `helio secret`, paste the new `digest:` value into `helio.yaml`, then restart to rotate. Existing dashboard sessions are revoked (they are signed with a key the proxy generates at startup and never survive a restart) and users must log in again with the new secret.
 - **Keep the main MCP port behind the same trust boundary as the dashboard.** `listen.host` defaults to `127.0.0.1`; if you need remote agents, use a reverse proxy or SSH tunnel rather than binding to `0.0.0.0`. The main port does not carry the dashboard secret — it accepts MCP traffic based on network reachability alone.
 - **Run the proxy as its own user for anything adversarial.** Give the proxy a dedicated OS user or its own container, keep `helio.yaml`, the audit database, and the dashboard secret out of every directory your agent can reach, and, if you moved the live file, delete the copy of `helio.yaml` you initialized in the workspace. Your agent keeps only the network hop. A tested step-by-step recipe is tracked in #342; until then, the [sidecar recipe](./deployment-sidecar.md) is the documented separation on the network axis, and [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) lists the four questions that tell you which tier you are on.
 

@@ -6,9 +6,16 @@ import { randomBytes } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
-import { loadConfig, ConfigError, ConfigWatcher, isNamedConfig } from './config/index.js'
+import {
+  loadConfig,
+  loadConfigWithMeta,
+  ConfigError,
+  ConfigWatcher,
+  isNamedConfig,
+} from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
+import { secretDigest } from './auth/bearer.js'
 import type { Hono } from 'hono'
 import { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
 import { applyReloadedPolicy } from './reload-fanout.js'
@@ -56,6 +63,7 @@ import {
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
+  warnIfDashboardSecretLiteral,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -124,7 +132,7 @@ function getBundledDashboardDistPath(): string | null {
 // Config template for `helio init`
 // ---------------------------------------------------------------------------
 
-function renderConfigTemplate(apiSecret: string): string {
+function renderConfigTemplate(apiSecretDigest: string): string {
   return `# Helio MCP Governance Proxy configuration
 # Docs: https://github.com/gethelio/helio
 
@@ -189,17 +197,19 @@ upstream:
 #   retention: 90d
 #   include_responses: true
 
-# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default — do
+# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default. Do
 # not change to 0.0.0.0 without putting an authenticating reverse proxy in
-# front. dashboard.api_secret is the manual dashboard login secret and also
-# supports machine Bearer auth for sideband API clients. Store it safely; it
-# stays valid until you rotate it. Rotate by editing this file and restarting
-# the proxy. Rotation invalidates active dashboard sessions.
+# front. dashboard.api_secret holds the SHA-256 digest of the dashboard
+# secret, never the secret itself: log in to the dashboard and authenticate
+# sideband API clients with the secret that \`helio init\` printed once. To
+# rotate, run \`helio secret\`, paste the new digest here, and restart the
+# proxy; active dashboard sessions are invalidated. A plaintext value is
+# still accepted.
 dashboard:
   enabled: true
   port: 3100
   host: 127.0.0.1
-  api_secret: "${apiSecret}"
+  api_secret: "${apiSecretDigest}"
 
 # sdk:
 #   enabled: false
@@ -288,8 +298,11 @@ interface StartOptions {
 
 async function startCommand(configPath: string, options: StartOptions): Promise<void> {
   let config
+  let interpolatedPaths: readonly string[] = []
   try {
-    config = await loadConfig(configPath)
+    const loaded = await loadConfigWithMeta(configPath)
+    config = loaded.config
+    interpolatedPaths = loaded.interpolatedPaths
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
@@ -666,6 +679,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   warnIfWebhookChannelUnreachable(config)
   warnIfSdkSidebandExposed(config)
   warnIfDashboardOpenMode(config)
+  warnIfDashboardSecretLiteral(config, { configPath, interpolatedPaths })
   warnIfBudgetWindowExceedsRetention(config)
   const channelCount = config.approval.channels.length
   console.error(
@@ -785,16 +799,24 @@ async function initCommand(outputPath: string, force: boolean): Promise<void> {
     process.exit(1)
   }
 
-  const apiSecret = randomBytes(32).toString('hex')
-  await writeFile(outputPath, renderConfigTemplate(apiSecret), 'utf-8')
+  const secret = randomBytes(32).toString('hex')
+  await writeFile(outputPath, renderConfigTemplate(secretDigest(secret)), 'utf-8')
 
   console.error(`Created ${outputPath}`)
   console.error('')
-  console.error('Generated dashboard.api_secret (also stored in the file above):')
-  console.error(`  ${apiSecret}`)
+  console.error('Dashboard secret (shown once; the file stores only its SHA-256 digest):')
+  console.error(`  ${secret}`)
   console.error('')
-  console.error('Use this as the dashboard login secret (and optional Bearer credential')
-  console.error('for sideband API clients at default 127.0.0.1:3100). Rotate in-file.')
+  console.error('Store it in your password manager. Use it to log in to the dashboard and')
+  console.error('as the Bearer credential for sideband API clients (127.0.0.1:3100 by')
+  console.error('default). If you lose it, run `helio secret`, paste the new digest into')
+  console.error('dashboard.api_secret, and restart the proxy.')
+}
+
+function secretCommand(): void {
+  const secret = randomBytes(32).toString('hex')
+  console.log(`secret: ${secret}`)
+  console.log(`digest: ${secretDigest(secret)}`)
 }
 
 async function validateCommand(configPath: string): Promise<void> {
@@ -1082,6 +1104,13 @@ program
   .description('Validate a helio.yaml config file')
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .action((opts: { config: string }) => validateCommand(opts.config))
+
+program
+  .command('secret')
+  .description('Generate a dashboard secret and the digest to store as dashboard.api_secret')
+  .action(() => {
+    secretCommand()
+  })
 
 program
   .command('export')

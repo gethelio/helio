@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { verifyBearer } from './bearer.js'
+import { isSecretDigest, secretDigest, verifyBearer } from './bearer.js'
 
 describe('verifyBearer', () => {
   const secret = 'correct-horse-battery-staple'
@@ -37,5 +37,40 @@ describe('verifyBearer', () => {
   it('returns false when the expected secret is empty or undefined', () => {
     expect(verifyBearer('Bearer anything', '')).toBe(false)
     expect(verifyBearer('Bearer anything', undefined)).toBe(false)
+  })
+})
+
+describe('stored digest form', () => {
+  const plaintext = 'f'.repeat(64)
+  const digest = secretDigest(plaintext)
+
+  it('recognizes only sha256: plus 64 lowercase hex', () => {
+    expect(isSecretDigest(digest)).toBe(true)
+    expect(isSecretDigest(plaintext)).toBe(false)
+    expect(isSecretDigest(`sha256:${'F'.repeat(64)}`)).toBe(false)
+    expect(isSecretDigest(`sha256:${'a'.repeat(63)}`)).toBe(false)
+    expect(isSecretDigest(`sha256:${'z'.repeat(64)}`)).toBe(false)
+  })
+
+  it('derives the digest the configuration reference documents', () => {
+    expect(secretDigest('your-secret')).toBe(
+      'sha256:ef1ea5dd2b28d2c127ffb41c522ac19787f408c19195cc2bebb41e227f664e86',
+    )
+  })
+
+  it('verifies the plaintext bearer against a stored digest', () => {
+    expect(verifyBearer(`Bearer ${plaintext}`, digest)).toBe(true)
+  })
+
+  it('rejects the digest itself presented as the bearer', () => {
+    expect(verifyBearer(`Bearer ${digest}`, digest)).toBe(false)
+  })
+
+  it('rejects a wrong plaintext against a stored digest', () => {
+    expect(verifyBearer(`Bearer ${'e'.repeat(64)}`, digest)).toBe(false)
+  })
+
+  it('still verifies a bare hex plaintext against itself', () => {
+    expect(verifyBearer(`Bearer ${plaintext}`, plaintext)).toBe(true)
   })
 })

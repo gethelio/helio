@@ -1,6 +1,7 @@
 /* eslint-disable no-console -- surfaces operator-visible startup warnings */
 
 import { parseDuration } from './config/schema.js'
+import { isSecretDigest } from './auth/bearer.js'
 
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'
@@ -172,6 +173,33 @@ export function warnIfDashboardOpenMode(
       'dashboard.api_secret is unset and dashboard.allow_open_mode=true. ' +
       'Dashboard endpoints accept unauthenticated requests. Use only on trusted ' +
       'localhost and set dashboard.api_secret before any shared or non-local deployment.',
+  )
+  return true
+}
+
+/**
+ * Emit a startup warning when the dashboard secret is a plaintext literal in
+ * the config file. The digest form (`sha256:<hex>`) and a value supplied
+ * through `${VAR}` interpolation draw no warning: the digest yields nothing
+ * to a reader of the file, and the environment path is the documented
+ * container posture.
+ */
+export function warnIfDashboardSecretLiteral(
+  config: { dashboard: { enabled: boolean; api_secret?: string } },
+  source: { configPath: string; interpolatedPaths: readonly string[] },
+  log: (message: string) => void = console.error,
+): boolean {
+  const secret = config.dashboard.api_secret
+  if (!config.dashboard.enabled) return false
+  if (typeof secret !== 'string' || secret.length === 0) return false
+  if (isSecretDigest(secret)) return false
+  if (source.interpolatedPaths.includes('dashboard.api_secret')) return false
+
+  log(
+    `[helio] Warning: dashboard.api_secret is stored as plaintext in ${source.configPath}. ` +
+      'Anyone who can read this file holds the operator credential and can approve ' +
+      'tickets. Run `helio secret`, store the printed digest as dashboard.api_secret, ' +
+      'and restart.',
   )
   return true
 }

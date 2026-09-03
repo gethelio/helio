@@ -10,7 +10,7 @@ The dashboard sideband is a read/write REST + SSE surface served on a separate p
 
 - **Default port:** `127.0.0.1:3100` (configurable via `dashboard.port`).
 - **Bind address:** localhost-only by default. Bind publicly only behind a TLS-terminating reverse proxy you control.
-- **Auth:** By default, `dashboard.enabled: true` requires `dashboard.api_secret`. Browser clients unlock with `POST /api/auth/session` + HttpOnly cookie; non-browser clients can use `Authorization: Bearer <api_secret>`. Running without `api_secret` is only allowed with explicit `dashboard.allow_open_mode: true` on loopback hosts. Open mode disables all sideband authentication and is a local/demo posture only: the CORS allowlist above does not make it safe, since an unauthenticated loopback service is still reachable by a determined local attacker (for example via DNS rebinding). See [Authentication](#authentication) below.
+- **Auth:** By default, `dashboard.enabled: true` requires `dashboard.api_secret`. Browser clients unlock with `POST /api/auth/session` + HttpOnly cookie; non-browser clients can use `Authorization: Bearer <secret>`. The value presented is always the secret itself; the config may hold either that secret or its `sha256:` digest (see [Authentication](#authentication) below). Running without `api_secret` is only allowed with explicit `dashboard.allow_open_mode: true` on loopback hosts. Open mode disables all sideband authentication and is a local/demo posture only: the CORS allowlist above does not make it safe, since an unauthenticated loopback service is still reachable by a determined local attacker (for example via DNS rebinding).
 - **CORS:** Allows same-origin, `localhost` / `127.0.0.1` / `0.0.0.0`, and validated private-network IPv4 literals (`10.x`, `172.16-31.x`, `192.168.x`) for Docker bridge and LAN access. Origins are matched as real IP addresses, not by hostname prefix; every other origin, including hostnames, receives no CORS headers. (CORS is a browser-enforced control, not a server-side auth boundary.)
 - **Content type:** JSON for everything except `/api/audit/export` and `/api/budgets/:name/events/export` (JSON or CSV attachments) and `/api/events` (SSE stream).
 - **Non-200 errors:** Always JSON in the shape `{ "error": "<message>" }`. Unknown `/api/*` paths return `404` with this shape (never HTML).
@@ -80,31 +80,30 @@ Strictly-internal TypeScript types (e.g. `ApprovalOutcome`, `RateLimitResult`, c
 
 ## Authentication
 
-When `dashboard.api_secret` is set in `helio.yaml` (default secure mode), authenticated access works in two modes:
+When `dashboard.api_secret` is set in `helio.yaml` (default secure mode), authenticated access works in two modes. The value a client presents is always the secret itself. The config may store either that secret or its SHA-256 digest in the form `sha256:<64 hex>`: `helio init` writes the digest and prints the secret once, `helio secret` prints a fresh secret and digest pair, and a `${VAR}` placeholder may resolve to either form.
 
 1. **Browser dashboard flow (recommended for operators)**
-   - `POST /api/auth/session` with `{ "secret": "<api_secret>" }`
-   - Server returns an HttpOnly `helio_session` cookie and a CSRF token in JSON (sessions last 8 hours)
+   - `POST /api/auth/session` with `{ "secret": "<secret>" }`
+   - Server returns an HttpOnly `helio_session` cookie, signed with a key the proxy generates at startup, and a CSRF token in JSON (sessions last 8 hours and never survive a proxy restart)
    - Browser then calls `/api/*` with cookie credentials (no secret exposed in JS runtime)
 2. **Machine client flow (backward compatible)**
-   - Send `Authorization: Bearer <api_secret>` on protected `/api/*` calls
+   - Send `Authorization: Bearer <secret>` on protected `/api/*` calls
 
-Bearer verification still uses constant-time comparison (`verifyBearer` hashes both values with SHA-256 before `timingSafeEqual`), so header length does not change timing behavior.
+Bearer verification is constant time: `verifyBearer` hashes the presented value with SHA-256 and compares it with `timingSafeEqual` against the stored digest, or against the hash of a stored plaintext, so neither the header length nor the stored form changes timing behavior.
 
 Machine-client auth header:
 
 ```
-Authorization: Bearer <api_secret>
+Authorization: Bearer <secret>
 ```
 
 Protected routes reject unauthenticated requests with `401`. Cookie-authenticated mutating routes additionally require `x-helio-csrf`; a missing or mismatched token gets `403` — `{ "error": "Invalid CSRF token" }`.
 
 When `dashboard.api_secret` is unset and the dashboard is enabled, config validation requires `dashboard.allow_open_mode: true` and a loopback `dashboard.host` (`127.0.0.1`, `localhost`, or `::1`) — otherwise the proxy refuses to start. Open mode is also unavailable whenever the secret is mandatory: any rule using `require_approval`, or `policies.flag_destructive: require_approval` or `policies.on_tool_drift: require_approval`, requires `dashboard.api_secret` regardless of `allow_open_mode` (see [Approval Workflows](./approvals.md#authentication)). In the open-mode posture, middleware is a no-op and endpoints are unauthenticated. Do not run this mode behind any shared or non-local endpoint.
 
-`helio init` generates a fresh 32-byte hex secret on first run and writes it into the scaffolded `helio.yaml`.
-Keep that generated secret unless you are intentionally opting into local open mode.
+`helio init` generates a fresh 256-bit secret on first run, prints it once to stderr, and writes only its `sha256:` digest into the scaffolded `helio.yaml`. Keep that secret unless you are intentionally opting into local open mode.
 
-If an operator loses the secret, recover by generating a new one (for example `openssl rand -hex 32`), updating `dashboard.api_secret` in `helio.yaml`, and restarting the proxy — `dashboard.*` changes are not applied by a hot reload. Existing sessions are invalidated and all browser clients must sign in again.
+If an operator loses the secret, recover by running `helio secret`, storing the printed `digest:` value under `dashboard.api_secret` in `helio.yaml`, and restarting the proxy; `dashboard.*` changes are not applied by a hot reload. Existing sessions are invalidated and all browser clients must sign in again.
 
 ---
 
@@ -154,12 +153,12 @@ Returns the current dashboard auth state for browser bootstrapping and session r
 
 #### POST /api/auth/session
 
-Creates a browser session from the shared dashboard secret.
+Creates a browser session from the dashboard secret (the secret itself, never a stored `sha256:` digest).
 
 **Request body:**
 
 ```json
-{ "secret": "<dashboard.api_secret>" }
+{ "secret": "<secret>" }
 ```
 
 **Behavior:**
@@ -721,7 +720,7 @@ Expired evidence entries are omitted from the `evidence` map in this response. H
 
 Server-Sent Events stream of dashboard events. The stream stays open indefinitely; the server sends a heartbeat every 30 seconds (configurable via `dashboard.sse_heartbeat_interval`) so network-level idle timers do not close the connection. A client that disconnects releases its connection slot immediately. A background sweeper additionally handles clients that stop reading without disconnecting: once such a connection's transport buffers fill, writes to it stop completing, and after three heartbeat intervals without a completed write the sweeper closes the connection — the socket is severed, not merely dropped from the connection count — and frees its slot. On proxy shutdown, active `/api/events` connections are drained and closed before process exit. At most 256 concurrent connections are served per proxy; a `GET` past the bound is refused with `503` and a JSON body (`{"error":"connection capacity reached"}`) and never displaces an established stream. The bound is not configurable. A browser `EventSource` treats the refusal as terminal and does not reconnect, so a refused dashboard tab keeps its last-loaded data until reloaded.
 
-**Authentication:** requires either a valid session cookie or `Authorization: Bearer <api_secret>`. Query-string token auth is intentionally not supported.
+**Authentication:** requires either a valid session cookie or `Authorization: Bearer <secret>`. Query-string token auth is intentionally not supported.
 
 **Event types:**
 

@@ -6,7 +6,7 @@ The core governance proxy package. Intercepts MCP `tools/call` requests, evaluat
 
 ```
 src/
-├── cli.ts                   → CLI entry point (helio start/init/validate/export)
+├── cli.ts                   → CLI entry point (helio start/init/validate/secret/export)
 ├── cli-forwarder.ts         → Build upstream McpForwarder from config (streamable-http / sse / stdio)
 ├── server.ts                → Hono app factory + HTTP server lifecycle
 ├── shutdown.ts              → Ordered resource teardown (drain traffic doors before clearing governance state)
@@ -253,6 +253,7 @@ pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scrip
 | `helio start [-c path] [--no-hot-reload]`                                                                               | Load config, compile policies, start proxy server (`--no-hot-reload` disables config-watch reload) |
 | `helio init [-o path] [-f]`                                                                                             | Scaffold helio.yaml with commented defaults                                                        |
 | `helio validate [-c path]`                                                                                              | Validate config + compile policies, report errors/warnings                                         |
+| `helio secret`                                                                                                          | Generate a dashboard secret and the digest to store as `dashboard.api_secret`, on stdout           |
 | `helio export [-c path] [-f format] [--budgets] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records — or one budget's spend ledger via `--budgets <name>` — as JSON or CSV        |
 
 ## Performance Constraints

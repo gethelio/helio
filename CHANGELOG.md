@@ -48,6 +48,28 @@ Maintainer notes:
   `policies.install`, and the policy guide documents evidence
   grounding as cooperative.
 
+### Security
+
+- **`helio init` now stores only a SHA-256 digest of the dashboard secret
+  (GHSA-5hpf-j7jh-7x44).** `dashboard.api_secret` gates the operator
+  control plane, including ticket approval, and every release through
+  0.13.0 wrote the secret itself into `helio.yaml`, which `init` creates
+  with the process umask (usually world-readable). Any local process
+  that could read the file, including the governed agent in the default
+  single-user install, held the credential and could approve its own
+  pending tickets. The field now accepts `sha256:<hex>` and the proxy
+  verifies the presented secret against it in constant time; `init`
+  writes the digest and prints the secret once; the new `helio secret`
+  command prints a fresh secret and digest pair for hand-written
+  configs and rotation; a plaintext value in the file still works and
+  draws a startup warning naming the file, while a value supplied
+  through `${VAR}` interpolation does not; session cookies are signed
+  with a per-process key rather than the secret; the login card and the
+  two config error messages say which value to enter. A value injected
+  through `${HELIO_DASHBOARD_SECRET}` may resolve to either form.
+  Upgrade, run `helio secret`, store the digest, and rotate the old
+  value.
+
 ## [0.13.0] - 2026-08-31
 
 ### Breaking changes

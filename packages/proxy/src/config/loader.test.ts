@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { loadConfig, ConfigError, interpolateEnvVars } from './loader.js'
+import { loadConfig, loadConfigWithMeta, ConfigError, interpolateEnvVars } from './loader.js'
 import { isSingularConfig } from './schema.js'
 
 // ---------------------------------------------------------------------------
@@ -368,7 +369,7 @@ policies:
         const paths = details.map((d) => d.path)
         expect(paths).toContain('dashboard.api_secret')
         const msg = details.find((d) => d.path === 'dashboard.api_secret')?.message ?? ''
-        expect(msg).toContain('openssl rand -hex 32')
+        expect(msg).toContain('helio secret')
       }
     })
 
@@ -566,5 +567,43 @@ policies:
         expect(paths).toContain('policies.rules.0.limits.max_spend')
       }
     })
+  })
+
+  it('reports the interpolated paths in document order and the sha256 of the file bytes', async () => {
+    const yaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080"
+  headers:
+    Authorization: "Bearer \${UPSTREAM_TOKEN}"
+dashboard:
+  enabled: false
+  api_secret: "\${S}"
+# a non-ASCII comment so the hash covers bytes, not characters: ünïcode
+`
+    const filePath = await writeTempYaml('helio.yaml', yaml)
+    const loaded = await loadConfigWithMeta(filePath, { S: 'plain', UPSTREAM_TOKEN: 'tok' })
+    expect(loaded.interpolatedPaths).toEqual([
+      'upstream.headers.Authorization',
+      'dashboard.api_secret',
+    ])
+    expect(loaded.sha256).toBe(
+      createHash('sha256').update(Buffer.from(yaml, 'utf-8')).digest('hex'),
+    )
+    expect(loaded.config.dashboard.api_secret).toBe('plain')
+  })
+
+  it('reports no interpolated paths for a literal config', async () => {
+    const yaml = `
+version: "1"
+upstream:
+  url: "http://localhost:8080"
+dashboard:
+  enabled: false
+  api_secret: "literal"
+`
+    const filePath = await writeTempYaml('helio.yaml', yaml)
+    const loaded = await loadConfigWithMeta(filePath)
+    expect(loaded.interpolatedPaths).toEqual([])
   })
 })

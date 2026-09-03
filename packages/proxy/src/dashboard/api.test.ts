@@ -3,6 +3,7 @@ import type { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { SSEStreamingApi } from 'hono/streaming'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { createHmac } from 'node:crypto'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -21,6 +22,7 @@ import { BudgetEngine } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
+import { secretDigest } from '../auth/bearer.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2882,4 +2884,46 @@ describe('CORS origin validation — hostname normalization', () => {
       expect(res.headers.get('access-control-allow-origin')).toBeNull()
     })
   }
+})
+
+describe('stored digest secret', () => {
+  const plaintext = 'correct-horse-battery-staple'
+  const digest = secretDigest(plaintext)
+
+  it('POST /api/auth/session accepts the plaintext when the config holds its digest', async () => {
+    const { post } = setup({ apiSecret: digest })
+    const res = await post('/api/auth/session', { secret: plaintext })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('set-cookie')).toContain('helio_session=')
+  })
+
+  it('accepts the plaintext as a Bearer and rejects the digest as a Bearer', async () => {
+    const { get } = setup({ apiSecret: digest })
+    expect((await get('/api/feed', { authorization: `Bearer ${plaintext}` })).status).toBe(200)
+    expect((await get('/api/feed', { authorization: `Bearer ${digest}` })).status).toBe(401)
+  })
+
+  it('POST /api/auth/session rejects the digest presented as the secret', async () => {
+    const { post } = setup({ apiSecret: digest })
+    expect((await post('/api/auth/session', { secret: digest })).status).toBe(401)
+  })
+
+  it('signs the session cookie with a key that no reader of the config can derive', async () => {
+    const { post } = setup({ apiSecret: digest })
+    const login = await post('/api/auth/session', { secret: plaintext })
+    const token = decodeURIComponent(
+      /helio_session=([^;]+)/.exec(login.headers.get('set-cookie') ?? '')?.[1] ?? '',
+    )
+    const [id, signature] = token.split('.')
+    expect(id).toBeTruthy()
+    expect(signature).toBeTruthy()
+    const forgedFromDigest = createHmac('sha256', digest)
+      .update(id ?? '')
+      .digest('base64url')
+    const forgedFromPlaintext = createHmac('sha256', plaintext)
+      .update(id ?? '')
+      .digest('base64url')
+    expect(signature).not.toBe(forgedFromDigest)
+    expect(signature).not.toBe(forgedFromPlaintext)
+  })
 })

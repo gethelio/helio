@@ -2,8 +2,12 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 
 /** Options for dashboard session storage. */
 export interface DashboardSessionStoreOptions {
-  /** Shared secret used to sign session tokens. */
-  readonly secret: string
+  /**
+   * Per-process random key that signs session tokens. Never the dashboard
+   * secret: the config may hold only a digest, and a key any reader of the
+   * config could derive would let them forge a signature.
+   */
+  readonly signingKey: string
   /** Session TTL in milliseconds. Defaults to 8 hours. */
   readonly ttlMs?: number
   /** Injectable clock for deterministic tests. Defaults to `Date.now`. */
@@ -31,7 +35,7 @@ interface SessionRecord {
  * `<sessionId>.<signature>`.
  */
 export class DashboardSessionStore {
-  private readonly secret: string
+  private readonly signingKey: string
   private readonly ttlMs: number
   private readonly now: () => number
   private readonly records = new Map<string, SessionRecord>()
@@ -39,7 +43,7 @@ export class DashboardSessionStore {
   private closed = false
 
   constructor(options: DashboardSessionStoreOptions) {
-    this.secret = options.secret
+    this.signingKey = options.signingKey
     this.ttlMs = options.ttlMs ?? 8 * 60 * 60 * 1_000
     this.now = options.now ?? Date.now
 
@@ -130,6 +134,6 @@ export class DashboardSessionStore {
   }
 
   private sign(id: string): string {
-    return createHmac('sha256', this.secret).update(id).digest('base64url')
+    return createHmac('sha256', this.signingKey).update(id).digest('base64url')
   }
 }
