@@ -14,6 +14,7 @@ import {
   startSessionEnforcingHttpMcpServer,
   startModernOnlyHttpMcpServer,
 } from './__tests__/helpers/mcp-test-server.js'
+import { secretDigest } from './auth/bearer.js'
 
 const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
 
@@ -370,7 +371,7 @@ describe('CLI', () => {
         expect(existsSync(outPath)).toBe(true)
 
         const contents = readFileSync(outPath, 'utf-8')
-        const match = contents.match(/dashboard:[\s\S]*?api_secret:\s*"([a-f0-9]{64})"/)
+        const match = contents.match(/dashboard:[\s\S]*?api_secret:\s*"sha256:([a-f0-9]{64})"/)
         expect(match).not.toBeNull()
       } finally {
         rmSync(dir, { recursive: true, force: true })
@@ -387,8 +388,12 @@ describe('CLI', () => {
         await runCli(['init', '-o', out1])
         await runCli(['init', '-o', out2])
 
-        const secret1 = readFileSync(out1, 'utf-8').match(/api_secret:\s*"([a-f0-9]{64})"/)?.[1]
-        const secret2 = readFileSync(out2, 'utf-8').match(/api_secret:\s*"([a-f0-9]{64})"/)?.[1]
+        const secret1 = readFileSync(out1, 'utf-8').match(
+          /api_secret:\s*"sha256:([a-f0-9]{64})"/,
+        )?.[1]
+        const secret2 = readFileSync(out2, 'utf-8').match(
+          /api_secret:\s*"sha256:([a-f0-9]{64})"/,
+        )?.[1]
         expect(secret1).toBeDefined()
         expect(secret2).toBeDefined()
         expect(secret1).not.toBe(secret2)
@@ -405,8 +410,29 @@ describe('CLI', () => {
       try {
         const { code, stderr } = await runCli(['init', '-o', outPath])
         expect(code).toBe(0)
-        expect(stderr).toContain('Generated dashboard.api_secret')
+        expect(stderr).toContain('Dashboard secret (shown once')
         expect(stderr).toMatch(/[a-f0-9]{64}/)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('writes only the digest of the secret it prints', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const outPath = join(dir, 'helio.yaml')
+
+      try {
+        const { code, stderr } = await runCli(['init', '-o', outPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain('Dashboard secret (shown once')
+
+        const printed = /^ {2}([a-f0-9]{64})$/m.exec(stderr)?.[1]
+        expect(printed).toBeDefined()
+
+        const contents = readFileSync(outPath, 'utf-8')
+        const stored = /dashboard:[\s\S]*?api_secret:\s*"(sha256:[a-f0-9]{64})"/.exec(contents)?.[1]
+        expect(stored).toBe(secretDigest(printed ?? ''))
+        expect(contents).not.toContain(printed ?? 'never')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -976,7 +1002,7 @@ dashboard:
       expect(validate.stderr).toContain('(0 policy rules, 0 budgets)')
 
       const contents = readFileSync(configPath, 'utf-8')
-      expect(contents).toMatch(/dashboard:[\s\S]*?api_secret:\s*"[a-f0-9]{64}"/)
+      expect(contents).toMatch(/dashboard:[\s\S]*?api_secret:\s*"sha256:[a-f0-9]{64}"/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

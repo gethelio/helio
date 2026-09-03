@@ -154,7 +154,7 @@ No MCP server to test against? Helio ships a zero-dependency echo server you can
 
 About `dashboard.api_secret`:
 
-- **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains a generated `api_secret` (a literal 32-byte hex value, also printed when you ran `init`). It's set — skip this step.
+- **If you ran `npx @gethelio/proxy init`**, your `helio.yaml` already contains the SHA-256 digest of a generated secret, and `init` printed the secret itself once. Keep the printed value; it is what you log in with. Skip this step.
 - **If you authored `helio.yaml` by hand** using the `${HELIO_DASHBOARD_SECRET}` placeholder shown above, set the variable before `start`:
 
   ```bash
@@ -195,7 +195,7 @@ Either way the call appears in the dashboard with its policy decision. (`get_wea
 http://localhost:3100
 ```
 
-If prompted, log in with the `dashboard.api_secret` that `init` generated (also printed when you ran it).
+If prompted, log in with the dashboard secret that `init` printed (the file holds only its digest).
 
 That's it. Every tool call now passes through Helio with a full audit trail, rate limits, and spend controls.
 
