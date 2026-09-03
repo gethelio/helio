@@ -21,6 +21,7 @@ import { BudgetEngine } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
+import { secretDigest } from '../auth/bearer.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2882,4 +2883,27 @@ describe('CORS origin validation — hostname normalization', () => {
       expect(res.headers.get('access-control-allow-origin')).toBeNull()
     })
   }
+})
+
+describe('stored digest secret', () => {
+  const plaintext = 'correct-horse-battery-staple'
+  const digest = secretDigest(plaintext)
+
+  it('POST /api/auth/session accepts the plaintext when the config holds its digest', async () => {
+    const { post } = setup({ apiSecret: digest })
+    const res = await post('/api/auth/session', { secret: plaintext })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('set-cookie')).toContain('helio_session=')
+  })
+
+  it('accepts the plaintext as a Bearer and rejects the digest as a Bearer', async () => {
+    const { get } = setup({ apiSecret: digest })
+    expect((await get('/api/feed', { authorization: `Bearer ${plaintext}` })).status).toBe(200)
+    expect((await get('/api/feed', { authorization: `Bearer ${digest}` })).status).toBe(401)
+  })
+
+  it('POST /api/auth/session rejects the digest presented as the secret', async () => {
+    const { post } = setup({ apiSecret: digest })
+    expect((await post('/api/auth/session', { secret: digest })).status).toBe(401)
+  })
 })

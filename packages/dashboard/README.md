@@ -33,7 +33,7 @@ Browser flow:
 3. The proxy validates the secret, sets an HTTP-only session cookie, and returns the authenticated session envelope (`auth_required`, `authenticated`, `expires_at`, `csrf_token`).
 4. The SPA keeps the CSRF token in memory and sends it as `x-helio-csrf` on mutating requests.
 
-Machine clients can still authenticate with `Authorization: Bearer <dashboard.api_secret>` directly.
+Machine clients can still authenticate with `Authorization: Bearer <secret>` directly (the secret itself; the proxy config may store only its `sha256:` digest).
 
 See `packages/proxy/src/dashboard/api.ts` for the auth/session middleware and `packages/dashboard/src/api.ts` for the client-side session + CSRF handling.
 
