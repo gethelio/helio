@@ -2431,7 +2431,7 @@ describe('helioConfigSchema', () => {
       expect(result.success).toBe(true)
     })
 
-    it('error message mentions openssl rand -hex 32 hint', () => {
+    it('error message points at helio secret', () => {
       const result = helioConfigSchema.safeParse(
         minimalConfig({ policies: { flag_destructive: 'require_approval' } }),
       )
@@ -2440,7 +2440,7 @@ describe('helioConfigSchema', () => {
       const msg = result.error.issues.find(
         (i) => i.path.join('.') === 'dashboard.api_secret',
       )?.message
-      expect(msg).toContain('openssl rand -hex 32')
+      expect(msg).toContain('helio secret')
     })
   })
 

@@ -369,7 +369,7 @@ policies:
         const paths = details.map((d) => d.path)
         expect(paths).toContain('dashboard.api_secret')
         const msg = details.find((d) => d.path === 'dashboard.api_secret')?.message ?? ''
-        expect(msg).toContain('openssl rand -hex 32')
+        expect(msg).toContain('helio secret')
       }
     })
 

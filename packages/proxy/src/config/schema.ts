@@ -901,8 +901,9 @@ function rootConfigChecks(cfg: RootConfigSections, ctx: z.core.$RefinementCtx): 
           'dashboard.api_secret is required when any rule uses require_approval, any budget ' +
           'uses on_exceed: require_approval, or policies.flag_destructive or ' +
           'policies.on_tool_drift is "require_approval". ' +
-          'Generate one with: `openssl rand -hex 32` and set it under ' +
-          '`dashboard.api_secret` in your helio.yaml. (See docs/approvals.md.)',
+          'Run `helio secret` and set the printed digest under `dashboard.api_secret` in ' +
+          'your helio.yaml (a plaintext value is accepted but warned about at startup). ' +
+          '(See docs/approvals.md.)',
       })
     }
   }
@@ -913,8 +914,8 @@ function rootConfigChecks(cfg: RootConfigSections, ctx: z.core.$RefinementCtx): 
       path: ['dashboard', 'api_secret'],
       message:
         'dashboard.api_secret is required when dashboard.enabled is true unless ' +
-        'dashboard.allow_open_mode is explicitly set to true. Generate one with ' +
-        '`openssl rand -hex 32` and set it under dashboard.api_secret in helio.yaml.',
+        'dashboard.allow_open_mode is explicitly set to true. Run `helio secret` and set ' +
+        'the printed digest under dashboard.api_secret in helio.yaml.',
     })
   }
 

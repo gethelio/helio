@@ -90,7 +90,7 @@ Both attribution fields are optional-absent: `session_source` appears whenever a
 
 **HMAC signing:** When `secret` is configured, the request includes an `x-helio-signature` header with the format `sha256=<hex_digest>`. The signature is computed as HMAC-SHA256 over the JSON request body using the configured secret.
 
-**Callback:** The external system resolves the ticket by calling the proxy's REST API on the dashboard sideband port (default `127.0.0.1:3100`), with an `Authorization: Bearer <api_secret>` header:
+**Callback:** The external system resolves the ticket by calling the proxy's REST API on the dashboard sideband port (default `127.0.0.1:3100`), with an `Authorization: Bearer <secret>` header:
 
 - `POST /api/approvals/:id/approve` with `{ "approved_by": "alice" }`
 - `POST /api/approvals/:id/deny` with `{ "denied_by": "bob", "reason": "Too risky" }`
@@ -299,7 +299,7 @@ For emergency situations, a break-glass override force-approves a ticket regardl
 ```bash
 curl -s -X POST http://localhost:3100/api/approvals/<ticket-id>/break-glass \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <api_secret>' \
+  -H 'Authorization: Bearer <secret>' \
   -d '{"approved_by": "admin", "reason": "Emergency: production incident P1-2345"}' | jq
 ```
 
@@ -414,20 +414,24 @@ Unknown paths under `/api/*` (e.g. a typo in the endpoint name) return a JSON `4
 
 ### Authentication
 
-Helio requires an `api_secret` whenever any rule uses `require_approval`, or
-`policies.flag_destructive: require_approval` or
+Helio requires `dashboard.api_secret` whenever any rule uses `require_approval`,
+or `policies.flag_destructive: require_approval` or
 `policies.on_tool_drift: require_approval` is set. The proxy refuses to start
 (or hot-reload) if the secret is missing.
 
-Generate a secret with:
+Generate a secret and its digest with:
 
 ```
-openssl rand -hex 32
+helio secret
 ```
 
-Then set it under `dashboard.api_secret` in your `helio.yaml`. The secret
-supports two authenticated access modes on protected `/api/*` endpoints
-(everything except `/api/health`, `/api/auth/session`, and `/api/auth/logout`):
+It prints two lines, `secret: <64 hex characters>` and
+`digest: sha256:<64 hex characters>`. Store the `digest:` value under
+`dashboard.api_secret` in your `helio.yaml` and keep the `secret:` value in
+your password manager; it is the value you present. A plaintext value in the
+file still works and draws a startup warning. The secret supports two
+authenticated access modes on protected `/api/*` endpoints (everything except
+`/api/health`, `/api/auth/session`, and `/api/auth/logout`):
 
 - browser operator flow: unlock dashboard via `POST /api/auth/session`, then use HttpOnly session cookie auth
 - machine/client flow: send `Authorization: Bearer <secret>`
@@ -437,12 +441,11 @@ operator reads (list tickets, get ticket, audit feed, evidence state, limits, an
 Bearer example:
 
 ```
-Authorization: Bearer <api_secret>
+Authorization: Bearer <secret>
 ```
 
-`helio init` generates a secret automatically on the first run and writes it
-into the scaffolded `helio.yaml` (the value is also echoed to stderr so you
-have a working credential immediately).
+`helio init` generates a secret automatically on the first run, prints it
+once to stderr, and writes only its digest into the scaffolded `helio.yaml`.
 
 ## See Also
 
