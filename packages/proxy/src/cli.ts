@@ -802,6 +802,12 @@ async function initCommand(outputPath: string, force: boolean): Promise<void> {
   console.error('dashboard.api_secret, and restart the proxy.')
 }
 
+function secretCommand(): void {
+  const secret = randomBytes(32).toString('hex')
+  console.log(`secret: ${secret}`)
+  console.log(`digest: ${secretDigest(secret)}`)
+}
+
 async function validateCommand(configPath: string): Promise<void> {
   try {
     const config = await loadConfig(configPath)
@@ -1087,6 +1093,13 @@ program
   .description('Validate a helio.yaml config file')
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .action((opts: { config: string }) => validateCommand(opts.config))
+
+program
+  .command('secret')
+  .description('Generate a dashboard secret and the digest to store as dashboard.api_secret')
+  .action(() => {
+    secretCommand()
+  })
 
 program
   .command('export')

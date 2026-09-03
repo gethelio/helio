@@ -986,6 +986,26 @@ dashboard:
     })
   })
 
+  describe('secret', () => {
+    it('prints a fresh secret and its digest on stdout', async () => {
+      const { code, stdout, stderr } = await runCli(['secret'])
+      expect(code).toBe(0)
+      expect(stderr).toBe('')
+      const lines = stdout.trimEnd().split('\n')
+      expect(lines).toHaveLength(2)
+      const secret = /^secret: ([a-f0-9]{64})$/.exec(lines[0] ?? '')?.[1]
+      const digest = /^digest: (sha256:[a-f0-9]{64})$/.exec(lines[1] ?? '')?.[1]
+      expect(secret).toBeDefined()
+      expect(digest).toBe(secretDigest(secret ?? ''))
+    })
+
+    it('prints a different pair each time', async () => {
+      const first = await runCli(['secret'])
+      const second = await runCli(['secret'])
+      expect(first.stdout).not.toBe(second.stdout)
+    })
+  })
+
   // --- helio init + validate round-trip ---
 
   it('init generates config that passes validate', async () => {
