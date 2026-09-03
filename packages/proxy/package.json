@@ -52,8 +52,8 @@
     "@types/node": "24.13.3",
     "@types/picomatch": "4.0.2",
     "tsup": "8.5.1",
-    "tsx": "4.21.0",
-    "vitest": "4.1.8"
+    "tsx": "4.23.13",
+    "vitest": "4.1.11"
   },
   "dependencies": {
     "@hono/node-server": "2.0.12",
