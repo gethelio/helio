@@ -69,4 +69,6 @@ dashboard:
   # start while this resolves to an empty string, so a forgotten or
   # blank value can never be mistaken for a working install. Rotate by
   # generating a new value and restarting the proxy.
+  # The variable may hold the secret or the `sha256:` digest that
+  # `helio secret` prints.
   api_secret: '${HELIO_DASHBOARD_SECRET}'

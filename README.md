@@ -356,6 +356,8 @@ Helio works with any MCP-compatible agent or framework:
 - **[Policy Guide](./docs/policies.md)**: How to write rules with examples
 - **[Approval Workflows](./docs/approvals.md)**: Slack, webhook, and dashboard approvals
 - **[Audit Trail](./docs/audit.md)**: What's recorded, how to search, how to export
+- **[Running Helio as a Sidecar](./docs/deployment-sidecar.md)**: Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network
+- **[Running Helio as its own user](./docs/deployment-separate-user.md)**: The separate-user tier on Ubuntu 24.04, run end to end
 
 ## Examples
 

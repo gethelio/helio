@@ -34,6 +34,8 @@ echo "HELIO_DASHBOARD_SECRET=$(openssl rand -hex 32)" >> .env
 
 (Sourcing the file applies assignments in order, so the appended secret overrides the empty placeholder.)
 
+`.env` lives inside the checkout, where anything that can read the checkout, including a coding agent working in it, can read the secret. Past a local try, keep the file outside the checkout and source it from there (`set -a; . /path/outside/.env; set +a`), or point Compose at it with `docker compose --env-file /path/outside/.env` if you run the proxy in Docker.
+
 The secret is required because the budget uses `on_exceed: require_approval` — break-glass tickets need an authenticated dashboard to resolve them, exactly like `require_approval` rules.
 
 ## Quick Start

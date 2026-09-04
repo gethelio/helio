@@ -102,4 +102,6 @@ dashboard:
   # rule as `require_approval` rules). Generate a fresh secret with
   # `openssl rand -hex 32` and put it in `.env` as HELIO_DASHBOARD_SECRET
   # (see `.env.example`).
+  # The variable may hold the secret or the `sha256:` digest that
+  # `helio secret` prints.
   api_secret: '${HELIO_DASHBOARD_SECRET}'

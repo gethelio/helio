@@ -239,6 +239,19 @@ hold either the secret or the `sha256:` digest that `helio secret`
 prints; the dashboard login and the Bearer header always take the
 secret itself.
 
+The config is bind-mounted read-only
+(`./helio.docker.yaml:/config/helio.yaml:ro`). That stops the
+container from writing its own config; it does nothing about a writer
+on the host. A process that can write `docker/helio.docker.yaml`,
+including a coding agent working in this checkout, changes policy on
+the running container through hot reload, and a `docker restart`
+loads the changed file again. That is fine for the demo. For a layout
+where the config and the upstream are out of the agent's reach and
+Helio is off the agent's network (the dashboard is unreachable by
+service name or address; a port published to the host stays reachable
+from containers through Docker Desktop's host gateway), use the
+[sidecar recipe](../docs/deployment-sidecar.md).
+
 ## Opting in to LAN or remote access
 
 If you need an agent on another machine to reach the proxy, change the

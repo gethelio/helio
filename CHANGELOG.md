@@ -19,6 +19,32 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **The sidecar recipe keeps the config out of the agent's reach and
+  the dashboard off its network.** `docs/deployment-sidecar.md` now
+  describes a layout where Helio's config lives in a directory the
+  agent container never mounts (a read-only directory bind mount into
+  the `helio` service only), Helio is attached to no network the agent
+  is on (a small forwarder relays the MCP port, so the dashboard on
+  `:3100` is unreachable from the agent by service name or address; a
+  port published to the host stays reachable through Docker Desktop's
+  host gateway; control-plane routes stay behind the secret,
+  `/api/health` answers without it), and the verification section runs
+  four checks from inside the agent container: no route to the
+  upstream, no mount holding the config, no route to the dashboard, no
+  credential in the environment. The page says what a read-only bind
+  mount does and does not protect. The Docker quickstart's security
+  model says the same about its own mount.
+- **A separate-user recipe that has been run.** New page
+  `docs/deployment-separate-user.md`: the proxy as a dedicated system
+  user on Ubuntu 24.04, config `root:helio 0640` under `/etc/helio`,
+  audit database under `/var/lib/helio`, started under `sudo` with an
+  absolute path, edited with `sudoedit`, and the four questions from
+  SECURITY.md answered from a second account. The production checklist
+  and SECURITY.md point at the recipes instead of at the tracking
+  issue.
+
 ## [0.13.1] - 2026-09-03
 
 ### Added
