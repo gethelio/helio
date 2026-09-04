@@ -358,6 +358,8 @@ The full docs live in the [monorepo](https://github.com/gethelio/helio) and are 
 - **[Policy Guide](https://github.com/gethelio/helio/blob/main/docs/policies.md)**: How to write rules with examples
 - **[Approval Workflows](https://github.com/gethelio/helio/blob/main/docs/approvals.md)**: Slack, webhook, and dashboard approvals
 - **[Audit Trail](https://github.com/gethelio/helio/blob/main/docs/audit.md)**: What's recorded, how to search, how to export
+- **[Running Helio as a Sidecar](https://github.com/gethelio/helio/blob/main/docs/deployment-sidecar.md)**: Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network
+- **[Running Helio as its own user](https://github.com/gethelio/helio/blob/main/docs/deployment-separate-user.md)**: The separate-user tier on Ubuntu 24.04, run end to end
 
 ## Examples
 

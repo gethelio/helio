@@ -19,6 +19,17 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **A separate-user recipe that has been run.** New page
+  `docs/deployment-separate-user.md`: the proxy as a dedicated system
+  user on Ubuntu 24.04, config `root:helio 0640` under `/etc/helio`,
+  audit database under `/var/lib/helio`, started under `sudo` with an
+  absolute path, edited with `sudoedit`, and the four questions from
+  SECURITY.md answered from a second account. The production checklist
+  and SECURITY.md point at the recipes instead of at the tracking
+  issue.
+
 ## [0.13.1] - 2026-09-03
 
 ### Added
