@@ -22,15 +22,21 @@ const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
 function runCli(
   args: string[],
   env?: NodeJS.ProcessEnv,
+  cwd?: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('node', [CLI_PATH, ...args], env ? { env } : {}, (error, stdout, stderr) => {
-      resolve({
-        code: typeof error?.code === 'number' ? error.code : error ? 1 : 0,
-        stdout,
-        stderr,
-      })
-    })
+    execFile(
+      'node',
+      [CLI_PATH, ...args],
+      { ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) },
+      (error, stdout, stderr) => {
+        resolve({
+          code: typeof error?.code === 'number' ? error.code : error ? 1 : 0,
+          stdout,
+          stderr,
+        })
+      },
+    )
   })
 }
 
@@ -517,6 +523,92 @@ describe('CLI', () => {
           expect(index, `\`${key}:\` is out of canonical order`).toBeGreaterThan(cursor)
           cursor = index
         }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('--sandbox writes the three-file layout and prints the next steps', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
+      const target = join(dir, 'sandbox')
+      try {
+        const { code, stderr } = await runCli(['init', '--sandbox', target])
+        expect(code).toBe(0)
+        for (const rel of ['compose.yaml', 'helio/helio.yaml', 'helio/README.md']) {
+          expect(existsSync(join(target, rel)), rel).toBe(true)
+          expect(stderr).toContain(`Created ${join(target, rel)}`)
+        }
+        expect(stderr).toContain('Next steps')
+        expect(stderr).toContain('helio secret')
+        expect(stderr).not.toMatch(/[a-f0-9]{64}/)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('--sandbox defaults to ./helio-sandbox under the current directory', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
+      try {
+        const { code } = await runCli(['init', '--sandbox'], undefined, dir)
+        expect(code).toBe(0)
+        expect(existsSync(join(dir, 'helio-sandbox', 'compose.yaml'))).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('--sandbox refuses to overwrite an existing layout without --force', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
+      const target = join(dir, 'sandbox')
+      try {
+        expect((await runCli(['init', '--sandbox', target])).code).toBe(0)
+        const second = await runCli(['init', '--sandbox', target])
+        expect(second.code).toBe(1)
+        expect(second.stderr).toContain('already exists')
+        const forced = await runCli(['init', '--sandbox', target, '--force'])
+        expect(forced.code).toBe(0)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('--sandbox rejects an explicit --output', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
+      try {
+        const { code, stderr } = await runCli([
+          'init',
+          '--sandbox',
+          join(dir, 's'),
+          '-o',
+          join(dir, 'x.yaml'),
+        ])
+        expect(code).toBe(1)
+        expect(stderr).toContain('--output does not apply to --sandbox')
+        // An explicit -o equal to the default must be caught too (option source, not value).
+        const sameAsDefault = await runCli(
+          ['init', '--sandbox', join(dir, 's2'), '-o', 'helio.yaml'],
+          undefined,
+          dir,
+        )
+        expect(sameAsDefault.code).toBe(1)
+        expect(existsSync(join(dir, 's2'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('--sandbox writes a config that passes validate', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
+      const target = join(dir, 'sandbox')
+      try {
+        expect((await runCli(['init', '--sandbox', target])).code).toBe(0)
+        const validate = await runCli(['validate', '-c', join(target, 'helio', 'helio.yaml')], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: 'sandbox-test',
+        })
+        expect(validate.code).toBe(0)
+        expect(validate.stderr).toContain('Config is valid')
+        expect(validate.stderr).toContain('(2 policy rules, 0 budgets)')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

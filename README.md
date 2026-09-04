@@ -62,6 +62,8 @@ npx @gethelio/proxy init
 
 This single package includes the built-in dashboard UI bundle.
 
+Running your agent in a container? `npx @gethelio/proxy init --sandbox` writes the sidecar layout instead; see [Running Helio as a Sidecar](./docs/deployment-sidecar.md).
+
 ### 2. Configure
 
 `npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. The singular `upstream:` form stays fully supported; to govern more than one MCP server, declare a named `upstreams:` list in its place (set exactly one of the two). Tool sets are never merged: each named upstream is served at its own `/mcp/<name>` door. See the [Configuration Reference](./docs/configuration.md#upstreams).

@@ -19,6 +19,21 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **`helio init --sandbox [dir]` writes the sidecar layout.** Three
+  files (`compose.yaml`, `helio/helio.yaml`, `helio/README.md`) in a
+  new directory (`helio-sandbox` by default) that the agent container
+  never mounts: four services on three networks, the agent on `edge`
+  only, Helio attached to no network the agent is on, the config
+  mounted read-only into Helio alone, the dashboard published to the
+  host's loopback (unreachable from the agent by service name or
+  address; a host-published port stays reachable through Docker
+  Desktop's host gateway, with the control-plane routes behind the
+  secret), and a README with the hard constraints, the four checks, and
+  a `devcontainer.json` snippet. Refuses to overwrite
+  without `--force`.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and

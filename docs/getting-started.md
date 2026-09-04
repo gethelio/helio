@@ -266,7 +266,7 @@ The local steps above (`helio start`) run the proxy as the same user as your age
 ## Next Steps
 
 - [Configuration Reference](./configuration.md) — Every `helio.yaml` field with defaults and types
-- [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent or dev container with the upstream out of its reach
+- [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network; `helio init --sandbox` writes the layout
 - [Running Helio as its own user](./deployment-separate-user.md) — The separate-user tier on Ubuntu 24.04, run end to end
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard

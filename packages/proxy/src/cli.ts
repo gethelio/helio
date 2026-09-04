@@ -1,9 +1,9 @@
 /* eslint-disable no-console -- CLI entry point, console is the intended output */
 import { Command } from 'commander'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import {
@@ -16,6 +16,14 @@ import {
 import type { SingularHelioConfig } from './config/index.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { secretDigest } from './auth/bearer.js'
+import {
+  SANDBOX_DEFAULT_DIR,
+  SANDBOX_FILES,
+  renderSandboxCompose,
+  renderSandboxConfig,
+  renderSandboxReadme,
+  sandboxImageTag,
+} from './sandbox-scaffold.js'
 import type { Hono } from 'hono'
 import { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
 import { applyReloadedPolicy } from './reload-fanout.js'
@@ -813,6 +821,37 @@ async function initCommand(outputPath: string, force: boolean): Promise<void> {
   console.error('dashboard.api_secret, and restart the proxy.')
 }
 
+async function sandboxCommand(dir: string, force: boolean): Promise<void> {
+  const root = resolve(dir)
+  const targets = SANDBOX_FILES.map((rel) => join(root, rel))
+  const existing = targets.find((path) => existsSync(path))
+  if (existing !== undefined && !force) {
+    console.error(`Error: ${existing} already exists. Use --force to overwrite.`)
+    process.exit(1)
+  }
+
+  await mkdir(join(root, 'helio'), { recursive: true })
+  const contents: Record<(typeof SANDBOX_FILES)[number], string> = {
+    'compose.yaml': renderSandboxCompose({ imageTag: sandboxImageTag(VERSION) }),
+    'helio/helio.yaml': renderSandboxConfig(),
+    'helio/README.md': renderSandboxReadme(),
+  }
+  for (const rel of SANDBOX_FILES) await writeFile(join(root, rel), contents[rel], 'utf-8')
+
+  for (const path of targets) console.error(`Created ${path}`)
+  console.error('')
+  console.error('Next steps:')
+  console.error('  1. In compose.yaml, set the agent image (or build:) and the mcp-server image.')
+  console.error(
+    '  2. Run `helio secret` and put HELIO_DASHBOARD_SECRET=<digest> in ./.env next to compose.yaml.',
+  )
+  console.error(`  3. cd ${dir} && docker compose up -d`)
+  console.error('  4. docker compose exec agent sh, then run the checks in helio/README.md.')
+  console.error(
+    'Never mount this directory, ./helio, .env, or the Docker socket into the agent service.',
+  )
+}
+
 function secretCommand(): void {
   const secret = randomBytes(32).toString('hex')
   console.log(`secret: ${secret}`)
@@ -1097,7 +1136,20 @@ program
   .description('Scaffold a helio.yaml config file with commented defaults')
   .option('-o, --output <path>', 'Output file path', DEFAULT_CONFIG_PATH)
   .option('-f, --force', 'Overwrite existing file', false)
-  .action((opts: { output: string; force: boolean }) => initCommand(opts.output, opts.force))
+  .option(
+    '--sandbox [dir]',
+    `Write the sidecar layout (compose.yaml, helio/helio.yaml, helio/README.md) into <dir> (default: ${SANDBOX_DEFAULT_DIR}) instead of a helio.yaml`,
+  )
+  .action((opts: { output: string; force: boolean; sandbox?: string | true }, command: Command) => {
+    if (opts.sandbox === undefined) return initCommand(opts.output, opts.force)
+    if (command.getOptionValueSource('output') === 'cli') {
+      console.error(
+        'Error: --output does not apply to --sandbox; pass the directory as --sandbox <dir>.',
+      )
+      process.exit(1)
+    }
+    return sandboxCommand(opts.sandbox === true ? SANDBOX_DEFAULT_DIR : opts.sandbox, opts.force)
+  })
 
 program
   .command('validate')
