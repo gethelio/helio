@@ -958,6 +958,8 @@ On successful reload:
 
 The budgets line always prints first, with the count from the reloaded file (`0 budgets` when no `budgets:` section is configured).
 
+Every reload attempt, applied or refused, is also an audit record (`record_kind: policy_reload`) carrying the outcome, the file hash before and after, the rule and budget counts, and the names of any rules the edit removed; see [Policy Reload Records](./audit.md#policy-reload-records). It is written through the immediate queue, so its row precedes the first call recorded under the new policy, and it reaches the dashboard feed like any other record.
+
 If the new configuration is invalid — or its budget epoch changes cannot be durably recorded — Helio rejects the reload as a whole, keeps the complete current configuration (policy rules and budgets alike), and logs the error:
 
 ```

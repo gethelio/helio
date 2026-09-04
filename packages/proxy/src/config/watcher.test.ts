@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { ConfigWatcher } from './watcher.js'
-import { ConfigError, loadConfig } from './loader.js'
+import { ConfigWatcher, PolicyReloadRejectedError } from './watcher.js'
+import type { AppliedPolicyReloadFacts, PolicyReloadFacts } from './watcher.js'
+import { ConfigError, loadConfigWithMeta } from './loader.js'
 import type { CompiledPolicy, PolicyParseWarning } from '../policy/types.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
@@ -76,14 +78,14 @@ describe('ConfigWatcher', () => {
   it('calls onReload when config file changes', async () => {
     // Start with a basic config
     await writeFile(configPath, validConfig())
-    const initialConfig = await loadConfig(configPath)
+    const initial = await loadConfigWithMeta(configPath)
 
     const reloads: Array<{ policy: CompiledPolicy; warnings: readonly PolicyParseWarning[] }> = []
     const restartRequiredPaths: string[][] = []
 
     watcher = new ConfigWatcher({
       configPath,
-      initialConfig,
+      initial,
       onReload: (policy, warnings, paths) => {
         reloads.push({ policy, warnings })
         restartRequiredPaths.push([...paths])
@@ -109,6 +111,107 @@ describe('ConfigWatcher', () => {
     expect(restartRequiredPaths).toEqual([[]])
   })
 
+  it('reports the reload facts against the last applied config (issue #341)', async () => {
+    await writeFile(configPath, configWithDenyRule())
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    const next = validConfig()
+    await writeFile(configPath, next)
+    await wait(500)
+    expect(refused).toHaveLength(0)
+    expect(applied).toHaveLength(1)
+    expect(applied[0]?.outcome).toBe('applied')
+    expect(applied[0]?.sha256Before).toBe(initial.sha256)
+    expect(applied[0]?.sha256After).toBe(createHash('sha256').update(next, 'utf-8').digest('hex'))
+    expect(applied[0]?.ruleCountBefore).toBe(1)
+    expect(applied[0]?.ruleCountAfter).toBe(0)
+    expect(applied[0]?.rulesRemoved).toEqual(['block-delete'])
+    expect(applied[0]?.restartRequiredPaths).toEqual([])
+    expect(applied[0]?.error).toBeNull()
+
+    // The second attempt is diffed against the FIRST reload, not the startup config.
+    await writeFile(configPath, configWithDenyRule())
+    await wait(500)
+    expect(applied).toHaveLength(2)
+    expect(applied[1]?.sha256Before).toBe(applied[0]?.sha256After)
+    expect(applied[1]?.ruleCountBefore).toBe(0)
+    expect(applied[1]?.rulesRemoved).toEqual([])
+  })
+
+  it('reports rejected_invalid with the hash of the unparseable bytes and no after counts', async () => {
+    await writeFile(configPath, validConfig())
+    const initial = await loadConfigWithMeta(configPath)
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      onReload: () => {},
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+    const broken = 'version: "1"\nupstream:\n  url: [unclosed\n'
+    await writeFile(configPath, broken)
+    await wait(500)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]?.outcome).toBe('rejected_invalid')
+    expect(refused[0]?.sha256Before).toBe(initial.sha256)
+    expect(refused[0]?.sha256After).toBe(createHash('sha256').update(broken, 'utf-8').digest('hex'))
+    expect(refused[0]?.ruleCountAfter).toBeNull()
+    expect(refused[0]?.rulesRemoved).toEqual([])
+    expect(refused[0]?.error).toContain('YAML parse error')
+  })
+
+  it('maps a typed rejection thrown by onReload to its outcome and does not move the baseline', async () => {
+    await writeFile(configPath, validConfig())
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    let fail = true
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => {
+        if (fail) {
+          throw new PolicyReloadRejectedError(
+            'rejected_budget_flush',
+            'budget epoch flush failed: disk full',
+          )
+        }
+        applied.push(facts)
+      },
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+    await writeFile(configPath, configWithDenyRule())
+    await wait(500)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]?.outcome).toBe('rejected_budget_flush')
+    expect(refused[0]?.ruleCountAfter).toBe(1)
+    expect(refused[0]?.error).toBe('budget epoch flush failed: disk full')
+
+    fail = false
+    await writeFile(configPath, validConfig())
+    await wait(500)
+    expect(applied).toHaveLength(1)
+    expect(applied[0]?.sha256Before).toBe(initial.sha256)
+    expect(applied[0]?.ruleCountBefore).toBe(0)
+  })
+
   it('passes compiled budgets to the reload callback', async () => {
     await writeFile(configPath, validConfig())
 
@@ -116,6 +219,7 @@ describe('ConfigWatcher', () => {
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (_policy, _warnings, _paths, budgets) => {
         budgetReloads.push([...budgets])
       },
@@ -195,6 +299,7 @@ ${extraContributor}
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (_policy, _warnings, _paths, budgets) => {
         engine.reconcile(budgets)
       },
@@ -283,6 +388,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (_policy, _warnings, _paths, budgets) => {
         engine.reconcile(budgets)
       },
@@ -384,6 +490,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (_policy, _warnings, _paths, budgets) => {
         engine.reconcile(budgets)
       },
@@ -434,6 +541,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
@@ -461,6 +569,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -485,6 +594,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -513,6 +623,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -541,6 +652,7 @@ budgets:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -584,6 +696,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 200,
@@ -617,6 +730,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
@@ -643,6 +757,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: () => {},
       debounceMs: 50,
@@ -658,9 +773,11 @@ policies:
     expect(reloads).toHaveLength(1)
   })
 
-  it('close() is idempotent — calling twice does not throw', () => {
+  it('close() is idempotent — calling twice does not throw', async () => {
+    await writeFile(configPath, validConfig())
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: () => {},
       onError: () => {},
     })
@@ -706,6 +823,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -746,6 +864,8 @@ policies:
 version: "1"
 upstream:
   url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: false
 environment: "production"
 policies:
   default: allow
@@ -763,6 +883,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -798,14 +919,14 @@ policies:
 
   it('reports restart-required paths when non-reloadable fields change', async () => {
     await writeFile(configPath, validConfig())
-    const initialConfig = await loadConfig(configPath)
+    const initial = await loadConfigWithMeta(configPath)
 
     const reloads: CompiledPolicy[] = []
     const restartRequiredPaths: string[][] = []
 
     watcher = new ConfigWatcher({
       configPath,
-      initialConfig,
+      initial,
       onReload: (policy, _warnings, paths) => {
         reloads.push(policy)
         restartRequiredPaths.push([...paths])
@@ -923,6 +1044,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
@@ -978,6 +1100,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
@@ -1068,6 +1191,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },
@@ -1117,6 +1241,7 @@ policies:
 
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => reloads.push(policy),
       onError: (err) => errors.push(err),
       debounceMs: 50,
@@ -1146,6 +1271,7 @@ policies:
     let readyCount = 0
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: () => {},
       onError: () => {},
       onReady: () => {
@@ -1164,6 +1290,7 @@ policies:
     let readyCount = 0
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: () => {},
       onError: () => {},
       onReady: () => {
@@ -1181,9 +1308,13 @@ policies:
     // No write: the path does not exist. Ready means "initial scan done",
     // not "file exists" — a caller waiting on the hook must not hang when
     // the config vanished between load and watch.
+    await writeFile(configPath, validConfig())
+    const initial = await loadConfigWithMeta(configPath)
+    await rm(configPath)
     let readyCount = 0
     watcher = new ConfigWatcher({
       configPath,
+      initial,
       onReload: () => {},
       onError: () => {},
       onReady: () => {
@@ -1202,6 +1333,7 @@ policies:
     let ready = false
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (policy) => {
         reloads.push(policy)
       },

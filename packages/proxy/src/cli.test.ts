@@ -1802,6 +1802,84 @@ audit:
       }
     }, 20_000)
 
+    it('writes exactly one policy_reload record per reload attempt (issue #341)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      const auditPath = join(dir, 'audit.db')
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<void> => {
+        const started = Date.now()
+        while (Date.now() - started < timeoutMs) {
+          if (predicate()) return
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        throw new Error(`Timed out. stderr:\n${stderr}`)
+      }
+      const reloadRows = (): Array<{ outcome: string | null; block_reason: string | null }> => {
+        if (!existsSync(auditPath)) return []
+        const db = new Database(auditPath)
+        try {
+          return db
+            .prepare(
+              `SELECT json_extract(evidence_chain, '$.policy_reload.outcome') AS outcome, block_reason
+               FROM audit_records WHERE record_kind = 'policy_reload' ORDER BY created_at, rowid`,
+            )
+            .all() as Array<{ outcome: string | null; block_reason: string | null }>
+        } finally {
+          db.close()
+        }
+      }
+      try {
+        await waitFor(() => stderr.includes(`Watching ${configPath} for policy changes`), 8_000)
+        await new Promise((resolve) => setTimeout(resolve, 100)) // WATCH_ARM_GRACE_MS
+        const original = readFileSync(configPath, 'utf-8')
+
+        // 1. applied
+        writeFileSync(configPath, `${original}policies:\n  default: deny\n`)
+        await waitFor(() => stderr.includes('Policy reloaded: 0 rules (default: deny)'), 8_000)
+        await waitFor(() => reloadRows().length >= 1, 5_000)
+        expect(reloadRows()).toEqual([{ outcome: 'applied', block_reason: null }])
+
+        // 2. rejected_invalid
+        writeFileSync(configPath, `${original}policies:\n  rules: [\n`)
+        await waitFor(
+          () => stderr.includes('Config reload failed (keeping current configuration)'),
+          8_000,
+        )
+        await waitFor(() => reloadRows().length >= 2, 5_000)
+        expect(reloadRows()[1]).toEqual({
+          outcome: 'rejected_invalid',
+          block_reason: 'rejected_invalid',
+        })
+
+        // 3. rejected_unroutable: the channel and the rule that needs it arrive in the same edit,
+        //    so validation passes and only the running surface refuses it.
+        writeFileSync(
+          configPath,
+          `${original}approval:\n  channels:\n    - type: webhook\n      name: hook\n      url: http://127.0.0.1:1/hook\npolicies:\n  rules:\n    - name: gated\n      match:\n        tool: delete_*\n      action: require_approval\n      approval:\n        channel: hook\n`,
+        )
+        await waitFor(
+          () => stderr.includes('approval routing is not available in the running process'),
+          8_000,
+        )
+        await waitFor(() => reloadRows().length >= 3, 5_000)
+        expect(reloadRows()[2]).toEqual({
+          outcome: 'rejected_unroutable',
+          block_reason: 'rejected_unroutable',
+        })
+        expect(reloadRows()).toHaveLength(3)
+      } finally {
+        child.kill('SIGTERM')
+        await waitForChildExit(child, 5_000).catch(() => undefined)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
     it('shuts down cleanly on SIGINT with an active dashboard SSE stream', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-shutdown-'))
       const configPath = join(dir, 'helio.yaml')

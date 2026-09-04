@@ -31,6 +31,13 @@ const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
 const NON_TOOL_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'rejected')"
 
 /**
+ * record_kind of the proxy's own config reload records (issue #341). Excluded
+ * from every decision aggregate (they are not decisions about calls) and
+ * kept in the raw total and the per-hour series.
+ */
+const POLICY_RELOAD_KIND_SQL = "'policy_reload'"
+
+/**
  * Maximum records a single bulk export may return. Shared by the dashboard
  * export route schema and the CLI export command so the advertised cap and
  * the store's actual cap cannot diverge.
@@ -669,14 +676,20 @@ export class AuditStore {
     const rangeFilters: AuditQueryFilters = { from, to, upstream: filters.upstream }
     const { clause, params } = buildWhereClause(rangeFilters)
 
+    // Policy reload records (issue #341) describe the proxy's own config
+    // reloads, not decisions about calls: an applied reload has a null
+    // block_reason and a refused one carries its outcome there, so without
+    // this guard they would count as allowed calls and as blocks. They stay
+    // in `total` and `per_hour` so "Total Actions" and "Actions Per Hour"
+    // agree with the feed, and out of every decision aggregate.
     const totals = this.db
       .prepare(
         `SELECT
            COUNT(*) as total,
-           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
-           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL THEN 1 ELSE 0 END), 0) as blocked_total,
-           COALESCE(SUM(CASE WHEN dry_run = 1 THEN 1 ELSE 0 END), 0) as dry_run_total,
-           COALESCE(SUM(CASE WHEN dry_run = 0 THEN 1 ELSE 0 END), 0) as applied_total
+           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
+           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as blocked_total,
+           COALESCE(SUM(CASE WHEN dry_run = 1 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as dry_run_total,
+           COALESCE(SUM(CASE WHEN dry_run = 0 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as applied_total
          FROM audit_records ${clause}`,
       )
       .get(...params) as {
@@ -688,18 +701,21 @@ export class AuditStore {
     }
 
     // By decision
+    const decisionClause = clause
+      ? `${clause} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const by_decision = this.db
       .prepare(
         `SELECT policy_decision as decision, COUNT(*) as count
-         FROM audit_records ${clause}
+         FROM audit_records ${decisionClause}
          GROUP BY policy_decision
          ORDER BY count DESC`,
       )
       .all(...params) as Array<{ decision: string; count: number }>
 
     const blockedClause = clause
-      ? `${clause} AND block_reason IS NOT NULL`
-      : 'WHERE block_reason IS NOT NULL'
+      ? `${clause} AND block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const by_block_reason = this.db
       .prepare(
         `SELECT block_reason as reason, COUNT(*) as count
@@ -710,11 +726,11 @@ export class AuditStore {
       .all(...params) as Array<{ reason: string; count: number }>
 
     // Top tools (limit 10) — non-tool decisions (drift events and nameless-call
-    // rejections) are excluded: they do not name a real tool call and would
-    // inflate tool-usage rankings.
+    // rejections) and policy reload records are excluded: they do not name a
+    // real tool call and would inflate tool-usage rankings.
     const toolsClause = clause
-      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
-      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
+      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const top_tools = this.db
       .prepare(
         `SELECT tool_name, upstream, COUNT(*) as count

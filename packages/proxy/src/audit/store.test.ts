@@ -1389,6 +1389,48 @@ CREATE TABLE IF NOT EXISTS audit_records (
     })
   })
 
+  describe('policy_reload records and the aggregates (issue #341)', () => {
+    function reloadRecord(outcome: 'applied' | 'rejected_pinned'): InsertRecord {
+      return makeRecord({
+        tool_name: 'helio.yaml',
+        tool_input: {},
+        policy_decision: 'policy_reload',
+        block_reason: outcome === 'applied' ? null : outcome,
+        record_kind: 'policy_reload',
+        origin: 'config',
+        upstream_response: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        evidence_chain: { policy_reload: { outcome } },
+      })
+    }
+
+    it('keeps reload rows out of the decision aggregates and in the raw totals', () => {
+      store.insert(reloadRecord('applied'))
+      store.insert(reloadRecord('rejected_pinned'))
+      store.insert(makeRecord({ tool_name: 'delete_record', policy_decision: 'allow' }))
+      const stats = store.aggregate()
+      expect(stats.total).toBe(3)
+      expect(stats.allowed_total).toBe(1)
+      expect(stats.blocked_total).toBe(0)
+      expect(stats.applied_total).toBe(1)
+      expect(stats.by_decision.map((row) => row.decision)).not.toContain('policy_reload')
+      expect(stats.by_block_reason.map((row) => row.reason)).not.toContain('rejected_pinned')
+      expect(stats.top_tools.map((row) => row.tool_name)).not.toContain('helio.yaml')
+      expect(stats.per_hour.reduce((sum, bucket) => sum + bucket.count, 0)).toBe(3)
+    })
+
+    it('filters reload rows by kind and reads the outcome back from the evidence', () => {
+      const id = store.insert(reloadRecord('rejected_pinned'))
+      const rows = store.list({ record_kind: 'policy_reload' })
+      expect(rows.total).toBe(1)
+      expect(rows.records[0]?.id).toBe(id)
+      expect(rows.records[0]?.evidence_chain).toEqual({
+        policy_reload: { outcome: 'rejected_pinned' },
+      })
+    })
+  })
+
   // -------------------------------------------------------------------------
   // Purge
   // -------------------------------------------------------------------------

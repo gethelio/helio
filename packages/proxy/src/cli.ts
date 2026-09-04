@@ -11,6 +11,7 @@ import {
   loadConfigWithMeta,
   ConfigError,
   ConfigWatcher,
+  PolicyReloadRejectedError,
   isNamedConfig,
 } from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
@@ -42,6 +43,7 @@ import {
   AuditWriter,
   EXPORT_MAX_RECORDS,
   buildHeaderMismatchAuditRecord,
+  buildPolicyReloadRecord,
 } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
@@ -307,10 +309,12 @@ interface StartOptions {
 async function startCommand(configPath: string, options: StartOptions): Promise<void> {
   let config
   let interpolatedPaths: readonly string[] = []
+  let configSha256 = ''
   try {
     const loaded = await loadConfigWithMeta(configPath)
     config = loaded.config
     interpolatedPaths = loaded.interpolatedPaths
+    configSha256 = loaded.sha256
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
@@ -714,34 +718,45 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   if (hotReloadEnabled) {
     configWatcher = new ConfigWatcher({
       configPath,
-      initialConfig: config,
+      initial: { config, sha256: configSha256 },
       onReady: () => {
         console.error(`Watching ${configPath} for policy changes`)
       },
-      onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
+      onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets, facts) => {
         // The RUNNING approval surface is startup-bound: a reload whose
         // policy or budgets reference channels (or a dashboard) that only
         // exist in the NEW file would validate on paper and then route
-        // tickets into the void. Reject the whole reload instead — the
-        // throw lands in onError, keeping the current configuration.
+        // tickets into the void. Refuse the whole reload instead; the
+        // throw lands in the watcher's catch, which records it once.
         const unroutable = findUnroutableApprovalReferences(newPolicy, newBudgets, {
           channelTypes: runtimeChannelTypes,
           dashboardEnabled: config.dashboard.enabled,
           defaultApprovalTimeoutMs: parseDuration(config.approval.timeout),
         })
         if (unroutable.length > 0) {
-          throw new Error(
+          throw new PolicyReloadRejectedError(
+            'rejected_unroutable',
             `approval routing is not available in the running process (restart required ` +
               `to apply approval.channels/dashboard changes): ${unroutable.join('; ')}`,
           )
         }
         // Budgets reconcile FIRST: it persists the reload's epoch mints and
-        // throws when the flush fails, which rejects the whole reload (the
-        // watcher's onError keeps the current config) before any policy
-        // swap — the reload applies all-or-nothing across the file.
-        budgetEngine.reconcile(newBudgets)
+        // throws when the flush fails, which refuses the whole reload
+        // before any policy swap; the reload applies all-or-nothing.
+        try {
+          budgetEngine.reconcile(newBudgets)
+        } catch (err) {
+          throw new PolicyReloadRejectedError(
+            'rejected_budget_flush',
+            `budget epoch flush failed: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          )
+        }
         applyReloadedPolicy(stacks, newPolicy)
         governanceService?.updatePolicy(newPolicy)
+        // The one success-path persist site: the swap is done, the record
+        // says so, and it precedes the first call the new policy serves.
+        auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
         const budgetTotal = newBudgets.length
         console.error(
           `[helio] Budgets reloaded: ${String(budgetTotal)} budget${budgetTotal !== 1 ? 's' : ''}`,
@@ -765,13 +780,15 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
           )
         }
       },
-      onError: (error) => {
+      onError: (error, facts) => {
         console.error(
           `[helio] Config reload failed (keeping current configuration): ${error.message}`,
         )
         if (error instanceof ConfigError) {
           printConfigErrorDetails(error, '[helio] ')
         }
+        // The one refusal persist site: the watcher classified the outcome.
+        auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
       },
     })
     configWatcher.start()

@@ -34,6 +34,18 @@ Maintainer notes:
   a `devcontainer.json` snippet. Refuses to overwrite
   without `--force`.
 
+- **Every policy reload attempt is an audit record.** A hot reload,
+  applied or refused, writes a `record_kind: policy_reload` record
+  through the immediate queue with the outcome (`applied`,
+  `rejected_invalid`, `rejected_unroutable`, `rejected_budget_flush`,
+  `rejected_pinned`), the file hash before and after, the rule and
+  budget counts, the names of the rules the edit removed, and the
+  error, under `evidence_chain.policy_reload`. The stderr line stays.
+  Reload records are excluded from the allowed, blocked, dry-run, and
+  applied totals, the decision and block-reason breakdowns, and the
+  top-tools ranking, and counted in the overall total and the per-hour
+  series.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and

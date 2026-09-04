@@ -92,19 +92,23 @@ export interface LoadedConfig {
   readonly interpolatedPaths: readonly string[]
 }
 
+/** A config file as read: the decoded text and the hash of its bytes. */
+export interface ConfigSource {
+  readonly raw: string
+  /** Lowercase hex SHA-256 of the file bytes as read, before parsing and interpolation. */
+  readonly sha256: string
+}
+
 /**
- * Load, interpolate, and validate a configuration file, and report the file
- * hash and the interpolated paths alongside the result.
+ * Read a configuration file and hash its bytes as read, before parsing and
+ * interpolation. Split from the parse so a caller holds the hash even when
+ * the bytes then fail to parse, and so a hash compare and the parse that
+ * follows it see the same bytes.
  *
  * @param filePath - Path to the YAML configuration file.
- * @param env - Environment variables for interpolation (defaults to `process.env`).
- * @throws {ConfigError} On file read error, YAML parse error, missing env var, or validation failure.
+ * @throws {ConfigError} On file read error.
  */
-export async function loadConfigWithMeta(
-  filePath: string,
-  env?: Record<string, string | undefined>,
-): Promise<LoadedConfig> {
-  // 1. Read file and hash its bytes as read, before parsing and interpolation
+export async function readConfigSource(filePath: string): Promise<ConfigSource> {
   let bytes: Buffer
   try {
     bytes = await readFile(filePath)
@@ -112,22 +116,37 @@ export async function loadConfigWithMeta(
     throw new ConfigError(`Cannot read config file: ${filePath}`)
   }
   const sha256 = createHash('sha256').update(bytes).digest('hex')
-  const raw = bytes.toString('utf-8')
+  return { raw: bytes.toString('utf-8'), sha256 }
+}
 
-  // 2. Parse YAML
+/**
+ * Parse, interpolate, and validate a configuration source read by
+ * `readConfigSource`, and report the interpolated paths alongside the result.
+ *
+ * @param source - The file text and hash as read.
+ * @param filePath - The path the source was read from, for error messages.
+ * @param env - Environment variables for interpolation (defaults to `process.env`).
+ * @throws {ConfigError} On YAML parse error, missing env var, or validation failure.
+ */
+export function parseConfigSource(
+  source: ConfigSource,
+  filePath: string,
+  env?: Record<string, string | undefined>,
+): { readonly config: HelioConfig; readonly interpolatedPaths: readonly string[] } {
+  // 1. Parse YAML
   let parsed: unknown
   try {
-    parsed = yaml.load(raw)
+    parsed = yaml.load(source.raw)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new ConfigError(`YAML parse error in ${filePath}: ${message}`)
   }
 
-  // 3. Interpolate environment variables, recording which paths were substituted
+  // 2. Interpolate environment variables, recording which paths were substituted
   const interpolatedPaths: string[] = []
   const interpolated = interpolateTracked(parsed, env ?? process.env, [], interpolatedPaths)
 
-  // 4. Validate with Zod
+  // 3. Validate with Zod
   const result = helioConfigSchema.safeParse(interpolated)
   if (!result.success) {
     // A root-level issue (e.g. an unrecognized top-level key) has an empty
@@ -143,7 +162,24 @@ export async function loadConfigWithMeta(
     )
   }
 
-  return { config: result.data, sha256, interpolatedPaths }
+  return { config: result.data, interpolatedPaths }
+}
+
+/**
+ * Load, interpolate, and validate a configuration file, and report the file
+ * hash and the interpolated paths alongside the result.
+ *
+ * @param filePath - Path to the YAML configuration file.
+ * @param env - Environment variables for interpolation (defaults to `process.env`).
+ * @throws {ConfigError} On file read error, YAML parse error, missing env var, or validation failure.
+ */
+export async function loadConfigWithMeta(
+  filePath: string,
+  env?: Record<string, string | undefined>,
+): Promise<LoadedConfig> {
+  const source = await readConfigSource(filePath)
+  const { config, interpolatedPaths } = parseConfigSource(source, filePath, env)
+  return { config, sha256: source.sha256, interpolatedPaths }
 }
 
 /**

@@ -3,6 +3,13 @@ export type { RetentionSweepCutoff } from './store.js'
 export { AuditWriter } from './writer.js'
 export type { AuditWriterOptions } from './writer.js'
 export { buildHeaderMismatchAuditRecord } from './header-mismatch.js'
+export {
+  buildPolicyReloadRecord,
+  policyReloadEvidence,
+  readPolicyReloadEvidence,
+  POLICY_RELOAD_DECISION,
+} from './policy-reload.js'
+export type { PolicyReloadEvidence } from './policy-reload.js'
 export type {
   AuditRecord,
   AuditQueryFilters,

@@ -3,7 +3,14 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { loadConfig, loadConfigWithMeta, ConfigError, interpolateEnvVars } from './loader.js'
+import {
+  loadConfig,
+  loadConfigWithMeta,
+  readConfigSource,
+  parseConfigSource,
+  ConfigError,
+  interpolateEnvVars,
+} from './loader.js'
 import { isSingularConfig } from './schema.js'
 
 // ---------------------------------------------------------------------------
@@ -605,5 +612,30 @@ dashboard:
     const filePath = await writeTempYaml('helio.yaml', yaml)
     const loaded = await loadConfigWithMeta(filePath)
     expect(loaded.interpolatedPaths).toEqual([])
+  })
+
+  it('reads the source once and parses it separately, so the hash survives a parse failure', async () => {
+    const broken = 'version: "1"\nupstream:\n  url: [unclosed\n'
+    const filePath = await writeTempYaml('helio.yaml', broken)
+    const source = await readConfigSource(filePath)
+    expect(source.raw).toBe(broken)
+    expect(source.sha256).toBe(createHash('sha256').update(broken, 'utf-8').digest('hex'))
+    expect(() => parseConfigSource(source, filePath)).toThrow(ConfigError)
+    expect(() => parseConfigSource(source, filePath)).toThrow(/YAML parse error/)
+  })
+
+  it('composes readConfigSource and parseConfigSource in loadConfigWithMeta', async () => {
+    const yaml =
+      'version: "1"\nupstream:\n  url: "http://localhost:8080"\ndashboard:\n  enabled: false\n'
+    const filePath = await writeTempYaml('helio.yaml', yaml)
+    const source = await readConfigSource(filePath)
+    const parsed = parseConfigSource(source, filePath, {})
+    const loaded = await loadConfigWithMeta(filePath, {})
+    expect(loaded.sha256).toBe(source.sha256)
+    expect(loaded.config).toEqual(parsed.config)
+    expect(loaded.interpolatedPaths).toEqual(parsed.interpolatedPaths)
+    await expect(readConfigSource(join(tmpDir, 'missing.yaml'))).rejects.toThrow(
+      /Cannot read config file/,
+    )
   })
 })
