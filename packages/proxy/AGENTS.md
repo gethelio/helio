@@ -248,13 +248,13 @@ pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scrip
 
 ## CLI Commands
 
-| Command                                                                                                                 | Description                                                                                        |
-| ----------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `helio start [-c path] [--no-hot-reload]`                                                                               | Load config, compile policies, start proxy server (`--no-hot-reload` disables config-watch reload) |
-| `helio init [-o path] [-f]`                                                                                             | Scaffold helio.yaml with commented defaults                                                        |
-| `helio validate [-c path]`                                                                                              | Validate config + compile policies, report errors/warnings                                         |
-| `helio secret`                                                                                                          | Generate a dashboard secret and the digest to store as `dashboard.api_secret`, on stdout           |
-| `helio export [-c path] [-f format] [--budgets] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records — or one budget's spend ledger via `--budgets <name>` — as JSON or CSV        |
+| Command                                                                                                                 | Description                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `helio start [-c path] [--no-hot-reload]`                                                                               | Load config, compile policies, start proxy server (`--no-hot-reload` disables config-watch reload)                                                                     |
+| `helio init [-o path] [-f] [--sandbox [dir]]`                                                                           | Scaffold helio.yaml with commented defaults, or with --sandbox the sidecar layout (compose.yaml, helio/helio.yaml, helio/README.md) into <dir> (default helio-sandbox) |
+| `helio validate [-c path]`                                                                                              | Validate config + compile policies, report errors/warnings                                                                                                             |
+| `helio secret`                                                                                                          | Generate a dashboard secret and the digest to store as `dashboard.api_secret`, on stdout                                                                               |
+| `helio export [-c path] [-f format] [--budgets] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records — or one budget's spend ledger via `--budgets <name>` — as JSON or CSV                                                                            |
 
 ## Performance Constraints
 

@@ -9,6 +9,7 @@ route to Helio by service name or address, and no copy of the upstream
 credential; the one residual, a dashboard port published to the host that
 Docker Desktop's host gateway still reaches, is stated in the verification
 section), with a copy-paste Docker Compose setup that implements it.
+`helio init --sandbox` writes the same files.
 
 **Who it's for:** you already know roughly what Helio does — if not, start with
 the [README](../README.md) or [Getting Started](./getting-started.md) — and you
@@ -84,7 +85,8 @@ what Helio allows is from the host.
 helio-sandbox/          the Compose project directory; never mounted into agent
 ├── compose.yaml
 ├── helio/
-│   └── helio.yaml      mounted read-only into the helio service only
+│   ├── helio.yaml      mounted read-only into the helio service only
+│   └── README.md       the constraints and the checks; optional by hand
 └── workspace/          your project; the only thing agent mounts
 ```
 
@@ -93,8 +95,8 @@ agent and the forwarder. `plane` is an ordinary bridge for the forwarder and
 Helio, and Helio's route out for upstreams on the internet. `internal` is
 marked `internal: true`, for Helio and the upstream, with no route anywhere
 else. `helio-edge` is the only service on both `edge` and `plane`; Helio is on
-`plane` and `internal` and never on `edge`. Create these files. First
-`compose.yaml`:
+`plane` and `internal` and never on `edge`. `helio init --sandbox` creates this
+layout; by hand, the files are the two below. First `compose.yaml`:
 
 <!-- helio-config-guard: skip -->
 
