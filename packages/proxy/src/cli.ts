@@ -813,13 +813,19 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         }
       },
       onError: (error, facts) => {
-        console.error(
-          `[helio] Config reload failed (keeping current configuration): ${error.message}`,
-        )
-        if (error instanceof ConfigError) {
-          printConfigErrorDetails(error, '[helio] ')
+        if (facts.outcome === 'watch_failed') {
+          console.error(
+            `[helio] Config watch failed (keeping current configuration; edits will not be ` +
+              `observed until restart): ${error.message}`,
+          )
+        } else {
+          console.error(
+            `[helio] Config reload failed (keeping current configuration): ${error.message}`,
+          )
+          if (error instanceof ConfigError) {
+            printConfigErrorDetails(error, '[helio] ')
+          }
         }
-        // The one refusal persist site: the watcher classified the outcome.
         auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
       },
     })

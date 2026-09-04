@@ -1041,6 +1041,8 @@ Changing policy on a pinned proxy is edit, re-pin, restart: no reload ever appli
 
 Refusing to start is fail-closed, and it costs availability: a process that can write the file can keep the proxy from restarting until the operator re-pins. That is the intended trade. What the pin does not do: it holds for the process you started, and a process running as the same user can still stop the proxy and start it again without the variable. Run the proxy as its own user, or in its own container with the file off the agent's filesystem, for the tiers where that is closed; see [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) and the two recipes it links.
 
+If the proxy loses its watch on the file (the file replaced by one it cannot read, for example), it logs `[helio] Config watch failed (keeping current configuration; edits will not be observed until restart)`, writes a `policy_reload` record with `outcome: watch_failed`, keeps serving the running policy, and observes no later edit until it is restarted; the `config_sha256` on every audit record, compared with `helio config hash`, is the check that does not depend on the watch.
+
 ### Reload boundary
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.

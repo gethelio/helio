@@ -130,6 +130,8 @@ export class ConfigWatcher {
   private lastGood: ConfigBaseline
   private watcher: FSWatcher | null = null
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** Set once the watch itself has failed; later change events and in-flight reloads are ignored (issue #351). */
+  private watchFailed = false
 
   constructor(options: ConfigWatcherOptions) {
     this.configPath = options.configPath
@@ -154,6 +156,7 @@ export class ConfigWatcher {
     })
 
     this.watcher.on('change', () => {
+      if (this.watchFailed) return
       this.scheduleReload()
     })
 
@@ -161,6 +164,37 @@ export class ConfigWatcher {
       // close() nulls the watcher synchronously; chokidar also suppresses
       // ready after close — this guard is our own invariant on top.
       if (this.watcher && this.onReady) this.onReady()
+    })
+
+    this.watcher.on('error', (err: unknown) => {
+      // The watch itself failed (the file replaced by one this process
+      // cannot read is the live case): chokidar emits the deferred change
+      // for the replaced path and then fails the re-watch, so one
+      // replacement reaches this watcher twice. Report it ONCE: mark the
+      // watch failed, drop any pending reload, ignore later change events
+      // from the dying watch, and never re-arm. Nothing was read, the
+      // running policy stays, and no later edit is observed until a
+      // restart.
+      const error = err instanceof Error ? err : new Error(String(err))
+      if (this.watchFailed) return
+      this.watchFailed = true
+      if (this.debounceTimer !== null) {
+        clearTimeout(this.debounceTimer)
+        this.debounceTimer = null
+      }
+      const before = beforeFacts(this.lastGood)
+      this.onError(error, {
+        configPath: this.configPath,
+        outcome: 'watch_failed',
+        ...before,
+        sha256After: null,
+        ruleCountAfter: null,
+        defaultActionAfter: null,
+        budgetCountAfter: null,
+        rulesRemoved: [],
+        restartRequiredPaths: [],
+        error: error.message,
+      })
     })
   }
 
@@ -218,13 +252,19 @@ export class ConfigWatcher {
         restartRequiredPaths,
         error: null,
       }
+      // The watch failed while this reload was in flight: the replacement is
+      // the watch_failed record's, whatever these bytes were; nothing applies
+      // and the baseline stays.
+      if (this.watchFailed) return
       this.onReload(policy, warnings, restartRequiredPaths, budgets, facts)
       this.lastGood = { config, sha256: source.sha256 }
-      // C4b inserts `if (this.watchFailed) return` before the onReload call above.
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
       const outcome: PolicyReloadOutcome =
         error instanceof PolicyReloadRejectedError ? error.outcome : 'rejected_invalid'
+      // A reload already in flight when the watch failed read the same
+      // replacement; the watch_failed record covers it.
+      if (this.watchFailed) return
       this.onError(error, {
         configPath: this.configPath,
         outcome,

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import type { FSWatcher } from 'chokidar'
 import { ConfigWatcher, PolicyReloadRejectedError } from './watcher.js'
 import type { AppliedPolicyReloadFacts, PolicyReloadFacts } from './watcher.js'
 import { ConfigError, loadConfigWithMeta } from './loader.js'
@@ -269,6 +270,67 @@ describe('ConfigWatcher', () => {
     expect(refused).toHaveLength(0)
     expect(applied).toHaveLength(1)
     expect(applied[0]?.sha256After).toBe(initial.sha256)
+  })
+
+  it('records one watch_failed per lost watch when the error lands before the deferred change (issue #351)', async () => {
+    await writeFile(configPath, configWithDenyRule())
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+    // chokidar offers no same-user way to provoke the EACCES re-watch on a
+    // temp file, so the test raises the events the live face raises
+    // (§1.3): the error from the failed re-watch, then the deferred change
+    // for the same replacement. The file on disk is still readable, so an
+    // unsuppressed change would reload it and record `applied`.
+    const inner = Reflect.get(watcher, 'watcher') as FSWatcher
+    inner.emit('error', new Error("EACCES: permission denied, watch '/etc/helio/helio.yaml'"))
+    inner.emit('change', configPath)
+    await wait(300)
+    expect(applied).toHaveLength(0)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]?.outcome).toBe('watch_failed')
+    expect(refused[0]?.sha256Before).toBe(initial.sha256)
+    expect(refused[0]?.sha256After).toBeNull()
+    expect(refused[0]?.ruleCountBefore).toBe(1)
+    expect(refused[0]?.ruleCountAfter).toBeNull()
+    expect(refused[0]?.error).toContain('EACCES')
+
+    // A second error on the same dying watch is not a second record.
+    inner.emit('error', new Error('EACCES: permission denied, watch'))
+    await wait(50)
+    expect(refused).toHaveLength(1)
+  })
+
+  it('records one watch_failed when the change was already debounced as the error lands (issue #351)', async () => {
+    await writeFile(configPath, configWithDenyRule())
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+    const inner = Reflect.get(watcher, 'watcher') as FSWatcher
+    inner.emit('change', configPath)
+    inner.emit('error', new Error("EACCES: permission denied, watch '/etc/helio/helio.yaml'"))
+    await wait(300)
+    expect(applied).toHaveLength(0)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]?.outcome).toBe('watch_failed')
   })
 
   it('passes compiled budgets to the reload callback', async () => {

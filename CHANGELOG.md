@@ -38,7 +38,7 @@ Maintainer notes:
   applied or refused, writes a `record_kind: policy_reload` record
   through the immediate queue with the outcome (`applied`,
   `rejected_invalid`, `rejected_unroutable`, `rejected_budget_flush`,
-  `rejected_pinned`), the file hash before and after, the rule and
+  `rejected_pinned`, `watch_failed`), the file hash before and after, the rule and
   budget counts, the names of the rules the edit removed, and the
   error, under `evidence_chain.policy_reload`. The stderr line stays.
   Reload records are excluded from the allowed, blocked, dry-run, and
@@ -98,6 +98,16 @@ Maintainer notes:
   `[helio] Audit DB migrated: added column "config_sha256"`; a v0.12.0
   database gets `upstream` and `config_sha256`, one notice each.
   Databases older than v0.12.0 still hit the clean break.
+
+### Fixed
+
+- **A lost config watch no longer takes the proxy down or goes
+  unrecorded.** When the file watcher fails (the config replaced by a
+  file the proxy cannot read is the observed case), the proxy logs it,
+  writes a `policy_reload` record with `outcome: watch_failed`, and
+  keeps serving the running policy instead of exiting on an unhandled
+  rejection. It does not re-arm the watch: no later edit reloads until
+  a restart.
 
 ## [0.13.1] - 2026-09-03
 
