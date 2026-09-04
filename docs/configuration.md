@@ -1002,7 +1002,7 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 [helio] Hot-reload disabled — config changes to helio.yaml will require a restart
 ```
 
-The other reason to disable it is the process and filesystem boundary: while hot reload is on, any process that can write this file changes policy on the running proxy, and the proxy does not check who wrote it. Disabling hot reload moves the change to the next restart, which closes nothing for a process that can also restart the proxy. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) for the deployments that close it. To refuse a changed file rather than defer it, see [Pinning the config](#pinning-the-config).
+The other reason to disable it is the process and filesystem boundary: while hot reload is on, any process that can write this file changes policy on the running proxy, and the proxy does not check who wrote it. Disabling hot reload moves the change to the next restart, which closes nothing for a process that can also restart the proxy. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) for the deployments that close it. To refuse a changed file rather than defer it, see [Pinning the config](#pinning-the-config). With hot reload off and the file writable by the proxy's user, the startup posture line says the next restart loads whatever is in the file.
 
 ### Pinning the config
 
@@ -1036,6 +1036,8 @@ While the pin is set:
   ```
   [helio] Config pinned to sha256:<first 12 hex>: reloads with a different hash will be refused
   ```
+
+  With the pin set, the startup posture line (printed when the file is writable by the proxy's user) says that reloads are pinned and that a restart by that user can still drop the pin.
 
 Changing policy on a pinned proxy is edit, re-pin, restart: no reload ever applies while the pin is set, because any edit changes the hash. `--no-hot-reload` with the pin set still refuses a changed file at startup; the pin's value over `--no-hot-reload` alone is exactly that startup check, which closes the restart path where a changed file would otherwise load cleanly.
 

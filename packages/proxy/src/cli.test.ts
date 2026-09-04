@@ -1998,10 +1998,37 @@ audit:
           `[helio] Config pinned to sha256:${fileHash.slice(0, 12)}: reloads with a different hash will be refused`,
         )
         expect(stderr).toContain(`Watching ${configPath} for policy changes`)
+        // Pinned and writable: the posture line says a restart can still drop the pin.
+        expect(stderr).toContain(
+          'Reloads are pinned, so a changed file is refused, but a restart by this user can still drop the pin.',
+        )
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
     }, 15_000)
+
+    it('prints the enforcement posture line when the config is writable by this user (issue #341)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        // Hot reload on, no pin: the live-change exposure.
+        const live = await startAndCaptureStderr(['-c', configPath], {
+          readyMarker: /Enforcement posture/,
+        })
+        expect(live).toContain(
+          `[helio] Enforcement posture: ${configPath} is writable by this user. Any same-user process, including your agent, can change policy live. Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier (SECURITY.md, Process and filesystem boundaries).`,
+        )
+
+        // Hot reload off, no pin: the next restart loads the file.
+        const deferred = await startAndCaptureStderr(['-c', configPath, '--no-hot-reload'], {
+          readyMarker: /Enforcement posture/,
+        })
+        expect(deferred).toContain(
+          `[helio] Enforcement posture: ${configPath} is writable by this user. Hot reload is off, so the next restart loads whatever is in the file. Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier (SECURITY.md, Process and filesystem boundaries).`,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
 
     it('refuses a reload under the pin and records exactly one rejected_pinned row carrying the active hash', async () => {
       // Same harness as the single-row test, with the pin in the child's env.

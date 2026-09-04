@@ -67,6 +67,12 @@ Maintainer notes:
   bytes, the value to pin, on stdout, so
   `export HELIO_CONFIG_SHA256=$(helio config hash)` is the whole setup.
 
+- **One enforcement-posture line at startup.** When the config file is
+  writable by the user the proxy runs as, `helio start` prints
+  `[helio] Enforcement posture: <path> is writable by this user` with what
+  that means (live changes, the next restart, or a restart dropping the
+  pin) and the two ways up a tier; silent when the file is not writable.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and

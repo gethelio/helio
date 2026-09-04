@@ -76,6 +76,7 @@ import {
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
   warnIfDashboardSecretLiteral,
+  warnIfConfigWritableByProxyUser,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -836,6 +837,16 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       `[helio] Hot-reload disabled — config changes to ${configPath} will require a restart`,
     )
   }
+
+  // The posture line prints on both branches, after the pin is known: when
+  // the file is writable by this user, say what a same-user process can
+  // still do and the two ways up a tier. Silent under a dedicated user or a
+  // read-only mount.
+  warnIfConfigWritableByProxyUser({
+    configPath,
+    hotReload: hotReloadEnabled,
+    pinned: pinnedSha256 !== undefined,
+  })
 
   registerShutdown(
     handle,

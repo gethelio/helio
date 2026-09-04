@@ -1,5 +1,6 @@
 /* eslint-disable no-console -- surfaces operator-visible startup warnings */
 
+import { accessSync, constants } from 'node:fs'
 import { parseDuration } from './config/schema.js'
 import { isSecretDigest } from './auth/bearer.js'
 
@@ -225,6 +226,53 @@ export function warnIfNoEnforcement(
     '[helio] No policy rules are loaded and the default action is "allow" - ' +
       'Helio is recording an audit trail but NOT blocking anything. Add rules ' +
       'under `policies:` in helio.yaml to start enforcing (see docs/policies.md).',
+  )
+  return true
+}
+
+/** The default writability probe: can THIS process write the path right now. */
+function defaultIsWritable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Print the one-line enforcement posture when the config file is writable
+ * by the user the proxy runs as (the detection-only tier): any same-user
+ * process can change policy live, or on the next restart, or drop the pin
+ * by restarting. Silent when the file is not writable (a dedicated user,
+ * a read-only mount). `isWritable` is injectable for tests.
+ */
+export function warnIfConfigWritableByProxyUser(
+  input: {
+    configPath: string
+    hotReload: boolean
+    pinned: boolean
+    isWritable?: (path: string) => boolean
+  },
+  log: (message: string) => void = console.error,
+): boolean {
+  const isWritable = input.isWritable ?? defaultIsWritable
+  if (!isWritable(input.configPath)) return false
+
+  // Precedence: the pin first (it governs both reload and restart), then
+  // the reload mode. Each middle sentence names what a same-user process
+  // can still do and the two ways up a tier.
+  const exposure = input.pinned
+    ? 'Reloads are pinned, so a changed file is refused, but a restart by this ' +
+      'user can still drop the pin. Run the proxy as its own user to move up a tier'
+    : input.hotReload
+      ? 'Any same-user process, including your agent, can change policy live. ' +
+        'Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier'
+      : 'Hot reload is off, so the next restart loads whatever is in the file. ' +
+        'Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier'
+  log(
+    `[helio] Enforcement posture: ${input.configPath} is writable by this user. ${exposure} ` +
+      '(SECURITY.md, Process and filesystem boundaries).',
   )
   return true
 }

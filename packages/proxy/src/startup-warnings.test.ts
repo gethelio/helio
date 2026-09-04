@@ -8,6 +8,7 @@ import {
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
   warnIfDashboardSecretLiteral,
+  warnIfConfigWritableByProxyUser,
 } from './startup-warnings.js'
 
 describe('warnIfManyUpstreams', () => {
@@ -519,5 +520,68 @@ describe('warnIfDashboardSecretLiteral', () => {
       ),
     ).toBe(false)
     expect(messages).toHaveLength(0)
+  })
+})
+
+describe('warnIfConfigWritableByProxyUser (issue #341)', () => {
+  const configPath = '/etc/helio/helio.yaml'
+  const writable = () => true
+  const notWritable = () => false
+  const tail = '(SECURITY.md, Process and filesystem boundaries).'
+
+  it('names the live-change exposure when the file is writable, hot reload is on, and no pin is set', () => {
+    const messages: string[] = []
+    const warned = warnIfConfigWritableByProxyUser(
+      { configPath, hotReload: true, pinned: false, isWritable: writable },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(true)
+    expect(messages).toEqual([
+      `[helio] Enforcement posture: ${configPath} is writable by this user. Any same-user process, including your agent, can change policy live. Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier ${tail}`,
+    ])
+  })
+
+  it('says a restart can drop the pin when the file is writable and pinned, whatever hot reload is', () => {
+    for (const hotReload of [true, false]) {
+      const messages: string[] = []
+      warnIfConfigWritableByProxyUser(
+        { configPath, hotReload, pinned: true, isWritable: writable },
+        (m) => messages.push(m),
+      )
+      expect(messages).toEqual([
+        `[helio] Enforcement posture: ${configPath} is writable by this user. Reloads are pinned, so a changed file is refused, but a restart by this user can still drop the pin. Run the proxy as its own user to move up a tier ${tail}`,
+      ])
+    }
+  })
+
+  it('says the next restart loads the file when hot reload is off and no pin is set', () => {
+    const messages: string[] = []
+    warnIfConfigWritableByProxyUser(
+      { configPath, hotReload: false, pinned: false, isWritable: writable },
+      (m) => messages.push(m),
+    )
+    expect(messages).toEqual([
+      `[helio] Enforcement posture: ${configPath} is writable by this user. Hot reload is off, so the next restart loads whatever is in the file. Run the proxy as its own user, or set HELIO_CONFIG_SHA256, to move up a tier ${tail}`,
+    ])
+  })
+
+  it('stays silent when the file is not writable', () => {
+    const messages: string[] = []
+    const warned = warnIfConfigWritableByProxyUser(
+      { configPath, hotReload: true, pinned: false, isWritable: notWritable },
+      (m) => messages.push(m),
+    )
+    expect(warned).toBe(false)
+    expect(messages).toEqual([])
+  })
+
+  it('defaults isWritable to a real access check', () => {
+    const messages: string[] = []
+    expect(
+      warnIfConfigWritableByProxyUser(
+        { configPath: '/nonexistent/helio.yaml', hotReload: true, pinned: false },
+        (m) => messages.push(m),
+      ),
+    ).toBe(false)
   })
 })
