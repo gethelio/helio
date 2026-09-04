@@ -6,7 +6,7 @@ The core governance proxy package. Intercepts MCP `tools/call` requests, evaluat
 
 ```
 src/
-├── cli.ts                   → CLI entry point (helio start/init/validate/secret/export)
+├── cli.ts                   → CLI entry point (helio start/init/validate/secret/config hash/export)
 ├── cli-forwarder.ts         → Build upstream McpForwarder from config (streamable-http / sse / stdio)
 ├── server.ts                → Hono app factory + HTTP server lifecycle
 ├── shutdown.ts              → Ordered resource teardown (drain traffic doors before clearing governance state)
@@ -254,6 +254,7 @@ pnpm --filter @gethelio/proxy benchmark   # Run performance benchmark (tsx scrip
 | `helio init [-o path] [-f] [--sandbox [dir]]`                                                                           | Scaffold helio.yaml with commented defaults, or with --sandbox the sidecar layout (compose.yaml, helio/helio.yaml, helio/README.md) into <dir> (default helio-sandbox) |
 | `helio validate [-c path]`                                                                                              | Validate config + compile policies, report errors/warnings                                                                                                             |
 | `helio secret`                                                                                                          | Generate a dashboard secret and the digest to store as `dashboard.api_secret`, on stdout                                                                               |
+| `helio config hash [-c path]`                                                                                           | Print the SHA-256 of the config file bytes, the value to set as `HELIO_CONFIG_SHA256`, on stdout                                                                       |
 | `helio export [-c path] [-f format] [--budgets] [--tool] [--decision] [--reason] [--session] [--from] [--to] [--limit]` | Export audit records — or one budget's spend ledger via `--budgets <name>` — as JSON or CSV                                                                            |
 
 ## Performance Constraints

@@ -9,6 +9,7 @@ import { VERSION } from './version.js'
 import {
   loadConfig,
   loadConfigWithMeta,
+  readConfigSource,
   ConfigError,
   ConfigWatcher,
   PolicyReloadRejectedError,
@@ -913,6 +914,19 @@ function secretCommand(): void {
   console.log(`digest: ${secretDigest(secret)}`)
 }
 
+async function configHashCommand(configPath: string): Promise<void> {
+  try {
+    const source = await readConfigSource(configPath)
+    console.log(source.sha256)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
+}
+
 async function validateCommand(configPath: string): Promise<void> {
   try {
     const config = await loadConfig(configPath)
@@ -1234,5 +1248,12 @@ program
   .option('--to <iso>', 'End time (ISO 8601)')
   .option('--limit <n>', 'Max records to export (up to 10000)', '1000')
   .action((opts: ExportOptions) => exportCommand(opts))
+
+const configCommand = program.command('config').description('Inspect a helio.yaml config file')
+configCommand
+  .command('hash')
+  .description('Print the SHA-256 of the config file bytes, the value HELIO_CONFIG_SHA256 pins')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .action((opts: { config: string }) => configHashCommand(opts.config))
 
 program.parse()

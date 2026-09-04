@@ -1106,6 +1106,45 @@ dashboard:
     })
   })
 
+  describe('config hash', () => {
+    it('prints the bare SHA-256 of the file bytes on stdout, matching the loader and shasum (issue #341)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const expected = createHash('sha256').update(readFileSync(configPath)).digest('hex')
+        const { code, stdout, stderr } = await runCli(['config', 'hash', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stdout).toBe(`${expected}\n`)
+        expect(stderr).toBe('')
+        // writeStartConfig names the file helio.yaml, so the default path resolves in `dir`.
+        const byDefault = await runCli(['config', 'hash'], undefined, dir)
+        expect(byDefault.code).toBe(0)
+        expect(byDefault.stdout).toBe(`${expected}\n`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('exits 1 with the read error on stderr and nothing on stdout for a missing file', async () => {
+      const { code, stdout, stderr } = await runCli([
+        'config',
+        'hash',
+        '-c',
+        '/nonexistent/helio.yaml',
+      ])
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).toContain('Error: Cannot read config file: /nonexistent/helio.yaml')
+    })
+
+    it('prints the group help and exits 1 when no subcommand is given', async () => {
+      const { code, stdout, stderr } = await runCli(['config'])
+      expect(code).toBe(1)
+      expect(`${stdout}${stderr}`).toContain('hash')
+      // Observed on commander 14.0.3: the group help goes to stderr with exit 1.
+      expect(`${stdout}${stderr}`).toContain('Usage: helio config')
+    })
+  })
+
   // --- helio init + validate round-trip ---
 
   it('init generates config that passes validate', async () => {

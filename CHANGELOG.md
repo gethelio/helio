@@ -63,6 +63,10 @@ Maintainer notes:
   operator started; a same-user process can still restart the proxy
   without it.
 
+- **`helio config hash [-c path]`** prints the SHA-256 of the config file
+  bytes, the value to pin, on stdout, so
+  `export HELIO_CONFIG_SHA256=$(helio config hash)` is the whole setup.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and
