@@ -52,6 +52,17 @@ Maintainer notes:
   and filters the new record kind, and a refused reload renders as
   Rejected, never Allow.
 
+- **`HELIO_CONFIG_SHA256` pins the config.** When set to the SHA-256 of
+  the file bytes (bare hex or `sha256:`-prefixed), a start under a file
+  with a different hash exits with both hashes before serving anything,
+  and a reload whose bytes hash differently is refused before parsing,
+  recorded as `rejected_pinned`, and leaves the running policy in
+  place. A set but malformed value refuses to start. The watcher stays
+  on under the pin as the tamper detector; changing policy on a pinned
+  proxy is edit, re-pin, restart. The pin holds for the process the
+  operator started; a same-user process can still restart the proxy
+  without it.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and

@@ -1903,6 +1903,137 @@ audit:
       }
     }, 40_000)
 
+    it('refuses to start when HELIO_CONFIG_SHA256 does not match the file, naming both hashes (issue #341)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const fileHash = createHash('sha256').update(readFileSync(configPath)).digest('hex')
+        const pinned = 'f'.repeat(64)
+        const { code, stderr } = await runCli(['start', '-c', configPath], {
+          ...process.env,
+          HELIO_CONFIG_SHA256: pinned,
+        })
+        expect(code).toBe(1)
+        expect(stderr).toContain(`HELIO_CONFIG_SHA256 does not match ${configPath}`)
+        expect(stderr).toContain(`pinned sha256:${pinned}`)
+        expect(stderr).toContain(`file sha256:${fileHash}`)
+        expect(stderr).not.toContain('Helio proxy listening')
+
+        const noHotReload = await runCli(['start', '-c', configPath, '--no-hot-reload'], {
+          ...process.env,
+          HELIO_CONFIG_SHA256: pinned,
+        })
+        expect(noHotReload.code).toBe(1)
+        expect(noHotReload.stderr).toContain('does not match')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses to start when HELIO_CONFIG_SHA256 is set but malformed, an empty value included', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        for (const value of ['', 'not-a-hash', `sha512:${'a'.repeat(64)}`]) {
+          const { code, stderr } = await runCli(['start', '-c', configPath], {
+            ...process.env,
+            HELIO_CONFIG_SHA256: value,
+          })
+          expect(code, value).toBe(1)
+          expect(stderr, value).toContain(
+            'HELIO_CONFIG_SHA256 is set but is not a SHA-256 hex digest',
+          )
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('starts under a matching pin, in either form, and says so', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const fileHash = createHash('sha256').update(readFileSync(configPath)).digest('hex')
+        const stderr = await startAndCaptureStderr(['-c', configPath], {
+          readyMarker: /for policy changes/,
+          env: { ...process.env, HELIO_CONFIG_SHA256: `SHA256:${fileHash.toUpperCase()}` },
+        })
+        expect(stderr).toContain(
+          `[helio] Config pinned to sha256:${fileHash.slice(0, 12)}: reloads with a different hash will be refused`,
+        )
+        expect(stderr).toContain(`Watching ${configPath} for policy changes`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses a reload under the pin and records exactly one rejected_pinned row carrying the active hash', async () => {
+      // Same harness as the single-row test, with the pin in the child's env.
+      const { dir, configPath } = writeStartConfig()
+      const auditPath = join(dir, 'audit.db')
+      const fileHash = createHash('sha256').update(readFileSync(configPath)).digest('hex')
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: { ...process.env, HELIO_CONFIG_SHA256: fileHash },
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<void> => {
+        const started = Date.now()
+        while (Date.now() - started < timeoutMs) {
+          if (predicate()) return
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        throw new Error(`Timed out. stderr:\n${stderr}`)
+      }
+      type ReloadRow = {
+        outcome: string | null
+        block_reason: string | null
+        config_sha256: string | null
+      }
+      const reloadRows = (): ReloadRow[] => {
+        if (!existsSync(auditPath)) return []
+        const db = new Database(auditPath)
+        try {
+          return db
+            .prepare(
+              `SELECT json_extract(evidence_chain, '$.policy_reload.outcome') AS outcome, block_reason,
+                      config_sha256
+               FROM audit_records WHERE record_kind = 'policy_reload' ORDER BY created_at, rowid`,
+            )
+            .all() as ReloadRow[]
+        } finally {
+          db.close()
+        }
+      }
+      try {
+        await waitFor(() => stderr.includes(`Watching ${configPath} for policy changes`), 8_000)
+        expect(stderr).toContain(`[helio] Config pinned to sha256:${fileHash.slice(0, 12)}`)
+        await new Promise((resolve) => setTimeout(resolve, 100)) // WATCH_ARM_GRACE_MS
+        const original = readFileSync(configPath, 'utf-8')
+
+        // A valid edit that would apply without the pin.
+        writeFileSync(configPath, `${original}policies:\n  default: deny\n`)
+        await waitFor(
+          () =>
+            stderr.includes(
+              'Config reload failed (keeping current configuration): config hash sha256:',
+            ),
+          8_000,
+        )
+        await waitFor(() => reloadRows().length >= 1, 5_000)
+        // Exactly one row, refused as pinned, stamped with the ACTIVE hash (the
+        // pinned file's), never the refused bytes'.
+        expect(reloadRows()).toEqual([
+          { outcome: 'rejected_pinned', block_reason: 'rejected_pinned', config_sha256: fileHash },
+        ])
+        expect(stderr).not.toContain('Policy reloaded')
+      } finally {
+        child.kill('SIGTERM')
+        await waitForChildExit(child, 5_000).catch(() => undefined)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
     it('shuts down cleanly on SIGINT with an active dashboard SSE stream', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-shutdown-'))
       const configPath = join(dir, 'helio.yaml')

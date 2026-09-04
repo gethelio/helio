@@ -27,6 +27,11 @@ services:
       # Set in docker/.env (copied from docker/.env.example).
       # The :? syntax fails `docker compose up` at parse time if unset.
       HELIO_DASHBOARD_SECRET: '${HELIO_DASHBOARD_SECRET:?Set HELIO_DASHBOARD_SECRET in docker/.env — generate with: openssl rand -hex 32}'
+      # Optional: pin the config. Set HELIO_CONFIG_SHA256 in docker/.env to
+      # the value `helio config hash -c helio.docker.yaml` prints; a file
+      # with a different hash is then refused at reload and at start
+      # (see docker/README.md, Security model). Uncomment to enable.
+      # HELIO_CONFIG_SHA256: '${HELIO_CONFIG_SHA256:?Set HELIO_CONFIG_SHA256 in docker/.env to the value helio config hash prints}'
     volumes:
       - ./helio.docker.yaml:/config/helio.yaml:ro
       - helio-data:/data

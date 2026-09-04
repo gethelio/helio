@@ -81,6 +81,8 @@ export interface ConfigWatcherOptions {
   readonly onReady?: () => void
   readonly env?: Record<string, string | undefined>
   readonly debounceMs?: number
+  /** When set, a reload whose file bytes hash differently is refused before parsing (issue #341). */
+  readonly pinnedSha256?: string
 }
 
 type BeforeFacts = Pick<
@@ -121,6 +123,8 @@ export class ConfigWatcher {
   private readonly initial: ConfigBaseline
   private readonly env: Record<string, string | undefined> | undefined
   private readonly debounceMs: number
+  /** When set, a reload whose bytes hash differently is refused before parsing (issue #341). */
+  private readonly pinnedSha256: string | undefined
 
   /** The last configuration that applied: the "before" side of the next attempt. */
   private lastGood: ConfigBaseline
@@ -136,6 +140,7 @@ export class ConfigWatcher {
     this.lastGood = options.initial
     this.env = options.env
     this.debounceMs = options.debounceMs ?? 200
+    this.pinnedSha256 = options.pinnedSha256
   }
 
   /** Start watching the config file for changes. */
@@ -190,6 +195,12 @@ export class ConfigWatcher {
     try {
       const source = await readConfigSource(this.configPath)
       sha256After = source.sha256
+      if (this.pinnedSha256 !== undefined && source.sha256 !== this.pinnedSha256) {
+        throw new PolicyReloadRejectedError(
+          'rejected_pinned',
+          `config hash sha256:${source.sha256} does not match the pinned sha256:${this.pinnedSha256}`,
+        )
+      }
       const { config } = parseConfigSource(source, this.configPath, this.env)
       parsed = config
       const { policy, warnings } = compilePolicies(config.policies)

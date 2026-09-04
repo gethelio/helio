@@ -14,6 +14,8 @@ export {
 } from './loader.js'
 export type { LoadedConfig, ConfigSource } from './loader.js'
 export { POLICY_RELOAD_OUTCOMES } from './reload-outcomes.js'
+export { CONFIG_PIN_ENV, normalizeConfigPin, readConfigPin } from './pin.js'
+export type { ConfigPin } from './pin.js'
 export type { PolicyReloadOutcome } from './reload-outcomes.js'
 export { ConfigWatcher, PolicyReloadRejectedError } from './watcher.js'
 export type {

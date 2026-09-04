@@ -212,6 +212,65 @@ describe('ConfigWatcher', () => {
     expect(applied[0]?.ruleCountBefore).toBe(0)
   })
 
+  it('refuses a reload whose bytes do not hash to the pin, before parsing, and keeps the policy', async () => {
+    await writeFile(configPath, configWithDenyRule())
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      pinnedSha256: initial.sha256,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+
+    // A tampered file that does not even parse is still rejected_pinned.
+    const broken = 'version: "1"\nupstream:\n  url: [unclosed\n'
+    await writeFile(configPath, broken)
+    await wait(500)
+    expect(applied).toHaveLength(0)
+    expect(refused).toHaveLength(1)
+    expect(refused[0]?.outcome).toBe('rejected_pinned')
+    expect(refused[0]?.sha256After).toBe(createHash('sha256').update(broken, 'utf-8').digest('hex'))
+    expect(refused[0]?.ruleCountAfter).toBeNull()
+    expect(refused[0]?.error).toContain('does not match the pinned')
+
+    // A valid weakening edit is refused the same way.
+    await writeFile(configPath, validConfig())
+    await wait(500)
+    expect(applied).toHaveLength(0)
+    expect(refused).toHaveLength(2)
+    expect(refused[1]?.outcome).toBe('rejected_pinned')
+    expect(refused[1]?.sha256Before).toBe(initial.sha256)
+  })
+
+  it('applies a write whose bytes are identical under the pin', async () => {
+    const text = configWithDenyRule()
+    await writeFile(configPath, text)
+    const initial = await loadConfigWithMeta(configPath)
+    const applied: AppliedPolicyReloadFacts[] = []
+    const refused: PolicyReloadFacts[] = []
+    watcher = new ConfigWatcher({
+      configPath,
+      initial,
+      pinnedSha256: initial.sha256,
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
+      onError: (_error, facts) => refused.push(facts),
+      debounceMs: 50,
+    })
+    watcher.start()
+    await wait(100)
+    await writeFile(configPath, text)
+    await wait(500)
+    expect(refused).toHaveLength(0)
+    expect(applied).toHaveLength(1)
+    expect(applied[0]?.sha256After).toBe(initial.sha256)
+  })
+
   it('passes compiled budgets to the reload callback', async () => {
     await writeFile(configPath, validConfig())
 

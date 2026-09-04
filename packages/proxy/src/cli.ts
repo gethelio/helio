@@ -12,6 +12,7 @@ import {
   ConfigError,
   ConfigWatcher,
   PolicyReloadRejectedError,
+  readConfigPin,
   isNamedConfig,
 } from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
@@ -323,6 +324,23 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     }
     throw err
   }
+
+  const configPin = readConfigPin()
+  if (configPin.status === 'invalid') {
+    console.error(
+      `Error: HELIO_CONFIG_SHA256 is set but is not a SHA-256 hex digest ` +
+        `(64 hex characters, with or without a sha256: prefix): "${configPin.raw.slice(0, 80)}"`,
+    )
+    process.exit(1)
+  }
+  if (configPin.status === 'set' && configPin.sha256 !== configSha256) {
+    console.error(
+      `Error: HELIO_CONFIG_SHA256 does not match ${configPath}: pinned sha256:${configPin.sha256}, ` +
+        `file sha256:${configSha256}. Review the change and re-pin it with helio config hash.`,
+    )
+    process.exit(1)
+  }
+  const pinnedSha256 = configPin.status === 'set' ? configPin.sha256 : undefined
 
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
   if (config.dashboard.enabled && !bundledDashboardDistPath) {
@@ -710,6 +728,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     console.error(`Dry-run: ENABLED (no requests will be forwarded to upstream)`)
   }
   console.error(`Config: ${configPath}`)
+  if (pinnedSha256 !== undefined) {
+    console.error(
+      `[helio] Config pinned to sha256:${pinnedSha256.slice(0, 12)}: reloads with a different hash will be refused`,
+    )
+  }
 
   // Hot-reload is enabled by default. The CLI flag takes precedence over
   // the config file so operators can pin the policy for a single start
@@ -722,6 +745,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     configWatcher = new ConfigWatcher({
       configPath,
       initial: { config, sha256: configSha256 },
+      pinnedSha256,
       onReady: () => {
         console.error(`Watching ${configPath} for policy changes`)
       },
