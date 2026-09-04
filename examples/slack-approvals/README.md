@@ -86,6 +86,8 @@ HELIO_DASHBOARD_SECRET=<generate with: openssl rand -hex 32>
 
 `helio.yaml` references each value via `${VAR_NAME}` interpolation, so secrets stay out of the YAML.
 
+`.env` lives inside the checkout, where anything that can read the checkout, including a coding agent working in it, can read every one of those values. Past a local try, keep the file outside the checkout and source it from there (`set -a; . /path/outside/.env; set +a`), or point Compose at it with `docker compose --env-file /path/outside/.env` if you run the proxy in Docker.
+
 The dashboard API secret is required whenever any rule uses `require_approval`. Generate a fresh value with `openssl rand -hex 32` — operators use it to unlock the dashboard login screen at `http://127.0.0.1:3100`, and machine clients use it as a Bearer credential for the sideband API. Keep it stored safely (password manager, secrets vault, etc.).
 
 If you lose the secret, recovery means rotation: generate a new value, update `.env`, and restart Helio. Existing dashboard sessions are invalidated and users must sign in again with the new secret.
