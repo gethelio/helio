@@ -14,13 +14,13 @@ import type {
   DashboardEvents,
 } from './event-bus.js'
 import { ApprovalQueue } from '../approval/queue.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecordInput } from '../audit/types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+type InsertRecord = AuditRecordInput
 
 function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {

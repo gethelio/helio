@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { POLICY_RELOAD_OUTCOMES } from '../config/reload-outcomes.js'
 import type { PolicyReloadOutcome } from '../config/reload-outcomes.js'
 import type { PolicyReloadFacts } from '../config/watcher.js'
-import type { AuditRecord } from './types.js'
+import type { AuditRecord, AuditRecordInput } from './types.js'
 
 /** The constant `policy_decision` of a reload record; the outcome lives in `block_reason` and the evidence. */
 export const POLICY_RELOAD_DECISION = 'policy_reload'
@@ -53,7 +53,7 @@ export function policyReloadEvidence(facts: PolicyReloadFacts): PolicyReloadEvid
 export function buildPolicyReloadRecord(
   facts: PolicyReloadFacts,
   environment: string | null,
-): Omit<AuditRecord, 'id' | 'created_at'> {
+): AuditRecordInput {
   return {
     timestamp: new Date().toISOString(),
     session_id: null,

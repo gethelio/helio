@@ -1,6 +1,6 @@
 /* eslint-disable no-console -- audit writer reports errors to stderr */
 import { randomUUID } from 'node:crypto'
-import type { AuditRecord } from './types.js'
+import type { AuditRecordInput } from './types.js'
 import type { AuditStore } from './store.js'
 
 // ---------------------------------------------------------------------------
@@ -21,15 +21,17 @@ export interface AuditWriterOptions {
   /** Max milliseconds between flushes (default: 100). */
   readonly flushIntervalMs?: number
   /** Optional callback invoked when a record enters the in-memory buffer. */
-  readonly onPush?: (record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void
+  readonly onPush?: (record: AuditRecordInput, id: string) => void
   /** Optional callback invoked after a record is successfully persisted. */
-  readonly onPersist?: (record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void
+  readonly onPersist?: (record: AuditRecordInput, id: string) => void
+  /** The hash of the config in force at construction; every record that leaves `config_sha256` nullish is stamped with the current value. */
+  readonly configSha256?: string
 }
 
 /** A buffered entry: the pre-generated ID paired with the record. */
 interface BufferEntry {
   readonly id: string
-  readonly record: Omit<AuditRecord, 'id' | 'created_at'>
+  readonly record: AuditRecordInput
 }
 
 /**
@@ -42,12 +44,17 @@ interface BufferEntry {
 export class AuditWriter {
   private readonly store: AuditStore
   private readonly bufferSize: number
-  private readonly onPush:
-    | ((record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void)
-    | undefined
-  private readonly onPersist:
-    | ((record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void)
-    | undefined
+  private readonly onPush: ((record: AuditRecordInput, id: string) => void) | undefined
+  private readonly onPersist: ((record: AuditRecordInput, id: string) => void) | undefined
+  /**
+   * The hash of the config file in force (issue #341), stamped onto every
+   * record whose builder left `config_sha256` nullish. Seeded at
+   * construction so no record is pushed unstamped before the first
+   * `setConfigSha256`; replaced by the reload path once the new policy is
+   * in force. Null only when the caller never had a hash (library
+   * embeddings without a config file).
+   */
+  private configSha256: string | null
   private buffer: BufferEntry[] = []
   private timer: ReturnType<typeof setInterval> | null = null
   private flushSoonTimer: ReturnType<typeof setTimeout> | null = null
@@ -58,6 +65,7 @@ export class AuditWriter {
     this.bufferSize = options.bufferSize ?? 50
     this.onPush = options.onPush
     this.onPersist = options.onPersist
+    this.configSha256 = options.configSha256 ?? null
 
     const intervalMs = options.flushIntervalMs ?? 100
     if (intervalMs > 0) {
@@ -80,8 +88,9 @@ export class AuditWriter {
    * is scheduled. This keeps request-path latency bounded even under bursty
    * write load.
    */
-  push(record: Omit<AuditRecord, 'id' | 'created_at'>, id: string = randomUUID()): void {
+  push(input: AuditRecordInput, id: string = randomUUID()): void {
     if (this.closed) return
+    const record = this.stamp(input)
     this.buffer.push({ id, record })
     this.onPush?.(record, id)
     if (this.buffer.length >= this.bufferSize) {
@@ -97,11 +106,31 @@ export class AuditWriter {
    * A fatal-process crash still invokes the crash-drain hook, which calls
    * `flush()` synchronously before exit.
    */
-  pushImmediate(record: Omit<AuditRecord, 'id' | 'created_at'>, id: string = randomUUID()): void {
+  pushImmediate(input: AuditRecordInput, id: string = randomUUID()): void {
     if (this.closed) return
+    const record = this.stamp(input)
     this.buffer.push({ id, record })
     this.onPush?.(record, id)
     this.scheduleFlushSoon()
+  }
+
+  /**
+   * Replace the config hash every later record is stamped with. Called by
+   * the reload path after the new policy is in force, before the reload's
+   * own record is pushed, so the reload record and every call it governs
+   * carry the new hash.
+   */
+  setConfigSha256(hash: string): void {
+    this.configSha256 = hash
+  }
+
+  /**
+   * Stamp the active config hash onto a record whose builder left the field
+   * nullish; a record that already carries a hash is passed through. The
+   * stamped record is what `onPush`, the store, and `onPersist` see.
+   */
+  private stamp(record: AuditRecordInput): AuditRecordInput {
+    return record.config_sha256 == null ? { ...record, config_sha256: this.configSha256 } : record
   }
 
   /**

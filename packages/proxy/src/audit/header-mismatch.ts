@@ -1,5 +1,5 @@
 import type { HeaderMismatchRejection } from '../mcp/types.js'
-import type { AuditRecord } from './types.js'
+import type { AuditRecordInput } from './types.js'
 
 /**
  * Map a header/body agreement rejection (issue #226) onto the audit record
@@ -19,7 +19,7 @@ export function buildHeaderMismatchAuditRecord(
   rejection: HeaderMismatchRejection,
   environment?: string,
   upstream?: string,
-): Omit<AuditRecord, 'id' | 'created_at'> {
+): AuditRecordInput {
   return {
     timestamp: new Date().toISOString(),
     session_id: rejection.session?.id ?? null,

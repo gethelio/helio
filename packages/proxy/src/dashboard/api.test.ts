@@ -11,7 +11,7 @@ import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
 import type { DashboardAppDeps } from './api.js'
 import { DashboardEventBus, dashboardEventCallbacks } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
 import { ApprovalQueue } from '../approval/queue.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { QueueChannel } from '../approval/channels.js'
@@ -104,10 +104,10 @@ function setup(options?: {
 /** Insert a test audit record and return the generated id. */
 function insertAuditRecord(
   store: AuditStore,
-  overrides: Partial<Omit<AuditRecord, 'id' | 'created_at'>> = {},
+  overrides: Partial<AuditRecordInput> = {},
   createdAt?: string,
 ): string {
-  const defaults: Omit<AuditRecord, 'id' | 'created_at'> = {
+  const defaults: AuditRecordInput = {
     timestamp: new Date().toISOString(),
     session_id: null,
     session_source: null,

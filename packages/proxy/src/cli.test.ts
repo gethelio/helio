@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, writeFileSync, rmSync, mkdtempSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -7,7 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
 import { AuditStore } from './audit/store.js'
-import type { AuditRecord } from './audit/types.js'
+import type { AuditRecord, AuditRecordInput } from './audit/types.js'
 import { BudgetLedger } from './budget/ledger.js'
 import type { BudgetLedgerRow } from './budget/engine.js'
 import {
@@ -17,6 +18,7 @@ import {
 import { secretDigest } from './auth/bearer.js'
 
 const CLI_PATH = join(import.meta.dirname, '../dist/cli.js')
+const CLI_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
 /** Run the CLI and capture output. */
 function runCli(
@@ -28,7 +30,13 @@ function runCli(
     execFile(
       'node',
       [CLI_PATH, ...args],
-      { ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) },
+      {
+        ...(env ? { env } : {}),
+        ...(cwd ? { cwd } : {}),
+        // A JSON export of 1100 records is just over execFile's 1 MiB default
+        // once every record carries config_sha256; the CLI itself has no cap.
+        maxBuffer: CLI_MAX_BUFFER_BYTES,
+      },
       (error, stdout, stderr) => {
         resolve({
           code: typeof error?.code === 'number' ? error.code : error ? 1 : 0,
@@ -1820,16 +1828,26 @@ audit:
         }
         throw new Error(`Timed out. stderr:\n${stderr}`)
       }
-      const reloadRows = (): Array<{ outcome: string | null; block_reason: string | null }> => {
+      // The hash every row is stamped with must be the ACTIVE config's, not the
+      // bytes of a refused edit.
+      const hashOf = (text: string): string =>
+        createHash('sha256').update(text, 'utf-8').digest('hex')
+      type ReloadRow = {
+        outcome: string | null
+        block_reason: string | null
+        config_sha256: string | null
+      }
+      const reloadRows = (): ReloadRow[] => {
         if (!existsSync(auditPath)) return []
         const db = new Database(auditPath)
         try {
           return db
             .prepare(
-              `SELECT json_extract(evidence_chain, '$.policy_reload.outcome') AS outcome, block_reason
+              `SELECT json_extract(evidence_chain, '$.policy_reload.outcome') AS outcome, block_reason,
+                      config_sha256
                FROM audit_records WHERE record_kind = 'policy_reload' ORDER BY created_at, rowid`,
             )
-            .all() as Array<{ outcome: string | null; block_reason: string | null }>
+            .all() as ReloadRow[]
         } finally {
           db.close()
         }
@@ -1840,10 +1858,13 @@ audit:
         const original = readFileSync(configPath, 'utf-8')
 
         // 1. applied
-        writeFileSync(configPath, `${original}policies:\n  default: deny\n`)
+        const appliedText = `${original}policies:\n  default: deny\n`
+        writeFileSync(configPath, appliedText)
         await waitFor(() => stderr.includes('Policy reloaded: 0 rules (default: deny)'), 8_000)
         await waitFor(() => reloadRows().length >= 1, 5_000)
-        expect(reloadRows()).toEqual([{ outcome: 'applied', block_reason: null }])
+        expect(reloadRows()).toEqual([
+          { outcome: 'applied', block_reason: null, config_sha256: hashOf(appliedText) },
+        ])
 
         // 2. rejected_invalid
         writeFileSync(configPath, `${original}policies:\n  rules: [\n`)
@@ -1855,6 +1876,7 @@ audit:
         expect(reloadRows()[1]).toEqual({
           outcome: 'rejected_invalid',
           block_reason: 'rejected_invalid',
+          config_sha256: hashOf(appliedText),
         })
 
         // 3. rejected_unroutable: the channel and the rule that needs it arrive in the same edit,
@@ -1871,6 +1893,7 @@ audit:
         expect(reloadRows()[2]).toEqual({
           outcome: 'rejected_unroutable',
           block_reason: 'rejected_unroutable',
+          config_sha256: hashOf(appliedText),
         })
         expect(reloadRows()).toHaveLength(3)
       } finally {
@@ -2560,7 +2583,7 @@ audit:
   // --- helio export ---
 
   describe('export', () => {
-    type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+    type InsertRecord = AuditRecordInput
 
     function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
       const defaults: InsertRecord = {

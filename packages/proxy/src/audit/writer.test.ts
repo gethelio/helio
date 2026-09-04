@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AuditWriter } from './writer.js'
 import { AuditStore } from './store.js'
-import type { AuditRecord } from './types.js'
+import type { AuditRecordInput } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+type InsertRecord = AuditRecordInput
 
 function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {
@@ -413,6 +413,40 @@ describe('AuditWriter', () => {
       expect(errorSpy.mock.calls[0]?.[0]).toContain('AuditWriter')
 
       errorSpy.mockRestore()
+    })
+  })
+
+  describe('config_sha256 stamp (issue #341)', () => {
+    it('stamps the active hash on records that leave the field unset or null, and follows setConfigSha256', () => {
+      const first = 'a'.repeat(64)
+      const second = 'b'.repeat(64)
+      const persisted: Array<string | null | undefined> = []
+      writer = new AuditWriter({
+        store,
+        flushIntervalMs: 60_000,
+        configSha256: first,
+        onPersist: (record) => persisted.push(record.config_sha256),
+      })
+      writer.push(makeRecord())
+      writer.push(makeRecord({ config_sha256: null }))
+      writer.flush()
+      writer.setConfigSha256(second)
+      writer.pushImmediate(makeRecord())
+      writer.flush()
+      expect(persisted).toEqual([first, first, second])
+      expect(
+        store
+          .list()
+          .records.map((row) => row.config_sha256)
+          .sort(),
+      ).toEqual([first, first, second].sort())
+    })
+
+    it('leaves the field null when no hash was ever set', () => {
+      writer = new AuditWriter({ store, flushIntervalMs: 60_000 })
+      writer.push(makeRecord())
+      writer.flush()
+      expect(store.list().records[0]?.config_sha256).toBeNull()
     })
   })
 })

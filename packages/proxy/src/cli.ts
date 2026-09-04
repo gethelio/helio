@@ -411,6 +411,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   const auditWriter = new AuditWriter({
     store: auditStore,
     onPersist: cbs.onPersist,
+    // Seed the config hash at construction so no record is written unstamped
+    // between here and the first reload; the reload path replaces it.
+    configSha256,
   })
   registerCrashDrainHook(() => {
     try {
@@ -752,6 +755,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
             { cause: err },
           )
         }
+        // The reconcile above was the last throw. From here to the record
+        // push everything is synchronous in one tick, so no record can be
+        // written between the stamp and the swap: the reload record and
+        // every call the new policy serves carry the new hash.
+        auditWriter.setConfigSha256(facts.sha256After)
         applyReloadedPolicy(stacks, newPolicy)
         governanceService?.updatePolicy(newPolicy)
         // The one success-path persist site: the swap is done, the record

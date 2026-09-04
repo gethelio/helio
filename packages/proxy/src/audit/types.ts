@@ -106,8 +106,20 @@ export interface AuditRecord {
    * could silently omit it would exempt that door from attribution.
    */
   readonly upstream: string | null
+  /**
+   * SHA-256 (lowercase hex) of the config file bytes in force when the
+   * record was written (issue #341); the value `helio config hash` prints.
+   * Stamped by the writer, never by a record builder. Null on rows written
+   * before the column existed.
+   */
+  readonly config_sha256: string | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
+}
+
+/** What a record builder produces: the stored shape without the ids and with the writer-stamped hash optional. */
+export type AuditRecordInput = Omit<AuditRecord, 'id' | 'created_at' | 'config_sha256'> & {
+  readonly config_sha256?: string | null
 }
 
 // ---------------------------------------------------------------------------

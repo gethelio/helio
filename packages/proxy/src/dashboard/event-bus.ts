@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
 import type { ApprovalTicket } from '../approval/types.js'
 import type { BudgetBreachEvent, BudgetCommitEvent } from '../budget/engine.js'
 import type { RateLimitKeyState } from '../policy/rate-limiter.js'
@@ -193,10 +193,7 @@ export class DashboardEventBus {
 // ---------------------------------------------------------------------------
 
 /** Map a persisted audit record (the writer's callback shape) to an ActionEvent. */
-export function actionEventFromRecord(
-  record: Omit<AuditRecord, 'id' | 'created_at'>,
-  id: string,
-): ActionEvent {
+export function actionEventFromRecord(record: AuditRecordInput, id: string): ActionEvent {
   return {
     id,
     tool_name: record.tool_name,
@@ -273,7 +270,7 @@ export function limitWarningEvent(
  * unchanged or engine-owned shapes.
  */
 export function dashboardEventCallbacks(bus: DashboardEventBus): {
-  onPersist: (record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void
+  onPersist: (record: AuditRecordInput, id: string) => void
   onApprovalSubmit: (ticket: ApprovalTicket) => void
   onRateWarning: (state: RateLimitKeyState) => void
   onSpendWarning: (state: SpendLimitKeyState) => void

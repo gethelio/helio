@@ -37,6 +37,7 @@ function makeRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
     metadata: null,
     protocol_version: null,
     upstream: null,
+    config_sha256: null,
     created_at: '2025-01-15T10:00:00.100Z',
   }
   return {
@@ -179,7 +180,7 @@ describe('recordsToCsv', () => {
     expect(row).toContain('"tool,with,commas"')
   })
 
-  it('includes all 30 AuditRecord fields in headers, in a stable order', () => {
+  it('includes all 31 AuditRecord fields in headers, in a stable order', () => {
     // Downstream consumers parse by column index, so new columns must only
     // ever be appended, never inserted or reordered.
     expect(CSV_HEADERS).toEqual([
@@ -213,6 +214,7 @@ describe('recordsToCsv', () => {
       'session_source',
       'protocol_version',
       'upstream',
+      'config_sha256',
     ])
   })
 
@@ -267,35 +269,56 @@ describe('recordsToCsv', () => {
 })
 
 // ---------------------------------------------------------------------------
-// upstream column (issue #292) — the trailing column; protocol_version
-// (issue #219) now sits second-to-last.
+// upstream column (issue #292) — second-to-last since config_sha256 (issue
+// #341) took the trailing slot; protocol_version (issue #219) sits third-to-last.
 // ---------------------------------------------------------------------------
 
 describe('upstream column', () => {
-  it('appends upstream as the LAST column so positional consumers hold', () => {
-    expect(CSV_HEADERS[CSV_HEADERS.length - 1]).toBe('upstream')
-    expect(CSV_HEADERS[CSV_HEADERS.length - 2]).toBe('protocol_version')
+  it('keeps upstream second-to-last so positional consumers hold', () => {
+    expect(CSV_HEADERS[CSV_HEADERS.length - 2]).toBe('upstream')
+    expect(CSV_HEADERS[CSV_HEADERS.length - 3]).toBe('protocol_version')
     // The pre-#218 prefix stays byte-stable.
     expect(CSV_HEADERS.slice(0, 3)).toEqual(['id', 'timestamp', 'session_id'])
   })
 
-  it('exports the upstream value in the trailing cell', () => {
+  it('exports the upstream value in its second-to-last cell', () => {
     const csv = recordsToCsv([makeRecord({ protocol_version: '2026-07-28', upstream: 'github' })])
     const lines = csv.split('\n')
     const headers = (lines[0] ?? '').split(',')
     const cells = (lines[1] ?? '').split(',')
-    expect(headers[headers.length - 1]).toBe('upstream')
-    expect(cells[cells.length - 1]).toBe('github')
+    expect(headers[headers.length - 2]).toBe('upstream')
+    expect(cells[cells.length - 2]).toBe('github')
     // protocol_version keeps exporting by name in its (now inner) cell.
     expect(cells[headers.indexOf('protocol_version')]).toBe('2026-07-28')
   })
 
-  it('exports an empty trailing cell when upstream is null', () => {
+  it('exports an empty second-to-last cell when upstream is null', () => {
     const csv = recordsToCsv([makeRecord({ upstream: null })])
     const lines = csv.split('\n')
     const headers = (lines[0] ?? '').split(',')
     const cells = (lines[1] ?? '').split(',')
-    expect(headers[headers.length - 1]).toBe('upstream')
-    expect(cells[cells.length - 1]).toBe('')
+    expect(headers[headers.length - 2]).toBe('upstream')
+    expect(cells[cells.length - 2]).toBe('')
+  })
+})
+
+describe('config_sha256 column (issue #341)', () => {
+  it('appends config_sha256 as the LAST column so positional consumers hold', () => {
+    expect(CSV_HEADERS[CSV_HEADERS.length - 1]).toBe('config_sha256')
+    expect(CSV_HEADERS[CSV_HEADERS.length - 2]).toBe('upstream')
+    expect(CSV_HEADERS).toHaveLength(31)
+  })
+
+  it('exports the hash in the trailing cell and an empty cell when null', () => {
+    const hash = 'c'.repeat(64)
+    const csv = recordsToCsv([
+      makeRecord({ config_sha256: hash }),
+      makeRecord({ config_sha256: null }),
+    ])
+    const lines = csv.split('\n')
+    const headers = (lines[0] ?? '').split(',')
+    expect(headers[headers.length - 1]).toBe('config_sha256')
+    expect((lines[1] ?? '').split(',').at(-1)).toBe(hash)
+    expect((lines[2] ?? '').split(',').at(-1)).toBe('')
   })
 })

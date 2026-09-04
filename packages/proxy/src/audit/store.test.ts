@@ -3,15 +3,15 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
-import { AuditStore, EXPORT_MAX_RECORDS, migrateAuditUpstreamColumn } from './store.js'
+import { AuditStore, EXPORT_MAX_RECORDS, migrateAdditiveAuditColumns } from './store.js'
 import { StartupError } from '../startup-error.js'
-import type { AuditRecord } from './types.js'
+import type { AuditRecord, AuditRecordInput } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+type InsertRecord = AuditRecordInput
 
 function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {
@@ -69,6 +69,40 @@ function insertAndGet(s: AuditStore, record: InsertRecord, createdAt?: string): 
   return result as AuditRecord
 }
 
+// The exact v0.12.0 shipped schema (29 columns, no `upstream`) — the one
+// population the ratified additive-migration exception applies to.
+const V012_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS audit_records (
+  id                TEXT PRIMARY KEY,
+  timestamp         TEXT NOT NULL,
+  session_id        TEXT,
+  session_source    TEXT,
+  agent_id          TEXT,
+  environment       TEXT,
+  tool_name         TEXT NOT NULL,
+  tool_input        TEXT NOT NULL,
+  policy_decision   TEXT NOT NULL,
+  block_reason      TEXT,
+  matched_rule      TEXT,
+  matched_rule_index INTEGER,
+  evidence_chain    TEXT,
+  approval_status   TEXT,
+  approved_by       TEXT,
+  upstream_response TEXT,
+  upstream_error    TEXT,
+  upstream_http_status INTEGER,
+  upstream_latency_ms REAL,
+  total_duration_ms REAL NOT NULL,
+  approval_wait_ms  REAL NOT NULL DEFAULT 0,
+  proxy_compute_ms  REAL NOT NULL,
+  flagged_destructive INTEGER NOT NULL DEFAULT 0,
+  dry_run           INTEGER NOT NULL DEFAULT 0,
+  record_kind       TEXT NOT NULL DEFAULT 'tool_call',
+  origin            TEXT NOT NULL DEFAULT 'mcp',
+  metadata          TEXT,
+  protocol_version  TEXT,
+  created_at        TEXT NOT NULL
+);`
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -469,41 +503,6 @@ CREATE TABLE IF NOT EXISTS audit_records (
   // -------------------------------------------------------------------------
 
   describe('upstream column and additive migration (issue #292)', () => {
-    // The exact v0.12.0 shipped schema (29 columns, no `upstream`) — the one
-    // population the ratified additive-migration exception applies to.
-    const V012_TABLE_DDL = `
-CREATE TABLE IF NOT EXISTS audit_records (
-  id                TEXT PRIMARY KEY,
-  timestamp         TEXT NOT NULL,
-  session_id        TEXT,
-  session_source    TEXT,
-  agent_id          TEXT,
-  environment       TEXT,
-  tool_name         TEXT NOT NULL,
-  tool_input        TEXT NOT NULL,
-  policy_decision   TEXT NOT NULL,
-  block_reason      TEXT,
-  matched_rule      TEXT,
-  matched_rule_index INTEGER,
-  evidence_chain    TEXT,
-  approval_status   TEXT,
-  approved_by       TEXT,
-  upstream_response TEXT,
-  upstream_error    TEXT,
-  upstream_http_status INTEGER,
-  upstream_latency_ms REAL,
-  total_duration_ms REAL NOT NULL,
-  approval_wait_ms  REAL NOT NULL DEFAULT 0,
-  proxy_compute_ms  REAL NOT NULL,
-  flagged_destructive INTEGER NOT NULL DEFAULT 0,
-  dry_run           INTEGER NOT NULL DEFAULT 0,
-  record_kind       TEXT NOT NULL DEFAULT 'tool_call',
-  origin            TEXT NOT NULL DEFAULT 'mcp',
-  metadata          TEXT,
-  protocol_version  TEXT,
-  created_at        TEXT NOT NULL
-);`
-
     /** Create a v0.12.0-schema database file holding one pre-existing row. */
     function createV012Fixture(prefix: string): { dir: string; dbPath: string } {
       const dir = mkdtempSync(join(tmpdir(), prefix))
@@ -560,14 +559,14 @@ CREATE TABLE IF NOT EXISTS audit_records (
         errorSpy.mockRestore()
       }
 
-      // The migrated file's column order matches the fresh DDL: upstream LAST,
-      // so positional consumers agree across both populations.
+      // The migrated file's column order matches the fresh DDL: upstream, then
+      // config_sha256 LAST, so positional consumers agree across populations.
       const probeDb = new Database(dbPath)
       try {
         const names = (probeDb.pragma('table_info(audit_records)') as Array<{ name: string }>).map(
           (row) => row.name,
         )
-        expect(names[names.length - 1]).toBe('upstream')
+        expect(names.slice(-2)).toEqual(['upstream', 'config_sha256'])
       } finally {
         probeDb.close()
         rmSync(dir, { recursive: true, force: true })
@@ -594,6 +593,9 @@ CREATE TABLE IF NOT EXISTS audit_records (
         second.close()
         expect(errorSpy).not.toHaveBeenCalledWith(
           '[helio] Audit DB migrated: added column "upstream"',
+        )
+        expect(errorSpy).not.toHaveBeenCalledWith(
+          '[helio] Audit DB migrated: added column "config_sha256"',
         )
       } finally {
         errorSpy.mockRestore()
@@ -622,7 +624,9 @@ CREATE TABLE IF NOT EXISTS audit_records (
         return realExec(sql) // the lost race: throws duplicate column name
       })
       try {
-        expect(migrateAuditUpstreamColumn(dbA)).toBe(false)
+        // The lost race on upstream is not reported; config_sha256 is still
+        // this opener's own column to add.
+        expect(migrateAdditiveAuditColumns(dbA)).toEqual(['config_sha256'])
         const names = (dbA.pragma('table_info(audit_records)') as Array<{ name: string }>).map(
           (row) => row.name,
         )
@@ -636,8 +640,8 @@ CREATE TABLE IF NOT EXISTS audit_records (
       // Part 2 — the constructor on the post-race file: the skip-if-present
       // gate finds nothing missing, so there is no migration log and the
       // store reads and writes normally. (The catch path itself is pinned at
-      // the helper above; the constructor is pinned on both boolean
-      // outcomes — log-on-true elsewhere, no-log-on-false here.)
+      // the helper above; the constructor is pinned on both outcomes —
+      // one notice per added column elsewhere, no notice here.)
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       errorSpy.mockClear()
       let racedStore: AuditStore | null = null
@@ -700,15 +704,15 @@ CREATE TABLE IF NOT EXISTS audit_records (
       legacyDb.close()
 
       try {
-        expect(
-          () =>
-            new AuditStore({
-              path: dbPath,
-              retention: '90d',
-              includeResponses: true,
-              cleanupIntervalMs: 0,
-            }),
-        ).toThrow(/session_source/)
+        const open = (): AuditStore =>
+          new AuditStore({
+            path: dbPath,
+            retention: '90d',
+            includeResponses: true,
+            cleanupIntervalMs: 0,
+          })
+        expect(open).toThrow(/session_source/)
+        expect(open).toThrow(/config_sha256/)
 
         // No schema change: the migration gate must never ALTER a pre-0.12
         // file it is about to refuse. There is no store instance after the
@@ -720,10 +724,160 @@ CREATE TABLE IF NOT EXISTS audit_records (
             probeDb.pragma('table_info(audit_records)') as Array<{ name: string }>
           ).map((row) => row.name)
           expect(names).not.toContain('upstream')
+          expect(names).not.toContain('config_sha256')
         } finally {
           probeDb.close()
         }
       } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('config_sha256 column and additive migration (issue #341)', () => {
+    // The exact v0.13 shipped schema (30 columns, `upstream` last, no
+    // `config_sha256`): the population the second additive column migrates.
+    const V013_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS audit_records (
+  id                TEXT PRIMARY KEY,
+  timestamp         TEXT NOT NULL,
+  session_id        TEXT,
+  session_source    TEXT,
+  agent_id          TEXT,
+  environment       TEXT,
+  tool_name         TEXT NOT NULL,
+  tool_input        TEXT NOT NULL,
+  policy_decision   TEXT NOT NULL,
+  block_reason      TEXT,
+  matched_rule      TEXT,
+  matched_rule_index INTEGER,
+  evidence_chain    TEXT,
+  approval_status   TEXT,
+  approved_by       TEXT,
+  upstream_response TEXT,
+  upstream_error    TEXT,
+  upstream_http_status INTEGER,
+  upstream_latency_ms REAL,
+  total_duration_ms REAL NOT NULL,
+  approval_wait_ms  REAL NOT NULL DEFAULT 0,
+  proxy_compute_ms  REAL NOT NULL,
+  flagged_destructive INTEGER NOT NULL DEFAULT 0,
+  dry_run           INTEGER NOT NULL DEFAULT 0,
+  record_kind       TEXT NOT NULL DEFAULT 'tool_call',
+  origin            TEXT NOT NULL DEFAULT 'mcp',
+  metadata          TEXT,
+  protocol_version  TEXT,
+  created_at        TEXT NOT NULL,
+  upstream          TEXT
+);`
+
+    function createFixture(prefix: string, ddl: string): { dir: string; dbPath: string } {
+      const dir = mkdtempSync(join(tmpdir(), prefix))
+      const dbPath = join(dir, 'audit.db')
+      const legacyDb = new Database(dbPath)
+      legacyDb.exec(ddl)
+      legacyDb
+        .prepare(
+          `INSERT INTO audit_records (id, timestamp, tool_name, tool_input, policy_decision,
+             total_duration_ms, proxy_compute_ms, created_at)
+           VALUES ('pre-1', '2026-08-01T00:00:00.000Z', 'legacy_tool', '{}', 'allow', 1, 1,
+             '2026-08-01T00:00:00.000Z')`,
+        )
+        .run()
+      legacyDb.close()
+      return { dir, dbPath }
+    }
+
+    function openAndCollectNotices(dbPath: string): { store: AuditStore; notices: string[] } {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      errorSpy.mockClear()
+      const opened = new AuditStore({
+        path: dbPath,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      const notices = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith('[helio] Audit DB migrated'))
+      errorSpy.mockRestore()
+      return { store: opened, notices }
+    }
+
+    it('round-trips config_sha256 through insert, get, and list, and keeps null as null', () => {
+      const hash = 'f'.repeat(64)
+      expect(insertAndGet(store, makeRecord({ config_sha256: hash })).config_sha256).toBe(hash)
+      expect(insertAndGet(store, makeRecord({ config_sha256: null })).config_sha256).toBeNull()
+      expect(insertAndGet(store, makeRecord()).config_sha256).toBeNull()
+      expect(store.list().records.map((row) => row.config_sha256)).toEqual([null, null, hash])
+    })
+
+    it('migrates a v0.13 database in place, adding exactly config_sha256 with one notice', () => {
+      const { dir, dbPath } = createFixture('helio-audit-sha-migrate-013-', V013_TABLE_DDL)
+      let migrated: AuditStore | null = null
+      try {
+        const opened = openAndCollectNotices(dbPath)
+        migrated = opened.store
+        expect(opened.notices).toEqual(['[helio] Audit DB migrated: added column "config_sha256"'])
+        expect(migrated.get('pre-1')?.config_sha256).toBeNull()
+        expect(migrated.get('pre-1')?.upstream).toBeNull()
+        const id = migrated.insert(makeRecord({ config_sha256: 'a'.repeat(64) }))
+        expect(migrated.get(id)?.config_sha256).toBe('a'.repeat(64))
+      } finally {
+        migrated?.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('migrates a v0.12.0 database in place, adding upstream then config_sha256 with one notice each', () => {
+      const { dir, dbPath } = createFixture('helio-audit-sha-migrate-012-', V012_TABLE_DDL)
+      let migrated: AuditStore | null = null
+      try {
+        const opened = openAndCollectNotices(dbPath)
+        migrated = opened.store
+        expect(opened.notices).toEqual([
+          '[helio] Audit DB migrated: added column "upstream"',
+          '[helio] Audit DB migrated: added column "config_sha256"',
+        ])
+        expect(migrated.get('pre-1')?.config_sha256).toBeNull()
+      } finally {
+        migrated?.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('does not log again on a second open of a migrated v0.13 database', () => {
+      const { dir, dbPath } = createFixture('helio-audit-sha-second-open-', V013_TABLE_DDL)
+      const first = openAndCollectNotices(dbPath)
+      first.store.close()
+      const second = openAndCollectNotices(dbPath)
+      try {
+        expect(second.notices).toEqual([])
+      } finally {
+        second.store.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('recovers when a second opener wins the probe-then-ALTER race on config_sha256', () => {
+      const { dir, dbPath } = createFixture('helio-audit-sha-race-', V013_TABLE_DDL)
+      const dbA = new Database(dbPath)
+      const dbB = new Database(dbPath)
+      const realExec = dbA.exec.bind(dbA)
+      const execSpy = vi.spyOn(dbA, 'exec').mockImplementationOnce((sql: string) => {
+        dbB.exec(sql)
+        return realExec(sql)
+      })
+      try {
+        expect(migrateAdditiveAuditColumns(dbA)).toEqual([])
+        const names = (dbA.pragma('table_info(audit_records)') as Array<{ name: string }>).map(
+          (row) => row.name,
+        )
+        expect(names).toContain('config_sha256')
+      } finally {
+        execSpy.mockRestore()
+        dbA.close()
+        dbB.close()
         rmSync(dir, { recursive: true, force: true })
       }
     })

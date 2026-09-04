@@ -72,6 +72,16 @@ Maintainer notes:
   and SECURITY.md point at the recipes instead of at the tracking
   issue.
 
+- **Every audit record carries `config_sha256`.** The hash of the config
+  bytes in force when the record was written, stamped by the writer, so
+  any decision can be attributed to the exact policy text it ran under.
+  It is the trailing CSV column and a new index. A v0.13 database,
+  complete except for this column, is migrated in place on first open
+  with one `ALTER TABLE` and the notice
+  `[helio] Audit DB migrated: added column "config_sha256"`; a v0.12.0
+  database gets `upstream` and `config_sha256`, one notice each.
+  Databases older than v0.12.0 still hit the clean break.
+
 ## [0.13.1] - 2026-09-03
 
 ### Added
