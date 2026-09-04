@@ -171,3 +171,21 @@ describe('session_unresolved outcome', () => {
     expect(DECISION_FILTERS.some((f) => f.value === 'session_unresolved')).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// policy_reload outcome (issue #341)
+// ---------------------------------------------------------------------------
+
+describe('policy_reload outcome (issue #341)', () => {
+  it('renders a refused reload as Rejected, never Allow, and an applied one as Allow beside the Reload chip', () => {
+    const refused = deriveDisplayOutcome({
+      policy_decision: 'policy_reload',
+      block_reason: 'rejected_pinned',
+    })
+    expect(refused).toBe('rejected')
+    expect(formatDisplayOutcome(refused)).toBe('Rejected')
+    expect(deriveDisplayOutcome({ policy_decision: 'policy_reload', block_reason: null })).toBe(
+      'allow',
+    )
+  })
+})

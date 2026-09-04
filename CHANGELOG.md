@@ -46,6 +46,12 @@ Maintainer notes:
   top-tools ranking, and counted in the overall total and the per-hour
   series.
 
+- **`policy_reload` on the dashboard event stream, and a Reload chip in
+  the feed.** `GET /api/events` emits `policy_reload` with the record's
+  facts beside the record's own `action` event; the dashboard labels
+  and filters the new record kind, and a refused reload renders as
+  Rejected, never Allow.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and

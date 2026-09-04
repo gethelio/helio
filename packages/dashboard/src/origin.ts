@@ -19,6 +19,7 @@ const RECORD_KIND_LABELS: Record<string, string> = {
   install_scan: 'Install Scan',
   drift_event: 'Drift',
   evaluation_expired: 'Expired',
+  policy_reload: 'Reload',
 }
 
 export function formatRecordKind(kind: string): string | null {

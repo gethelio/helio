@@ -69,6 +69,11 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       break
   }
 
+  // A refused policy reload (record_kind policy_reload, issue #341) rides
+  // policy_decision 'policy_reload' with the outcome in block_reason and
+  // must never render as Allow (the #276 hazard class). An applied reload
+  // keeps the drift precedent: an Allow badge beside the Reload chip.
+  if (record.policy_decision === 'policy_reload' && record.block_reason != null) return 'rejected'
   if (record.policy_decision === 'deny') return 'deny'
   // Decision-first fallback (issue #276): a rejected record must never render
   // as Allow, whatever its block_reason. Reason pins above exist only where a
