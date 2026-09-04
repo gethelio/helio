@@ -9,7 +9,7 @@ import { compileBudgets } from '../budget/parser.js'
 import { compilePolicies } from '../policy/parser.js'
 import { ApprovalRouter } from '../approval/router.js'
 import { ApprovalQueue } from '../approval/queue.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecordInput } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
 import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
@@ -599,9 +599,9 @@ describe('POST /evaluate — budget_exceeded over HTTP (issue #14)', () => {
     }
     const captured: Array<{ id: string | undefined; kind: string }> = []
     const capturingWriter = {
-      push: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) =>
+      push: (record: AuditRecordInput, id?: string) =>
         captured.push({ id, kind: record.record_kind }),
-      pushImmediate: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) =>
+      pushImmediate: (record: AuditRecordInput, id?: string) =>
         captured.push({ id, kind: record.record_kind }),
     } as unknown as AuditWriter
     const governance = new GovernanceService({

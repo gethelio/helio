@@ -19,7 +19,7 @@ import { StreamableHttpForwarder } from '../upstream/streamable-http-forwarder.j
 import { compilePolicies } from '../policy/index.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
 import { AuditStore, AuditWriter } from '../audit/index.js'
-import { ConfigWatcher } from '../config/index.js'
+import { ConfigWatcher, loadConfigWithMeta } from '../config/index.js'
 import type { ManagedServer } from './helpers/test-utils.js'
 import type { PoliciesConfig } from '../config/index.js'
 
@@ -381,6 +381,7 @@ policies:
     // Start the config watcher
     watcher = new ConfigWatcher({
       configPath,
+      initial: await loadConfigWithMeta(configPath),
       onReload: (newPolicy) => {
         governed.updatePolicy(newPolicy)
       },

@@ -19,6 +19,7 @@ describe('formatRecordKind', () => {
     expect(formatRecordKind('install_scan')).toBe('Install Scan')
     expect(formatRecordKind('drift_event')).toBe('Drift')
     expect(formatRecordKind('evaluation_expired')).toBe('Expired')
+    expect(formatRecordKind('policy_reload')).toBe('Reload')
   })
   it('falls back to the raw kind for unknown values', () => {
     expect(formatRecordKind('something_new')).toBe('something_new')

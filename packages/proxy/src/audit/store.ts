@@ -8,6 +8,7 @@ import { extractResponseSummary } from '../upstream/response-summary.js'
 import { clamp } from '../util/clamp.js'
 import type {
   AuditRecord,
+  AuditRecordInput,
   AuditQueryFilters,
   AuditPaginationOptions,
   AuditListResult,
@@ -29,6 +30,13 @@ const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
  * would otherwise pollute tool-usage rankings.
  */
 const NON_TOOL_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'rejected')"
+
+/**
+ * record_kind of the proxy's own config reload records (issue #341). Excluded
+ * from every decision aggregate (they are not decisions about calls) and
+ * kept in the raw total and the per-hour series.
+ */
+const POLICY_RELOAD_KIND_SQL = "'policy_reload'"
 
 /**
  * Maximum records a single bulk export may return. Shared by the dashboard
@@ -78,7 +86,8 @@ CREATE TABLE IF NOT EXISTS audit_records (
   metadata          TEXT,
   protocol_version  TEXT,
   created_at        TEXT NOT NULL,
-  upstream          TEXT
+  upstream          TEXT,
+  config_sha256     TEXT
 );
 `
 
@@ -92,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_upstream_status_created_at ON audit_records
 CREATE INDEX IF NOT EXISTS idx_audit_record_kind     ON audit_records (record_kind);
 CREATE INDEX IF NOT EXISTS idx_audit_origin          ON audit_records (origin);
 CREATE INDEX IF NOT EXISTS idx_audit_upstream        ON audit_records (upstream);
+CREATE INDEX IF NOT EXISTS idx_audit_config_sha256   ON audit_records (config_sha256);
 `
 
 const INSERT_SQL = `
@@ -102,7 +112,7 @@ INSERT INTO audit_records (
   upstream_http_status,
   total_duration_ms, approval_wait_ms, proxy_compute_ms,
   flagged_destructive, dry_run, record_kind, origin, metadata, protocol_version, created_at,
-  upstream
+  upstream, config_sha256
 ) VALUES (
   @id, @timestamp, @session_id, @session_source, @agent_id, @environment, @tool_name, @tool_input,
   @policy_decision, @block_reason, @matched_rule, @matched_rule_index, @evidence_chain, @approval_status,
@@ -110,7 +120,7 @@ INSERT INTO audit_records (
   @upstream_http_status,
   @total_duration_ms, @approval_wait_ms, @proxy_compute_ms,
   @flagged_destructive, @dry_run, @record_kind, @origin, @metadata, @protocol_version, @created_at,
-  @upstream
+  @upstream, @config_sha256
 )
 `
 
@@ -131,10 +141,14 @@ const REQUIRED_AUDIT_COLUMNS = [
   // Same clean break, same unreleased cycle (issue #219): released users see
   // ONE break, at v0.12.0.
   'protocol_version',
-  // The one ratified exception to the clean break (issue #292): a
-  // v0.12.0-complete database missing ONLY this column is migrated in place
-  // by migrateAuditUpstreamColumn instead of failing the assertion.
+  // The ratified exception to the clean break (issue #292): a database that
+  // is complete except for this column is migrated in place by
+  // migrateAdditiveAuditColumns instead of failing the assertion.
   'upstream',
+  // The second additive column under the same exception (issue #341): a
+  // v0.13 database missing only this one, or a v0.12.0 database missing
+  // both, migrates in place; anything older still clean-breaks.
+  'config_sha256',
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -172,6 +186,7 @@ interface RawAuditRow {
   protocol_version: string | null
   created_at: string
   upstream: string | null
+  config_sha256: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +228,7 @@ function deserializeRow(row: RawAuditRow): AuditRecord {
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
     protocol_version: row.protocol_version,
     upstream: row.upstream,
+    config_sha256: row.config_sha256,
     created_at: row.created_at,
   }
 }
@@ -300,42 +316,49 @@ function buildWhereClause(filters: AuditQueryFilters): {
   return { clause, params }
 }
 
+/** The additive nullable columns that migrate in place (issues #292, #341), in the order they were added. */
+const ADDITIVE_AUDIT_COLUMNS: ReadonlyArray<{ readonly name: string; readonly ddl: string }> = [
+  { name: 'upstream', ddl: 'upstream TEXT' },
+  { name: 'config_sha256', ddl: 'config_sha256 TEXT' },
+]
+
 /**
- * One-time additive migration for the `upstream` column (issue #292) — the
- * ratified narrow exception to the pre-1.0 clean-break policy: additive
- * nullable columns and indexes only.
+ * In-place migration for the additive columns, the ratified narrow
+ * exception to the pre-1.0 clean-break policy. Runs only when EVERY missing
+ * required column is additive (a v0.13 file missing `config_sha256`, a
+ * v0.12.0 file missing both); anything else falls through untouched to
+ * `assertRequiredSchema`'s clean-break error. One probe-then-ALTER per
+ * column, with the #292 race recovery: when the ALTER throws, re-probe;
+ * present means another opener landed it (not ours to report); absent
+ * means rethrow the original error.
  *
- * Runs the ALTER only when the set of missing required columns is EXACTLY
- * `{upstream}` — i.e. the database is v0.12.0-complete and lacks only the
- * new column. Anything else (a pre-0.12 schema, a manually mangled file)
- * falls through untouched to `assertRequiredSchema`'s clean-break error.
- *
- * Probe-then-ALTER races across processes (`helio start` + `helio export`
- * on first upgrade): when the ALTER throws, re-probe — if another opener
- * landed the column, report no migration; if the column is genuinely still
- * absent, rethrow the original error so a locked or broken database keeps
- * its raw failure.
- *
- * @returns true iff THIS call's ALTER added the column.
- * @internal Exported for direct race-path testing only — not part of the
- *   package API; keep off `audit/index.ts` and the package root.
+ * @returns the names THIS call added, in order; the caller logs one notice each.
+ * @internal Exported for direct race-path testing only.
  */
-export function migrateAuditUpstreamColumn(db: DatabaseType): boolean {
+export function migrateAdditiveAuditColumns(db: DatabaseType): string[] {
   const probe = (): Set<string> => {
     const rows = db.pragma('table_info(audit_records)') as Array<{ name: string }>
     return new Set(rows.map((row) => row.name))
   }
   const existing = probe()
-  const missing = REQUIRED_AUDIT_COLUMNS.filter((name) => !existing.has(name))
-  if (missing.length !== 1 || missing[0] !== 'upstream') return false
-
-  try {
-    db.exec('ALTER TABLE audit_records ADD COLUMN upstream TEXT')
-  } catch (err) {
-    if (probe().has('upstream')) return false
-    throw err
+  const missing = new Set<string>(REQUIRED_AUDIT_COLUMNS.filter((name) => !existing.has(name)))
+  if (missing.size === 0) return []
+  const additive = new Set(ADDITIVE_AUDIT_COLUMNS.map((column) => column.name))
+  for (const name of missing) {
+    if (!additive.has(name)) return []
   }
-  return true
+  const added: string[] = []
+  for (const column of ADDITIVE_AUDIT_COLUMNS) {
+    if (!missing.has(column.name)) continue
+    try {
+      db.exec(`ALTER TABLE audit_records ADD COLUMN ${column.ddl}`)
+    } catch (err) {
+      if (probe().has(column.name)) continue
+      throw err
+    }
+    added.push(column.name)
+  }
+  return added
 }
 
 /**
@@ -405,15 +428,15 @@ export class AuditStore {
     this.retentionMs = parseDuration(options.retention)
     this.includeResponses = options.includeResponses
 
-    // Create table first, migrate v0.12 files, validate schema, then create
-    // indexes. This preserves an explicit clean-break policy for
-    // incompatible pre-1.0 local schemas; the upstream column is the one
-    // ratified additive exception (issue #292). Every open migrates —
+    // Create table first, migrate the additive columns, validate schema, then
+    // create indexes. This preserves an explicit clean-break policy for
+    // incompatible pre-1.0 local schemas; the additive columns are the one
+    // ratified exception (issues #292, #341). Every open migrates —
     // `helio start` and `helio export` construct the store the same way.
     this.db.exec(CREATE_TABLE_DDL)
-    if (migrateAuditUpstreamColumn(this.db)) {
+    for (const name of migrateAdditiveAuditColumns(this.db)) {
       // eslint-disable-next-line no-console -- Intentional operational notice; stderr keeps stdout clean for piped exports
-      console.error('[helio] Audit DB migrated: added column "upstream"')
+      console.error(`[helio] Audit DB migrated: added column "${name}"`)
     }
     this.assertRequiredSchema(options.path)
     this.db.exec(CREATE_INDEX_DDL)
@@ -513,7 +536,7 @@ export class AuditStore {
    * @param createdAt - Optional override for the created_at timestamp (for testing).
    * @param id - Optional pre-generated ID (used by AuditWriter to share ID with SSE event bus).
    */
-  insert(record: Omit<AuditRecord, 'id' | 'created_at'>, createdAt?: string, id?: string): string {
+  insert(record: AuditRecordInput, createdAt?: string, id?: string): string {
     const resolvedId = id ?? randomUUID()
     const now = createdAt ?? new Date().toISOString()
 
@@ -552,6 +575,7 @@ export class AuditStore {
       metadata: record.metadata ? JSON.stringify(record.metadata) : null,
       protocol_version: record.protocol_version,
       upstream: record.upstream ?? null,
+      config_sha256: record.config_sha256 ?? null,
       created_at: now,
     })
 
@@ -574,10 +598,10 @@ export class AuditStore {
    * @returns The number of records successfully inserted.
    */
   insertBatch(
-    records: ReadonlyArray<Omit<AuditRecord, 'id' | 'created_at'>>,
-    onError?: (record: Omit<AuditRecord, 'id' | 'created_at'>, err: unknown) => void,
+    records: ReadonlyArray<AuditRecordInput>,
+    onError?: (record: AuditRecordInput, err: unknown) => void,
     ids?: ReadonlyArray<string>,
-    onPersist?: (record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void,
+    onPersist?: (record: AuditRecordInput, id: string) => void,
   ): number {
     let inserted = 0
     this.db.transaction(() => {
@@ -669,14 +693,20 @@ export class AuditStore {
     const rangeFilters: AuditQueryFilters = { from, to, upstream: filters.upstream }
     const { clause, params } = buildWhereClause(rangeFilters)
 
+    // Policy reload records (issue #341) describe the proxy's own config
+    // reloads, not decisions about calls: an applied reload has a null
+    // block_reason and a refused one carries its outcome there, so without
+    // this guard they would count as allowed calls and as blocks. They stay
+    // in `total` and `per_hour` so "Total Actions" and "Actions Per Hour"
+    // agree with the feed, and out of every decision aggregate.
     const totals = this.db
       .prepare(
         `SELECT
            COUNT(*) as total,
-           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
-           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL THEN 1 ELSE 0 END), 0) as blocked_total,
-           COALESCE(SUM(CASE WHEN dry_run = 1 THEN 1 ELSE 0 END), 0) as dry_run_total,
-           COALESCE(SUM(CASE WHEN dry_run = 0 THEN 1 ELSE 0 END), 0) as applied_total
+           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
+           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as blocked_total,
+           COALESCE(SUM(CASE WHEN dry_run = 1 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as dry_run_total,
+           COALESCE(SUM(CASE WHEN dry_run = 0 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as applied_total
          FROM audit_records ${clause}`,
       )
       .get(...params) as {
@@ -688,18 +718,21 @@ export class AuditStore {
     }
 
     // By decision
+    const decisionClause = clause
+      ? `${clause} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const by_decision = this.db
       .prepare(
         `SELECT policy_decision as decision, COUNT(*) as count
-         FROM audit_records ${clause}
+         FROM audit_records ${decisionClause}
          GROUP BY policy_decision
          ORDER BY count DESC`,
       )
       .all(...params) as Array<{ decision: string; count: number }>
 
     const blockedClause = clause
-      ? `${clause} AND block_reason IS NOT NULL`
-      : 'WHERE block_reason IS NOT NULL'
+      ? `${clause} AND block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const by_block_reason = this.db
       .prepare(
         `SELECT block_reason as reason, COUNT(*) as count
@@ -710,11 +743,11 @@ export class AuditStore {
       .all(...params) as Array<{ reason: string; count: number }>
 
     // Top tools (limit 10) — non-tool decisions (drift events and nameless-call
-    // rejections) are excluded: they do not name a real tool call and would
-    // inflate tool-usage rankings.
+    // rejections) and policy reload records are excluded: they do not name a
+    // real tool call and would inflate tool-usage rankings.
     const toolsClause = clause
-      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
-      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`
+      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
     const top_tools = this.db
       .prepare(
         `SELECT tool_name, upstream, COUNT(*) as count

@@ -58,7 +58,12 @@ export interface AuditRecord {
   readonly flagged_destructive: boolean
   readonly dry_run: boolean
   readonly created_at: string
-  readonly record_kind: 'tool_call' | 'drift_event' | 'install_scan' | 'evaluation_expired'
+  readonly record_kind:
+    | 'tool_call'
+    | 'drift_event'
+    | 'install_scan'
+    | 'evaluation_expired'
+    | 'policy_reload'
   readonly origin: string
   readonly metadata: Record<string, unknown> | null
 }

@@ -8,7 +8,7 @@ import {
   type LatencyStats,
 } from './benchmark-report.js'
 import { AuditStore } from '../src/audit/index.js'
-import type { AuditRecord } from '../src/audit/types.js'
+import type { AuditRecordInput } from '../src/audit/types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,7 +57,7 @@ function makeResults(
 
 // Copied verbatim from src/audit/store.test.ts — the helper is not exported,
 // and every NOT NULL column has to be present for the insert to succeed.
-type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+type InsertRecord = AuditRecordInput
 
 function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {

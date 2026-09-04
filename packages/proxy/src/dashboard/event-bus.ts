@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
+import { readPolicyReloadEvidence } from '../audit/policy-reload.js'
+import type { PolicyReloadEvidence } from '../audit/policy-reload.js'
 import type { ApprovalTicket } from '../approval/types.js'
 import type { BudgetBreachEvent, BudgetCommitEvent } from '../budget/engine.js'
 import type { RateLimitKeyState } from '../policy/rate-limiter.js'
@@ -98,6 +100,14 @@ export type BudgetUpdateEvent = BudgetCommitEvent
  */
 export type BudgetBreachedEvent = BudgetBreachEvent
 
+/** A policy reload attempt, emitted beside the record's own `action` event (issue #341). */
+export interface PolicyReloadEvent extends PolicyReloadEvidence {
+  /** The audit record's id. */
+  readonly id: string
+  /** The record's timestamp. */
+  readonly at: string
+}
+
 /** Map of event type names to their payload types. */
 export interface DashboardEvents {
   action: ActionEvent
@@ -107,6 +117,7 @@ export interface DashboardEvents {
   approval_notification_failed: ApprovalNotificationFailedEvent
   budget_update: BudgetUpdateEvent
   budget_breached: BudgetBreachedEvent
+  policy_reload: PolicyReloadEvent
 }
 
 /** Union of all dashboard event type names. */
@@ -121,6 +132,7 @@ const EVENT_TYPES: readonly DashboardEventType[] = [
   'approval_notification_failed',
   'budget_update',
   'budget_breached',
+  'policy_reload',
 ]
 
 /**
@@ -193,10 +205,7 @@ export class DashboardEventBus {
 // ---------------------------------------------------------------------------
 
 /** Map a persisted audit record (the writer's callback shape) to an ActionEvent. */
-export function actionEventFromRecord(
-  record: Omit<AuditRecord, 'id' | 'created_at'>,
-  id: string,
-): ActionEvent {
+export function actionEventFromRecord(record: AuditRecordInput, id: string): ActionEvent {
   return {
     id,
     tool_name: record.tool_name,
@@ -220,6 +229,14 @@ export function actionEventFromRecord(
     origin: record.origin,
     upstream: record.upstream,
   }
+}
+
+export function policyReloadEventFromRecord(
+  record: AuditRecordInput,
+  id: string,
+): PolicyReloadEvent | null {
+  const evidence = readPolicyReloadEvidence(record)
+  return evidence === null ? null : { ...evidence, id, at: record.timestamp }
 }
 
 /**
@@ -273,7 +290,7 @@ export function limitWarningEvent(
  * unchanged or engine-owned shapes.
  */
 export function dashboardEventCallbacks(bus: DashboardEventBus): {
-  onPersist: (record: Omit<AuditRecord, 'id' | 'created_at'>, id: string) => void
+  onPersist: (record: AuditRecordInput, id: string) => void
   onApprovalSubmit: (ticket: ApprovalTicket) => void
   onRateWarning: (state: RateLimitKeyState) => void
   onSpendWarning: (state: SpendLimitKeyState) => void
@@ -281,6 +298,10 @@ export function dashboardEventCallbacks(bus: DashboardEventBus): {
   return {
     onPersist: (record, id) => {
       bus.emit('action', actionEventFromRecord(record, id))
+      if (record.record_kind === 'policy_reload') {
+        const event = policyReloadEventFromRecord(record, id)
+        if (event !== null) bus.emit('policy_reload', event)
+      }
     },
     onApprovalSubmit: (ticket) => {
       bus.emit('approval_requested', approvalRequestedEvent(ticket))

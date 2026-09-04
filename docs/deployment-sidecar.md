@@ -201,8 +201,9 @@ that is what this layout does. The mount is the directory, not the file: a
 single-file bind mount binds an inode, so an editor that saves by writing a
 temporary file and renaming it leaves the running container on the old inode
 until it is recreated, while the directory mount reloads on both save styles.
-Hot reload and the config pin tracked in #341 matter less once the file is
-where the agent cannot reach it, and more if it is not.
+Hot reload and the `HELIO_CONFIG_SHA256` pin (see
+[Pinning the config](./configuration.md#pinning-the-config)) matter less once
+the file is where the agent cannot reach it, and more if it is not.
 
 Why Helio is not on `edge`: on a shared network the agent container can reach
 every port Helio listens on, including the dashboard at `helio:3100`; a

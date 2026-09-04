@@ -14,7 +14,7 @@ import { decide } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
 import type { ToolDriftEvent, ToolCacheUpdateResult } from './annotation-cache.js'
 import type { AuditWriter } from '../audit/writer.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecordInput } from '../audit/types.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/grounding.js'
 import {
@@ -1835,7 +1835,7 @@ export class GovernedForwarder implements McpForwarder {
       }
     }
 
-    const record: Omit<AuditRecord, 'id' | 'created_at'> = {
+    const record: AuditRecordInput = {
       timestamp,
       session_id: request.session?.id ?? null,
       session_source: request.session?.source ?? null,

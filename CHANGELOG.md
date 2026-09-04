@@ -34,6 +34,45 @@ Maintainer notes:
   a `devcontainer.json` snippet. Refuses to overwrite
   without `--force`.
 
+- **Every policy reload attempt is an audit record.** A hot reload,
+  applied or refused, writes a `record_kind: policy_reload` record
+  through the immediate queue with the outcome (`applied`,
+  `rejected_invalid`, `rejected_unroutable`, `rejected_budget_flush`,
+  `rejected_pinned`, `watch_failed`), the file hash before and after, the rule and
+  budget counts, the names of the rules the edit removed, and the
+  error, under `evidence_chain.policy_reload`. The stderr line stays.
+  Reload records are excluded from the allowed, blocked, dry-run, and
+  applied totals, the decision and block-reason breakdowns, and the
+  top-tools ranking, and counted in the overall total and the per-hour
+  series.
+
+- **`policy_reload` on the dashboard event stream, and a Reload chip in
+  the feed.** `GET /api/events` emits `policy_reload` with the record's
+  facts beside the record's own `action` event; the dashboard labels
+  and filters the new record kind, and a refused reload renders as
+  Rejected, never Allow.
+
+- **`HELIO_CONFIG_SHA256` pins the config.** When set to the SHA-256 of
+  the file bytes (bare hex or `sha256:`-prefixed), a start under a file
+  with a different hash exits with both hashes before serving anything,
+  and a reload whose bytes hash differently is refused before parsing,
+  recorded as `rejected_pinned`, and leaves the running policy in
+  place. A set but malformed value refuses to start. The watcher stays
+  on under the pin as the tamper detector; changing policy on a pinned
+  proxy is edit, re-pin, restart. The pin holds for the process the
+  operator started; a same-user process can still restart the proxy
+  without it.
+
+- **`helio config hash [-c path]`** prints the SHA-256 of the config file
+  bytes, the value to pin, on stdout, so
+  `export HELIO_CONFIG_SHA256=$(helio config hash)` is the whole setup.
+
+- **One enforcement-posture line at startup.** When the config file is
+  writable by the user the proxy runs as, `helio start` prints
+  `[helio] Enforcement posture: <path> is writable by this user` with what
+  that means (live changes, the next restart, or a restart dropping the
+  pin) and the two ways up a tier; silent when the file is not writable.
+
 ### Changed
 
 - **The sidecar recipe keeps the config out of the agent's reach and
@@ -59,6 +98,26 @@ Maintainer notes:
   SECURITY.md answered from a second account. The production checklist
   and SECURITY.md point at the recipes instead of at the tracking
   issue.
+
+- **Every audit record carries `config_sha256`.** The hash of the config
+  bytes in force when the record was written, stamped by the writer, so
+  any decision can be attributed to the exact policy text it ran under.
+  It is the trailing CSV column and a new index. A v0.13 database,
+  complete except for this column, is migrated in place on first open
+  with one `ALTER TABLE` and the notice
+  `[helio] Audit DB migrated: added column "config_sha256"`; a v0.12.0
+  database gets `upstream` and `config_sha256`, one notice each.
+  Databases older than v0.12.0 still hit the clean break.
+
+### Fixed
+
+- **A lost config watch no longer takes the proxy down or goes
+  unrecorded.** When the file watcher fails (the config replaced by a
+  file the proxy cannot read is the observed case), the proxy logs it,
+  writes a `policy_reload` record with `outcome: watch_failed`, and
+  keeps serving the running policy instead of exiting on an unhandled
+  rejection. It does not re-arm the watch: no later edit reloads until
+  a restart.
 
 ## [0.13.1] - 2026-09-03
 

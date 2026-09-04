@@ -255,6 +255,7 @@ export function AuditFilterBar({
           <option value="install_scan">Install Scan</option>
           <option value="drift_event">Drift</option>
           <option value="evaluation_expired">Expired</option>
+          <option value="policy_reload">Reload</option>
         </select>
 
         {/* Session identity source (issue #250) — the raw five-value config

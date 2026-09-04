@@ -484,15 +484,15 @@ Like `listen`, the `session` section is compiled into the transports at startup:
 
 Governance rules for tool calls. See [Policy Guide](./policies.md) for full documentation, including install-time rules (`policies.install` with `deny_install`) and the [adapter governance API](./adapter-api.md).
 
-| Field               | Type    | Required | Default               | Description                                                                                                                                                                                                     |
-| ------------------- | ------- | -------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default`           | string  | No       | `allow`               | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                 |
-| `flag_destructive`  | string  | No       | —                     | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                    |
-| `on_tool_drift`     | string  | No       | `block`               | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift). |
-| `tool_revalidation` | object  | No       | enabled-with-defaults | Proxy-scheduled `tools/list` revalidation and downward-only `ttlMs` clamping. Omit to use defaults (enabled, 5m interval, 5m max TTL). See below.                                                               |
-| `dry_run`           | boolean | No       | `false`               | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                              |
-| `hot_reload`        | boolean | No       | `true`                | Watch the config file for changes and reconcile policy live. Set to `false` to pin the policy (see below).                                                                                                      |
-| `rules`             | array   | No       | `[]`                  | Ordered list of policy rules. First matching rule wins.                                                                                                                                                         |
+| Field               | Type    | Required | Default               | Description                                                                                                                                                                                                          |
+| ------------------- | ------- | -------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default`           | string  | No       | `allow`               | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                      |
+| `flag_destructive`  | string  | No       | —                     | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                         |
+| `on_tool_drift`     | string  | No       | `block`               | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift).      |
+| `tool_revalidation` | object  | No       | enabled-with-defaults | Proxy-scheduled `tools/list` revalidation and downward-only `ttlMs` clamping. Omit to use defaults (enabled, 5m interval, 5m max TTL). See below.                                                                    |
+| `dry_run`           | boolean | No       | `false`               | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                                   |
+| `hot_reload`        | boolean | No       | `true`                | Watch the config file for changes and reconcile policy live. Set to `false` to move config changes to the next restart (see below); to refuse a changed file instead, see [Pinning the config](#pinning-the-config). |
+| `rules`             | array   | No       | `[]`                  | Ordered list of policy rules. First matching rule wins.                                                                                                                                                              |
 
 `tool_revalidation` fields:
 
@@ -958,6 +958,8 @@ On successful reload:
 
 The budgets line always prints first, with the count from the reloaded file (`0 budgets` when no `budgets:` section is configured).
 
+Every reload attempt, applied or refused, is also an audit record (`record_kind: policy_reload`) carrying the outcome, the file hash before and after, the rule and budget counts, and the names of any rules the edit removed; see [Policy Reload Records](./audit.md#policy-reload-records). It is written through the immediate queue, so its row precedes the first call recorded under the new policy, and it reaches the dashboard feed like any other record.
+
 If the new configuration is invalid — or its budget epoch changes cannot be durably recorded — Helio rejects the reload as a whole, keeps the complete current configuration (policy rules and budgets alike), and logs the error:
 
 ```
@@ -1000,7 +1002,48 @@ The CLI flag takes precedence over the config file. When disabled, Helio logs:
 [helio] Hot-reload disabled — config changes to helio.yaml will require a restart
 ```
 
-The other reason to disable it is the process and filesystem boundary: while hot reload is on, any process that can write this file changes policy on the running proxy, and the proxy does not check who wrote it. Disabling hot reload moves the change to the next restart, which closes nothing for a process that can also restart the proxy. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) for the deployments that close it.
+The other reason to disable it is the process and filesystem boundary: while hot reload is on, any process that can write this file changes policy on the running proxy, and the proxy does not check who wrote it. Disabling hot reload moves the change to the next restart, which closes nothing for a process that can also restart the proxy. See [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) for the deployments that close it. To refuse a changed file rather than defer it, see [Pinning the config](#pinning-the-config). With hot reload off and the file writable by the proxy's user, the startup posture line says the next restart loads whatever is in the file.
+
+### Pinning the config
+
+`HELIO_CONFIG_SHA256` pins the running proxy to one exact config file. Set it to the SHA-256 of the file bytes before you start the proxy:
+
+```bash
+export HELIO_CONFIG_SHA256=$(helio config hash)
+helio start
+```
+
+`helio config hash [-c path]` prints the lowercase hex digest of the file as it is on disk, before `${VAR}` interpolation, so `sha256sum helio.yaml` (Linux) and `shasum -a 256 helio.yaml` (macOS) print the same value. The variable accepts the bare hex or the `sha256:`-prefixed form, in either case, with surrounding whitespace ignored. Any other value, an empty one included, refuses to start: a pin that failed to compute must not start an unpinned proxy.
+
+While the pin is set:
+
+- At startup, a file whose hash differs exits with status 1 before anything is served, naming both hashes:
+
+  ```
+  Error: HELIO_CONFIG_SHA256 does not match helio.yaml: pinned sha256:<64 hex>, file sha256:<64 hex>. Review the change and re-pin it with helio config hash.
+  ```
+
+- On a reload, the file's bytes are hashed and compared before they are parsed. A different hash is refused with the running policy kept, a `policy_reload` audit record with `outcome: rejected_pinned` (an unparseable tampered file is still `rejected_pinned`, not `rejected_invalid`), and this line:
+
+  ```
+  [helio] Config reload failed (keeping current configuration): config hash sha256:<64 hex> does not match the pinned sha256:<64 hex>
+  ```
+
+- The watcher stays on. Under a pin it is the tamper detector: every write that changes the bytes becomes a refused reload on the record and the event stream. A write the watcher observes that leaves the bytes identical reloads as before and is recorded as `applied` with equal hashes.
+
+- The startup log says so:
+
+  ```
+  [helio] Config pinned to sha256:<first 12 hex>: reloads with a different hash will be refused
+  ```
+
+  With the pin set, the startup posture line (printed when the file is writable by the proxy's user) says that reloads are pinned and that a restart by that user can still drop the pin.
+
+Changing policy on a pinned proxy is edit, re-pin, restart: no reload ever applies while the pin is set, because any edit changes the hash. `--no-hot-reload` with the pin set still refuses a changed file at startup; the pin's value over `--no-hot-reload` alone is exactly that startup check, which closes the restart path where a changed file would otherwise load cleanly.
+
+Refusing to start is fail-closed, and it costs availability: a process that can write the file can keep the proxy from restarting until the operator re-pins. That is the intended trade. What the pin does not do: it holds for the process you started, and a process running as the same user can still stop the proxy and start it again without the variable. Run the proxy as its own user, or in its own container with the file off the agent's filesystem, for the tiers where that is closed; see [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries) and the two recipes it links.
+
+If the proxy loses its watch on the file (the file replaced by one it cannot read, for example), it logs `[helio] Config watch failed (keeping current configuration; edits will not be observed until restart)`, writes a `policy_reload` record with `outcome: watch_failed`, keeps serving the running policy, and observes no later edit until it is restarted; the `config_sha256` on every audit record, compared with `helio config hash`, is the check that does not depend on the watch.
 
 ### Reload boundary
 

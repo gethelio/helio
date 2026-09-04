@@ -10,17 +10,19 @@ import type {
   ActionEvent,
   ApprovalRequestedEvent,
   LimitWarningEvent,
+  PolicyReloadEvent,
   DashboardEventType,
   DashboardEvents,
 } from './event-bus.js'
 import { ApprovalQueue } from '../approval/queue.js'
-import type { AuditRecord } from '../audit/types.js'
+import { buildPolicyReloadRecord } from '../audit/policy-reload.js'
+import type { AuditRecordInput } from '../audit/types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-type InsertRecord = Omit<AuditRecord, 'id' | 'created_at'>
+type InsertRecord = AuditRecordInput
 
 function makeRecord(overrides: Partial<InsertRecord> = {}): InsertRecord {
   const defaults: InsertRecord = {
@@ -203,8 +205,25 @@ describe('DashboardEventBus', () => {
       currency: 'USD',
       upstream: null,
     })
+    bus.emit('policy_reload', {
+      id: 'evt-reload',
+      at: '2026-04-02T12:02:00Z',
+      outcome: 'applied',
+      config_path: '/etc/helio/helio.yaml',
+      sha256_before: 'a'.repeat(64),
+      sha256_after: 'b'.repeat(64),
+      rule_count_before: 1,
+      rule_count_after: 1,
+      default_action_before: 'allow',
+      default_action_after: 'allow',
+      budget_count_before: 0,
+      budget_count_after: 0,
+      rules_removed: [],
+      restart_required_paths: [],
+      error: null,
+    })
 
-    expect(received).toHaveLength(7)
+    expect(received).toHaveLength(8)
     expect(received[0]).toMatchObject({ event: 'action' })
     expect(received[1]).toMatchObject({ event: 'approval_requested' })
     expect(received[2]).toMatchObject({ event: 'approval_resolved' })
@@ -212,6 +231,7 @@ describe('DashboardEventBus', () => {
     expect(received[4]).toMatchObject({ event: 'approval_notification_failed' })
     expect(received[5]).toMatchObject({ event: 'budget_update' })
     expect(received[6]).toMatchObject({ event: 'budget_breached' })
+    expect(received[7]).toMatchObject({ event: 'policy_reload' })
   })
 
   it('budget events round-trip typed payloads (#14 PR 4)', () => {
@@ -469,5 +489,60 @@ describe('dashboardEventCallbacks (issue #292)', () => {
       utilization: 0.45,
       upstream: null,
     })
+  })
+
+  it('emits policy_reload beside action for a reload record, and action alone otherwise (issue #341)', () => {
+    bus = new DashboardEventBus()
+    const cbs = dashboardEventCallbacks(bus)
+    const actions: ActionEvent[] = []
+    const reloads: PolicyReloadEvent[] = []
+    bus.on('action', (e) => actions.push(e))
+    bus.on('policy_reload', (e) => reloads.push(e))
+
+    const record = buildPolicyReloadRecord(
+      {
+        configPath: '/etc/helio/helio.yaml',
+        outcome: 'rejected_invalid',
+        sha256Before: 'a'.repeat(64),
+        sha256After: 'b'.repeat(64),
+        ruleCountBefore: 1,
+        ruleCountAfter: null,
+        defaultActionBefore: 'allow',
+        defaultActionAfter: null,
+        budgetCountBefore: 0,
+        budgetCountAfter: null,
+        rulesRemoved: [],
+        restartRequiredPaths: [],
+        error: 'YAML parse error in /etc/helio/helio.yaml: bad indentation',
+      },
+      'prod',
+    )
+    cbs.onPersist(record, 'evt-reload')
+    expect(actions).toHaveLength(1)
+    expect(actions[0]?.record_kind).toBe('policy_reload')
+    expect(actions[0]?.block_reason).toBe('rejected_invalid')
+    expect(reloads).toEqual([
+      {
+        id: 'evt-reload',
+        at: record.timestamp,
+        outcome: 'rejected_invalid',
+        config_path: '/etc/helio/helio.yaml',
+        sha256_before: 'a'.repeat(64),
+        sha256_after: 'b'.repeat(64),
+        rule_count_before: 1,
+        rule_count_after: null,
+        default_action_before: 'allow',
+        default_action_after: null,
+        budget_count_before: 0,
+        budget_count_after: null,
+        rules_removed: [],
+        restart_required_paths: [],
+        error: 'YAML parse error in /etc/helio/helio.yaml: bad indentation',
+      },
+    ])
+
+    cbs.onPersist(makeRecord(), 'evt-call')
+    expect(actions).toHaveLength(2)
+    expect(reloads).toHaveLength(1)
   })
 })

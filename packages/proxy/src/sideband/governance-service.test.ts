@@ -5,7 +5,7 @@ import { GovernanceConfigError } from './errors.js'
 import { compilePolicies } from '../policy/parser.js'
 import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecordInput } from '../audit/types.js'
 import type { AuditWriter } from '../audit/writer.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
@@ -32,7 +32,7 @@ function compile(config: Omit<PoliciesConfig, 'dry_run'> & { dry_run?: boolean }
 
 interface Captured {
   id: string
-  record: Omit<AuditRecord, 'id' | 'created_at'>
+  record: AuditRecordInput
   immediate: boolean
 }
 
@@ -40,12 +40,10 @@ function fakeWriter() {
   const records: Captured[] = []
   let counter = 0
   const writer = {
-    push: (record: Omit<AuditRecord, 'id' | 'created_at'>, id = `id-${String(++counter)}`) =>
+    push: (record: AuditRecordInput, id = `id-${String(++counter)}`) =>
       records.push({ id, record, immediate: false }),
-    pushImmediate: (
-      record: Omit<AuditRecord, 'id' | 'created_at'>,
-      id = `id-${String(++counter)}`,
-    ) => records.push({ id, record, immediate: true }),
+    pushImmediate: (record: AuditRecordInput, id = `id-${String(++counter)}`) =>
+      records.push({ id, record, immediate: true }),
   } as unknown as AuditWriter
   return { writer, records }
 }
@@ -2337,14 +2335,14 @@ describe('GovernanceService — budget gate (issue #14)', () => {
       // the first buffered write throws, AFTER buffering — the shape of
       // an embedder-registered onPush hook (the stock proxy's SSE bus
       // rides onPersist inside the flush try/catch and cannot throw here).
-      push: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) => {
+      push: (record: AuditRecordInput, id?: string) => {
         pushes.push({ id, kind: record.record_kind })
         if (throwNext) {
           throwNext = false
           throw new Error('embedder onPush hook failed')
         }
       },
-      pushImmediate: (record: Omit<AuditRecord, 'id' | 'created_at'>, id?: string) => {
+      pushImmediate: (record: AuditRecordInput, id?: string) => {
         pushes.push({ id, kind: record.record_kind })
       },
     } as unknown as AuditWriter

@@ -9,8 +9,11 @@ import { VERSION } from './version.js'
 import {
   loadConfig,
   loadConfigWithMeta,
+  readConfigSource,
   ConfigError,
   ConfigWatcher,
+  PolicyReloadRejectedError,
+  readConfigPin,
   isNamedConfig,
 } from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
@@ -42,6 +45,7 @@ import {
   AuditWriter,
   EXPORT_MAX_RECORDS,
   buildHeaderMismatchAuditRecord,
+  buildPolicyReloadRecord,
 } from './audit/index.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
@@ -72,6 +76,7 @@ import {
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
   warnIfDashboardSecretLiteral,
+  warnIfConfigWritableByProxyUser,
 } from './startup-warnings.js'
 import { closeResources } from './shutdown.js'
 import { drainForCrash, registerCrashDrainHook } from './crash-drain.js'
@@ -307,10 +312,12 @@ interface StartOptions {
 async function startCommand(configPath: string, options: StartOptions): Promise<void> {
   let config
   let interpolatedPaths: readonly string[] = []
+  let configSha256 = ''
   try {
     const loaded = await loadConfigWithMeta(configPath)
     config = loaded.config
     interpolatedPaths = loaded.interpolatedPaths
+    configSha256 = loaded.sha256
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Error: ${err.message}`)
@@ -319,6 +326,23 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     }
     throw err
   }
+
+  const configPin = readConfigPin()
+  if (configPin.status === 'invalid') {
+    console.error(
+      `Error: HELIO_CONFIG_SHA256 is set but is not a SHA-256 hex digest ` +
+        `(64 hex characters, with or without a sha256: prefix): "${configPin.raw.slice(0, 80)}"`,
+    )
+    process.exit(1)
+  }
+  if (configPin.status === 'set' && configPin.sha256 !== configSha256) {
+    console.error(
+      `Error: HELIO_CONFIG_SHA256 does not match ${configPath}: pinned sha256:${configPin.sha256}, ` +
+        `file sha256:${configSha256}. Review the change and re-pin it with helio config hash.`,
+    )
+    process.exit(1)
+  }
+  const pinnedSha256 = configPin.status === 'set' ? configPin.sha256 : undefined
 
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
   if (config.dashboard.enabled && !bundledDashboardDistPath) {
@@ -407,6 +431,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   const auditWriter = new AuditWriter({
     store: auditStore,
     onPersist: cbs.onPersist,
+    // Seed the config hash at construction so no record is written unstamped
+    // between here and the first reload; the reload path replaces it.
+    configSha256,
   })
   registerCrashDrainHook(() => {
     try {
@@ -703,6 +730,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     console.error(`Dry-run: ENABLED (no requests will be forwarded to upstream)`)
   }
   console.error(`Config: ${configPath}`)
+  if (pinnedSha256 !== undefined) {
+    console.error(
+      `[helio] Config pinned to sha256:${pinnedSha256.slice(0, 12)}: reloads with a different hash will be refused`,
+    )
+  }
 
   // Hot-reload is enabled by default. The CLI flag takes precedence over
   // the config file so operators can pin the policy for a single start
@@ -714,34 +746,51 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   if (hotReloadEnabled) {
     configWatcher = new ConfigWatcher({
       configPath,
-      initialConfig: config,
+      initial: { config, sha256: configSha256 },
+      pinnedSha256,
       onReady: () => {
         console.error(`Watching ${configPath} for policy changes`)
       },
-      onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets) => {
+      onReload: (newPolicy, reloadWarnings, restartRequiredPaths, newBudgets, facts) => {
         // The RUNNING approval surface is startup-bound: a reload whose
         // policy or budgets reference channels (or a dashboard) that only
         // exist in the NEW file would validate on paper and then route
-        // tickets into the void. Reject the whole reload instead — the
-        // throw lands in onError, keeping the current configuration.
+        // tickets into the void. Refuse the whole reload instead; the
+        // throw lands in the watcher's catch, which records it once.
         const unroutable = findUnroutableApprovalReferences(newPolicy, newBudgets, {
           channelTypes: runtimeChannelTypes,
           dashboardEnabled: config.dashboard.enabled,
           defaultApprovalTimeoutMs: parseDuration(config.approval.timeout),
         })
         if (unroutable.length > 0) {
-          throw new Error(
+          throw new PolicyReloadRejectedError(
+            'rejected_unroutable',
             `approval routing is not available in the running process (restart required ` +
               `to apply approval.channels/dashboard changes): ${unroutable.join('; ')}`,
           )
         }
         // Budgets reconcile FIRST: it persists the reload's epoch mints and
-        // throws when the flush fails, which rejects the whole reload (the
-        // watcher's onError keeps the current config) before any policy
-        // swap — the reload applies all-or-nothing across the file.
-        budgetEngine.reconcile(newBudgets)
+        // throws when the flush fails, which refuses the whole reload
+        // before any policy swap; the reload applies all-or-nothing.
+        try {
+          budgetEngine.reconcile(newBudgets)
+        } catch (err) {
+          throw new PolicyReloadRejectedError(
+            'rejected_budget_flush',
+            `budget epoch flush failed: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          )
+        }
+        // The reconcile above was the last throw. From here to the record
+        // push everything is synchronous in one tick, so no record can be
+        // written between the stamp and the swap: the reload record and
+        // every call the new policy serves carry the new hash.
+        auditWriter.setConfigSha256(facts.sha256After)
         applyReloadedPolicy(stacks, newPolicy)
         governanceService?.updatePolicy(newPolicy)
+        // The one success-path persist site: the swap is done, the record
+        // says so, and it precedes the first call the new policy serves.
+        auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
         const budgetTotal = newBudgets.length
         console.error(
           `[helio] Budgets reloaded: ${String(budgetTotal)} budget${budgetTotal !== 1 ? 's' : ''}`,
@@ -765,13 +814,21 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
           )
         }
       },
-      onError: (error) => {
-        console.error(
-          `[helio] Config reload failed (keeping current configuration): ${error.message}`,
-        )
-        if (error instanceof ConfigError) {
-          printConfigErrorDetails(error, '[helio] ')
+      onError: (error, facts) => {
+        if (facts.outcome === 'watch_failed') {
+          console.error(
+            `[helio] Config watch failed (keeping current configuration; edits will not be ` +
+              `observed until restart): ${error.message}`,
+          )
+        } else {
+          console.error(
+            `[helio] Config reload failed (keeping current configuration): ${error.message}`,
+          )
+          if (error instanceof ConfigError) {
+            printConfigErrorDetails(error, '[helio] ')
+          }
         }
+        auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
       },
     })
     configWatcher.start()
@@ -780,6 +837,16 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       `[helio] Hot-reload disabled — config changes to ${configPath} will require a restart`,
     )
   }
+
+  // The posture line prints on both branches, after the pin is known: when
+  // the file is writable by this user, say what a same-user process can
+  // still do and the two ways up a tier. Silent under a dedicated user or a
+  // read-only mount.
+  warnIfConfigWritableByProxyUser({
+    configPath,
+    hotReload: hotReloadEnabled,
+    pinned: pinnedSha256 !== undefined,
+  })
 
   registerShutdown(
     handle,
@@ -856,6 +923,19 @@ function secretCommand(): void {
   const secret = randomBytes(32).toString('hex')
   console.log(`secret: ${secret}`)
   console.log(`digest: ${secretDigest(secret)}`)
+}
+
+async function configHashCommand(configPath: string): Promise<void> {
+  try {
+    const source = await readConfigSource(configPath)
+    console.log(source.sha256)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      process.exit(1)
+    }
+    throw err
+  }
 }
 
 async function validateCommand(configPath: string): Promise<void> {
@@ -1179,5 +1259,12 @@ program
   .option('--to <iso>', 'End time (ISO 8601)')
   .option('--limit <n>', 'Max records to export (up to 10000)', '1000')
   .action((opts: ExportOptions) => exportCommand(opts))
+
+const configCommand = program.command('config').description('Inspect a helio.yaml config file')
+configCommand
+  .command('hash')
+  .description('Print the SHA-256 of the config file bytes, the value HELIO_CONFIG_SHA256 pins')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .action((opts: { config: string }) => configHashCommand(opts.config))
 
 program.parse()

@@ -223,7 +223,7 @@ Commit semantics at `/audit` (on top of the [decision-finalization rules](#post-
 
 Sideband activity shares the audit schema with the MCP path, plus three columns (also used by the dashboard):
 
-- `record_kind` — `tool_call` | `drift_event` | `install_scan` | `evaluation_expired`.
+- `record_kind` — `tool_call` | `drift_event` | `install_scan` | `evaluation_expired` | `policy_reload` (a config reload attempt the proxy records about itself; see [Policy Reload Records](./audit.md#policy-reload-records)).
 - `origin` — `mcp` for the proxy path, or the adapter origin string.
 - `metadata` — the adapter-supplied context object, stored as sent (well-known match keys: `channel_id`, `sender_id`, `sender_name`, `conversation_id`). `agent_id` is **not** carried here — it has its own column and is rejected if placed in `metadata`.
 

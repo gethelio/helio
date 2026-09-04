@@ -252,6 +252,17 @@ service name or address; a port published to the host stays reachable
 from containers through Docker Desktop's host gateway), use the
 [sidecar recipe](../docs/deployment-sidecar.md).
 
+To refuse a changed file instead of reloading it, uncomment the
+`HELIO_CONFIG_SHA256` line in `docker-compose.yml` and set the variable
+in `docker/.env` to the value `helio config hash -c helio.docker.yaml`
+prints (or, without a local install, `docker compose run --rm helio
+node packages/proxy/dist/cli.js config hash -c /config/helio.yaml`).
+The container then records a reload with a different hash as
+`rejected_pinned` and keeps the running policy, and refuses to start
+under a changed file, so a policy change is edit, re-pin, restart. The
+pin holds for the container you started; anything that can rewrite
+`docker/.env` and recreate the container can drop it.
+
 ## Opting in to LAN or remote access
 
 If you need an agent on another machine to reach the proxy, change the

@@ -67,9 +67,17 @@ export interface AuditRecord {
    * records; `'install_scan'` for sideband install evaluations; and
    * `'evaluation_expired'` for sideband evaluations whose `/audit` never
    * arrived (the bypass/tamper signal — block_reason stays null so they do not
-   * count as enforcement blocks).
+   * count as enforcement blocks); and `'policy_reload'` for a config reload
+   * attempt the proxy records about itself (issue #341): the outcome is in
+   * `block_reason` and under `evidence_chain.policy_reload`, and the decision
+   * column holds the constant `policy_reload` so analytics can exclude the kind.
    */
-  readonly record_kind: 'tool_call' | 'drift_event' | 'install_scan' | 'evaluation_expired'
+  readonly record_kind:
+    | 'tool_call'
+    | 'drift_event'
+    | 'install_scan'
+    | 'evaluation_expired'
+    | 'policy_reload'
   /**
    * Enforcement origin: `'mcp'` for the proxy path, or an adapter-supplied
    * origin string (e.g. `'openclaw'`) for sideband-governed calls. Surfaces
@@ -98,8 +106,20 @@ export interface AuditRecord {
    * could silently omit it would exempt that door from attribution.
    */
   readonly upstream: string | null
+  /**
+   * SHA-256 (lowercase hex) of the config file bytes in force when the
+   * record was written (issue #341); the value `helio config hash` prints.
+   * Stamped by the writer, never by a record builder. Null on rows written
+   * before the column existed.
+   */
+  readonly config_sha256: string | null
   /** ISO 8601 timestamp of when the record was persisted. */
   readonly created_at: string
+}
+
+/** What a record builder produces: the stored shape without the ids and with the writer-stamped hash optional. */
+export type AuditRecordInput = Omit<AuditRecord, 'id' | 'created_at' | 'config_sha256'> & {
+  readonly config_sha256?: string | null
 }
 
 // ---------------------------------------------------------------------------

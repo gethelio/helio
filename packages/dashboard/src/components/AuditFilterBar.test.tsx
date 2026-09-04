@@ -282,6 +282,8 @@ describe('AuditFilterBar', () => {
     expect(setFilter).toHaveBeenCalledWith('origin', 'some_future_adapter')
     fireEvent.change(screen.getByLabelText('Record Kind'), { target: { value: 'install_scan' } })
     expect(setFilter).toHaveBeenCalledWith('record_kind', 'install_scan')
+    fireEvent.change(screen.getByLabelText('Record Kind'), { target: { value: 'policy_reload' } })
+    expect(setFilter).toHaveBeenCalledWith('record_kind', 'policy_reload')
   })
 
   it('renders channel and sender free-text inputs, calling setFilter (#16)', () => {

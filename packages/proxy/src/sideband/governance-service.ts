@@ -29,7 +29,7 @@ import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
-import type { AuditRecord } from '../audit/types.js'
+import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
 import type { ApprovalRouter, NativeResolution } from '../approval/router.js'
 import type {
   ApprovalAuditContext,
@@ -1827,7 +1827,7 @@ export class GovernanceService {
       evidenceChain = { ...(evidenceChain ?? {}), approval: { ...args.approvalContext } }
     }
 
-    const record: Omit<AuditRecord, 'id' | 'created_at'> = {
+    const record: AuditRecordInput = {
       timestamp: args.timestampIso,
       session_id: args.sessionId,
       // Adapter-supplied ids are attributed to the sideband door itself —
