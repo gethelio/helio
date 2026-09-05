@@ -108,6 +108,13 @@ Maintainer notes:
   `[helio] Audit DB migrated: added column "config_sha256"`; a v0.12.0
   database gets `upstream` and `config_sha256`, one notice each.
   Databases older than v0.12.0 still hit the clean break.
+- **The README states the enforcement claims by tier.** "Why Helio?"
+  now carries the two claims that hold at every tier (a rule in the
+  proxy cannot be forgotten, and enforcement is in the path rather than
+  in the prompt) and "cannot be weakened silently" with the mechanism
+  behind it; the enforcement-grades section states that claim's one
+  condition in the same-user install and names the deployments where
+  it falls away. The proxy package README mirrors it.
 
 ### Fixed
 
