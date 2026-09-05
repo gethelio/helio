@@ -31,6 +31,8 @@ Model providers are building governance for their own platforms but your agents 
 
 Helio governs what agents **do to the rest of the world** across any MCP-compatible agent, any tool, any platform.
 
+A rule in Helio cannot be forgotten and cannot be weakened silently. It is not in the model's context, so a long session cannot evict it and an injection cannot argue it away, and enforcement is in the path rather than in the prompt: a tool call routed through Helio is decided before it is forwarded, whatever the model has been told. Every attempt to reload the policy file, including one that removes a rule, is an audit record, and every record carries the hash of the config in force when it was written, so a change shows against the decisions made under it. The "cannot be weakened silently" claim has one condition, stated under [Enforcement grades](#enforcement-grades).
+
 ## How It Works
 
 <p align="center">
@@ -50,7 +52,7 @@ Helio governs at the strongest grade each path physically allows, and records it
 - **Network** (HTTP MCP) — structural given you control the upstream's egress.
 - **Host-enforced** (hook adapters via the [adapter API](docs/adapter-api.md), e.g. OpenClaw) — for frameworks that run tools in-process and expose hooks rather than an MCP transport. The framework's hook gate enforces; Helio decides. This is a cooperative, lower grade than the proxy path, and Helio labels it as such rather than overclaiming. Helio's decisions still cannot be evicted from the agent's context or prompt-injected, and any attempt to route around them is visible in the audit trail.
 
-All three grades assume the proxy's config, secret, and audit store are outside the agent's reach. In the default local install they are not: the proxy runs as the same user as the agent. [SECURITY.md](SECURITY.md#process-and-filesystem-boundaries) states the boundary and the deployments that close it.
+All three grades assume the proxy's config, secret, and audit store are outside the agent's reach. In the default local install they are not: the proxy runs as the same user as the agent. [SECURITY.md](SECURITY.md#process-and-filesystem-boundaries) states the boundary and the deployments that close it. That install is also the condition on "cannot be weakened silently": a same-user agent can restart the proxy without the config pin and can edit or delete the audit file, so the reload record and the hash on every record are durable only while the agent cannot write the audit file, and the event stream and stderr are the channels that leave the box before that. Run the proxy as its own user or in its own container, as the recipes there do, and the condition falls away.
 
 ## Quick Start (5 minutes)
 
