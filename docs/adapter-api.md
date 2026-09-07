@@ -13,15 +13,15 @@ The governance API lives on the **SDK sideband** — the local server on `127.0.
 
 ## Why this exists, and what it does not promise
 
-Helio's headline guarantee is **structural** enforcement: an agent speaking MCP physically cannot reach a tool except through the proxy. Hook-based frameworks run their tools in-process, so there is nothing to proxy — the framework's hook dispatcher is the enforcement point, and Helio supplies the decision. This is the standard policy-decision-point / policy-enforcement-point split.
+Helio's strongest grade is **structural** enforcement: on the stdio MCP path Helio owns the child process it spawned, so nothing on that path routes around it; what a co-located process can still do is stated in [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries). Hook-based frameworks run their tools in-process, so there is nothing to proxy; the framework's hook dispatcher is the enforcement point, and Helio supplies the decision. This is the standard policy-decision-point / policy-enforcement-point split.
 
 Helio classifies every governed call by **enforcement grade**. The audit `origin` column separates host-enforced calls (the adapter's origin string) from proxy-path calls (`mcp`); whether an `mcp` record was structural or network is a property of the deployment's upstream transport, not something the record captures:
 
-| Grade           | Path                     | Guarantee                                                          |
-| --------------- | ------------------------ | ------------------------------------------------------------------ |
-| `structural`    | stdio MCP                | Helio owns the only path to the tool.                              |
-| `network`       | HTTP MCP                 | Structural given the operator controls egress.                     |
-| `host-enforced` | hook adapters (this API) | Enforcement by the host framework's hook gate; decisions by Helio. |
+| Grade           | Path                     | What holds                                                                                                              |
+| --------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `structural`    | stdio MCP                | Helio owns the child process it spawned; a co-located process that can run the same command line is outside this grade. |
+| `network`       | HTTP MCP                 | Structural given the operator controls egress.                                                                          |
+| `host-enforced` | hook adapters (this API) | Enforcement by the host framework's hook gate; decisions by Helio.                                                      |
 
 The host-enforced grade is **cooperative**: it works only if the adapter faithfully calls `/evaluate`, honors the decision, and reports `/audit`. A malicious in-process skill that bypasses the hook is outside what this API can prevent (`/install-scan` exists to gate exactly that vector). Helio does not market the hook path as proxy-grade, and neither should you.
 

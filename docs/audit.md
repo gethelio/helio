@@ -145,6 +145,8 @@ Where the agent can write the audit file, a reload record is deletable after the
 
 Audit records are stored in a local SQLite database using WAL (Write-Ahead Logging) mode for optimal concurrent read/write performance.
 
+WAL mode needs coherent shared memory between every connection to the file, and a Docker Desktop bind mount does not provide it across the VM boundary. So when the proxy runs in a container on Docker Desktop with the database on a host directory bind-mounted into the container, do not open the file from the host (`sqlite3`, or `helio export` run on the host) while the container holds it. The host connection checkpoints and truncates the write-ahead log under the container's open connection, the container's next audit write lands on its stale view of the log, and its shutdown checkpoint then writes a main file that is no longer a SQLite database: the next start fails in the audit store with `SQLITE_NOTADB`, and the audit trail and the budget ledger in that file are gone. Keep the database on a named volume, as the shipped Docker recipes do, and export from inside the container (`docker compose exec -T helio node packages/proxy/dist/cli.js export -c /config/helio.yaml > audit.json`, run from the compose directory), or stop the container before opening the file from the host. Docker on Linux, where the host and the container share one kernel, is expected to be unaffected; it is untested.
+
 **Database configuration:**
 
 ```yaml

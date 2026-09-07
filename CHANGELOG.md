@@ -115,6 +115,16 @@ Maintainer notes:
   behind it; the enforcement-grades section states that claim's one
   condition in the same-user install and names the deployments where
   it falls away. The proxy package README mirrors it.
+- **The docs say where the audit database must not be opened from.**
+  On Docker Desktop, a host process that opens a bind-mounted audit
+  database while the container holds it leaves the container on a
+  stale write-ahead log, and the container's next write and shutdown
+  checkpoint corrupt the file (`docs/audit.md`, `docker/README.md`).
+  The shipped recipes keep the database on a named volume and are not
+  affected; export from inside the container or stop it first. The
+  adapter API page states the structural grade with the co-located
+  process qualifier the README carries, and the Docker quickstart says
+  its single-file config mount reloads on in-place saves only.
 
 ### Fixed
 
