@@ -24,11 +24,16 @@ const encoder = new TextEncoder()
 
 const MCP_SESSION_HEADER = 'mcp-session-id'
 
-// Stale-session sweeper tuning. Mirrors the dashboard SSE sweep in
-// dashboard/api.ts: a session that has not had a successful write in
-// STALE_THRESHOLD_MS (~3 missed heartbeats at 30s cadence) is evicted so
-// the session map cannot grow unboundedly when clients disappear without
-// a clean abort signal.
+// Stale-session sweeper tuning. A session whose lastActivity is older than
+// STALE_THRESHOLD_MS is evicted (the map entry dropped and the writer
+// closed) so the session map cannot grow unboundedly when clients
+// disappear without a clean abort signal. lastActivity is set when the
+// session is created and refreshed at every write ATTEMPT in
+// writeSessionEvent, before the write settles, not on success. The
+// dashboard SSE sweep in dashboard/api.ts lands on the same numbers at its
+// 30 s heartbeat default (a 90 s threshold, a 60 s sweep) but derives them
+// from that heartbeat, heartbeats its connections, and refreshes lastWrite
+// only when a write completes, so this block is not a mirror of that one.
 const STALE_THRESHOLD_MS = 90_000
 const SWEEP_INTERVAL_MS = 60_000
 
@@ -43,10 +48,11 @@ const SWEEP_INTERVAL_MS = 60_000
 // disables the cap silently disables a governance control.
 //
 // Do NOT add a periodic keepalive/heartbeat write to the downstream /sse
-// stream. lastActivity is refreshed only on successful writes, so a
-// held-open unproven session goes idle and is swept within
-// STALE_THRESHOLD_MS + SWEEP_INTERVAL_MS; a heartbeat would refresh it
-// forever and let held-open connections pin the cap indefinitely.
+// stream. lastActivity is refreshed only when writeSessionEvent attempts a
+// write, and a held-open unproven session receives no writes at all, so it
+// goes idle and is swept within STALE_THRESHOLD_MS + SWEEP_INTERVAL_MS; a
+// heartbeat would refresh it forever and let held-open connections pin the
+// cap indefinitely.
 const MAX_CONCURRENT_SESSIONS = 1024
 
 // Cap-refusal log window. Deliberately time-based, unlike the origin

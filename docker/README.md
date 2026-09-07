@@ -191,6 +191,23 @@ the volume too:
 docker compose down -v
 ```
 
+The volume rather than a host directory is deliberate. On Docker
+Desktop, opening a bind-mounted audit database from the host
+(`sqlite3`, or `helio export` run on the host) while the container
+holds it leaves the container on a stale write-ahead log, and its next
+write and shutdown checkpoint leave a file that is no longer a SQLite
+database (the next boot fails with `SQLITE_NOTADB`). That is a
+limitation of SQLite's WAL mode across a virtualized bind mount, and a
+named volume is not host-readable, so the demo never gets there. To
+read the records, export from inside the container:
+
+```bash
+docker compose exec -T helio node packages/proxy/dist/cli.js export -c /config/helio.yaml > audit.json
+```
+
+Or stop the container first. See
+[Storage Backend](../docs/audit.md#storage-backend).
+
 ## Security model
 
 By default the quickstart binds **both** published ports to
@@ -245,12 +262,17 @@ container from writing its own config; it does nothing about a writer
 on the host. A process that can write `docker/helio.docker.yaml`,
 including a coding agent working in this checkout, changes policy on
 the running container through hot reload, and a `docker restart`
-loads the changed file again. That is fine for the demo. For a layout
-where the config and the upstream are out of the agent's reach and
-Helio is off the agent's network (the dashboard is unreachable by
-service name or address; a port published to the host stays reachable
-from containers through Docker Desktop's host gateway), use the
-[sidecar recipe](../docs/deployment-sidecar.md).
+loads the changed file again. That is fine for the demo. The mount is
+the single file, not its directory, so it reloads on an in-place save;
+an editor that saves by writing a temporary file and renaming it over
+the original gives the file a new inode, the running container keeps
+the old one, and the edit lands at `docker compose up --force-recreate`
+(the sidecar recipe mounts a directory, which reloads on both save
+styles). For a layout where the config and the upstream are out of the
+agent's reach and Helio is off the agent's network (the dashboard is
+unreachable by service name or address; a port published to the host
+stays reachable from containers through Docker Desktop's host
+gateway), use the [sidecar recipe](../docs/deployment-sidecar.md).
 
 To refuse a changed file instead of reloading it, uncomment the
 `HELIO_CONFIG_SHA256` line in `docker-compose.yml` and set the variable
