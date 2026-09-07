@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-07
+
 ### Added
 
 - **`helio init --sandbox [dir]` writes the sidecar layout.** Three
@@ -1409,7 +1411,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/gethelio/helio/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/gethelio/helio/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/gethelio/helio/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/gethelio/helio/compare/v0.11.1...v0.12.0
