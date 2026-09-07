@@ -125,6 +125,12 @@ Maintainer notes:
   keeps serving the running policy instead of exiting on an unhandled
   rejection. It does not re-arm the watch: no later edit reloads until
   a restart.
+- **The stdio forwarder's death-line tests no longer race a fixed
+  sleep.** Three tests in `stdio-wrapper.test.ts` waited 100 ms for a
+  crashing child to exhaust its retries before asserting; on a slow or
+  loaded runner the assertion ran first and `pnpm test` went red with
+  nothing wrong in the proxy. They now wait for the death line itself,
+  up to the test's own budget.
 
 ## [0.13.1] - 2026-09-03
 

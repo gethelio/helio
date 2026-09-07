@@ -32,6 +32,16 @@ function makeRequest(id: number, method: string): McpRequest {
   return { jsonrpc: '2.0', id, method }
 }
 
+/** Wait for the forwarder's death line to reach the console spy. */
+async function waitForDeathLine(logged: string[], line: string): Promise<void> {
+  await vi.waitFor(
+    () => {
+      expect(logged).toContain(line)
+    },
+    { timeout: 4000, interval: 20 },
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -169,21 +179,30 @@ describe('StdioForwarder', () => {
   })
 
   it('rejects forward when dead after max retries', async () => {
-    forwarder = new StdioForwarder({
-      command: 'node',
-      args: ['-e', CRASH_SCRIPT],
-      maxRetries: 0,
-      retryDelayMs: 10,
+    const logged: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
     })
+    try {
+      forwarder = new StdioForwarder({
+        command: 'node',
+        args: ['-e', CRASH_SCRIPT],
+        maxRetries: 0,
+        retryDelayMs: 10,
+      })
 
-    // start() will succeed (process spawns), but it will exit immediately.
-    // After exit with maxRetries=0, the forwarder should be dead.
-    await forwarder.start()
+      // start() will succeed (process spawns), but it will exit immediately.
+      // After exit with maxRetries=0, the forwarder should be dead.
+      await forwarder.start()
 
-    // Wait for the process to crash and be marked dead
-    await new Promise((resolve) => setTimeout(resolve, 100))
+      // The death line is logged only after the forwarder is marked dead
+      // and its child is gone, so the forward() below never writes.
+      await waitForDeathLine(logged, '[helio] Stdio forwarder: max retries (0) exceeded')
 
-    await expect(forwarder.forward(makeRequest(1, 'ping'))).rejects.toThrow('dead')
+      await expect(forwarder.forward(makeRequest(1, 'ping'))).rejects.toThrow('dead')
+    } finally {
+      spy.mockRestore()
+    }
   }, 5000)
 
   it('tags the max-retries death line with the upstream name when one is set (issue #294)', async () => {
@@ -201,9 +220,7 @@ describe('StdioForwarder', () => {
       })
       await forwarder.start()
 
-      // Wait for the crash to mark the forwarder dead and log the death line.
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      expect(logged).toContain('[helio][files] Stdio forwarder: max retries (0) exceeded')
+      await waitForDeathLine(logged, '[helio][files] Stdio forwarder: max retries (0) exceeded')
     } finally {
       spy.mockRestore()
     }
@@ -223,8 +240,7 @@ describe('StdioForwarder', () => {
       })
       await forwarder.start()
 
-      await new Promise((resolve) => setTimeout(resolve, 100))
-      expect(logged).toContain('[helio] Stdio forwarder: max retries (0) exceeded')
+      await waitForDeathLine(logged, '[helio] Stdio forwarder: max retries (0) exceeded')
     } finally {
       spy.mockRestore()
     }
