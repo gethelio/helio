@@ -245,7 +245,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Attestations (explicit for documentation): attach full build
           # provenance to the image. No image SBOM here — the `sbom` job below
-          # publishes a CycloneDX dependency SBOM as a release asset instead.
+          # publishes a CycloneDX SBOM of the proxy's lockfile-pinned production
+          # tree as a release asset instead.
           provenance: mode=max
           sbom: false
           cache-from: type=gha
@@ -282,12 +283,30 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate CycloneDX SBOM
-        run: npx @cyclonedx/cyclonedx-npm --output-file sbom.json --output-format json
-          --omit=dev
+      - name: Set package versions
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/set-release-version.sh "$VERSION"
+
+      # Production packages only: `pnpm sbom` reads license and author
+      # metadata from the store, so the store must hold the proxy's
+      # production tree, and nothing here needs the dev tree or a
+      # native build.
+      - name: Install production dependencies
+        run: pnpm install --frozen-lockfile --prod --ignore-scripts
+
+      # CycloneDX 1.6 of @gethelio/proxy's production tree as
+      # pnpm-lock.yaml pins it, at the tag's version; the script fails
+      # the job on an empty, mis-scoped, incomplete, or unlicensed
+      # inventory (issue #349).
+      - name: Generate and check the SBOM
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: scripts/generate-sbom.sh sbom.json "$VERSION"
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4

@@ -42,7 +42,7 @@ The dashboard source lives in the internal workspace package `packages/dashboard
 | `react-router` | Client-side routing for the 5 dashboard pages             | Declarative, data-router-compatible, no external state libraries |
 | `recharts`     | Time-series, pie, and bar charts on the Analytics page    | Pure React, composable, no global theme context                  |
 
-These packages are **bundled** into dashboard static files at build time (`dist/assets/*.js`) and then copied into `@gethelio/proxy` (`dist/dashboard-assets/`) during proxy build. They remain listed as `dependencies` (not `devDependencies`) in this workspace package so CycloneDX SBOM generation with `--omit=dev` still captures the shipped frontend dependency tree.
+These packages are **bundled** into dashboard static files at build time (`dist/assets/*.js`) and then copied into `@gethelio/proxy` (`dist/dashboard-assets/`) during proxy build. They stay listed as `dependencies` (not `devDependencies`) because their code ships in the release artifact. The `sbom.json` attached to each GitHub Release inventories the proxy's production dependency tree as `pnpm-lock.yaml` pins it (`scripts/generate-sbom.sh`), type-definition packages included where a runtime dependency declares them (`@types/node` and `@types/retry` through `@slack/web-api`, `undici-types` through `@types/node`); the bundled frontend tree is not part of that document.
 
 ### Dev Dependencies (build-only)
 

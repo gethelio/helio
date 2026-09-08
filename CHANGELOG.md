@@ -19,6 +19,18 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release SBOM now inventories the proxy's production
+  dependency tree.** Every `sbom.json` attached to a release so far
+  listed zero components: the generator ran at the workspace root,
+  whose package has no runtime dependencies. The release pipeline
+  now writes the CycloneDX 1.6 document with `pnpm sbom` for
+  `@gethelio/proxy` at the tag's version, straight from
+  `pnpm-lock.yaml`, and fails the release if the inventory is empty,
+  names the wrong package or version, misses a direct dependency, or
+  carries an unlicensed component. The same check runs in CI.
+
 ## [0.14.0] - 2026-09-07
 
 ### Added
