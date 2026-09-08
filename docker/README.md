@@ -318,3 +318,9 @@ OAuth, etc.).
 | `helio.docker.yaml`     | Helio config loaded by the proxy container                                                            |
 | `mcp-echo-server.mjs`   | Zero-dependency MCP echo server for the demo                                                          |
 | `.env.example`          | Template for local env vars (copy to `.env`, fill in the secret)                                      |
+
+The runtime image's `node_modules` is the production dependency tree of
+`@gethelio/proxy` as `pnpm-lock.yaml` pins it, the same tree the release
+`sbom.json` inventories; the dashboard is in the image only as the static
+bundle the proxy serves. `scripts/check-image-inventory.sh <image>` asserts
+this against a built image, and CI runs it on every build.

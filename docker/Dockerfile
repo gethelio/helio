@@ -2,10 +2,10 @@
 # Helio MCP Governance Proxy — Docker Image
 #
 # Multi-stage build:
-#   1. deps     — install all dependencies (including native build tools)
-#   2. build    — compile TypeScript (dashboard + proxy)
-#   3. prod-deps — reinstall production-only dependencies
-#   4. runtime  — slim image with built artifacts + prod deps
+#   1. deps      - install all dependencies (including native build tools)
+#   2. build     - compile TypeScript (dashboard + proxy)
+#   3. prod-deps - install the proxy's production dependencies alone, fresh
+#   4. runtime   - slim image with built artifacts + prod deps
 #
 # Usage:
 #   docker build -f docker/Dockerfile .          (from repo root)
@@ -55,13 +55,26 @@ RUN pnpm --filter @gethelio/proxy build
 # ===========================================================================
 FROM deps AS prod-deps
 
-# Reinstall with production-only deps (no devDependencies). CI=true because
-# pnpm 11 prompts before purging the modules dir inherited from the deps
-# stage, and docker build has no TTY to answer it. --ignore-scripts because
-# pnpm 11 runs the root prepare script (husky) even on --prod installs, and
-# husky is pruned with the dev deps; nothing new installs in this stage, so
-# no build scripts are needed (better-sqlite3 is already built in deps).
-RUN CI=true pnpm install --frozen-lockfile --prod --ignore-scripts
+# Start from an empty modules tree. A production install over the tree
+# inherited from deps unlinks the dev packages but leaves their
+# directories under node_modules/.pnpm, and the runtime stage copies the
+# directory whole.
+RUN rm -rf node_modules packages/proxy/node_modules packages/dashboard/node_modules
+
+# Install the proxy's production tree alone, from the store the deps stage
+# filled (nothing is downloaded). --filter keeps the dashboard's tree out:
+# the dashboard reaches the image only as the bundle the build stage writes
+# under packages/proxy/dist/dashboard-assets. --ignore-scripts keeps pnpm 11
+# from running the root prepare script (husky, a dev dependency that is not
+# installed here). The result is the tree the release sbom.json inventories
+# (scripts/generate-sbom.sh); scripts/check-image-inventory.sh asserts it
+# in CI.
+RUN CI=true pnpm install --frozen-lockfile --prod --ignore-scripts --filter @gethelio/proxy
+
+# The one build script the tree needs. better-sqlite3's install script takes
+# the prebuilt binary the deps stage already fetched for this platform, or
+# compiles one with the build tools installed there.
+RUN CI=true pnpm --filter @gethelio/proxy rebuild better-sqlite3
 
 # ===========================================================================
 # Stage 4: Slim runtime image

@@ -30,6 +30,15 @@ Maintainer notes:
   `pnpm-lock.yaml`, and fails the release if the inventory is empty,
   names the wrong package or version, misses a direct dependency, or
   carries an unlicensed component. The same check runs in CI.
+- **The Docker image now holds only the proxy's production dependency
+  tree.** The `prod-deps` stage reinstalled over the modules tree it
+  inherited from the `deps` stage, which unlinked the dev packages but
+  left their directories in place, and it installed every workspace
+  package's dependencies, so the runtime image carried the dashboard's
+  dependency tree and the whole dev virtual store, none of it loaded.
+  The stage now installs the proxy's production tree alone into an
+  empty modules directory, the same packages the release `sbom.json`
+  lists, and CI asserts that the image holds exactly that set.
 
 ## [0.14.0] - 2026-09-07
 
