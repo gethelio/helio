@@ -169,6 +169,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -182,6 +190,13 @@ jobs:
           tags: helio:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The image must hold exactly the proxy's production tree from the
+      # lockfile, the tree the release sbom.json inventories (issue #366:
+      # the dashboard's tree and the deps stage's dev store rode along
+      # unnoticed). Reads the lockfile only; nothing is installed here.
+      - name: Assert the image holds the proxy's production tree and no other package
+        run: scripts/check-image-inventory.sh helio:ci
 
       - name: Validate the demo config
         working-directory: docker
