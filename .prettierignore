@@ -5,3 +5,4 @@ pnpm-lock.yaml
 packages/python-sdk
 .claude/
 .superpowers/
+/sbom.json
