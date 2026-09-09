@@ -19,6 +19,18 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **Every release now attaches a second SBOM, `sbom-dashboard.json`,
+  for the dashboard bundle.** The dashboard the proxy serves is built
+  by Vite from `react`, `react-dom`, `react-router`, and `recharts`,
+  none of which is in the proxy's own tree or in `sbom.json`. The
+  release pipeline now writes a second CycloneDX 1.6 document with
+  `pnpm sbom` for `@gethelio/dashboard` at the tag's version: that
+  package's production dependency tree as `pnpm-lock.yaml` pins it,
+  under the same checks as the proxy's document, and the release
+  fails if either document is missing. CI runs both on every change.
+
 ### Fixed
 
 - **The release SBOM now inventories the proxy's production

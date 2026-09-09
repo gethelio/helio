@@ -19,8 +19,9 @@ coverage
 /build
 dist/
 dist
-# release SBOM written at the root by scripts/generate-sbom.sh (prettier-dirty)
+# release SBOMs written at the root by scripts/generate-sbom.sh (prettier-dirty)
 /sbom.json
+/sbom-dashboard.json
 
 # misc
 .DS_Store
