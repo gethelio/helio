@@ -6,3 +6,4 @@ packages/python-sdk
 .claude/
 .superpowers/
 /sbom.json
+/sbom-dashboard.json

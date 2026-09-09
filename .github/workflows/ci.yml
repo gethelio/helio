@@ -112,14 +112,16 @@ jobs:
           fi
           echo "::notice title=Dependency audit skipped::No dependency manifest or install input changed in this PR (package.json / pnpm-lock.yaml / pnpm-workspace.yaml / .npmrc / .pnpmfile.* / patches/). The full-tree audit is enforced on main, on release, and by the daily Security Audit workflow."
 
-      # The release SBOM's generator and guard run on every push and
+      # The release SBOMs' generator and guard run on every push and
       # pull request so a pnpm or manifest change that breaks them is
-      # red here, not at the next tag (the asset shipped empty for
-      # three releases while nothing ran it, issue #349). Written to
-      # the runner's temp directory: the document is prettier-dirty
+      # red here, not at the next tag (the proxy's asset shipped empty
+      # for three releases while nothing ran it, issue #349). Written
+      # to the runner's temp directory: the documents are prettier-dirty
       # and `pnpm format:check` scans the workspace below.
-      - name: Generate and check the SBOM
-        run: scripts/generate-sbom.sh "$RUNNER_TEMP/sbom.json"
+      - name: Generate and check the SBOMs
+        run: |
+          scripts/generate-sbom.sh proxy "$RUNNER_TEMP/sbom.json"
+          scripts/generate-sbom.sh dashboard "$RUNNER_TEMP/sbom-dashboard.json"
 
       - name: Build
         run: pnpm build
