@@ -52,6 +52,21 @@ Maintainer notes:
   empty modules directory, the same packages the release `sbom.json`
   lists, and CI asserts that the image holds exactly that set.
 
+### Security
+
+- **js-yaml `4.3.1` → `4.3.2`** (GHSA-2883-xcg3-v3hh: `maxTotalMergeKeys`
+  did not bound CPU use for a sequence of empty merge sources). js-yaml
+  parses `helio.yaml`, which is operator-authored, so there is no remote
+  input path; the parser of a governance proxy is upgraded regardless.
+  The patch ships on the maintained v4 line, so no API changes.
+- **hono `4.12.34` → `4.13.7`** (GHSA-crvj-82cr-hjcx: the query parser
+  read parameters after the URL fragment; GHSA-g6gw-c38x-mqfc: unbounded
+  dot-notation nesting in `parseBody()`; GHSA-gqvv-2mrq-wpjv: `toSSG()`
+  path normalization). The proxy reads query strings through Hono on its
+  dashboard and SSE routes, the one served path the fixes reach; it does
+  not use `parseBody()`, `toSSG()`, or `hono/jsx` (whose XSS 4.13.7 also
+  closes). A minor release within the v4 line.
+
 ## [0.14.0] - 2026-09-07
 
 ### Added
