@@ -1,5 +1,4 @@
 import { describe, it, expect, afterAll, beforeAll } from 'vitest'
-import type { AddressInfo } from 'node:net'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
@@ -20,8 +19,10 @@ interface MockSseUpstream {
 /**
  * Create a mock MCP server that speaks SSE transport.
  * Returns actual MCP-style responses for tools/list, tools/call, etc.
+ * Bound to 127.0.0.1 so the kernel cannot hand it a port another process
+ * holds (issue #271); the port is known once the server is listening.
  */
-function createMockSseUpstream(): MockSseUpstream {
+function createMockSseUpstream(): Promise<MockSseUpstream> {
   const app = new Hono()
   const writers: WritableStreamDefaultWriter<Uint8Array>[] = []
   const encoder = new TextEncoder()
@@ -87,10 +88,12 @@ function createMockSseUpstream(): MockSseUpstream {
     return c.body(null, 202)
   })
 
-  const server = serve({ fetch: app.fetch, port: 0 })
-  const port = (server.address() as AddressInfo).port
-
-  return { server, port }
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
+      resolve({ server, port: info.port })
+    })
+    server.once('error', reject)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -213,7 +216,7 @@ describe('SSE integration', () => {
   const activeSessions: SseClientSession[] = []
 
   beforeAll(async () => {
-    mockUpstream = createMockSseUpstream()
+    mockUpstream = await createMockSseUpstream()
 
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mockUpstream.port)}/`,
@@ -228,7 +231,7 @@ describe('SSE integration', () => {
     })
 
     const app = createApp(config, forwarder)
-    proxy = startOnDynamicPort(app)
+    proxy = await startOnDynamicPort(app)
     proxyPort = proxy.port
   })
 

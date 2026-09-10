@@ -179,7 +179,7 @@ async function composeTwoDoors(options: {
     },
     sse: options.sse,
   })
-  const proxy = startOnDynamicPort(app)
+  const proxy = await startOnDynamicPort(app)
   const base = `http://127.0.0.1:${String(proxy.port)}`
 
   return {

@@ -32,7 +32,7 @@ describe('Streamable HTTP integration', () => {
     })
 
     const app = createApp(config, forwarder)
-    proxy = startOnDynamicPort(app)
+    proxy = await startOnDynamicPort(app)
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 
@@ -193,7 +193,7 @@ describe('Streamable HTTP integration', () => {
 
     const forwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const app = createApp(config, forwarder)
-    const badProxy = startOnDynamicPort(app)
+    const badProxy = await startOnDynamicPort(app)
 
     try {
       const { status, body } = await sendMcpRequest(
@@ -220,7 +220,7 @@ describe('Streamable HTTP integration', () => {
       })
     })
 
-    const malformedUpstream = startOnDynamicPort(upstreamApp)
+    const malformedUpstream = await startOnDynamicPort(upstreamApp)
     const config = makeConfig({
       upstream: {
         url: `http://127.0.0.1:${String(malformedUpstream.port)}/mcp`,
@@ -229,7 +229,7 @@ describe('Streamable HTTP integration', () => {
     })
     const forwarder = new StreamableHttpForwarder({ url: config.upstream.url as string })
     const app = createApp(config, forwarder)
-    const proxy = startOnDynamicPort(app)
+    const proxy = await startOnDynamicPort(app)
 
     try {
       const { status, body } = await sendMcpRequest(
@@ -270,7 +270,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   })
 
   /** Create a proxy with the given policy config and return its URL + close handle. */
-  function createGovernedProxy(policiesConfig: {
+  async function createGovernedProxy(policiesConfig: {
     default?: 'allow' | 'deny'
     rules: Array<Record<string, unknown>>
   }) {
@@ -287,7 +287,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
       environment: config.environment,
     })
     const app = createApp(config, governed)
-    const managed = startOnDynamicPort(app)
+    const managed = await startOnDynamicPort(app)
     return {
       url: `http://127.0.0.1:${String(managed.port)}/mcp`,
       close: managed.close,
@@ -295,7 +295,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   }
 
   it('allowed tool call passes through and returns upstream response', async () => {
-    const proxy = createGovernedProxy({
+    const proxy = await createGovernedProxy({
       default: 'deny',
       rules: [{ match: { tool: 'get_weather' }, action: 'allow' }],
     })
@@ -314,7 +314,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   })
 
   it('denied tool call returns JSON-RPC error without contacting upstream', async () => {
-    const proxy = createGovernedProxy({
+    const proxy = await createGovernedProxy({
       default: 'allow',
       rules: [
         {
@@ -348,7 +348,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   })
 
   it('default deny blocks unmatched tools', async () => {
-    const proxy = createGovernedProxy({
+    const proxy = await createGovernedProxy({
       default: 'deny',
       rules: [{ match: { tool: 'get_weather' }, action: 'allow' }],
     })
@@ -369,7 +369,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   })
 
   it('non-tool methods pass through regardless of policy', async () => {
-    const proxy = createGovernedProxy({
+    const proxy = await createGovernedProxy({
       default: 'deny',
       rules: [{ match: { tool: '*' }, action: 'deny' }],
     })
@@ -386,7 +386,7 @@ describe('Policy evaluation (Streamable HTTP)', () => {
   })
 
   it('annotation-based matching works after tools/list populates cache', async () => {
-    const proxy = createGovernedProxy({
+    const proxy = await createGovernedProxy({
       default: 'allow',
       rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
     })
@@ -430,7 +430,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
     await upstream.close()
   })
 
-  function createGovernedProxyWithAudit(
+  async function createGovernedProxyWithAudit(
     policiesConfig: {
       default?: 'allow' | 'deny'
       rules: Array<Record<string, unknown>>
@@ -461,7 +461,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
       auditWriter,
     })
     const app = createApp(config, governed)
-    const managed = startOnDynamicPort(app)
+    const managed = await startOnDynamicPort(app)
 
     return {
       url: `http://127.0.0.1:${String(managed.port)}/mcp`,
@@ -475,7 +475,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
   }
 
   it('allowed call stores full upstream response when include_responses is true', async () => {
-    const proxy = createGovernedProxyWithAudit({ default: 'allow', rules: [] }, true)
+    const proxy = await createGovernedProxyWithAudit({ default: 'allow', rules: [] }, true)
 
     try {
       await sendMcpRequest(proxy.url, 'tools/call', {
@@ -502,7 +502,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
   })
 
   it('allowed call stores response summary when include_responses is false', async () => {
-    const proxy = createGovernedProxyWithAudit({ default: 'allow', rules: [] }, false)
+    const proxy = await createGovernedProxyWithAudit({ default: 'allow', rules: [] }, false)
 
     try {
       await sendMcpRequest(proxy.url, 'tools/call', {
@@ -533,7 +533,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
   })
 
   it('denied call stores null upstream_response regardless of flag', async () => {
-    const proxy = createGovernedProxyWithAudit({
+    const proxy = await createGovernedProxyWithAudit({
       default: 'allow',
       rules: [{ match: { tool: 'delete_*' }, action: 'deny' }],
     })
@@ -559,7 +559,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
   })
 
   it('audit record captures full metadata end-to-end', async () => {
-    const proxy = createGovernedProxyWithAudit({ default: 'allow', rules: [] })
+    const proxy = await createGovernedProxyWithAudit({ default: 'allow', rules: [] })
 
     try {
       await sendMcpRequest(
@@ -599,8 +599,8 @@ describe('Audit response capture (Streamable HTTP)', () => {
         headers: { 'content-type': 'text/plain' },
       })
     })
-    const malformedUpstream = startOnDynamicPort(upstreamApp)
-    const proxy = createGovernedProxyWithAudit(
+    const malformedUpstream = await startOnDynamicPort(upstreamApp)
+    const proxy = await createGovernedProxyWithAudit(
       { default: 'allow', rules: [] },
       true,
       `http://127.0.0.1:${String(malformedUpstream.port)}/mcp`,
@@ -625,7 +625,7 @@ describe('Audit response capture (Streamable HTTP)', () => {
   })
 
   it('connection-level forwarding failure writes audit row with null upstream_http_status', async () => {
-    const proxy = createGovernedProxyWithAudit(
+    const proxy = await createGovernedProxyWithAudit(
       { default: 'allow', rules: [] },
       true,
       'http://127.0.0.1:19999/mcp',
@@ -667,7 +667,7 @@ describe('Static upstream headers', () => {
       capturedAuth = c.req.header('authorization')
       return c.json({ jsonrpc: '2.0', id: 1, result: { tools: [] } })
     })
-    upstreamServer = startOnDynamicPort(upstreamApp)
+    upstreamServer = await startOnDynamicPort(upstreamApp)
 
     const config = makeConfig({
       upstream: {
@@ -680,7 +680,7 @@ describe('Static upstream headers', () => {
 
     const { forwarder } = await createForwarderFromConfig(config)
     const app = createApp(config, forwarder)
-    proxy = startOnDynamicPort(app)
+    proxy = await startOnDynamicPort(app)
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 

@@ -252,7 +252,7 @@ beforeAll(async () => {
 
   // 9. Create and start proxy server
   const app = createApp(config, governed)
-  proxyManaged = startOnDynamicPort(app)
+  proxyManaged = await startOnDynamicPort(app)
   proxyUrl = `http://127.0.0.1:${String(proxyManaged.port)}/mcp`
 
   // 10. Start sideband server (evidence API + governance endpoints)
@@ -267,7 +267,7 @@ beforeAll(async () => {
     sweepIntervalMs: 0,
   })
   const sidebandApp = createSidebandApp(evidenceStore, { governance: governanceService })
-  sidebandManaged = startOnDynamicPort(sidebandApp)
+  sidebandManaged = await startOnDynamicPort(sidebandApp)
   sidebandUrl = `http://127.0.0.1:${String(sidebandManaged.port)}`
 
   // 11. Start dashboard API server
@@ -283,7 +283,7 @@ beforeAll(async () => {
     },
     { staticDir: undefined },
   )
-  dashboardManaged = startOnDynamicPort(dashboardApp)
+  dashboardManaged = await startOnDynamicPort(dashboardApp)
   dashboardUrl = `http://127.0.0.1:${String(dashboardManaged.port)}`
 })
 

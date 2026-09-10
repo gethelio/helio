@@ -134,7 +134,7 @@ async function main(): Promise<void> {
   })
   const forwarder1 = new UpstreamForwarder({ url: config1.upstream.url as string })
   const app1 = createApp(config1, forwarder1)
-  const proxy1 = startOnDynamicPort(app1)
+  const proxy1 = await startOnDynamicPort(app1)
   const proxyUrl1 = `http://127.0.0.1:${String(proxy1.port)}/mcp`
 
   for (let i = 0; i < WARMUP_COUNT; i++) {
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
   const auditWriter = new AuditWriter({ store: auditStore, bufferSize: 2000 })
   const governed = new GovernedForwarder(forwarder2, policy, { auditWriter })
   const app2 = createApp(config2, governed)
-  const proxy2 = startOnDynamicPort(app2)
+  const proxy2 = await startOnDynamicPort(app2)
   const proxyUrl2 = `http://127.0.0.1:${String(proxy2.port)}/mcp`
 
   // Prime annotation cache (intentionally before memory snapshots so the

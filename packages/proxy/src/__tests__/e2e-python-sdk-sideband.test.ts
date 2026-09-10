@@ -95,7 +95,7 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
     const { policy } = compilePolicies(config.policies)
     const governed = new GovernedForwarder(forwarder, policy, { evidenceStore })
     const app = createApp(config, governed)
-    proxyManaged = startOnDynamicPort(app)
+    proxyManaged = await startOnDynamicPort(app)
     proxyUrl = `http://127.0.0.1:${String(proxyManaged.port)}/mcp`
 
     // Prime annotation cache
@@ -106,7 +106,7 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
     // end-to-end over real HTTP — not just via Hono's in-memory
     // `app.request()` simulator used by `evidence/api.test.ts`.
     const sidebandApp = createSidebandApp(evidenceStore, { token: SDK_TOKEN })
-    sidebandManaged = startOnDynamicPort(sidebandApp)
+    sidebandManaged = await startOnDynamicPort(sidebandApp)
     sidebandUrl = `http://127.0.0.1:${String(sidebandManaged.port)}`
   })
 

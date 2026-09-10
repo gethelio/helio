@@ -92,7 +92,7 @@ describe('modern sessionless client against a modern-only upstream', () => {
       compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
       { auditWriter },
     )
-    proxy = startOnDynamicPort(createApp(config, governedForwarder))
+    proxy = await startOnDynamicPort(createApp(config, governedForwarder))
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 

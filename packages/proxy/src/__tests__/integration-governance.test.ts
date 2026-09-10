@@ -43,7 +43,7 @@ afterAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function createGovernedProxyWithAudit(
+async function createGovernedProxyWithAudit(
   policiesConfig: PoliciesConfig,
   options?: { environment?: string; includeResponses?: boolean; bufferSize?: number },
 ) {
@@ -74,7 +74,7 @@ function createGovernedProxyWithAudit(
   })
 
   const app = createApp(config, governed)
-  const managed = startOnDynamicPort(app)
+  const managed = await startOnDynamicPort(app)
 
   return {
     url: `http://127.0.0.1:${String(managed.port)}/mcp`,
@@ -117,10 +117,10 @@ async function postJson(
 // ---------------------------------------------------------------------------
 
 describe('full pipeline with 5+ rules', () => {
-  let proxy: ReturnType<typeof createGovernedProxyWithAudit>
+  let proxy: Awaited<ReturnType<typeof createGovernedProxyWithAudit>>
 
   beforeAll(async () => {
-    proxy = createGovernedProxyWithAudit(
+    proxy = await createGovernedProxyWithAudit(
       {
         default: 'deny',
         dry_run: false,
@@ -272,10 +272,10 @@ describe('full pipeline with 5+ rules', () => {
 // ---------------------------------------------------------------------------
 
 describe('destructive detection', () => {
-  let proxy: ReturnType<typeof createGovernedProxyWithAudit>
+  let proxy: Awaited<ReturnType<typeof createGovernedProxyWithAudit>>
 
   beforeAll(async () => {
-    proxy = createGovernedProxyWithAudit({
+    proxy = await createGovernedProxyWithAudit({
       default: 'allow',
       dry_run: false,
       flag_destructive: 'log',
@@ -391,7 +391,7 @@ policies:
     watcher.start()
 
     const app = createApp(config, governed)
-    proxy = startOnDynamicPort(app)
+    proxy = await startOnDynamicPort(app)
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
 
     await wait(100)
@@ -467,7 +467,7 @@ describe('performance (<5ms p99 with policy + audit)', { timeout: 30_000 }, () =
 
   it(`p99 latency for ${String(MEASURE)} governed tool calls is reasonable`, async () => {
     // Use a large buffer to avoid mid-benchmark auto-flush blocking
-    const proxy = createGovernedProxyWithAudit(
+    const proxy = await createGovernedProxyWithAudit(
       {
         default: 'deny',
         dry_run: false,
@@ -531,7 +531,7 @@ describe('performance (<5ms p99 with policy + audit)', { timeout: 30_000 }, () =
 
 describe('dry-run mode', () => {
   it('per-rule dry_run returns synthetic response without contacting upstream', async () => {
-    const proxy = createGovernedProxyWithAudit({
+    const proxy = await createGovernedProxyWithAudit({
       default: 'allow',
       dry_run: false,
       rules: [{ name: 'shadow-weather', match: { tool: 'get_weather' }, action: 'dry_run' }],
@@ -567,7 +567,7 @@ describe('dry-run mode', () => {
   })
 
   it('global dry_run prevents forwarding and returns would_forward: true for allow', async () => {
-    const proxy = createGovernedProxyWithAudit({
+    const proxy = await createGovernedProxyWithAudit({
       default: 'allow',
       dry_run: true,
       rules: [{ name: 'allow-weather', match: { tool: 'get_weather' }, action: 'allow' }],
@@ -603,7 +603,7 @@ describe('dry-run mode', () => {
   })
 
   it('global dry_run with deny shows would_forward: false', async () => {
-    const proxy = createGovernedProxyWithAudit({
+    const proxy = await createGovernedProxyWithAudit({
       default: 'deny',
       dry_run: true,
       rules: [],
@@ -633,7 +633,7 @@ describe('dry-run mode', () => {
   })
 
   it('stamps resultType: complete on the dry-run result for a door-passing modern request', async () => {
-    const proxy = createGovernedProxyWithAudit({
+    const proxy = await createGovernedProxyWithAudit({
       default: 'allow',
       dry_run: true,
       rules: [],
