@@ -30,6 +30,16 @@ Maintainer notes:
   package's production dependency tree as `pnpm-lock.yaml` pins it,
   under the same checks as the proxy's document, and the release
   fails if either document is missing. CI runs both on every change.
+- **Every release image now carries an SBOM attestation.** BuildKit's
+  syft scanner writes an SPDX document of the image's filesystem per
+  platform, the base image's packages included, and attaches it to the
+  image index next to the build provenance, where
+  `docker buildx imagetools inspect --format '{{ json .SBOM }}'` and
+  registry scanners read it. The release pipeline asserts that the
+  proxy's tree in it equals the lockfile's before signing, CI asserts
+  the same on every build, and the signature covers the attestation.
+  The release assets `sbom.json` and `sbom-dashboard.json` are
+  unchanged.
 
 ### Fixed
 

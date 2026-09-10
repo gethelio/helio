@@ -167,6 +167,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # A registry on localhost for the SBOM attestation check below: BuildKit
+    # attaches attestations to a pushed image, not to one loaded into the
+    # daemon, and imagetools reads them back from a registry.
+    services:
+      registry:
+        image: registry:3
+        ports:
+          - 5000:5000
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -181,6 +190,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # The builder runs in a container; host networking lets it reach
+          # the registry service on localhost:5000.
+          driver-opts: network=host
 
       - name: Build Docker image
         uses: docker/build-push-action@v6
@@ -199,6 +212,29 @@ jobs:
       # unnoticed). Reads the lockfile only; nothing is installed here.
       - name: Assert the image holds the proxy's production tree and no other package
         run: scripts/check-image-inventory.sh helio:ci
+
+      # The same build once more, cached, with the SBOM attestation the
+      # release build attaches, pushed to the registry service so it can be
+      # read back the way a consumer reads it from ghcr.io. The guard
+      # asserts the attestation's proxy tree equals the lockfile's (issue
+      # #368); a scanner change that drops or invents a package fails here,
+      # not at the tag.
+      - name: Build the image with its SBOM attestation into the local registry
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: localhost:5000/helio:ci
+          provenance: mode=max
+          sbom: 'generator=docker/buildkit-syft-scanner:1.12.0'
+          cache-from: type=gha
+
+      - name: Assert the image's SBOM attestation lists the proxy's production tree
+        run: |
+          docker buildx imagetools inspect localhost:5000/helio:ci \
+            --format '{{ json .SBOM }}' > "$RUNNER_TEMP/image-sbom.json"
+          scripts/check-image-sbom.sh "$RUNNER_TEMP/image-sbom.json"
 
       - name: Validate the demo config
         working-directory: docker

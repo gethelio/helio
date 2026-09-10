@@ -324,3 +324,30 @@ The runtime image's `node_modules` is the production dependency tree of
 `sbom.json` inventories; the dashboard is in the image only as the static
 bundle the proxy serves. `scripts/check-image-inventory.sh <image>` asserts
 this against a built image, and CI runs it on every build.
+
+Every release image also carries an SBOM attestation: an SPDX document
+BuildKit's syft scanner writes from the final stage's filesystem and
+attaches to the image index per platform, next to the build provenance.
+It lists everything on that filesystem, so the base image's Debian
+packages, Node, npm and its tree, and the pnpm copy corepack cached are
+in it alongside the proxy's production tree, and so are the workspace
+root manifest, which has no version and appears as `helio@UNKNOWN`,
+and any manifest syft finds inside a package's example or test
+directory. Read it with
+
+```bash
+docker buildx imagetools inspect ghcr.io/gethelio/helio:<version> \
+  --format '{{ json .SBOM }}'
+```
+
+(`--format '{{ json (index .SBOM "linux/arm64").SPDX }}'` for one
+platform). `scripts/check-image-sbom.sh <that-json>` asserts that the
+proxy's tree in it equals the lockfile's; CI runs it on every build and
+the release pipeline runs it on the pushed image before signing. The
+release signature covers the attestation manifests (`cosign sign
+--recursive`), so `cosign verify` on an attestation manifest's digest
+succeeds; `cosign verify-attestation` does not apply, because BuildKit
+stores attestations in the image index, not in cosign's own tags, and
+neither does `gh attestation verify`, which reads GitHub's attestation
+store. The release assets `sbom.json` and `sbom-dashboard.json` stay
+the CycloneDX documents of the two lockfile-pinned trees.
