@@ -8,7 +8,7 @@
  * This is the gold standard. If it passes, the MVP works.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { startHttpMcpServer } from './helpers/mcp-test-server.js'
 import { startOnDynamicPort, makeConfig, sendMcpRequest } from './helpers/test-utils.js'
 import type { ManagedServer } from './helpers/test-utils.js'
@@ -325,6 +325,22 @@ function getResultText(body: Record<string, unknown>): string {
 // Tests
 // ---------------------------------------------------------------------------
 
+/**
+ * Wait until the approval queue holds a pending ticket and return the
+ * pending list. A fixed sleep here outran the request under load.
+ */
+async function waitForPendingApproval(
+  queue: ApprovalQueue,
+): Promise<ReturnType<ApprovalQueue['listPending']>> {
+  await vi.waitFor(
+    () => {
+      expect(queue.listPending().length).toBeGreaterThanOrEqual(1)
+    },
+    { timeout: 4000, interval: 20 },
+  )
+  return queue.listPending()
+}
+
 describe('E2E: full MVP integration', () => {
   // Tests share mutable state (audit store, rate/spend limiters, evidence store,
   // approval queue, event collector) and MUST run in sequential order.
@@ -502,13 +518,7 @@ describe('E2E: full MVP integration', () => {
       arguments: { amount: 100, currency: 'USD', to_account: 'acct-1' },
     })
 
-    // Wait for the HTTP request to reach the proxy and create the ticket.
-    // The ticket is created synchronously inside ApprovalRouter.submit(),
-    // so 100ms is sufficient for the HTTP round-trip. A polling loop would
-    // be more robust but adds complexity for minimal gain in a sequential test.
-    await new Promise((r) => setTimeout(r, 100))
-    const pending = approvalQueue.listPending()
-    expect(pending.length).toBeGreaterThanOrEqual(1)
+    const pending = await waitForPendingApproval(approvalQueue)
     const ticketId = pending[0]?.id ?? ''
 
     // Approve via REST API on the dashboard sideband (/approvals is no
@@ -554,9 +564,7 @@ describe('E2E: full MVP integration', () => {
       arguments: { amount: 200, currency: 'USD', to_account: 'acct-2' },
     })
 
-    await new Promise((r) => setTimeout(r, 100))
-    const pending = approvalQueue.listPending()
-    expect(pending.length).toBeGreaterThanOrEqual(1)
+    const pending = await waitForPendingApproval(approvalQueue)
     const ticketId = pending[0]?.id ?? ''
 
     const denyRes = await fetch(`${dashboardUrl}/api/approvals/${ticketId}/deny`, {
@@ -775,9 +783,7 @@ describe('E2E: full MVP integration', () => {
       { sessionId },
     )
 
-    await new Promise((r) => setTimeout(r, 100))
-    const pending = approvalQueue.listPending()
-    expect(pending.length).toBeGreaterThanOrEqual(1)
+    await waitForPendingApproval(approvalQueue)
 
     approvalRouter.close()
 

@@ -50,7 +50,11 @@ Maintainer notes:
   which answered with its own bytes or reset the socket. The fixtures
   now bind `127.0.0.1`, where the kernel skips every held port, and
   the CLI tests' spawned proxies pick ports below every ephemeral
-  range so they cannot land on one a port-0 listener holds.
+  range so they cannot land on one a port-0 listener holds. The stdio
+  crash-restart test waits for the restarted child through a marker
+  file instead of sleeping a fixed 500 ms before it forwards a request,
+  and the full end-to-end test polls the approval queue instead of
+  sleeping a fixed 100 ms before it reads a pending approval.
 - **The release SBOM now inventories the proxy's production
   dependency tree.** Every `sbom.json` attached to a release so far
   listed zero components: the generator ran at the workspace root,

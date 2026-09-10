@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { StdioForwarder } from './stdio-wrapper.js'
 import type { McpRequest } from '../mcp/types.js'
 
@@ -247,7 +250,17 @@ describe('StdioForwarder', () => {
   }, 5000)
 
   it('auto-restarts on crash up to maxRetries', async () => {
-    // Script that crashes on first run, then works on second
+    // The script's marker files, keyed by this worker's pid (the child
+    // sees it as process.ppid). A stale first marker from an earlier run
+    // with the same worker pid would make the script skip the crash, and
+    // the test would pass without exercising a restart.
+    const marker = join(tmpdir(), 'helio-stdio-test-' + String(process.pid))
+    const restarted = marker + '.restarted'
+    rmSync(marker, { force: true })
+    rmSync(restarted, { force: true })
+
+    // Script that crashes on first run, then works on second and says so
+    // through a second marker the test can wait for.
     const crashOnceScript = `
         const fs = require('fs');
         const path = require('path');
@@ -257,6 +270,7 @@ describe('StdioForwarder', () => {
           process.exit(1);
         }
         fs.unlinkSync(marker);
+        fs.writeFileSync(marker + '.restarted', '');
         const readline = require('readline');
         const rl = readline.createInterface({ input: process.stdin });
         rl.on('line', (line) => {
@@ -277,13 +291,24 @@ describe('StdioForwarder', () => {
       maxRetries: 3,
       retryDelayMs: 50,
     })
-    await forwarder.start()
+    try {
+      await forwarder.start()
 
-    // Wait for crash + restart
-    await new Promise((resolve) => setTimeout(resolve, 500))
+      // Wait for the restarted child before forwarding: a request written
+      // to the first child's stdin is orphaned when that child exits.
+      await vi.waitFor(
+        () => {
+          expect(existsSync(restarted)).toBe(true)
+        },
+        { timeout: 8000, interval: 20 },
+      )
 
-    const result = await forwarder.forward(makeRequest(1, 'ping'))
-    expect(result.response.body).toHaveProperty('result', { ok: true })
+      const result = await forwarder.forward(makeRequest(1, 'ping'))
+      expect(result.response.body).toHaveProperty('result', { ok: true })
+    } finally {
+      rmSync(marker, { force: true })
+      rmSync(restarted, { force: true })
+    }
   }, 10000)
 
   it('close rejects pending requests', async () => {
