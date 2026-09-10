@@ -21,7 +21,7 @@ const store = new EvidenceStore({
 
 const sidebandApp = createSidebandApp(store)
 // Start before all tests (eagerly, outside beforeAll to keep it simple)
-const server: ManagedServer = startOnDynamicPort(sidebandApp)
+const server: ManagedServer = await startOnDynamicPort(sidebandApp)
 const baseUrl = `http://127.0.0.1:${String(server.port)}`
 
 afterAll(async () => {
@@ -174,7 +174,7 @@ describe('Sideband API integration', () => {
       allowedEvidenceKeys: ['orders.lookup'],
     })
     const localApp = createSidebandApp(localStore)
-    const localServer = startOnDynamicPort(localApp)
+    const localServer = await startOnDynamicPort(localApp)
     const localBaseUrl = `http://127.0.0.1:${String(localServer.port)}`
 
     try {
@@ -205,7 +205,7 @@ describe('Sideband API integration', () => {
   it('POST /context returns 503 when store is closed', async () => {
     const localStore = new EvidenceStore({ cleanupIntervalMs: 0 })
     const localApp = createSidebandApp(localStore)
-    const localServer = startOnDynamicPort(localApp)
+    const localServer = await startOnDynamicPort(localApp)
     const localBaseUrl = `http://127.0.0.1:${String(localServer.port)}`
 
     try {

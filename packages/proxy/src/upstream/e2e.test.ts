@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import type { AddressInfo } from 'node:net'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
@@ -11,16 +10,18 @@ import type { HelioConfig } from '../config/index.js'
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Wait for a server to be listening and return the assigned port. */
-function getPort(server: ServerType): number {
-  const addr = server.address() as AddressInfo
-  return addr.port
-}
-
-/** Start a Hono app on a dynamic port. Returns the server and port. */
-function startOnDynamicPort(app: Hono): { server: ServerType; port: number } {
-  const server = serve({ fetch: app.fetch, port: 0 })
-  return { server, port: getPort(server) }
+/**
+ * Start a Hono app on a dynamic port, bound to 127.0.0.1 so the kernel
+ * cannot hand it a port another process holds (issue #271). The port is
+ * known once the server is listening, so the helper is asynchronous.
+ */
+function startOnDynamicPort(app: Hono): Promise<{ server: ServerType; port: number }> {
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
+      resolve({ server, port: info.port })
+    })
+    server.once('error', reject)
+  })
 }
 
 /** Close a server and return a promise. */
@@ -145,14 +146,14 @@ describe('upstream forwarder e2e', () => {
 
   it('forwards tools/list through the proxy and returns the upstream response', async () => {
     // Start mock upstream
-    const upstream = startOnDynamicPort(createMockUpstream())
+    const upstream = await startOnDynamicPort(createMockUpstream())
     servers.push(upstream.server)
 
     // Start proxy pointing at upstream
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
     const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
-    const proxy = startOnDynamicPort(proxyApp)
+    const proxy = await startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
 
     // Send tools/list through the proxy
@@ -170,13 +171,13 @@ describe('upstream forwarder e2e', () => {
   })
 
   it('forwards tools/call through the proxy', async () => {
-    const upstream = startOnDynamicPort(createMockUpstream())
+    const upstream = await startOnDynamicPort(createMockUpstream())
     servers.push(upstream.server)
 
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
     const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
-    const proxy = startOnDynamicPort(proxyApp)
+    const proxy = await startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
 
     const res = await fetch(`http://127.0.0.1:${String(proxy.port)}/mcp`, {
@@ -196,13 +197,13 @@ describe('upstream forwarder e2e', () => {
   })
 
   it('passes Mcp-Session-Id from upstream back to the client', async () => {
-    const upstream = startOnDynamicPort(createMockUpstream())
+    const upstream = await startOnDynamicPort(createMockUpstream())
     servers.push(upstream.server)
 
     const upstreamUrl = `http://127.0.0.1:${String(upstream.port)}/mcp`
     const forwarder = new StreamableHttpForwarder({ url: upstreamUrl })
     const proxyApp = createApp(makeConfig(upstreamUrl), forwarder)
-    const proxy = startOnDynamicPort(proxyApp)
+    const proxy = await startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
 
     const res = await fetch(`http://127.0.0.1:${String(proxy.port)}/mcp`, {
@@ -219,7 +220,7 @@ describe('upstream forwarder e2e', () => {
     // Point at a port where nothing is listening
     const forwarder = new StreamableHttpForwarder({ url: 'http://127.0.0.1:19999/mcp' })
     const proxyApp = createApp(makeConfig('http://127.0.0.1:19999/mcp'), forwarder)
-    const proxy = startOnDynamicPort(proxyApp)
+    const proxy = await startOnDynamicPort(proxyApp)
     servers.push(proxy.server)
 
     const res = await fetch(`http://127.0.0.1:${String(proxy.port)}/mcp`, {

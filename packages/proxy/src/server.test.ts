@@ -397,7 +397,7 @@ describe('startSidebandServer', () => {
       return new Response('ok')
     })
 
-    const port = 45_000 + Math.floor(Math.random() * 10_000)
+    const port = 20_000 + Math.floor(Math.random() * 10_000)
     const handle = startSidebandServer(app, port, '127.0.0.1')
     const holdRequest = fetch(`http://127.0.0.1:${String(port)}/hold`)
     await new Promise<void>((resolve) => {

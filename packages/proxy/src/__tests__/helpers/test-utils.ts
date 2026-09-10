@@ -1,4 +1,3 @@
-import type { AddressInfo } from 'node:net'
 import type { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
@@ -11,27 +10,33 @@ export interface ManagedServer {
   close: () => Promise<void>
 }
 
-/** Extract the assigned port from a running server. */
-export function getPort(server: ServerType): number {
-  const addr = server.address() as AddressInfo
-  return addr.port
-}
-
-/** Start a Hono app on a dynamic port (port 0). */
-export function startOnDynamicPort(app: Hono): ManagedServer {
-  const server = serve({ fetch: app.fetch, port: 0 })
-  const port = getPort(server)
-  return {
-    server,
-    port,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((err) => {
-          if (err) reject(err)
-          else resolve()
-        })
-      }),
-  }
+/**
+ * Start a Hono app on a dynamic port (port 0), bound to 127.0.0.1 so the
+ * kernel never hands it a port another process already holds on that
+ * address (issue #271: an IPv6-wildcard bind(0) is handed such ports on
+ * macOS, and the other process then answers the fixture's traffic).
+ * Binding a named host resolves asynchronously, so the port is known
+ * only once the server is listening.
+ */
+export function startOnDynamicPort(app: Hono): Promise<ManagedServer> {
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
+      resolve({
+        server,
+        port: info.port,
+        close: () =>
+          new Promise<void>((done, fail) => {
+            server.close((err) => {
+              if (err) fail(err)
+              else done()
+            })
+          }),
+      })
+    })
+    // Port 0 on 127.0.0.1 cannot collide, but a listen failure must
+    // reject rather than hang the caller to its test timeout.
+    server.once('error', reject)
+  })
 }
 
 /** Promisified server.close(). */

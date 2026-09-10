@@ -137,14 +137,23 @@ async function startAndCaptureStderr(
 }
 
 /**
- * Write a minimal start-ready config at a randomized high port and return
- * the tempdir + config path. The caller is responsible for rmSync cleanup.
+ * A random port for a spawned `helio start`, below every OS's ephemeral
+ * range so it cannot land on a port a port-0 listener already holds
+ * (issue #271). A foreign fixed-port service there is still possible
+ * and fails loudly with EADDRINUSE in the child's stderr.
+ */
+function randomChildPort(): number {
+  return 20_000 + Math.floor(Math.random() * 10_000)
+}
+
+/**
+ * Write a minimal start-ready config at a random port and return the
+ * tempdir + config path. The caller is responsible for rmSync cleanup.
  */
 function writeStartConfig(): { dir: string; configPath: string } {
   const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
   const configPath = join(dir, 'helio.yaml')
-  // High-numbered random ports avoid collisions across parallel test workers.
-  const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+  const listenPort = randomChildPort()
   const dashboardPort = listenPort + 1
   const auditPath = join(dir, 'audit.db')
   writeFileSync(
@@ -177,7 +186,7 @@ function writeStdioStartConfig(requestTimeout: string): {
 } {
   const dir = mkdtempSync(join(tmpdir(), 'helio-cli-stdio-start-'))
   const configPath = join(dir, 'helio.yaml')
-  const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+  const listenPort = randomChildPort()
   const auditPath = join(dir, 'audit.db')
   writeFileSync(
     configPath,
@@ -225,7 +234,7 @@ const STDIO_MCP_FIXTURE = join(import.meta.dirname, '__tests__', 'helpers', 'std
 function writeTwoUpstreamConfig(): { dir: string; configPath: string; listenPort: number } {
   const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-'))
   const configPath = join(dir, 'helio.yaml')
-  const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+  const listenPort = randomChildPort()
   writeFileSync(
     configPath,
     `
@@ -275,6 +284,23 @@ async function waitForProxyHealth(baseUrl: string, timeoutMs: number): Promise<v
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   throw new Error(`Timed out waiting for proxy health endpoint at ${baseUrl}/healthz`)
+}
+
+/** Wait for the proxy's health endpoint, or fail at once if the child exits first. */
+async function waitForProxyHealthOrExit(
+  child: ReturnType<typeof spawn>,
+  baseUrl: string,
+  timeoutMs: number,
+  stderr: () => string,
+): Promise<void> {
+  await Promise.race([
+    waitForProxyHealth(baseUrl, timeoutMs),
+    new Promise<never>((_, reject) => {
+      child.once('close', (code) => {
+        reject(new Error(`helio start exited ${String(code)} before healthy. stderr:\n${stderr()}`))
+      })
+    }),
+  ])
 }
 
 /**
@@ -415,7 +441,7 @@ describe('CLI', () => {
         rmSync(dir1, { recursive: true, force: true })
         rmSync(dir2, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('prints the generated secret to stderr', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
@@ -578,7 +604,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('--sandbox rejects an explicit --output', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
@@ -603,7 +629,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('--sandbox writes a config that passes validate', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
@@ -620,7 +646,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
   })
 
   // --- helio validate ---
@@ -1103,7 +1129,7 @@ dashboard:
       const first = await runCli(['secret'])
       const second = await runCli(['secret'])
       expect(first.stdout).not.toBe(second.stdout)
-    })
+    }, 15_000)
   })
 
   describe('config hash', () => {
@@ -1122,7 +1148,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('exits 1 with the read error on stderr and nothing on stdout for a missing file', async () => {
       const { code, stdout, stderr } = await runCli([
@@ -1165,7 +1191,7 @@ dashboard:
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('uncommenting only the budgets stub yields a config with one budget', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
@@ -1193,7 +1219,7 @@ dashboard:
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   // --- helio start ---
 
@@ -1399,7 +1425,7 @@ dashboard:
       const modern = await startModernOnlyHttpMcpServer()
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-mixed-era-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       writeFileSync(
         configPath,
         `
@@ -1572,7 +1598,7 @@ audit:
       const closedPort = await getClosedPort()
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-fail-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       writeFileSync(
         configPath,
         `
@@ -1612,7 +1638,7 @@ audit:
       const closedPort = await getClosedPort()
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-multi-many-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const entries = Array.from(
         { length: 17 },
         (_, i) =>
@@ -1643,7 +1669,7 @@ audit:
     it('warns before spawning when a stdio upstream sets a url (issue #324)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-stdio-url-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       // An absolute path under the tmpdir: a bare name would resolve through
       // PATH, and a found-but-exiting binary hits the stdio wrapper's retry
       // loop instead of failing fast with ENOENT.
@@ -1715,7 +1741,7 @@ audit:
       })
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sse-conn-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       writeFileSync(
         configPath,
         `
@@ -2103,7 +2129,7 @@ audit:
     it('shuts down cleanly on SIGINT with an active dashboard SSE stream', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-shutdown-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const dashboardPort = listenPort + 1
       const apiSecret = `test-secret-${String(listenPort)}`
       const auditPath = join(dir, 'audit.db')
@@ -2165,7 +2191,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         // The signal also times the body read below, so it must outlast the
         // 8s heartbeat bound or the race rejects with a bare AbortError.
@@ -2239,7 +2265,7 @@ audit:
 
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-prime-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const auditPath = join(dir, 'audit.db')
       writeFileSync(
         configPath,
@@ -2321,7 +2347,7 @@ audit:
 
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-prime-call-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const auditPath = join(dir, 'audit.db')
       writeFileSync(
         configPath,
@@ -2379,7 +2405,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         const res = await fetch(`${baseUrl}/mcp`, {
           method: 'POST',
@@ -2432,7 +2458,7 @@ audit:
 
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-approval-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const dashboardPort = listenPort + 1
       const auditPath = join(dir, 'audit.db')
       const secret = `test-secret-${String(listenPort)}`
@@ -2496,7 +2522,7 @@ audit:
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
         const dashUrl = `http://127.0.0.1:${String(dashboardPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         // The require_approval rule holds the call open, so do NOT await yet.
         const callPromise = fetch(`${baseUrl}/mcp`, {
@@ -2560,7 +2586,7 @@ audit:
     it('generates a fresh SDK sideband bearer token when sdk.enabled is true', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const dashboardPort = listenPort + 1
       const sdkPort = listenPort + 2
       const auditPath = join(dir, 'audit.db')
@@ -2607,7 +2633,7 @@ audit:
     it('respects a pre-set HELIO_SDK_TOKEN environment variable', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const dashboardPort = listenPort + 1
       const sdkPort = listenPort + 2
       const auditPath = join(dir, 'audit.db')
@@ -2667,7 +2693,7 @@ audit:
     it('disables the config watcher when policies.hot_reload is false', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-start-'))
       const configPath = join(dir, 'helio.yaml')
-      const listenPort = 40_000 + Math.floor(Math.random() * 20_000)
+      const listenPort = randomChildPort()
       const dashboardPort = listenPort + 1
       const auditPath = join(dir, 'audit.db')
       writeFileSync(
@@ -2738,7 +2764,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         const beginMs = Date.now()
         const res = await fetch(`${baseUrl}/mcp`, {

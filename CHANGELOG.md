@@ -43,6 +43,26 @@ Maintainer notes:
 
 ### Fixed
 
+- **The test suite no longer fails on ports other processes hold.**
+  Every in-process test fixture bound the IPv6 wildcard on port 0, and
+  macOS hands such a bind a port another process already holds on
+  `127.0.0.1`; connections to the fixture then reached that process,
+  which answered with its own bytes or reset the socket. The fixtures
+  now bind `127.0.0.1`, where the kernel skips every held port, and
+  the CLI tests' spawned proxies pick ports below every ephemeral
+  range so they cannot land on one a port-0 listener holds. The stdio
+  crash-restart test waits for the restarted child through a marker
+  file instead of sleeping a fixed 500 ms before it forwards a request,
+  and the full end-to-end test polls the approval queue instead of
+  sleeping a fixed 100 ms before it reads a pending approval.
+  The governance integration test no longer asserts end-to-end latency
+  percentiles that measured the box rather than the proxy (the
+  benchmark script's governed-overhead gate is the latency check); it
+  still requires its thousand governed calls to complete and be
+  audited. The audit writer test pins that `push` never writes
+  synchronously instead of timing a hundred calls, and the CLI tests
+  that poll a spawned proxy's health endpoint fail at once with the
+  child's stderr when it exits first.
 - **The release SBOM now inventories the proxy's production
   dependency tree.** Every `sbom.json` attached to a release so far
   listed zero components: the generator ran at the workspace root,

@@ -37,11 +37,11 @@ interface LiveDashboard {
   closeAll: () => Promise<void>
 }
 
-function makeLiveDashboard(options: {
+async function makeLiveDashboard(options: {
   sseHeartbeatMs: number
   maxSseConnections?: number
   sweepIntervalMs?: number
-}): LiveDashboard {
+}): Promise<LiveDashboard> {
   const auditStore = new AuditStore({
     path: ':memory:',
     retention: '90d',
@@ -72,7 +72,7 @@ function makeLiveDashboard(options: {
     },
     options,
   )
-  const managed = startOnDynamicPort(lifecycle.app)
+  const managed = await startOnDynamicPort(lifecycle.app)
   const closeAll = async (): Promise<void> => {
     lifecycle.close()
     await managed.close()
@@ -190,7 +190,7 @@ async function pollUntil(
 
 describe('GET /api/events — sweeper sever over the real transport (issue #327)', () => {
   it('severs a dead-but-unaborted connection at sweep: server-side socket destroyed', async () => {
-    const fx = makeLiveDashboard({
+    const fx = await makeLiveDashboard({
       sseHeartbeatMs: 1000,
       maxSseConnections: 1,
       sweepIntervalMs: 1000,
@@ -263,7 +263,7 @@ describe('GET /api/events — sweeper sever over the real transport (issue #327)
     // keep its graceful-end contract — the in-process drain test cannot
     // see a sever (no server socket there), so the boundary is pinned
     // here, on the wire.
-    const fx = makeLiveDashboard({ sseHeartbeatMs: 5000 })
+    const fx = await makeLiveDashboard({ sseHeartbeatMs: 5000 })
     const client = openRawSseClient(fx.port)
     try {
       // A healthy READING client (never paused) is admitted, then the

@@ -240,17 +240,18 @@ describe('AuditWriter', () => {
   // -----------------------------------------------------------------------
 
   describe('non-blocking', () => {
-    it('push returns synchronously without waiting for DB', () => {
+    it('push returns synchronously without waiting for DB', async () => {
       writer = new AuditWriter({ store, flushIntervalMs: 0 })
 
-      const start = performance.now()
       for (let i = 0; i < 100; i++) {
         writer.push(makeRecord())
       }
-      const elapsed = performance.now() - start
 
-      // 100 pushes (with 2 threshold flushes at 50 and 100) should complete very fast
-      expect(elapsed).toBeLessThan(50)
+      // The threshold at push 50 scheduled one setTimeout(0) flush (later
+      // pushes coalesce into it); nothing ran inside push().
+      expect(store.count()).toBe(0)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(store.count()).toBe(100)
     })
   })
 

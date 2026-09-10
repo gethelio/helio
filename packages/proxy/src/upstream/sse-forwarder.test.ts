@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import type { AddressInfo } from 'node:net'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
@@ -25,8 +24,10 @@ interface MockSseServer {
  * Create a mock MCP server that speaks SSE transport.
  * GET / returns SSE stream with endpoint event.
  * POST /messages accepts JSON-RPC and pushes response on the SSE stream.
+ * Bound to 127.0.0.1 so the kernel cannot hand it a port another process
+ * holds (issue #271); the port is known once the server is listening.
  */
-function createMockSseServer(postStatus: number = 202): MockSseServer {
+function createMockSseServer(postStatus: number = 202): Promise<MockSseServer> {
   const receivedBodies: unknown[] = []
   const receivedHeaders: Record<string, string>[] = []
   const receivedGetHeaders: Record<string, string>[] = []
@@ -75,10 +76,12 @@ function createMockSseServer(postStatus: number = 202): MockSseServer {
     return c.body(null, postStatus as 202 | 500)
   })
 
-  const server = serve({ fetch: app.fetch, port: 0 })
-  const port = (server.address() as AddressInfo).port
-
-  return { server, port, receivedBodies, receivedHeaders, receivedGetHeaders }
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, port: 0, hostname: '127.0.0.1' }, (info) => {
+      resolve({ server, port: info.port, receivedBodies, receivedHeaders, receivedGetHeaders })
+    })
+    server.once('error', reject)
+  })
 }
 
 function closeServer(server: ServerType): Promise<void> {
@@ -120,7 +123,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('connects and learns POST URL from endpoint event', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -133,7 +136,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('forwards a request and receives response via SSE', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -149,7 +152,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('measures durationMs', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -162,7 +165,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('strips session fields and headers from the POST body', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -186,7 +189,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('sends only transportSessionId upstream as Mcp-Session-Id, never the resolved session', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -210,7 +213,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('strips caller-supplied mcp-method and mcp-name from the request POST', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -230,7 +233,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('strips caller-supplied mcp-method and mcp-name from the notification POST', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -247,7 +250,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('never sends a caller-supplied mcp-session-id header', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -264,7 +267,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('sends transportSessionId even when a caller mcp-session-id header is present', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -282,7 +285,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('re-stamps application/json over a caller-supplied content-type on the request POST', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -299,7 +302,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('re-stamps application/json over a caller-supplied content-type on the notification POST', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -315,7 +318,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('re-stamps application/json over a constructor static-header content-type', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { 'content-type': 'text/plain' },
@@ -334,7 +337,7 @@ describe('SseUpstreamForwarder', () => {
   it('re-stamps application/json whatever the caller content-type key casing', async () => {
     // Mirrors the mixed-case pin above: the re-stamp runs after the merge
     // lower-cases names, so a cased key cannot dodge it.
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -351,7 +354,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('drops a caller-supplied content-length so the wire carries the computed truthful length', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     // The 1500ms pin is load-bearing: pre-fix, undici honors the caller's
     // content-length promise and the POST never transmits, so the run must
     // die as this forwarder's own named timeout rejection — not Vitest's
@@ -379,7 +382,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('re-stamps text/event-stream on the connect GET over a static accept without dropping other statics', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { accept: 'application/json', authorization: 'Bearer s' },
@@ -395,7 +398,7 @@ describe('SseUpstreamForwarder', () => {
     // An Accept-cased static must not survive alongside the seed either:
     // Node fetch combines case-distinct keys into one comma-joined wire
     // value, so only a case-collapsing merge plus re-stamp owns the header.
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { Accept: 'application/json' },
@@ -407,7 +410,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('drops a caller-supplied accept from the request POST, leaving the runtime default', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -426,7 +429,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('drops a constructor static accept from the request POST, asserting none at the fetch layer', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { accept: 'application/xml' },
@@ -460,7 +463,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('drops a constructor static accept from the notification POST', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { accept: 'application/xml' },
@@ -476,7 +479,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('passes legitimate caller and static headers through untouched', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
       headers: { 'x-static': 'from-config' },
@@ -497,7 +500,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('passes a caller-supplied mcp-protocol-version through', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -527,7 +530,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('close can be called cleanly after connect', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -541,7 +544,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('handles relative endpoint URLs', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     // The mock server sends `data: /messages` (relative URL)
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
@@ -554,7 +557,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('handles concurrent requests', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -573,7 +576,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('treats id: null as a request id (not a notification)', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -592,7 +595,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('rejects a request when upstream POST fails and cleans pending state', async () => {
-    mock = createMockSseServer(500)
+    mock = await createMockSseServer(500)
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -604,7 +607,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('translates request POST fetch failures into actionable unreachable guidance', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -631,7 +634,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('translates notification POST fetch failures into actionable unreachable guidance', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })
@@ -659,7 +662,7 @@ describe('SseUpstreamForwarder', () => {
   })
 
   it('rejects immediately when downstream signal is already aborted', async () => {
-    mock = createMockSseServer()
+    mock = await createMockSseServer()
     forwarder = new SseUpstreamForwarder({
       url: `http://127.0.0.1:${String(mock.port)}/`,
     })

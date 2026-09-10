@@ -31,7 +31,7 @@ describe('Streamable HTTP session-enforcing upstream', () => {
       built.forwarder,
       compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
     )
-    proxy = startOnDynamicPort(createApp(config, governedForwarder))
+    proxy = await startOnDynamicPort(createApp(config, governedForwarder))
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 

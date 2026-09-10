@@ -83,7 +83,7 @@ describe('inbound header/body agreement through production wiring (issue #226)',
     )
     // The cli.ts recorder composition, verbatim: callback → builder →
     // pushImmediate.
-    proxy = startOnDynamicPort(
+    proxy = await startOnDynamicPort(
       createApp(config, governedForwarder, {
         onHeaderMismatch: (rejection) => {
           auditWriter.pushImmediate(buildHeaderMismatchAuditRecord(rejection, config.environment))
@@ -496,7 +496,7 @@ describe('chained proxies keep the era cache stable (issue #226, R1 F1 regressio
       compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
       {},
     )
-    proxyB = startOnDynamicPort(createApp(configB, governedB))
+    proxyB = await startOnDynamicPort(createApp(configB, governedB))
 
     const configA = makeConfig({
       upstream: {
@@ -512,7 +512,7 @@ describe('chained proxies keep the era cache stable (issue #226, R1 F1 regressio
       compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy,
       {},
     )
-    proxyA = startOnDynamicPort(createApp(configA, governedA))
+    proxyA = await startOnDynamicPort(createApp(configA, governedA))
     proxyAUrl = `http://127.0.0.1:${String(proxyA.port)}/mcp`
   })
 

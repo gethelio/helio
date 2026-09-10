@@ -88,7 +88,7 @@ describe('Stdio integration', () => {
     })
 
     const app = createApp(config, forwarder)
-    proxy = startOnDynamicPort(app)
+    proxy = await startOnDynamicPort(app)
     proxyUrl = `http://127.0.0.1:${String(proxy.port)}/mcp`
   })
 
