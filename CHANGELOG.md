@@ -55,6 +55,14 @@ Maintainer notes:
   file instead of sleeping a fixed 500 ms before it forwards a request,
   and the full end-to-end test polls the approval queue instead of
   sleeping a fixed 100 ms before it reads a pending approval.
+  The governance integration test no longer asserts end-to-end latency
+  percentiles that measured the box rather than the proxy (the
+  benchmark script's governed-overhead gate is the latency check); it
+  still requires its thousand governed calls to complete and be
+  audited. The audit writer test pins that `push` never writes
+  synchronously instead of timing a hundred calls, and the CLI tests
+  that poll a spawned proxy's health endpoint fail at once with the
+  child's stderr when it exits first.
 - **The release SBOM now inventories the proxy's production
   dependency tree.** Every `sbom.json` attached to a release so far
   listed zero components: the generator ran at the workspace root,

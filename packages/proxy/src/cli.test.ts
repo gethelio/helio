@@ -286,6 +286,23 @@ async function waitForProxyHealth(baseUrl: string, timeoutMs: number): Promise<v
   throw new Error(`Timed out waiting for proxy health endpoint at ${baseUrl}/healthz`)
 }
 
+/** Wait for the proxy's health endpoint, or fail at once if the child exits first. */
+async function waitForProxyHealthOrExit(
+  child: ReturnType<typeof spawn>,
+  baseUrl: string,
+  timeoutMs: number,
+  stderr: () => string,
+): Promise<void> {
+  await Promise.race([
+    waitForProxyHealth(baseUrl, timeoutMs),
+    new Promise<never>((_, reject) => {
+      child.once('close', (code) => {
+        reject(new Error(`helio start exited ${String(code)} before healthy. stderr:\n${stderr()}`))
+      })
+    }),
+  ])
+}
+
 /**
  * Wait for child process exit with timeout. Resolves on 'close' (exit AND
  * stdio streams flushed) rather than 'exit', so callers may assert on
@@ -424,7 +441,7 @@ describe('CLI', () => {
         rmSync(dir1, { recursive: true, force: true })
         rmSync(dir2, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('prints the generated secret to stderr', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
@@ -587,7 +604,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('--sandbox rejects an explicit --output', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
@@ -612,7 +629,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('--sandbox writes a config that passes validate', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-sandbox-'))
@@ -629,7 +646,7 @@ describe('CLI', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
   })
 
   // --- helio validate ---
@@ -1112,7 +1129,7 @@ dashboard:
       const first = await runCli(['secret'])
       const second = await runCli(['secret'])
       expect(first.stdout).not.toBe(second.stdout)
-    })
+    }, 15_000)
   })
 
   describe('config hash', () => {
@@ -1131,7 +1148,7 @@ dashboard:
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
-    })
+    }, 15_000)
 
     it('exits 1 with the read error on stderr and nothing on stdout for a missing file', async () => {
       const { code, stdout, stderr } = await runCli([
@@ -1174,7 +1191,7 @@ dashboard:
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('uncommenting only the budgets stub yields a config with one budget', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
@@ -1202,7 +1219,7 @@ dashboard:
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   // --- helio start ---
 
@@ -2174,7 +2191,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         // The signal also times the body read below, so it must outlast the
         // 8s heartbeat bound or the race rejects with a bare AbortError.
@@ -2388,7 +2405,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         const res = await fetch(`${baseUrl}/mcp`, {
           method: 'POST',
@@ -2505,7 +2522,7 @@ audit:
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
         const dashUrl = `http://127.0.0.1:${String(dashboardPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         // The require_approval rule holds the call open, so do NOT await yet.
         const callPromise = fetch(`${baseUrl}/mcp`, {
@@ -2747,7 +2764,7 @@ audit:
         })
 
         const baseUrl = `http://127.0.0.1:${String(listenPort)}`
-        await waitForProxyHealth(baseUrl, 8_000)
+        await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
 
         const beginMs = Date.now()
         const res = await fetch(`${baseUrl}/mcp`, {

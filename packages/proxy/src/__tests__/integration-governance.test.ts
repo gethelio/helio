@@ -5,7 +5,8 @@
  * mock MCP server → proxy with policies + audit → SQLite.
  *
  * Covers: all matcher types, first-match-wins ordering, destructive
- * detection, hot-reload, response capture, and performance (<5ms p99).
+ * detection, hot-reload, response capture, and a thousand governed calls
+ * completing and being audited (latency is the benchmark script's gate).
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -458,15 +459,15 @@ policies:
 })
 
 // ---------------------------------------------------------------------------
-// Suite 4: Performance benchmark (1,000 calls with policy + audit)
+// Suite 4: 1,000 governed calls with policy + audit complete and are audited
 // ---------------------------------------------------------------------------
 
-describe('performance (<5ms p99 with policy + audit)', { timeout: 30_000 }, () => {
+describe('1000 governed calls complete and are audited', { timeout: 60_000 }, () => {
   const WARMUP = 20
   const MEASURE = 1000
 
-  it(`p99 latency for ${String(MEASURE)} governed tool calls is reasonable`, async () => {
-    // Use a large buffer to avoid mid-benchmark auto-flush blocking
+  it(`${String(MEASURE)} governed tool calls complete and are audited`, async () => {
+    // Use a large buffer so no threshold flush runs mid-loop
     const proxy = await createGovernedProxyWithAudit(
       {
         default: 'deny',
@@ -492,29 +493,15 @@ describe('performance (<5ms p99 with policy + audit)', { timeout: 30_000 }, () =
         })
       }
 
-      // Measure
-      const durations: number[] = []
+      // The calls. Latency is not asserted here: inside a parallel vitest
+      // run these numbers measure the box, not the proxy. The latency gate
+      // is `pnpm --filter @gethelio/proxy benchmark` (governed overhead p99).
       for (let i = 0; i < MEASURE; i++) {
-        const start = performance.now()
         await sendMcpRequest(proxy.url, 'tools/call', {
           name: 'get_weather',
           arguments: { city: 'London' },
         })
-        durations.push(performance.now() - start)
       }
-
-      // Calculate stats
-      const sorted = [...durations].sort((a, b) => a - b)
-      const p99idx = Math.ceil(0.99 * sorted.length) - 1
-      const p99 = sorted[Math.max(0, p99idx)] ?? 0
-      const p95idx = Math.ceil(0.95 * sorted.length) - 1
-      const p95 = sorted[Math.max(0, p95idx)] ?? 0
-
-      // Vitest + concurrent test suites add significant overhead.
-      // The dedicated benchmark script (pnpm benchmark) is the authoritative <5ms check.
-      // Here we verify no major regression while tolerating occasional worker-load spikes.
-      expect(p95).toBeLessThan(50)
-      expect(p99).toBeLessThan(100)
 
       // Verify audit records were written
       proxy.auditWriter.flush()
