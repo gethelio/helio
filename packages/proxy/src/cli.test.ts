@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, writeFileSync, rmSync, mkdtempSync, readFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -1967,6 +1975,115 @@ audit:
         rmSync(dir, { recursive: true, force: true })
       }
     }, 40_000)
+
+    // uid 0 reads a mode-0000 file, so the loss cannot be provoked as root.
+    it.skipIf(process.getuid?.() === 0)(
+      're-arms the config watch and reloads once a replaced file can be read again (issue #352; skipped as root, which reads a mode-0000 file)',
+      async () => {
+        const { dir, configPath } = writeStartConfig()
+        const auditPath = join(dir, 'audit.db')
+        const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+        })
+        let stderr = ''
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf-8')
+        })
+        const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<void> => {
+          const started = Date.now()
+          while (Date.now() - started < timeoutMs) {
+            if (predicate()) return
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          }
+          throw new Error(`Timed out. stderr:\n${stderr}`)
+        }
+        const hashOf = (text: string): string =>
+          createHash('sha256').update(text, 'utf-8').digest('hex')
+        type ReloadRow = {
+          outcome: string | null
+          block_reason: string | null
+          config_sha256: string | null
+        }
+        const reloadRows = (): ReloadRow[] => {
+          if (!existsSync(auditPath)) return []
+          const db = new Database(auditPath)
+          try {
+            return db
+              .prepare(
+                `SELECT json_extract(evidence_chain, '$.policy_reload.outcome') AS outcome, block_reason,
+                        config_sha256
+                 FROM audit_records WHERE record_kind = 'policy_reload' ORDER BY created_at, rowid`,
+              )
+              .all() as ReloadRow[]
+          } finally {
+            db.close()
+          }
+        }
+        const watchingLine = `Watching ${configPath} for policy changes`
+        const watchingLines = (): number => stderr.split(watchingLine).length - 1
+        try {
+          await waitFor(() => watchingLines() >= 1, 8_000)
+          await new Promise((resolve) => setTimeout(resolve, 100)) // WATCH_ARM_GRACE_MS
+          const original = readFileSync(configPath, 'utf-8')
+
+          // 1. The file is replaced by a new inode this process cannot read:
+          //    the watch is lost, the loss line says it is retrying, one row.
+          const replacedText = `${original}policies:\n  default: deny\n`
+          writeFileSync(`${configPath}.tmp`, replacedText)
+          chmodSync(`${configPath}.tmp`, 0o000)
+          renameSync(`${configPath}.tmp`, configPath)
+          await waitFor(
+            () =>
+              stderr.includes(
+                'Config watch failed (keeping current configuration; retrying every 1s until ' +
+                  'the file can be read again): EACCES',
+              ),
+            8_000,
+          )
+          await waitFor(() => reloadRows().length >= 1, 5_000)
+          expect(reloadRows()).toEqual([
+            {
+              outcome: 'watch_failed',
+              block_reason: 'watch_failed',
+              config_sha256: hashOf(original),
+            },
+          ])
+          expect(watchingLines()).toBe(1)
+
+          // 2. The repair: the watch re-arms, the Watching line prints again,
+          //    and the replaced file reloads without an edit or a restart.
+          chmodSync(configPath, 0o644)
+          await waitFor(() => watchingLines() >= 2, 8_000)
+          await waitFor(() => stderr.includes('Policy reloaded: 0 rules (default: deny)'), 8_000)
+          await waitFor(() => reloadRows().length >= 2, 5_000)
+          expect(reloadRows()).toEqual([
+            {
+              outcome: 'watch_failed',
+              block_reason: 'watch_failed',
+              config_sha256: hashOf(original),
+            },
+            { outcome: 'applied', block_reason: null, config_sha256: hashOf(replacedText) },
+          ])
+
+          // 3. A later in-place edit reloads through the fresh watch.
+          await new Promise((resolve) => setTimeout(resolve, 100)) // WATCH_ARM_GRACE_MS
+          const editedText = `${replacedText}# edited in place\n`
+          writeFileSync(configPath, editedText)
+          await waitFor(() => reloadRows().length >= 3, 8_000)
+          expect(reloadRows()[2]).toEqual({
+            outcome: 'applied',
+            block_reason: null,
+            config_sha256: hashOf(editedText),
+          })
+          expect(reloadRows()).toHaveLength(3)
+        } finally {
+          child.kill('SIGTERM')
+          await waitForChildExit(child, 5_000).catch(() => undefined)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      20_000,
+    )
 
     it('refuses to start when HELIO_CONFIG_SHA256 does not match the file, naming both hashes (issue #341)', async () => {
       const { dir, configPath } = writeStartConfig()

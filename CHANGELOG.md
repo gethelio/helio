@@ -43,6 +43,18 @@ Maintainer notes:
 
 ### Fixed
 
+- **A lost config watch now re-arms and reloads once the file can be
+  read again.** When the config file was replaced by one the proxy
+  user cannot read, chokidar's re-watch of the new inode failed, the
+  loss was recorded as `watch_failed` once, and the watch was never
+  re-armed, so a repaired file was not observed until a restart. The
+  proxy now keeps the running policy, logs
+  `Config watch failed (keeping current configuration; retrying every 1s until the file can be read again)`,
+  checks once a second whether it can read the file, arms a fresh
+  watch, prints the `Watching` line again, and reloads the file at
+  once: a replaced file applies, or is refused as `rejected_pinned`
+  under `HELIO_CONFIG_SHA256`. A replacement the proxy can read keeps
+  working as before.
 - **Sideband audit records no longer alias the caller's request
   objects.** A library embedder of `GovernanceService` could mutate the
   `arguments`, `metadata`, `result`, or install `package` objects it had

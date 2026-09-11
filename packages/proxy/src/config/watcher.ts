@@ -1,3 +1,4 @@
+import { access, constants } from 'node:fs/promises'
 import { watch } from 'chokidar'
 import type { FSWatcher } from 'chokidar'
 import { readConfigSource, parseConfigSource } from './loader.js'
@@ -59,6 +60,9 @@ export class PolicyReloadRejectedError extends Error {
   }
 }
 
+/** How often, while the watch is lost, the watcher checks whether it can read the file again (issue #352). */
+export const DEFAULT_REARM_INTERVAL_MS = 1000
+
 /** A config and the hash of the file bytes it was parsed from. */
 export interface ConfigBaseline {
   readonly config: HelioConfig
@@ -83,6 +87,14 @@ export interface ConfigWatcherOptions {
   readonly debounceMs?: number
   /** When set, a reload whose file bytes hash differently is refused before parsing (issue #341). */
   readonly pinnedSha256?: string
+  /** While the watch is lost, how often to check whether the file can be read again; default DEFAULT_REARM_INTERVAL_MS. */
+  readonly rearmIntervalMs?: number
+  /**
+   * Test seam only: how the chokidar watcher is created. Production never
+   * sets it; the default is chokidar's `watch`. The suite uses it to make a
+   * fresh arm fail after the readability check passed (issue #352).
+   */
+  readonly watchFactory?: typeof watch
 }
 
 type BeforeFacts = Pick<
@@ -113,7 +125,9 @@ function rulesRemovedBetween(previous: HelioConfig, next: HelioConfig): string[]
  * Watches a helio.yaml config file for changes and recompiles the policy
  * rule set when the file is modified. On successful reload, calls
  * `onReload` with the new compiled policy and budgets. On failure, calls
- * `onError` and retains the current policy.
+ * `onError` and retains the current policy. When the watch itself is lost,
+ * it records the loss once, keeps the current policy, and retries until the
+ * file can be read again, then arms a fresh watch and reloads the file.
  */
 export class ConfigWatcher {
   private readonly configPath: string
@@ -125,13 +139,24 @@ export class ConfigWatcher {
   private readonly debounceMs: number
   /** When set, a reload whose bytes hash differently is refused before parsing (issue #341). */
   private readonly pinnedSha256: string | undefined
+  private readonly rearmIntervalMs: number
+  private readonly watchFactory: typeof watch
 
   /** The last configuration that applied: the "before" side of the next attempt. */
   private lastGood: ConfigBaseline
   private watcher: FSWatcher | null = null
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
-  /** Set once the watch itself has failed; later change events and in-flight reloads are ignored (issue #351). */
+  private rearmTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Set while the watch is lost: later change events and in-flight reloads
+   * from the dying watch are ignored (issue #351). Cleared right before a
+   * fresh watch is armed, so a fresh arm that fails is a new loss (issue #352).
+   */
   private watchFailed = false
+  /** Bumped by every arm and by close(); a listener whose generation is stale returns at once. */
+  private generation = 0
+  /** Set by close() and never cleared: no retry runs after it, and start() is a no-op. */
+  private closed = false
 
   constructor(options: ConfigWatcherOptions) {
     this.configPath = options.configPath
@@ -143,38 +168,80 @@ export class ConfigWatcher {
     this.env = options.env
     this.debounceMs = options.debounceMs ?? 200
     this.pinnedSha256 = options.pinnedSha256
+    this.rearmIntervalMs = options.rearmIntervalMs ?? DEFAULT_REARM_INTERVAL_MS
+    this.watchFactory = options.watchFactory ?? watch
   }
 
-  /** Start watching the config file for changes. */
+  /** Start watching the config file for changes. A no-op after close(). */
   start(): void {
-    if (this.watcher) return // Already watching
+    if (this.closed || this.watcher) return // Closed for good, or already watching
+    this.arm()
+  }
 
-    this.watcher = watch(this.configPath, {
+  /** Stop watching and clean up resources. The watcher cannot be started again. */
+  close(): void {
+    this.closed = true
+    this.generation += 1 // Every listener of every past watcher goes inert
+    if (this.debounceTimer !== null) {
+      clearTimeout(this.debounceTimer)
+      this.debounceTimer = null
+    }
+    // Hygiene rather than the thing that stops the loop: a timer that
+    // outlived close() would fire a tryRearm that returns on `closed`.
+    if (this.rearmTimer !== null) {
+      clearTimeout(this.rearmTimer)
+      this.rearmTimer = null
+    }
+    if (this.watcher) {
+      void this.watcher.close()
+      this.watcher = null
+    }
+  }
+
+  /** Create the chokidar watcher for this generation and attach its listeners. */
+  private arm(): void {
+    const gen = ++this.generation
+    const watcher = this.watchFactory(this.configPath, {
       persistent: true,
       ignoreInitial: true,
       awaitWriteFinish: { stabilityThreshold: 50, pollInterval: 10 },
     })
+    this.watcher = watcher
+    // A listener of a watcher this instance has moved past (a later arm, or
+    // close()) must do nothing, whatever chokidar still emits from it.
+    const stale = (): boolean => gen !== this.generation || this.closed
 
-    this.watcher.on('change', () => {
-      if (this.watchFailed) return
+    watcher.on('change', () => {
+      if (stale() || this.watchFailed) return
       this.scheduleReload()
     })
 
-    this.watcher.on('ready', () => {
-      // close() nulls the watcher synchronously; chokidar also suppresses
-      // ready after close — this guard is our own invariant on top.
-      if (this.watcher && this.onReady) this.onReady()
+    watcher.on('ready', () => {
+      // A fresh watcher whose arming failed emits error and THEN ready
+      // (chokidar calls ready() whether or not fs.watch succeeded). The
+      // error listener below closes it first, which strips this event; if
+      // that order ever changes, a ready with the watch failed is not a
+      // resume and must not report the watch as armed.
+      if (stale() || this.watchFailed) return
+      if (this.onReady) this.onReady()
+      // A resume (every arm after the first): the file on disk is whatever
+      // the operator put there while the watch was lost, so reload it now
+      // rather than serve a policy the file may no longer hold.
+      if (gen > 1) void this.reload()
     })
 
-    this.watcher.on('error', (err: unknown) => {
+    watcher.on('error', (err: unknown) => {
+      if (stale()) return
       // The watch itself failed (the file replaced by one this process
-      // cannot read is the live case): chokidar emits the deferred change
-      // for the replaced path and then fails the re-watch, so one
-      // replacement reaches this watcher twice. Report it ONCE: mark the
-      // watch failed, drop any pending reload, ignore later change events
-      // from the dying watch, and never re-arm. Nothing was read, the
-      // running policy stays, and no later edit is observed until a
-      // restart.
+      // cannot read is the live case): chokidar fails the re-watch of the
+      // new inode and then emits the deferred change for the replaced path,
+      // so one replacement reaches this watcher twice. Report it ONCE: mark
+      // the watch failed, drop any pending reload, and ignore later change
+      // events from the dying watch. Nothing was read and the running
+      // policy stays. Then retry: close the dead instance and check once
+      // per interval whether the file can be read again; when it can, a
+      // fresh watch is armed, onReady fires again, and the file is reloaded
+      // at once (issue #352).
       const error = err instanceof Error ? err : new Error(String(err))
       if (this.watchFailed) return
       this.watchFailed = true
@@ -195,19 +262,44 @@ export class ConfigWatcher {
         restartRequiredPaths: [],
         error: error.message,
       })
+      // Resource cleanup for the dead instance (its descriptor); the stale
+      // check above is what keeps its deferred change from reloading.
+      void watcher.close()
+      this.watcher = null
+      this.scheduleRearm()
     })
   }
 
-  /** Stop watching and clean up resources. */
-  close(): void {
-    if (this.debounceTimer !== null) {
-      clearTimeout(this.debounceTimer)
-      this.debounceTimer = null
+  private scheduleRearm(): void {
+    if (this.closed) return
+    if (this.rearmTimer !== null) {
+      clearTimeout(this.rearmTimer)
     }
-    if (this.watcher) {
-      void this.watcher.close()
-      this.watcher = null
+    this.rearmTimer = setTimeout(() => {
+      this.rearmTimer = null
+      if (this.closed) return // The timer outlived close()
+      void this.tryRearm()
+    }, this.rearmIntervalMs)
+  }
+
+  /** One retry: if the file can be read again, arm a fresh watch; otherwise wait another interval. */
+  private async tryRearm(): Promise<void> {
+    try {
+      await access(this.configPath, constants.R_OK)
+    } catch {
+      this.scheduleRearm()
+      return
     }
+    // close() while the check was pending. Belt-and-suspenders: access on an
+    // unreadable file rejects in well under a millisecond, so no test reaches
+    // this line; it is kept so a repair landing inside that await can never
+    // arm a watcher on a closed instance.
+    if (this.closed) return
+    // Cleared BEFORE the fresh arm: should that arm fail (the file unreadable
+    // again between the check and chokidar's own watch), its error is a new
+    // loss with its own record and its own retry, not a suppressed repeat.
+    this.watchFailed = false
+    this.arm()
   }
 
   private scheduleReload(): void {
