@@ -244,25 +244,36 @@ sudo -u helio -H /usr/local/bin/helio validate -c /etc/helio/helio.yaml
 
 The `stat` line now reads `root:root 640` with a new inode, and `validate`
 as the proxy user reports `Invalid config: Cannot read config file:
-/etc/helio/helio.yaml`. The running proxy does one of two things, and which
-one is a matter of timing: it logs nothing, keeps serving the last policy it
-read, and observes no later edit until it is restarted; or its file watcher
-fails with `EACCES: permission denied, watch '/etc/helio/helio.yaml'`, which
-Helio logs as an unhandled promise rejection and exits on, so the next call
-is refused. Either way the repair is the same: fix the ownership and restart
-the proxy.
+/etc/helio/helio.yaml`. The running proxy logs
+`[helio] Config watch failed (keeping current configuration; retrying every 1s until the file can be read again): EACCES: permission denied, watch '/etc/helio/helio.yaml'`,
+writes a `policy_reload` record with `outcome: watch_failed`, keeps serving
+the last policy it read, and checks once a second whether it can read the
+file. Until it can, the call from the agent's account still returns
+`Record rec_42 deleted` while the file says `deny`. The repair is the
+ownership:
 
 ```bash
 sudo chown root:helio /etc/helio/helio.yaml
 sudo chmod 0640 /etc/helio/helio.yaml
+sleep 2
+sudo tail -n 3 /var/lib/helio/helio.log
+```
+
+Within about a second of the `chown`, the log ends with the `Watching` line
+a second time, `[helio] Budgets reloaded: 0 budgets`, and
+`[helio] Policy reloaded: 1 rule (default: allow)`: the proxy re-armed its
+watch and reloaded the replaced file, without a restart, and the agent's
+call is denied again. A restart does the same:
+
+```bash
 sudo pkill -TERM -u helio -f 'helio start'
 sleep 1
 sudo -u helio -H bash -c 'nohup /usr/local/bin/helio start -c /etc/helio/helio.yaml >>/var/lib/helio/helio.log 2>&1 &'
 sudo grep -E 'listening|Policies|Watching' /var/lib/helio/helio.log
 ```
 
-The grep prints the four startup lines a second time, the file the second
-boot read is the repaired one, and the agent's call is denied again.
+The grep prints the four startup lines a second time, and the file the
+second boot read is the repaired one.
 GNU `sed -i` run as root happens to keep the owner because it restores it
 after writing; do not rely on that. `sudoedit` is the whole edit procedure.
 

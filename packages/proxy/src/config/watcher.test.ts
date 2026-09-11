@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { chmodSync } from 'node:fs'
+import { chmod, mkdtemp, rename, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import type { FSWatcher } from 'chokidar'
+import { watch } from 'chokidar'
 import { ConfigWatcher, PolicyReloadRejectedError } from './watcher.js'
-import type { AppliedPolicyReloadFacts, PolicyReloadFacts } from './watcher.js'
+import type {
+  AppliedPolicyReloadFacts,
+  ConfigWatcherOptions,
+  PolicyReloadFacts,
+} from './watcher.js'
 import { ConfigError, loadConfigWithMeta } from './loader.js'
 import type { CompiledPolicy, PolicyParseWarning } from '../policy/types.js'
 import { GovernedForwarder } from '../policy/governed-forwarder.js'
@@ -57,20 +62,96 @@ function wait(ms: number): Promise<void> {
 // Tests
 // ---------------------------------------------------------------------------
 
+/** What the watcher reported, in order: the applied and refused facts and the onReady count. */
+interface Trail {
+  readonly applied: AppliedPolicyReloadFacts[]
+  readonly refused: PolicyReloadFacts[]
+  readyCount: number
+}
+
+function sha256Of(text: string): string {
+  return createHash('sha256').update(text, 'utf-8').digest('hex')
+}
+
 describe('ConfigWatcher', () => {
   let tmpDir: string
   let configPath: string
   let watcher: ConfigWatcher | null
+  let trail: Trail
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'helio-watcher-'))
     configPath = join(tmpDir, 'helio.yaml')
     watcher = null
+    trail = { applied: [], refused: [], readyCount: 0 }
   })
 
   afterEach(() => {
     if (watcher) watcher.close()
   })
+
+  // -------------------------------------------------------------------------
+  // Lost-watch harness (issue #352): real chokidar on a real temp file. A
+  // rename-over with a mode-0000 inode is, as the same user, the face the
+  // separate-user deployment shows when root replaces the file: chokidar's
+  // re-watch of the new inode fails EACCES on macOS and Linux alike.
+  // -------------------------------------------------------------------------
+
+  /** The callbacks every lost-watch test wires: they append to `trail`. */
+  function recording(): Pick<ConfigWatcherOptions, 'onReload' | 'onError' | 'onReady'> {
+    return {
+      onReload: (_policy, _warnings, _paths, _budgets, facts) => trail.applied.push(facts),
+      onError: (_error, facts) => trail.refused.push(facts),
+      onReady: () => {
+        trail.readyCount += 1
+      },
+    }
+  }
+
+  function counts(): string {
+    return `applied=${String(trail.applied.length)} refused=${String(trail.refused.length)} readyCount=${String(trail.readyCount)}`
+  }
+
+  /** Poll every 20 ms until `pred` holds; on timeout, throw with the trail's counts. */
+  async function waitUntil(pred: () => boolean, ms: number): Promise<void> {
+    const started = Date.now()
+    while (Date.now() - started < ms) {
+      if (pred()) return
+      await wait(20)
+    }
+    throw new Error(`waitUntil timed out after ${String(ms)} ms (${counts()})`)
+  }
+
+  /** Wait for the n-th onReady, then the platform arming grace (see the last test in this file). */
+  async function armed(n: number): Promise<void> {
+    await waitUntil(() => trail.readyCount >= n, 3_000)
+    await wait(100)
+  }
+
+  /** Replace the config by a new inode this process cannot read: write, chmod 0000, rename over. */
+  async function replaceUnreadable(text: string): Promise<void> {
+    const tmp = `${configPath}.tmp`
+    await writeFile(tmp, text)
+    await chmod(tmp, 0o000)
+    await rename(tmp, configPath)
+  }
+
+  /** The operator's repair: the file is readable by this process again. */
+  async function repair(): Promise<void> {
+    await chmod(configPath, 0o644)
+  }
+
+  /**
+   * Replace the file unreadably and wait for the loss to be recorded. The
+   * loss exists only when the repair loses the race with chokidar's
+   * re-watch, so every repair in these tests follows this wait.
+   */
+  async function loseWatch(text: string): Promise<void> {
+    const before = trail.refused.length
+    await replaceUnreadable(text)
+    await waitUntil(() => trail.refused.length > before, 3_000)
+    expect(trail.refused[before]?.outcome).toBe('watch_failed')
+  }
 
   // -------------------------------------------------------------------------
   // Successful reload
@@ -272,65 +353,245 @@ describe('ConfigWatcher', () => {
     expect(applied[0]?.sha256After).toBe(initial.sha256)
   })
 
-  it('records one watch_failed per lost watch when the error lands before the deferred change (issue #351)', async () => {
-    await writeFile(configPath, configWithDenyRule())
+  it('applies a readable rename-over with no loss (issue #352)', async () => {
+    // A replacement whose new inode this process can read: chokidar
+    // re-watches the new inode and the change reloads, as today.
+    await writeFile(configPath, validConfig())
     const initial = await loadConfigWithMeta(configPath)
-    const applied: AppliedPolicyReloadFacts[] = []
-    const refused: PolicyReloadFacts[] = []
-    watcher = new ConfigWatcher({
-      configPath,
-      initial,
-      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
-      onError: (_error, facts) => refused.push(facts),
-      debounceMs: 50,
-    })
+    watcher = new ConfigWatcher({ configPath, initial, ...recording(), debounceMs: 50 })
     watcher.start()
-    await wait(100)
-    // chokidar offers no same-user way to provoke the EACCES re-watch on a
-    // temp file, so the test raises the events the live face raises
-    // (§1.3): the error from the failed re-watch, then the deferred change
-    // for the same replacement. The file on disk is still readable, so an
-    // unsuppressed change would reload it and record `applied`.
-    const inner = Reflect.get(watcher, 'watcher') as FSWatcher
-    inner.emit('error', new Error("EACCES: permission denied, watch '/etc/helio/helio.yaml'"))
-    inner.emit('change', configPath)
-    await wait(300)
-    expect(applied).toHaveLength(0)
-    expect(refused).toHaveLength(1)
-    expect(refused[0]?.outcome).toBe('watch_failed')
-    expect(refused[0]?.sha256Before).toBe(initial.sha256)
-    expect(refused[0]?.sha256After).toBeNull()
-    expect(refused[0]?.ruleCountBefore).toBe(1)
-    expect(refused[0]?.ruleCountAfter).toBeNull()
-    expect(refused[0]?.error).toContain('EACCES')
+    await armed(1)
 
-    // A second error on the same dying watch is not a second record.
-    inner.emit('error', new Error('EACCES: permission denied, watch'))
-    await wait(50)
-    expect(refused).toHaveLength(1)
+    const next = configWithDenyRule()
+    await writeFile(`${configPath}.tmp`, next)
+    await rename(`${configPath}.tmp`, configPath)
+    await waitUntil(() => trail.applied.length === 1, 3_000)
+    expect(trail.refused).toHaveLength(0)
+    expect(trail.applied[0]?.sha256Before).toBe(initial.sha256)
+    expect(trail.applied[0]?.sha256After).toBe(sha256Of(next))
+    expect(trail.readyCount).toBe(1)
   })
 
-  it('records one watch_failed when the change was already debounced as the error lands (issue #351)', async () => {
-    await writeFile(configPath, configWithDenyRule())
-    const initial = await loadConfigWithMeta(configPath)
-    const applied: AppliedPolicyReloadFacts[] = []
-    const refused: PolicyReloadFacts[] = []
-    watcher = new ConfigWatcher({
-      configPath,
-      initial,
-      onReload: (_policy, _warnings, _paths, _budgets, facts) => applied.push(facts),
-      onError: (_error, facts) => refused.push(facts),
-      debounceMs: 50,
+  // uid 0 reads a mode-0000 file, so the loss cannot be provoked as root.
+  describe.skipIf(process.getuid?.() === 0)('lost watch (issue #352; skipped as root)', () => {
+    const lostOptions = { debounceMs: 50, rearmIntervalMs: 50 }
+
+    it('records one watch_failed for a replacement it cannot read and suppresses the deferred change', async () => {
+      await writeFile(configPath, configWithDenyRule())
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      // The replacement's bytes are never read: the watch fails first.
+      await loseWatch(validConfig())
+      expect(trail.applied).toHaveLength(0)
+      expect(trail.refused).toHaveLength(1)
+      expect(trail.refused[0]?.outcome).toBe('watch_failed')
+      expect(trail.refused[0]?.sha256Before).toBe(initial.sha256)
+      expect(trail.refused[0]?.sha256After).toBeNull()
+      expect(trail.refused[0]?.ruleCountBefore).toBe(1)
+      expect(trail.refused[0]?.ruleCountAfter).toBeNull()
+      expect(trail.refused[0]?.error).toContain('EACCES')
+
+      // chokidar emits the deferred change for the same replacement about
+      // 50 ms after the error, and a second error on the dying watch is
+      // not a second record: still one refused, nothing applied, and the
+      // retry loop records nothing while the file stays unreadable.
+      await wait(300)
+      expect(trail.applied).toHaveLength(0)
+      expect(trail.refused).toHaveLength(1)
+
+      // The live sequence: the file stayed unreadable across several failed
+      // retries, and the repair still resumes (the loop survived its own
+      // failed checks). Every other test here repairs before the first
+      // retry fires, so this is the one pin on the retry-after-failure path.
+      await repair()
+      await waitUntil(() => trail.readyCount === 2, 3_000)
+      await waitUntil(() => trail.applied.length === 1, 3_000)
+      expect(trail.applied[0]?.sha256After).toBe(sha256Of(validConfig()))
+      expect(trail.refused).toHaveLength(1)
     })
-    watcher.start()
-    await wait(100)
-    const inner = Reflect.get(watcher, 'watcher') as FSWatcher
-    inner.emit('change', configPath)
-    inner.emit('error', new Error("EACCES: permission denied, watch '/etc/helio/helio.yaml'"))
-    await wait(300)
-    expect(applied).toHaveLength(0)
-    expect(refused).toHaveLength(1)
-    expect(refused[0]?.outcome).toBe('watch_failed')
+
+    it('re-arms after the repair and reloads a later in-place edit', async () => {
+      const text = validConfig()
+      await writeFile(configPath, text)
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      await loseWatch(text)
+      await repair()
+      await armed(2)
+
+      const edited = configWithDenyRule()
+      await writeFile(configPath, edited)
+      // The resume reload's own record (equal hashes, the bytes were the
+      // same) is pinned by the next test; this one pins the edit.
+      await waitUntil(
+        () => trail.applied.some((facts) => facts.sha256After === sha256Of(edited)),
+        3_000,
+      )
+      const record = trail.applied.find((facts) => facts.sha256After === sha256Of(edited))
+      expect(record?.rulesRemoved).toEqual([])
+      expect(record?.ruleCountAfter).toBe(1)
+      expect(trail.readyCount).toBe(2)
+    })
+
+    it('reloads the replaced file on resume without waiting for an edit', async () => {
+      await writeFile(configPath, validConfig())
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      const replacement = configWithDenyRule()
+      await loseWatch(replacement)
+      await repair()
+      await waitUntil(() => trail.applied.length === 1, 3_000)
+      expect(trail.applied[0]?.sha256Before).toBe(initial.sha256)
+      expect(trail.applied[0]?.sha256After).toBe(sha256Of(replacement))
+      expect(trail.applied[0]?.ruleCountAfter).toBe(1)
+      expect(trail.refused).toHaveLength(1)
+      expect(trail.refused[0]?.outcome).toBe('watch_failed')
+      expect(trail.readyCount).toBe(2)
+
+      // The resume reload runs once.
+      await wait(300)
+      expect(trail.applied).toHaveLength(1)
+    })
+
+    it('refuses the replaced file on resume under the pin and applies the pinned bytes written back', async () => {
+      const pinnedText = configWithDenyRule()
+      await writeFile(configPath, pinnedText)
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({
+        configPath,
+        initial,
+        pinnedSha256: initial.sha256,
+        ...recording(),
+        ...lostOptions,
+      })
+      watcher.start()
+      await armed(1)
+
+      await loseWatch(validConfig())
+      await repair()
+      await waitUntil(() => trail.refused.length === 2, 3_000)
+      expect(trail.refused[1]?.outcome).toBe('rejected_pinned')
+      expect(trail.refused[1]?.sha256After).toBe(sha256Of(validConfig()))
+      expect(trail.applied).toHaveLength(0)
+
+      await armed(2)
+      await writeFile(configPath, pinnedText)
+      await waitUntil(() => trail.applied.length === 1, 3_000)
+      expect(trail.applied[0]?.sha256After).toBe(initial.sha256)
+      expect(trail.refused).toHaveLength(2)
+    })
+
+    it('records and recovers from a second loss in the same life', async () => {
+      await writeFile(configPath, validConfig())
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      await loseWatch(configWithDenyRule())
+      await repair()
+      await waitUntil(() => trail.applied.length === 1, 3_000)
+      await armed(2)
+
+      await loseWatch(validConfig())
+      expect(trail.refused).toHaveLength(2)
+      expect(trail.refused[1]?.outcome).toBe('watch_failed')
+      expect(trail.refused[1]?.sha256Before).toBe(trail.applied[0]?.sha256After)
+      await repair()
+      await waitUntil(() => trail.applied.length === 2, 3_000)
+      expect(trail.applied[1]?.sha256After).toBe(sha256Of(validConfig()))
+      expect(trail.readyCount).toBe(3)
+    })
+
+    it('observes a readable rename-over through the re-armed watch', async () => {
+      const text = validConfig()
+      await writeFile(configPath, text)
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      // The resume, then an in-place edit (the previous test's steps).
+      await loseWatch(text)
+      await repair()
+      await armed(2)
+      const edited = configWithDenyRule()
+      await writeFile(configPath, edited)
+      await waitUntil(
+        () => trail.applied.some((facts) => facts.sha256After === sha256Of(edited)),
+        3_000,
+      )
+      const seen = trail.applied.length
+
+      // Then a readable rename-over: the fresh watch re-watches the new inode.
+      const renamed = `${edited}# renamed over\n`
+      await writeFile(`${configPath}.tmp`, renamed)
+      await rename(`${configPath}.tmp`, configPath)
+      await waitUntil(() => trail.applied.length === seen + 1, 3_000)
+      expect(trail.applied[seen]?.sha256After).toBe(sha256Of(renamed))
+      expect(trail.refused).toHaveLength(1)
+    })
+
+    it('never resumes after close() during the loss', async () => {
+      await writeFile(configPath, validConfig())
+      const initial = await loadConfigWithMeta(configPath)
+      watcher = new ConfigWatcher({ configPath, initial, ...recording(), ...lostOptions })
+      watcher.start()
+      await armed(1)
+
+      await loseWatch(configWithDenyRule())
+      watcher.close()
+      await repair()
+      await wait(400)
+      expect(trail.readyCount).toBe(1)
+      expect(trail.applied).toHaveLength(0)
+      expect(trail.refused).toHaveLength(1)
+    })
+
+    it('records a fresh arm that fails as a second loss and keeps retrying', async () => {
+      await writeFile(configPath, validConfig())
+      const initial = await loadConfigWithMeta(configPath)
+      // The second arm finds the file unreadable again between the access
+      // check and chokidar's own watch: it must be a new loss, not a resume.
+      let arms = 0
+      const watchFactory: typeof watch = (paths, options) => {
+        arms += 1
+        if (arms === 2) chmodSync(configPath, 0o000)
+        return watch(paths, options)
+      }
+      watcher = new ConfigWatcher({
+        configPath,
+        initial,
+        ...recording(),
+        ...lostOptions,
+        watchFactory,
+      })
+      watcher.start()
+      await armed(1)
+
+      await loseWatch(configWithDenyRule())
+      await repair()
+      await waitUntil(() => trail.refused.length === 2, 3_000)
+      expect(trail.refused[1]?.outcome).toBe('watch_failed')
+      expect(trail.readyCount).toBe(1)
+      expect(trail.applied).toHaveLength(0)
+
+      // The loop survived the failed arm: the next repair resumes.
+      await repair()
+      await waitUntil(() => trail.readyCount === 2, 3_000)
+      await waitUntil(() => trail.applied.length === 1, 3_000)
+      expect(trail.applied[0]?.sha256After).toBe(sha256Of(configWithDenyRule()))
+      expect(arms).toBe(3)
+    })
   })
 
   it('passes compiled budgets to the reload callback', async () => {
@@ -1423,6 +1684,38 @@ policies:
     watcher.close()
     await wait(300)
     expect(readyCount).toBe(0)
+  })
+
+  it('does not re-arm on start() after close() (issue #352)', async () => {
+    await writeFile(configPath, validConfig())
+    let readyCount = 0
+    // The arm count is what a leaked arm after close() would move: its
+    // listeners are inert, so the ready count alone could not see it.
+    let arms = 0
+    const watchFactory: typeof watch = (paths, options) => {
+      arms += 1
+      return watch(paths, options)
+    }
+    watcher = new ConfigWatcher({
+      configPath,
+      initial: await loadConfigWithMeta(configPath),
+      onReload: () => {},
+      onError: () => {},
+      onReady: () => {
+        readyCount += 1
+      },
+      debounceMs: 50,
+      watchFactory,
+    })
+    watcher.start()
+    await wait(100)
+    expect(readyCount).toBe(1)
+    expect(arms).toBe(1)
+    watcher.close()
+    watcher.start() // A closed watcher stays closed: no second arm, no second ready
+    await wait(300)
+    expect(readyCount).toBe(1)
+    expect(arms).toBe(1)
   })
 
   it('calls onReady even when the watched file is missing', async () => {

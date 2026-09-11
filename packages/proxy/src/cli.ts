@@ -17,6 +17,7 @@ import {
   isNamedConfig,
 } from './config/index.js'
 import type { SingularHelioConfig } from './config/index.js'
+import { DEFAULT_REARM_INTERVAL_MS } from './config/watcher.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
 import { secretDigest } from './auth/bearer.js'
 import {
@@ -906,8 +907,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       onError: (error, facts) => {
         if (facts.outcome === 'watch_failed') {
           console.error(
-            `[helio] Config watch failed (keeping current configuration; edits will not be ` +
-              `observed until restart): ${error.message}`,
+            `[helio] Config watch failed (keeping current configuration; retrying every ` +
+              `${String(DEFAULT_REARM_INTERVAL_MS / 1000)}s until the file can be read again): ` +
+              error.message,
           )
         } else {
           console.error(
