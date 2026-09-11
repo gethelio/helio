@@ -6,7 +6,8 @@ import { compilePolicies } from '../policy/parser.js'
 import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from '../policy/types.js'
 import type { AuditRecordInput } from '../audit/types.js'
-import type { AuditWriter } from '../audit/writer.js'
+import { AuditWriter } from '../audit/writer.js'
+import { AuditStore } from '../audit/store.js'
 import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { BudgetEngine } from '../budget/engine.js'
@@ -3664,6 +3665,262 @@ describe('GovernanceService — terminal audit rows are immune to response mutat
 
     const chain = records[0]?.record.evidence_chain as { rate: Record<string, unknown> }
     expect(chain.rate['current']).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Audit rows are immune to request mutation (issue #192)
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService — audit rows are immune to request mutation (issue #192)', () => {
+  // A direct embedder of the exported GovernanceService keeps the objects it
+  // passed in. The writer buffers records by reference until flush, so every
+  // test below mutates AFTER the call returned and reads the captured record.
+  // The HTTP route builds fresh objects per request and cannot reach this.
+  const denySendEmail = compile({
+    default: 'allow',
+    rules: [{ name: 'block', match: { tool: 'send_email' }, action: 'deny' }],
+  })
+  const originalArgs = (): Record<string, unknown> => ({
+    to: 'ops@example.com',
+    nested: { note: 'original' },
+  })
+  const originalMetadata = (): Record<string, unknown> => ({
+    channel_id: 'C1',
+    nested: { k: 'original' },
+  })
+  const forgeArgs = (args: Record<string, unknown>) => {
+    args['to'] = 'attacker@example.com'
+    ;(args['nested'] as Record<string, unknown>)['note'] = 'forged'
+  }
+  const forgeMetadata = (metadata: Record<string, unknown>) => {
+    metadata['channel_id'] = 'FORGED'
+    ;(metadata['nested'] as Record<string, unknown>)['k'] = 'forged'
+  }
+  const originalPackage = () =>
+    // The type declares five string fields; a JS embedder is not stopped
+    // from passing an excess nested property, so the test carries one.
+    ({ name: 'left-pad', source: 'npm', extra: { deep: 'original' } }) as unknown as {
+      name: string
+      source: string
+    }
+  const forgePackage = (pkg: Record<string, unknown>) => {
+    pkg['name'] = 'forged-top-level'
+    ;(pkg['extra'] as Record<string, unknown>)['deep'] = 'forged'
+  }
+
+  // T1
+  it('a terminal deny snapshots arguments and metadata, nested values included', () => {
+    const { service, records } = makeService({ policy: denySendEmail })
+    const args = originalArgs()
+    const metadata = originalMetadata()
+    const res = service.evaluate(
+      evalInput({ tool: { name: 'send_email' }, arguments: args, metadata }),
+    )
+    expect(res.body['decision']).toBe('deny')
+
+    forgeArgs(args)
+    forgeMetadata(metadata)
+
+    expect(records[0]?.record.tool_input).toEqual(originalArgs())
+    expect(records[0]?.record.metadata).toEqual(originalMetadata())
+  })
+
+  // T2
+  it('audit() snapshots the result, nested values included', () => {
+    const { service, records } = makeService()
+    const id = service.evaluate(evalInput()).body['evaluation_id'] as string
+    const result = { ok: true, nested: { v: 'original' } }
+    expect(service.audit(auditInput(id, { result }), 'h').status).toBe(201)
+
+    result.ok = false
+    result.nested.v = 'forged'
+
+    expect(records[0]?.record.upstream_response).toEqual({ ok: true, nested: { v: 'original' } })
+  })
+
+  // T3
+  it('installScan() snapshots the package and metadata, nested values included', () => {
+    const { service, records } = makeService()
+    const metadata = originalMetadata()
+    const pkg = originalPackage()
+    const res = service.installScan({
+      origin: 'openclaw',
+      agent_id: 'main',
+      session_id: null,
+      package: pkg,
+      metadata,
+    })
+    expect(res.status).toBe(200)
+
+    forgeMetadata(metadata)
+    forgePackage(pkg as unknown as Record<string, unknown>)
+
+    expect(records[0]?.record.tool_input).toEqual({
+      name: 'left-pad',
+      source: 'npm',
+      extra: { deep: 'original' },
+    })
+    expect(records[0]?.record.metadata).toEqual(originalMetadata())
+  })
+
+  // T4
+  it('the buffered record does not share the caller objects', () => {
+    const { service, records } = makeService({ policy: denySendEmail })
+    const args = originalArgs()
+    const metadata = originalMetadata()
+    service.evaluate(evalInput({ tool: { name: 'send_email' }, arguments: args, metadata }))
+
+    expect(records[0]?.record.tool_input).not.toBe(args)
+    expect(records[0]?.record.metadata).not.toBe(metadata)
+    expect(records[0]?.record.tool_input).toEqual(originalArgs())
+    expect(records[0]?.record.metadata).toEqual(originalMetadata())
+  })
+
+  // T5
+  it('a value structuredClone refuses is snapshotted in its JSON form on the terminal path', () => {
+    const { service, records } = makeService({ policy: denySendEmail })
+    const args: Record<string, unknown> = { to: 'x', cb: () => 1 }
+    let res: ReturnType<GovernanceService['evaluate']> | undefined
+    expect(() => {
+      res = service.evaluate(evalInput({ tool: { name: 'send_email' }, arguments: args }))
+    }).not.toThrow()
+    expect(res?.body['decision']).toBe('deny')
+    expect(records[0]?.record.tool_input).toEqual({ to: 'x' })
+  })
+
+  // T6
+  it('a value structuredClone refuses is admitted on the non-terminal path and lands in its JSON form', () => {
+    const { service, records } = makeService()
+    const args: Record<string, unknown> = { to: 'x', cb: () => 1 }
+    let res: ReturnType<GovernanceService['evaluate']> | undefined
+    expect(() => {
+      res = service.evaluate(evalInput({ arguments: args }))
+    }).not.toThrow()
+    expect(res?.body['decision']).toBe('allow')
+    service.audit(auditInput(res?.body['evaluation_id'] as string), 'h')
+    expect(records[0]?.record.tool_input).toEqual({ to: 'x' })
+  })
+
+  // T7
+  it('the persisted rows on all three paths hold what governance saw', () => {
+    // A real writer over a real in-memory store: the library embedder's
+    // wiring, not the fake writer. Ids are captured on persistence and the
+    // rows are matched by tool name, so buffer order does not matter.
+    const store = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const persisted = new Map<string, string>()
+    const writer = new AuditWriter({
+      store,
+      flushIntervalMs: 0,
+      onPersist: (record, id) => persisted.set(record.tool_name, id),
+    })
+    const service = new GovernanceService({
+      policy: denySendEmail,
+      auditWriter: writer,
+      ttlMs: 600_000,
+      sweepIntervalMs: 0,
+    })
+    try {
+      // A: the terminal deny.
+      const args = originalArgs()
+      const metadata = originalMetadata()
+      const denied = service.evaluate(
+        evalInput({ tool: { name: 'send_email' }, arguments: args, metadata }),
+      )
+      expect(denied.body['decision']).toBe('deny')
+      forgeArgs(args)
+      forgeMetadata(metadata)
+
+      // B: a second, pending evaluation finalized through audit(). (The
+      // deny's id is tombstoned and would answer already_finalized.)
+      const allowed = service.evaluate(evalInput({ tool: { name: 'send' } }))
+      expect(allowed.body['decision']).toBe('allow')
+      const result = { ok: true, nested: { v: 'original' } }
+      const audited = service.audit(
+        auditInput(allowed.body['evaluation_id'] as string, { result }),
+        'h',
+      )
+      expect(audited.status).toBe(201)
+      result.ok = false
+      result.nested.v = 'forged'
+
+      // C: the install scan.
+      const scanMetadata = originalMetadata()
+      const pkg = originalPackage()
+      const scanned = service.installScan({
+        origin: 'openclaw',
+        agent_id: 'main',
+        session_id: null,
+        package: pkg,
+        metadata: scanMetadata,
+      })
+      expect(scanned.status).toBe(200)
+      forgeMetadata(scanMetadata)
+      forgePackage(pkg as unknown as Record<string, unknown>)
+
+      writer.flush()
+      expect(persisted.size).toBe(3)
+
+      const rowA = store.get(persisted.get('send_email') ?? '')
+      expect(rowA?.tool_input).toEqual(originalArgs())
+      expect(rowA?.metadata).toEqual(originalMetadata())
+
+      const rowB = store.get(persisted.get('send') ?? '')
+      expect(rowB?.upstream_response).toEqual({ ok: true, nested: { v: 'original' } })
+
+      const rowC = store.get(persisted.get('install:npm:left-pad') ?? '')
+      expect(rowC?.tool_input).toEqual({
+        name: 'left-pad',
+        source: 'npm',
+        extra: { deep: 'original' },
+      })
+      expect(rowC?.metadata).toEqual(originalMetadata())
+    } finally {
+      writer.close()
+    }
+  })
+
+  // T8
+  it('the snapshot never mutates or freezes the caller objects', () => {
+    const { service } = makeService({ policy: denySendEmail })
+    const args = originalArgs()
+    const metadata = originalMetadata()
+    const argsBefore = structuredClone(args)
+    const metadataBefore = structuredClone(metadata)
+
+    service.evaluate(evalInput({ tool: { name: 'send_email' }, arguments: args, metadata }))
+
+    expect(args).toEqual(argsBefore)
+    expect(metadata).toEqual(metadataBefore)
+    expect(Object.isFrozen(args)).toBe(false)
+    expect(() => {
+      args['later'] = 1
+    }).not.toThrow()
+    expect(args['later']).toBe(1)
+  })
+
+  // T9
+  it('a value structuredClone refuses is admitted on the approval path and the ticket carries its JSON form', () => {
+    const harness = makeService({
+      withApprovals: true,
+      policy: compile({
+        default: 'allow',
+        rules: [{ name: 'gate', match: { tool: 'send' }, action: 'require_approval' }],
+      }),
+    })
+    const args: Record<string, unknown> = { to: 'x', cb: () => 1 }
+    let res: ReturnType<GovernanceService['evaluate']> | undefined
+    expect(() => {
+      res = harness.service.evaluate(evalInput({ arguments: args }))
+    }).not.toThrow()
+    expect(res?.body['decision']).toBe('require_approval')
+    const approval = res?.body['approval'] as { id: string }
+    expect(harness.approvalRouter?.getTicket(approval.id)?.tool_input).toEqual({ to: 'x' })
   })
 })
 

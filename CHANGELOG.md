@@ -43,6 +43,16 @@ Maintainer notes:
 
 ### Fixed
 
+- **Sideband audit records no longer alias the caller's request
+  objects.** A library embedder of `GovernanceService` could mutate the
+  `arguments`, `metadata`, `result`, or install `package` objects it had
+  passed after the call returned, and the buffered audit record changed
+  with them until the flush. Every record now snapshots those fields
+  before buffering; the snapshot tolerates values that cannot be cloned
+  by falling back to their JSON form, never mutates the caller's
+  objects, and never blocks a decision. The HTTP adapter API's route
+  builds a fresh object per request, so remote clients never had this
+  alias.
 - **`helio start` now reports a port that is already in use as a
   startup error, before its listening line.** The three servers were
   started without waiting for their binds and nothing listened for a
