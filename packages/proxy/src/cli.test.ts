@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, vi } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, writeFileSync, rmSync, mkdtempSync, readFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -2798,6 +2798,250 @@ audit:
             })
           })
         }
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    // --- held ports (issue #375) ---
+
+    /** Hold a 127.0.0.1 port in a raw server the test keeps open. */
+    async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
+      const holder = createServer()
+      await new Promise<void>((resolve, reject) => {
+        holder.once('error', reject)
+        holder.listen(0, '127.0.0.1', () => {
+          resolve()
+        })
+      })
+      const port = (holder.address() as AddressInfo).port
+      return {
+        port,
+        release: () =>
+          new Promise<void>((resolve) => {
+            holder.close(() => {
+              resolve()
+            })
+          }),
+      }
+    }
+
+    type PortSetting = 'listen.port' | 'sdk.port' | 'dashboard.port'
+
+    /**
+     * Write a start config with `heldPort` on the named setting and free
+     * ports on the other two. The SDK sideband and the dashboard are
+     * enabled only when they carry the held port.
+     */
+    function writeHeldPortConfig(dir: string, setting: PortSetting, heldPort: number): string {
+      const configPath = join(dir, 'helio.yaml')
+      const base = randomChildPort()
+      const listenPort = setting === 'listen.port' ? heldPort : base
+      const sdkPort = setting === 'sdk.port' ? heldPort : base + 1
+      const dashboardPort = setting === 'dashboard.port' ? heldPort : base + 2
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: ${setting === 'dashboard.port' ? 'true' : 'false'}
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "test-secret-375"
+sdk:
+  enabled: ${setting === 'sdk.port' ? 'true' : 'false'}
+  port: ${String(sdkPort)}
+  host: 127.0.0.1
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+      return configPath
+    }
+
+    it.each(['listen.port', 'sdk.port', 'dashboard.port'] as const)(
+      'start with %s already in use exits 1 with one line naming the setting and no listening line (issue #375)',
+      async (setting) => {
+        const held = await holdPort()
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-held-port-'))
+        const configPath = writeHeldPortConfig(dir, setting, held.port)
+        try {
+          const result = await runCli(['start', '-c', configPath])
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(
+            `${setting} ${String(held.port)} is already in use on 127.0.0.1 (EADDRINUSE). ` +
+              `Stop the process holding it, or set ${setting} in ${configPath} to a free port.`,
+          )
+          // A diagnosis, not a crash: no listening line for a server that is
+          // not bound, no crash-path wrapper, no stack.
+          expect(result.stderr).not.toContain('Helio proxy listening')
+          expect(result.stderr).not.toContain('SDK sideband listening')
+          expect(result.stderr).not.toContain('Dashboard API listening')
+          expect(result.stderr).not.toContain('Uncaught exception')
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+          expect(result.stderr).not.toMatch(/\n\s+at /)
+        } finally {
+          await held.release()
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it('start with a listen.host this machine cannot bind exits 1 with the bind error and the config path (issue #375)', async () => {
+      // 192.0.2.1 is TEST-NET-1 (RFC 5737): never a local address, so the
+      // bind fails with EADDRNOTAVAIL rather than EADDRINUSE.
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-bad-host-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = randomChildPort()
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 192.0.2.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain(
+          `listen.port ${String(listenPort)} on 192.0.2.1 cannot be bound: listen EADDRNOTAVAIL`,
+        )
+        expect(result.stderr).toContain(`Check listen.host and listen.port in ${configPath}.`)
+        expect(result.stderr).not.toContain('Helio proxy listening')
+        expect(result.stderr).not.toContain('Uncaught exception')
+        expect(result.stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('prints the listening line only once the listen server is bound (issue #375)', async () => {
+      const { dir, configPath } = writeStartConfig()
+      const original = readFileSync(configPath, 'utf-8')
+      writeFileSync(configPath, original.replace('enabled: true', 'enabled: false'))
+      const listenPort = Number(/port: (\d+)/.exec(original)?.[1])
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error(`Timed out waiting for the listening line. stderr:\n${stderr}`))
+          }, 8_000)
+          timer.unref()
+          child.stderr.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf-8')
+            if (stderr.includes('Helio proxy listening')) {
+              clearTimeout(timer)
+              resolve()
+            }
+          })
+          child.once('close', (code) => {
+            clearTimeout(timer)
+            reject(
+              new Error(
+                `helio start exited ${String(code)} before the listening line. stderr:\n${stderr}`,
+              ),
+            )
+          })
+        })
+        // ONE fresh connection the instant the marker lands: no retry and no
+        // keep-alive socket. The line must mean the server is bound.
+        const status = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(
+            { host: '127.0.0.1', port: listenPort, path: '/healthz', agent: false },
+            (res) => {
+              res.resume()
+              resolve(res.statusCode ?? 0)
+            },
+          )
+          req.on('error', reject)
+          req.end()
+        })
+        expect(status).toBe(200)
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGTERM')
+        }
+        await waitForChildExit(child, 8_000)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('start with listen.port already in use closes the stdio upstream child it had spawned (issue #375)', async () => {
+      const held = await holdPort()
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-held-stdio-'))
+      const configPath = join(dir, 'helio.yaml')
+      const pidPath = join(dir, 'child.pid')
+      // A child that ignores stdin EOF silently: error handlers on every
+      // stream, stdin resumed, an interval keeping it alive. Its first
+      // statement records its pid for the test.
+      const childSource =
+        `require('fs').writeFileSync('${pidPath}', String(process.pid)); ` +
+        `for (const s of [process.stdin, process.stdout, process.stderr]) s.on('error', () => {}); ` +
+        `process.stdin.resume(); setInterval(() => {}, 1000)`
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  transport: stdio
+  command: "node"
+  args:
+    - "-e"
+    - "${childSource}"
+listen:
+  port: ${String(held.port)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+      let childPid: number | undefined
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        const pid = Number(readFileSync(pidPath, 'utf-8'))
+        expect(Number.isInteger(pid)).toBe(true)
+        childPid = pid
+        // The abort closes the forwarder, which signals the child. A child
+        // that outlives the CLI's exit is the leak this pins.
+        await vi.waitFor(
+          () => {
+            expect(() => process.kill(pid, 0)).toThrow(/ESRCH/)
+          },
+          { timeout: 4_000, interval: 20 },
+        )
+        expect(result.stderr).toContain(
+          `listen.port ${String(held.port)} is already in use on 127.0.0.1 (EADDRINUSE).`,
+        )
+      } finally {
+        if (childPid !== undefined) {
+          try {
+            process.kill(childPid, 'SIGKILL')
+          } catch {
+            // Already gone.
+          }
+        }
+        await held.release()
         rmSync(dir, { recursive: true, force: true })
       }
     }, 15_000)

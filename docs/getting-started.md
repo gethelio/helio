@@ -126,6 +126,8 @@ The final `Watching` line prints once the config watcher is armed — an edit to
 > On startup, Helio also sends a synthetic upstream `tools/list` to warm the tool-annotation cache before first traffic. If the prime attempt cannot complete quickly, Helio continues startup and retries in the background. During that window, annotation matching remains fail-closed using MCP defaults.
 >
 > If `dashboard.enabled: true`, startup requires bundled dashboard assets to be present. If assets are missing, Helio exits with an actionable error instead of silently serving API-only mode.
+>
+> If `listen.port`, `dashboard.port`, or `sdk.port` is already in use, Helio exits with one line naming the setting, the host, and the port instead of printing its listening line, for example `listen.port 3000 is already in use on 127.0.0.1 (EADDRINUSE). Stop the process holding it, or set listen.port in helio.yaml to a free port.` With `-c`, the line names the config file you passed.
 
 ## Step 4: Point Your MCP Client at Helio
 

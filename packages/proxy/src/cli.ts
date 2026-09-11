@@ -273,6 +273,66 @@ async function connectUpstream(
   }
 }
 
+/**
+ * Close every connected door while aborting startup. Best effort: a close
+ * failure is logged and never thrown, so the abort's own diagnosis stays
+ * the last word.
+ */
+async function closeDoorsBestEffort(
+  doors: ReadonlyArray<{ close?: () => Promise<void> }>,
+): Promise<void> {
+  for (const door of doors) {
+    try {
+      await door.close?.()
+    } catch (closeErr) {
+      console.error(
+        `[helio] Ignoring a forwarder close failure while aborting startup: ${String(closeErr)}`,
+      )
+    }
+  }
+}
+
+/** The config paths of the three ports `helio start` binds. */
+type PortSetting = 'listen.port' | 'sdk.port' | 'dashboard.port'
+
+/**
+ * The operator line for a port that could not be bound (#375). Names the
+ * setting the port came from, the configured host, the port, and the code,
+ * and says which file to change: `configPath` is the file this boot loaded,
+ * printed as given. A held port gets its own sentence; every other bind
+ * error quotes Node's message.
+ */
+function listenFailureMessage(
+  setting: PortSetting,
+  host: string,
+  port: number,
+  configPath: string,
+  err: unknown,
+): string {
+  const bindError =
+    err instanceof Error
+      ? (err as Error & { code?: string; address?: string; port?: number })
+      : undefined
+  if (bindError?.code === 'EADDRINUSE') {
+    // A named host resolves to an address Node reports; say so when it is
+    // not the configured host verbatim (`localhost` resolved to `::1`).
+    const resolved =
+      bindError.address !== undefined && bindError.address !== host
+        ? ` at ${bindError.address}:${String(bindError.port ?? port)}`
+        : ''
+    return (
+      `${setting} ${String(port)} is already in use on ${host} (EADDRINUSE${resolved}). ` +
+      `Stop the process holding it, or set ${setting} in ${configPath} to a free port.`
+    )
+  }
+  const hostSetting = setting.replace(/\.port$/, '.host')
+  const detail = bindError ? bindError.message : String(err)
+  return (
+    `${setting} ${String(port)} on ${host} cannot be bound: ${detail}. ` +
+    `Check ${hostSetting} and ${setting} in ${configPath}.`
+  )
+}
+
 /** One governed upstream stack: the forwarder wrapped in governance plus
  *  its running annotation prime loop. */
 interface UpstreamStack {
@@ -383,15 +443,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       const built = await connectUpstream(upstream, name)
       doors.push({ name, forwarder: built.forwarder, close: built.close })
     } catch (err) {
-      for (const door of doors) {
-        try {
-          await door.close?.()
-        } catch (closeErr) {
-          console.error(
-            `[helio] Ignoring a forwarder close failure while aborting startup: ${String(closeErr)}`,
-          )
-        }
-      }
+      await closeDoorsBestEffort(doors)
       throw err
     }
   }
@@ -561,7 +613,41 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       },
     })
   }
-  const handle = startServer(app, config)
+  // Bind the servers in config order, first failure aborts (the connect
+  // loop's shape). A bind failure is a diagnosed boot failure, not a crash
+  // (#375): stop what the boot started (the prime loops, the servers bound
+  // so far in reverse, then the doors, a stdio child included), then throw
+  // the operator line. Every close is best effort; the diagnosis is the
+  // last word. The `StartupError` catch prints it and exits 1.
+  const boundHandles: ServerHandle[] = []
+  const listenOrAbort = async (
+    setting: PortSetting,
+    host: string,
+    port: number,
+    start: () => Promise<ServerHandle>,
+  ): Promise<ServerHandle> => {
+    try {
+      const bound = await start()
+      boundHandles.push(bound)
+      return bound
+    } catch (err) {
+      for (const stack of stacks) stack.annotationPrime.stop()
+      for (const bound of [...boundHandles].reverse()) {
+        try {
+          await bound.close()
+        } catch (closeErr) {
+          console.error(
+            `[helio] Ignoring a server close failure while aborting startup: ${String(closeErr)}`,
+          )
+        }
+      }
+      await closeDoorsBestEffort(doors)
+      throw new StartupError(listenFailureMessage(setting, host, port, configPath, err))
+    }
+  }
+  const handle = await listenOrAbort('listen.port', config.listen.host, config.listen.port, () =>
+    startServer(app, config),
+  )
 
   // Conditionally start the sideband server for SDK communication.
   //
@@ -623,7 +709,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       adapterToken,
       governance: governanceService,
     })
-    sidebandHandle = startSidebandServer(sidebandApp, config.sdk.port, config.sdk.host)
+    sidebandHandle = await listenOrAbort('sdk.port', config.sdk.host, config.sdk.port, () =>
+      startSidebandServer(sidebandApp, config.sdk.port, config.sdk.host),
+    )
   }
 
   // Conditionally start the dashboard API server
@@ -657,10 +745,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       },
     )
     closeDashboardApp = dashboardApp.close
-    dashboardHandle = startSidebandServer(
-      dashboardApp.app,
-      config.dashboard.port,
+    dashboardHandle = await listenOrAbort(
+      'dashboard.port',
       config.dashboard.host,
+      config.dashboard.port,
+      () => startSidebandServer(dashboardApp.app, config.dashboard.port, config.dashboard.host),
     )
   }
 
