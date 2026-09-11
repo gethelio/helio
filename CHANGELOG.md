@@ -43,6 +43,18 @@ Maintainer notes:
 
 ### Fixed
 
+- **`helio start` now reports a port that is already in use as a
+  startup error, before its listening line.** The three servers were
+  started without waiting for their binds and nothing listened for a
+  bind error, so a held `listen.port`, `dashboard.port`, or `sdk.port`
+  printed `Helio proxy listening` and then crashed through the
+  uncaught-exception path 4 to 8 ms later. The start command now waits
+  for each server to be listening, prints one line naming the setting,
+  the host, and the port when a bind fails, closes what it had started
+  (a stdio upstream's child included), and exits 1; the listening lines
+  print only once the servers are bound. The exported `startServer` and
+  `startSidebandServer` return a promise that resolves once the server
+  is listening and rejects with the bind error.
 - **The test suite no longer fails on ports other processes hold.**
   Every in-process test fixture bound the IPv6 wildcard on port 0, and
   macOS hands such a bind a port another process already holds on

@@ -324,37 +324,48 @@ export function createMultiApp(
 }
 
 /**
+ * Bind `app` on `hostname:port`. Resolves with the handle once the server
+ * is listening; rejects with the bind error (`EADDRINUSE`, `EADDRNOTAVAIL`,
+ * `EACCES`, ...). `serve()` returns before the bind completes (a named host
+ * resolves asynchronously), so the error listener is attached right after
+ * it returns and removed once listening: a settled promise ignores a later
+ * `reject`, and leaving the listener would silently swallow the first
+ * runtime `error` event instead of letting it reach the process's crash
+ * path as it does today.
+ */
+function listen(app: Hono, port: number, hostname: string): Promise<ServerHandle> {
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, port, hostname }, () => {
+      server.off('error', reject)
+      resolve(createServerHandle(server))
+    })
+    server.once('error', reject)
+  })
+}
+
+/**
  * Start the HTTP server on the configured host and port.
  *
  * @param app - The Hono app to serve.
  * @param config - The validated Helio configuration (uses `listen.port` and `listen.host`).
- * @returns A handle with the underlying server and a `close()` method for graceful shutdown.
+ * @returns A handle with the underlying server and a `close()` method for
+ *   graceful shutdown. Resolves once the server is listening; rejects with
+ *   the bind error.
  */
-export function startServer(app: Hono, config: HelioConfig): ServerHandle {
-  const server = serve({
-    fetch: app.fetch,
-    port: config.listen.port,
-    hostname: config.listen.host,
-  })
-
-  return createServerHandle(server)
+export function startServer(app: Hono, config: HelioConfig): Promise<ServerHandle> {
+  return listen(app, config.listen.port, config.listen.host)
 }
 
 /**
  * Start the sideband HTTP server for the SDK API.
  *
  * Binds to 127.0.0.1 by default (local-only) on the configured SDK port.
+ * Resolves once the server is listening; rejects with the bind error.
  */
 export function startSidebandServer(
   app: Hono,
   port: number,
   host: string = '127.0.0.1',
-): ServerHandle {
-  const server = serve({
-    fetch: app.fetch,
-    port,
-    hostname: host,
-  })
-
-  return createServerHandle(server)
+): Promise<ServerHandle> {
+  return listen(app, port, host)
 }

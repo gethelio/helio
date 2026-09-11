@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Hono } from 'hono'
-import { createApp, startSidebandServer } from './server.js'
+import { createApp, startServer, startSidebandServer } from './server.js'
 import type { HelioConfig } from './config/index.js'
+import { createServer as createNetServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import type { McpForwarder, McpRequest, McpResponse } from './mcp/types.js'
 
 // ---------------------------------------------------------------------------
@@ -398,7 +400,7 @@ describe('startSidebandServer', () => {
     })
 
     const port = 20_000 + Math.floor(Math.random() * 10_000)
-    const handle = startSidebandServer(app, port, '127.0.0.1')
+    const handle = await startSidebandServer(app, port, '127.0.0.1')
     const holdRequest = fetch(`http://127.0.0.1:${String(port)}/hold`)
     await new Promise<void>((resolve) => {
       setTimeout(resolve, 50)
@@ -412,5 +414,81 @@ describe('startSidebandServer', () => {
     await holdRequest.catch(() => {
       // Expected: shutdown may close the request stream abruptly.
     })
+  })
+})
+
+describe('listen failures', () => {
+  /** Hold a 127.0.0.1 port in a raw server the test keeps open. */
+  async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
+    const holder = createNetServer()
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject)
+      holder.listen(0, '127.0.0.1', () => {
+        resolve()
+      })
+    })
+    const port = (holder.address() as AddressInfo).port
+    return {
+      port,
+      release: () =>
+        new Promise<void>((resolve) => {
+          holder.close(() => {
+            resolve()
+          })
+        }),
+    }
+  }
+
+  /** A 127.0.0.1 port that was free a moment ago. */
+  async function freePort(): Promise<number> {
+    const held = await holdPort()
+    await held.release()
+    return held.port
+  }
+
+  it('startSidebandServer rejects with the bind error when the port is held', async () => {
+    const held = await holdPort()
+    try {
+      await expect(startSidebandServer(new Hono(), held.port, '127.0.0.1')).rejects.toMatchObject({
+        code: 'EADDRINUSE',
+        syscall: 'listen',
+        port: held.port,
+      })
+    } finally {
+      await held.release()
+    }
+  })
+
+  it('startServer rejects with the bind error when listen.port is held', async () => {
+    const held = await holdPort()
+    const config = {
+      ...minimalConfig,
+      listen: { ...minimalConfig.listen, port: held.port, host: '127.0.0.1' },
+    } as HelioConfig
+    try {
+      await expect(startServer(new Hono(), config)).rejects.toMatchObject({
+        code: 'EADDRINUSE',
+        syscall: 'listen',
+        port: held.port,
+      })
+    } finally {
+      await held.release()
+    }
+  })
+
+  it('resolves once the server is listening and drops the bind error listener', async () => {
+    const port = await freePort()
+    const handle = await startSidebandServer(new Hono(), port, '127.0.0.1')
+    // Resolves ON listening, not before: the address is known.
+    const address = handle.server.address() as AddressInfo | null
+    expect(address).not.toBeNull()
+    expect(address?.port).toBe(port)
+    try {
+      // The bind error listener is removed once listening, so a runtime
+      // 'error' after that keeps the process's crash path.
+      expect(handle.server.listenerCount('error')).toBe(0)
+    } finally {
+      await handle.close()
+    }
   })
 })
