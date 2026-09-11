@@ -833,8 +833,9 @@ export class GovernanceService {
         tool_name: toolName,
         // Cloned: the ticket is what the APPROVER sees, and a direct
         // embedder mutating its arguments object after /evaluate must not
-        // rewrite it (same guard as the pending entry's evidence below).
-        tool_input: structuredClone(req.arguments ?? {}),
+        // rewrite it (same guard as the pending entry's evidence below). The
+        // helper tolerates a value structuredClone refuses (issue #192).
+        tool_input: snapshotForAudit(req.arguments ?? {}),
         matched_rule: decision.matchedRule,
         session_id: sessionId,
         origin: req.origin,
@@ -863,9 +864,10 @@ export class GovernanceService {
       // Cloned: direct embedders share these references and could otherwise
       // mutate the audit evidence (and desync the byte accounting) after
       // admission. The HTTP route always builds fresh objects; this guards
-      // the library surface.
-      toolInput: structuredClone(req.arguments ?? {}),
-      metadata: req.metadata === null ? null : structuredClone(req.metadata),
+      // the library surface. The helper tolerates a value structuredClone
+      // refuses (issue #192).
+      toolInput: snapshotForAudit(req.arguments ?? {}),
+      metadata: snapshotForAudit(req.metadata),
       action: decision.action,
       matchedRuleName,
       matchedRuleIndex,
@@ -1169,7 +1171,7 @@ export class GovernanceService {
       // must not land in the audit row as attributed sideband identity.
       sessionId: isWellFormedSessionId(req.session_id) ? req.session_id : null,
       toolName,
-      toolInput: { ...req.package },
+      toolInput: req.package,
       metadata: req.metadata,
       // policy_decision is 'deny' (NOT 'deny_install') so the dashboard renders a
       // blocked install as a block, not an allow. The install context lives in
@@ -1836,7 +1838,7 @@ export class GovernanceService {
       agent_id: args.agentId,
       environment: this.environment ?? null,
       tool_name: args.toolName,
-      tool_input: args.toolInput,
+      tool_input: snapshotForAudit(args.toolInput),
       policy_decision: args.action,
       block_reason: blockReason,
       matched_rule: args.matchedRuleName,
@@ -1844,7 +1846,8 @@ export class GovernanceService {
       evidence_chain: evidenceChain,
       approval_status: args.approvalStatus ?? null,
       approved_by: args.approvedBy ?? null,
-      upstream_response: args.upstreamResponse ?? null,
+      upstream_response:
+        args.upstreamResponse == null ? null : snapshotForAudit(args.upstreamResponse),
       upstream_error: args.upstreamError ?? null,
       upstream_http_status: null,
       upstream_latency_ms: args.upstreamLatencyMs ?? null,
@@ -1855,7 +1858,7 @@ export class GovernanceService {
       dry_run: args.dryRun,
       record_kind: args.recordKind,
       origin: args.origin,
-      metadata: args.metadata,
+      metadata: args.metadata === null ? null : snapshotForAudit(args.metadata),
       // The sideband has no MCP wire, so no protocol claim exists.
       protocol_version: null,
       // No door on the sideband either: upstream attribution is MCP-only.
@@ -1887,6 +1890,31 @@ export class GovernanceService {
 // Free helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Snapshot a caller-owned value before it enters a buffered audit record
+ * (issue #192). structuredClone first (the sibling guards at the pending
+ * entry and the ticket use it; it keeps cycles, Dates, BigInt); a value it
+ * refuses (a function, a symbol, an exotic object) falls back to the JSON
+ * form, which is exactly what the store persists; a value neither can
+ * serialize (a throwing getter, a throwing toJSON) is returned as is,
+ * because the store could not persist that record either (its insert fails
+ * per record and is logged). Cycles never reach the fallbacks:
+ * structuredClone keeps them. Never throws: a snapshot failure must not
+ * block a decision that has already been made.
+ */
+function snapshotForAudit<T>(value: T): T {
+  try {
+    return structuredClone(value)
+  } catch {
+    // fall through
+  }
+  try {
+    return JSON.parse(JSON.stringify(value)) as T
+  } catch {
+    return value
+  }
+}
+
 interface WriteAuditArgs {
   /** Caller-supplied record id (pre-allocated when ledger rows reference it). */
   id?: string
@@ -1895,6 +1923,10 @@ interface WriteAuditArgs {
   agentId: string | null
   sessionId: string | null
   toolName: string
+  /**
+   * `toolInput`, `metadata`, and `upstreamResponse` may be caller-owned;
+   * `writeAudit` snapshots them, so call sites pass them as received.
+   */
   toolInput: Record<string, unknown>
   metadata: Record<string, unknown> | null
   action: PolicyAction
