@@ -925,6 +925,13 @@ Invalid config: Invalid configuration (1 error)
   upstream: Unrecognized key: "request_timout"
 ```
 
+A file that validates but does not compile (a rule or a budget contributor whose `regex` is rejected as catastrophic or malformed; see [Policies](./policies.md)) is reported on one line naming the rule or the budget, by `helio validate` and `helio start` alike, exit 1. `helio start` compiles the file before it connects to any upstream, so nothing is started for a file it refuses:
+
+```
+Invalid policy: Policy rule 0 ("bad"): catastrophic regex "(a+)+$" for input path "$.memo": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.
+Invalid budget: Budget "daily-cap": contributor 0: invalid regex "[z-a]" for input path "$.memo": Invalid regular expression: /[z-a]/: Range out of order in character class
+```
+
 The one exception is top-level keys beginning with lowercase `x-`. They are reserved as extension keys — holders for reusable YAML anchors, in the docker-compose style — and are ignored by the schema:
 
 ```yaml

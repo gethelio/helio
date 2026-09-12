@@ -43,6 +43,20 @@ Maintainer notes:
 
 ### Fixed
 
+- **`helio start` now refuses a config that does not compile on one
+  line, before any upstream is touched.** A file whose YAML validates
+  but whose policy rule or budget contributor carries a `regex` that
+  is rejected as catastrophic or malformed used to be reported as
+  `[helio] Unhandled promise rejection: PolicyParseError: ...` (or
+  `BudgetParseError`) with a stack trace, after every upstream had
+  been connected, which left a stdio upstream's child process running
+  after the exit. The proxy now compiles the file right after the
+  config pin check and prints `Invalid policy: ...` or
+  `Invalid budget: ...` and exits 1 with nothing started, the same
+  line `helio validate` prints. `helio validate` now prints
+  `Invalid budget: ...` for a budget that does not compile (it printed
+  `Error: ...`). Hot reload of such a file was already refused on one
+  line and is unchanged.
 - **A lost config watch now re-arms and reloads once the file can be
   read again.** When the config file was replaced by one the proxy
   user cannot read, chokidar's re-watch of the new inode failed, the
