@@ -35,7 +35,7 @@ import { createForwarderFromConfig } from './cli-forwarder.js'
 import type { BuiltForwarder } from './cli-forwarder.js'
 import type { McpForwarder } from './mcp/types.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
-import type { CompiledPolicy } from './policy/index.js'
+import type { CompiledPolicy, CompilePoliciesResult } from './policy/index.js'
 import { GovernedForwarder } from './policy/governed-forwarder.js'
 import type { GovernedForwarderOptions } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
@@ -58,7 +58,14 @@ import {
 } from './approval/index.js'
 import { RateLimiter } from './policy/index.js'
 import { SpendLimiter } from './policy/index.js'
-import { BudgetEngine, BudgetLedger, budgetEventsToCsv, compileBudgets } from './budget/index.js'
+import {
+  BudgetEngine,
+  BudgetLedger,
+  BudgetParseError,
+  budgetEventsToCsv,
+  compileBudgets,
+} from './budget/index.js'
+import type { CompiledBudget } from './budget/index.js'
 import { parseDuration } from './config/schema.js'
 import {
   createDashboardAppWithLifecycle,
@@ -252,6 +259,18 @@ function printConfigErrorDetails(error: ConfigError, prefix = ''): void {
 }
 
 /**
+ * The one line for a config that loaded but did not compile: a policy
+ * rule or a budget whose glob or regex was rejected. Both `validate`
+ * and `start` print it, so the two surfaces cannot drift (issue #195).
+ * Returns undefined for anything that is not a compile failure.
+ */
+function compileFailureLine(err: unknown): string | undefined {
+  if (err instanceof PolicyParseError) return `Invalid policy: ${err.message}`
+  if (err instanceof BudgetParseError) return `Invalid budget: ${err.message}`
+  return undefined
+}
+
+/**
  * Phase 1 of per-upstream stack assembly: build and connect the transport
  * forwarder for one upstream section. Kept separate from governUpstream so
  * every upstream connects before any shared service is constructed — a bad
@@ -405,6 +424,25 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   }
   const pinnedSha256 = configPin.status === 'set' ? configPin.sha256 : undefined
 
+  // Compile BEFORE any environment check or side effect (issue #195): a
+  // file that does not compile is refused the way validate refuses it,
+  // with no upstream connected, no stdio child spawned, no audit DB.
+  // The line is the complete diagnosis; StartupError prints it verbatim.
+  let compiled: CompilePoliciesResult & { readonly budgets: CompiledBudget[] }
+  try {
+    const { policy, warnings } = compilePolicies(config.policies)
+    compiled = { policy, warnings, budgets: compileBudgets(config.budgets) }
+  } catch (err) {
+    const line = compileFailureLine(err)
+    if (line === undefined) throw err
+    throw new StartupError(line)
+  }
+  const { policy, warnings, budgets } = compiled
+  for (const w of warnings) {
+    const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
+    console.error(`Warning: policy ${label}: ${w.message}`)
+  }
+
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
   if (config.dashboard.enabled && !bundledDashboardDistPath) {
     console.error(
@@ -448,14 +486,6 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       throw err
     }
   }
-
-  // Compile policies and wrap the forwarder with governance
-  const { policy, warnings } = compilePolicies(config.policies)
-  for (const w of warnings) {
-    const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
-    console.error(`Warning: policy ${label}: ${w.message}`)
-  }
-  const budgets = compileBudgets(config.budgets)
 
   // Create dashboard event bus (used by all components for real-time events)
   // and the shared record/ticket/limiter-state projections onto it. The
@@ -1069,8 +1099,9 @@ async function validateCommand(configPath: string): Promise<void> {
       printConfigErrorDetails(err)
       process.exit(1)
     }
-    if (err instanceof PolicyParseError) {
-      console.error(`Invalid policy: ${err.message}`)
+    const line = compileFailureLine(err)
+    if (line !== undefined) {
+      console.error(line)
       process.exit(1)
     }
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)

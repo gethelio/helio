@@ -232,6 +232,106 @@ function getClosedPort(): Promise<number> {
   })
 }
 
+// The compile-failure faces (issue #195): a name, the YAML tail appended to a
+// start-ready header, and the exact line BOTH surfaces must print for it. One
+// table drives validate and start so a drift on either fails its own row.
+const RULE_CATASTROPHIC_TAIL = `policies:
+  default: allow
+  rules:
+    - name: bad
+      match:
+        input:
+          '$.memo':
+            regex: '(a+)+$'
+      action: deny
+`
+const RULE_INVALID_TAIL = `policies:
+  default: allow
+  rules:
+    - name: bad
+      match:
+        input:
+          '$.memo':
+            regex: '[z-a]'
+      action: deny
+`
+const METADATA_CATASTROPHIC_TAIL = `policies:
+  default: allow
+  rules:
+    - name: bad
+      match:
+        metadata:
+          agent:
+            regex: '(a+)+$'
+      action: deny
+`
+const BUDGET_CATASTROPHIC_TAIL = `budgets:
+  - name: daily-cap
+    limit: 50
+    currency: USD
+    window: 24h
+    contributors:
+      - match:
+          tool: 'stripe_*'
+          input:
+            '$.memo':
+              regex: '(a+)+$'
+        field: '$.amount'
+`
+const RULE_CATASTROPHIC_LINE =
+  'Invalid policy: Policy rule 0 ("bad"): catastrophic regex "(a+)+$" for input path "$.memo": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.'
+const COMPILE_FAILURE_FACES: Array<[string, string, string]> = [
+  ['a catastrophic rule input regex', RULE_CATASTROPHIC_TAIL, RULE_CATASTROPHIC_LINE],
+  [
+    'a malformed rule input regex',
+    RULE_INVALID_TAIL,
+    'Invalid policy: Policy rule 0 ("bad"): invalid regex "[z-a]" for input path "$.memo": Invalid regular expression: /[z-a]/: Range out of order in character class',
+  ],
+  [
+    'a catastrophic rule metadata regex',
+    METADATA_CATASTROPHIC_TAIL,
+    'Invalid policy: Policy rule 0 ("bad"): catastrophic regex "(a+)+$" for metadata key "agent": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.',
+  ],
+  [
+    'a catastrophic budget contributor regex',
+    BUDGET_CATASTROPHIC_TAIL,
+    'Invalid budget: Budget "daily-cap": contributor 0: catastrophic regex "(a+)+$" for input path "$.memo": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.',
+  ],
+]
+
+/**
+ * Write a start-ready config (the writeStartConfig header with the dashboard
+ * disabled, so no dashboard port or bundled assets are involved) followed by
+ * a `policies:` or `budgets:` tail that validates but does not compile.
+ * The caller is responsible for rmSync cleanup.
+ */
+function writeCompileFailureConfig(tail: string): {
+  dir: string
+  configPath: string
+  auditPath: string
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'helio-cli-compile-'))
+  const configPath = join(dir, 'helio.yaml')
+  const listenPort = randomChildPort()
+  const auditPath = join(dir, 'audit.db')
+  writeFileSync(
+    configPath,
+    `version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${auditPath}"
+${tail}`,
+  )
+  return { dir, configPath, auditPath }
+}
+
 /** Path of the MCP-speaking stdio child fixture (see the file's header). */
 const STDIO_MCP_FIXTURE = join(import.meta.dirname, '__tests__', 'helpers', 'stdio-mcp-fixture.cjs')
 
@@ -1118,6 +1218,22 @@ dashboard:
         rmSync(dir, { recursive: true, force: true })
       }
     })
+
+    it.each(COMPILE_FAILURE_FACES)(
+      'reports %s on one line and exits 1 (issue #195)',
+      async (_name, tail, expectedLine) => {
+        const { dir, configPath } = writeCompileFailureConfig(tail)
+        try {
+          const result = await runCli(['validate', '-c', configPath])
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(expectedLine)
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
   })
 
   describe('secret', () => {
@@ -1777,6 +1893,113 @@ audit:
         // name, no crash dump.
         expect(result.stderr).not.toContain('upstream "')
         expect(result.stderr).not.toContain('Unhandled promise rejection')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it.each(COMPILE_FAILURE_FACES)(
+      'refuses %s on one line before anything starts (issue #195)',
+      async (_name, tail, expectedLine) => {
+        const { dir, configPath, auditPath } = writeCompileFailureConfig(tail)
+        try {
+          const result = await runCli(['start', '-c', configPath])
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(expectedLine)
+          // The same line validate prints: no rejection wrapper, no stack.
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+          expect(result.stderr).not.toMatch(/\n\s+at /)
+          expect(result.stderr).not.toContain('Helio proxy listening')
+          // Refused before any side effect: the audit DB is never opened.
+          expect(existsSync(auditPath)).toBe(false)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it('refuses a compile failure before a missing stdio command is spawned (issue #195)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-compile-stdio-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = randomChildPort()
+      // An absolute path that does not exist: spawn fails fast with ENOENT
+      // (the #324 shape), so the outcome is deterministic on either ordering.
+      const missingCommand = join(dir, 'nonexistent-helio-stdio-195')
+      writeFileSync(
+        configPath,
+        `version: "1"
+upstream:
+  transport: stdio
+  command: "${missingCommand}"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+${RULE_CATASTROPHIC_TAIL}`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        // The compile refuses the file before the connect loop, so the stdio
+        // command is never spawned and ENOENT never appears.
+        expect(result.stderr).toContain(RULE_CATASTROPHIC_LINE)
+        expect(result.stderr).not.toContain('ENOENT')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('prints a policy warning before a connect failure (issue #195)', async () => {
+      const closedPort = await getClosedPort()
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-warn-order-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = randomChildPort()
+      // limits.key "agent" is the one semantic policy warning the schema lets
+      // through; the sse upstream on a just-closed port fails with ECONNREFUSED.
+      writeFileSync(
+        configPath,
+        `version: "1"
+upstream:
+  url: "http://127.0.0.1:${String(closedPort)}/sse"
+  transport: sse
+  connect_timeout: "2s"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(dir, 'audit.db')}"
+policies:
+  default: allow
+  rules:
+    - name: throttle
+      match:
+        tool: "delete_*"
+      action: rate_limit
+      limits:
+        max_calls: 5
+        window: 1m
+        key: agent
+`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        const warningIndex = result.stderr.indexOf(
+          'Warning: policy rule "throttle": limits.key "agent" is not yet supported',
+        )
+        const failureIndex = result.stderr.indexOf('is unreachable (ECONNREFUSED)')
+        expect(warningIndex).toBeGreaterThanOrEqual(0)
+        expect(failureIndex).toBeGreaterThanOrEqual(0)
+        // The compile (warnings included) precedes the connect loop, so the
+        // operator hears the policy warning even when the upstream is down.
+        expect(warningIndex).toBeLessThan(failureIndex)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
