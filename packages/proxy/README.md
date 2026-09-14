@@ -220,6 +220,12 @@ policies:
           '$.amount': { gt: 1000 }
       action: require_approval
 ```
+### Multi-Upstream Governance
+
+A named `upstreams:` list in `helio.yaml` lets one Helio instance govern several MCP servers under a single policy file, budget engine, approval queue, and audit trail. It's mutually exclusive with the singular `upstream:` block — set exactly one of the two — and the singular form stays fully supported, so existing configs need no migration.
+
+Each named upstream is served at its own door, `/mcp/<name>` and `/sse/<name>`, with its own forwarder and route stack. Tool names are never rewritten and there is no merged toolset — a client connects to exactly one door and sees exactly that upstream's tools. See the [Configuration Reference](https://github.com/gethelio/helio/blob/main/docs/configuration.md#upstreams) for the full field list, or the runnable [multi-upstream example](https://github.com/gethelio/helio/tree/main/examples/multi-upstream) for a two-upstream setup with a door-scoped rate limit and budget.
+
 
 ### Cross-Tool Spend Budgets
 
