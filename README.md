@@ -7,6 +7,8 @@
   <a href="https://github.com/gethelio/helio/actions/workflows/ci.yml"><img src="https://github.com/gethelio/helio/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/gethelio/helio/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://www.npmjs.com/package/@gethelio/proxy"><img src="https://img.shields.io/npm/v/@gethelio/proxy.svg" alt="npm version" /></a>
+  <a href="https://mcpservers.org/servers/gethelio/helio"><img src="https://mcpservers.org/badge.svg" alt="Listed on mcpservers.org" /></a>
+  <a href="https://glama.ai/mcp/servers/gethelio/helio"><img src="https://glama.ai/mcp/servers/gethelio/helio/badges/score.svg" alt="Helio MCP server on Glama" /></a>
 </p>
 
 <p align="center">
