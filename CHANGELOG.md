@@ -43,6 +43,21 @@ Maintainer notes:
 
 ### Fixed
 
+- **An empty or whitespace-only `audit.path` is now refused by the
+  schema with the field named.** A blank `path` under `audit:` (or a
+  `${VAR}` that interpolated to nothing) opened a private temporary
+  database, so the proxy booted and recorded an audit trail and a
+  budget ledger that vanished on exit; since #404 the empty string was
+  refused, but as `<cwd> is a directory, not a file`, naming the
+  working directory instead of the blank field, and a whitespace-only
+  value still booted. The schema now trims the value and requires at
+  least one character, so all three commands print
+  `audit.path: Too small: expected string to have >=1 characters`
+  under the usual `Invalid configuration` line and exit 1. A path with
+  leading or trailing spaces is trimmed to the file SQLite opens, which
+  is also what the `Audit:` startup line and the directory check now
+  use (a padded `:memory:` is the in-memory store it always was to
+  SQLite).
 - **`helio start` and `helio export` now refuse an `audit.path` whose
   directory is missing on one line, before any upstream is touched.**
   A path whose directory did not exist, was not a directory, could not
