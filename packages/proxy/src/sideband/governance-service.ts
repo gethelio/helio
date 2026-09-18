@@ -956,9 +956,9 @@ export class GovernanceService {
           ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
           ...(resolution.escalatedAt
             ? {
-                escalated_at: resolution.escalatedAt,
-                escalated_to: [...(resolution.escalatedTo ?? [])],
-              }
+              escalated_at: resolution.escalatedAt,
+              escalated_to: [...(resolution.escalatedTo ?? [])],
+            }
             : {}),
         }
       }
@@ -1472,15 +1472,15 @@ export class GovernanceService {
       const approvalContext: ApprovalAuditContext | undefined =
         entry.approvalTicketId && resolution && (resolution.denialReason || resolution.escalatedAt)
           ? {
-              ticket_id: entry.approvalTicketId,
-              ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
-              ...(resolution.escalatedAt
-                ? {
-                    escalated_at: resolution.escalatedAt,
-                    escalated_to: [...(resolution.escalatedTo ?? [])],
-                  }
-                : {}),
-            }
+            ticket_id: entry.approvalTicketId,
+            ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
+            ...(resolution.escalatedAt
+              ? {
+                escalated_at: resolution.escalatedAt,
+                escalated_to: [...(resolution.escalatedTo ?? [])],
+              }
+              : {}),
+          }
           : undefined
       const auditId = this.writeAudit({
         ...(committed ? { id: committed.auditId } : {}),
@@ -1520,10 +1520,10 @@ export class GovernanceService {
       console.error(
         committed
           ? `[helio] Sideband evaluation ${entry.evaluationId} expired after a failed ` +
-              `/audit finalization (origin=${entry.origin}, tool=${entry.toolName}) — ` +
-              `recorded as evaluation_expired under the committed audit id`
+          `/audit finalization (origin=${entry.origin}, tool=${entry.toolName}) — ` +
+          `recorded as evaluation_expired under the committed audit id`
           : `[helio] Sideband evaluation ${entry.evaluationId} expired without /audit ` +
-              `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
+          `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
       )
       return 'expired'
     }
@@ -1582,11 +1582,11 @@ export class GovernanceService {
     senderId: string | null,
   ):
     | {
-        plan?: LimitPlan
-        block?: Record<string, unknown>
-        allowed: boolean
-        sessionUnresolved?: true
-      }
+      plan?: LimitPlan
+      block?: Record<string, unknown>
+      allowed: boolean
+      sessionUnresolved?: true
+    }
     | undefined {
     const matchedRule = decision.matchedRule
     const limits = matchedRule?.limits
@@ -1631,11 +1631,11 @@ export class GovernanceService {
     senderId: string | null,
   ):
     | {
-        plan?: LimitPlan
-        block?: Record<string, unknown>
-        allowed: boolean
-        sessionUnresolved?: true
-      }
+      plan?: LimitPlan
+      block?: Record<string, unknown>
+      allowed: boolean
+      sessionUnresolved?: true
+    }
     | undefined {
     const maxSpend = decision.matchedRule?.limits?.maxSpend
     if (!this.spendLimiter || !maxSpend) return { allowed: true }
@@ -1880,8 +1880,8 @@ export class GovernanceService {
     if (!policyCanRequireApproval(policy) || this.approvalRouter) return
     throw new GovernanceConfigError(
       '[helio] GovernanceService misconfiguration: approval-capable policy ' +
-        '(a require_approval rule, or flag_destructive/on_tool_drift set to require_approval) ' +
-        'requires an approvalRouter',
+      '(a require_approval rule, or flag_destructive/on_tool_drift set to require_approval) ' +
+      'requires an approvalRouter',
     )
   }
 }
@@ -2105,11 +2105,23 @@ function definitionProvided(tool: WireToolDefinition): boolean {
 /** Map the wire tool object to an MCP-shaped definition for the cache. */
 function toMcpToolDef(tool: WireToolDefinition): Record<string, unknown> {
   const def: Record<string, unknown> = { name: tool.name }
+
   if (tool.description !== undefined) def['description'] = tool.description
-  if (tool.input_schema !== undefined) def['inputSchema'] = tool.input_schema
-  if (tool.output_schema !== undefined) def['outputSchema'] = tool.output_schema
+
+  if (tool.input_schema !== undefined) {
+    def['inputSchema'] = snapshotForAudit(tool.input_schema)
+  }
+
+  if (tool.output_schema !== undefined) {
+    def['outputSchema'] = snapshotForAudit(tool.output_schema)
+  }
+
   if (tool.title !== undefined) def['title'] = tool.title
-  if (tool.annotations !== undefined) def['annotations'] = tool.annotations
+
+  if (tool.annotations !== undefined) {
+    def['annotations'] = snapshotForAudit(tool.annotations)
+  }
+
   return def
 }
 
@@ -2182,12 +2194,12 @@ function planBytes(plans: readonly Plan[]): number {
     total += byteLength(
       plan.kind === 'budget'
         ? {
-            kind: plan.kind,
-            name: plan.budget.name,
-            key: plan.bucketKey,
-            amount: plan.amount,
-            breached: plan.breached,
-          }
+          kind: plan.kind,
+          name: plan.budget.name,
+          key: plan.bucketKey,
+          amount: plan.amount,
+          breached: plan.breached,
+        }
         : { kind: plan.kind, key: plan.key, amount: plan.amount ?? 0 },
     )
   }
