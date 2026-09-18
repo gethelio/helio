@@ -41,6 +41,19 @@ Maintainer notes:
   The release assets `sbom.json` and `sbom-dashboard.json` are
   unchanged.
 
+### Changed
+
+- **The README, the package README, and the npm package description
+  now lead with the outcome:
+  `Open-source governance for MCP agents: useful autonomy without unlimited authority.`**
+  The stateless-protocol argument moves from "How Helio Compares" to
+  directly under the intro, and a five-line authority example
+  (`ALLOW`, `APPROVE`, `DENY`, `BUDGET`, `REQUIRE`) follows the install
+  command. The `@gethelio/proxy` description and the README npm ships
+  with this version now read the same; GitHub shows them from this
+  commit, npm when this version is published. Nothing else in the
+  READMEs changes.
+
 ### Fixed
 
 - **An empty or whitespace-only `audit.path` is now refused by the
