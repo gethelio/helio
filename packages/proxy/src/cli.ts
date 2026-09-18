@@ -1,7 +1,8 @@
 /* eslint-disable no-console -- CLI entry point, console is the intended output */
 import { Command } from 'commander'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { accessSync, constants, existsSync, statSync } from 'node:fs'
+import type { Stats } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -271,6 +272,58 @@ function compileFailureLine(err: unknown): string | undefined {
 }
 
 /**
+ * The one diagnosis for an audit.path the store could not open because of
+ * where it points: its directory must exist, be a directory, and be
+ * searchable, the path itself must not be a directory, and when the
+ * file does not exist yet the directory must be writable so it can be
+ * created (issue #388). Returned without a prefix: start and export
+ * throw it as an `Invalid config:` StartupError, because they run where
+ * the directory has to be; validate prints it as a `Warning:` and still
+ * accepts the file, because it is run on hosts that will not run start
+ * (a config for a container, or for a service account's directory). One
+ * body, so the surfaces cannot drift. The directory is named resolved,
+ * because a relative path resolves against the working directory, not
+ * the config file. Nothing else is checked: a read-only file still
+ * exports, and an existing database only needs directory write for
+ * sidecars that are not already there, so SQLite keeps the last word on
+ * an existing file. `:memory:` has no directory.
+ */
+function auditPathProblem(auditPath: string): string | undefined {
+  if (auditPath === ':memory:') return undefined
+  const file = resolve(auditPath)
+  const dir = dirname(file)
+  const prefix = 'audit.path:'
+  const errnoCode = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? 'unknown error'
+  let dirStat: Stats
+  try {
+    dirStat = statSync(dir)
+  } catch (err) {
+    const code = errnoCode(err)
+    if (code === 'ENOENT') return `${prefix} directory ${dir} does not exist`
+    if (code === 'ENOTDIR') return `${prefix} ${dir} is not a directory`
+    return `${prefix} directory ${dir} cannot be accessed (${code})`
+  }
+  if (!dirStat.isDirectory()) return `${prefix} ${dir} is not a directory`
+  let fileStat: Stats | undefined
+  try {
+    fileStat = statSync(file, { throwIfNoEntry: false })
+  } catch (err) {
+    // throwIfNoEntry suppresses ENOENT only; a directory this process
+    // cannot search throws EACCES here after the checks above passed.
+    return `${prefix} ${file} cannot be accessed (${errnoCode(err)})`
+  }
+  if (fileStat?.isDirectory()) return `${prefix} ${file} is a directory, not a file`
+  if (fileStat === undefined) {
+    try {
+      accessSync(dir, constants.W_OK)
+    } catch {
+      return `${prefix} directory ${dir} is not writable by this user`
+    }
+  }
+  return undefined
+}
+
+/**
  * Phase 1 of per-upstream stack assembly: build and connect the transport
  * forwarder for one upstream section. Kept separate from governUpstream so
  * every upstream connects before any shared service is constructed — a bad
@@ -442,6 +495,12 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
     console.error(`Warning: policy ${label}: ${w.message}`)
   }
+
+  // The audit directory is checked BEFORE the connect loop (issue #388):
+  // a path the store cannot open is refused with no upstream connected,
+  // no stdio child spawned, and no directory created.
+  const auditProblem = auditPathProblem(config.audit.path)
+  if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
 
   const bundledDashboardDistPath = config.dashboard.enabled ? getBundledDashboardDistPath() : null
   if (config.dashboard.enabled && !bundledDashboardDistPath) {
@@ -1079,6 +1138,13 @@ async function validateCommand(configPath: string): Promise<void> {
     }
     warnIfStdioUrlIgnored(config)
 
+    // The audit directory is a fact about the host that will run start,
+    // which need not be this one (issue #388): warn, do not refuse.
+    const auditProblem = auditPathProblem(config.audit.path)
+    if (auditProblem !== undefined) {
+      console.error(`Warning: ${auditProblem} (helio start will refuse this path)`)
+    }
+
     if (config.dashboard.enabled && !getBundledDashboardDistPath()) {
       console.error(
         'Invalid config: dashboard.enabled is true but bundled dashboard assets are missing. ' +
@@ -1173,6 +1239,9 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
     }
     throw err
   }
+
+  const auditProblem = auditPathProblem(config.audit.path)
+  if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
 
   const store = new AuditStore({
     path: config.audit.path,
@@ -1308,6 +1377,19 @@ function registerShutdown(
 // Program
 // ---------------------------------------------------------------------------
 
+/**
+ * A StartupError message is the complete operator diagnosis: print it
+ * verbatim and exit 1, no stack, no rejection wrapper (#233, #388).
+ * Anything else rethrows into the unhandledRejection crash path.
+ */
+function exitOnStartupError(err: unknown): never {
+  if (err instanceof StartupError) {
+    console.error(err.message)
+    process.exit(1)
+  }
+  throw err
+}
+
 const program = new Command()
   .name('helio')
   .description('Helio MCP governance proxy')
@@ -1320,16 +1402,7 @@ program
   .option('--no-hot-reload', 'Disable policy hot-reload — config edits will require a restart')
   .action((opts: { config: string; hotReload?: boolean }) =>
     startCommand(opts.config, { config: opts.config, noHotReload: opts.hotReload === false }).catch(
-      (err: unknown) => {
-        // A StartupError message is the complete operator diagnosis: print
-        // it verbatim and exit — no stack, no rejection wrapper (#233).
-        // Anything else rethrows into the unhandledRejection crash path.
-        if (err instanceof StartupError) {
-          console.error(err.message)
-          process.exit(1)
-        }
-        throw err
-      },
+      exitOnStartupError,
     ),
   )
 
@@ -1380,7 +1453,7 @@ program
   .option('--from <iso>', 'Start time (ISO 8601)')
   .option('--to <iso>', 'End time (ISO 8601)')
   .option('--limit <n>', 'Max records to export (up to 10000)', '1000')
-  .action((opts: ExportOptions) => exportCommand(opts))
+  .action((opts: ExportOptions) => exportCommand(opts).catch(exitOnStartupError))
 
 const configCommand = program.command('config').description('Inspect a helio.yaml config file')
 configCommand

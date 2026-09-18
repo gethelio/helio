@@ -43,6 +43,27 @@ Maintainer notes:
 
 ### Fixed
 
+- **`helio start` and `helio export` now refuse an `audit.path` whose
+  directory is missing on one line, before any upstream is touched.**
+  A path whose directory did not exist, was not a directory, could not
+  be searched, or could not be written by the proxy user when the
+  database had to be created (or that named an existing directory)
+  passed `helio validate` and crashed `helio start` and `helio export`
+  as `[helio] Unhandled promise rejection: TypeError: Cannot open database because the directory does not exist`
+  (or `SqliteError: unable to open database file`). On `helio start`
+  the crash came after every upstream had been connected, which left a
+  stdio upstream's child process running after the exit. `helio start`
+  and `helio export` now print
+  `Invalid config: audit.path: directory <dir> does not exist` (or the
+  matching line for the other cases), naming the resolved path, and
+  exit 1; `helio start` checks before it connects to any upstream and
+  never creates the directory. `helio validate` prints the same
+  diagnosis as a `Warning:` and still reports the file valid, since it
+  is often run on a machine that will not run the proxy. An existing
+  database keeps opening as before, whatever its directory's
+  permissions. `helio export` now also prints the audit store's own
+  refusals, such as the schema mismatch line, verbatim instead of
+  inside the rejection wrapper.
 - **`helio start` now refuses a config that does not compile on one
   line, before any upstream is touched.** A file whose YAML validates
   but whose policy rule or budget contributor carries a `regex` that
