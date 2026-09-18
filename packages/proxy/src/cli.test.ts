@@ -4,8 +4,10 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -330,6 +332,115 @@ audit:
 ${tail}`,
   )
   return { dir, configPath, auditPath }
+}
+
+/**
+ * Write the start-ready header writeCompileFailureConfig uses, with the
+ * given audit.path and no tail, into an existing tempdir (issue #388).
+ */
+function writeAuditPathConfig(dir: string, auditPath: string): string {
+  const configPath = join(dir, 'helio.yaml')
+  writeFileSync(
+    configPath,
+    `version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(randomChildPort())}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${auditPath}"
+`,
+  )
+  return configPath
+}
+
+/** A directory chmod cannot make unwritable for root, and W_OK is not honored on Windows. */
+const CAN_TEST_UNWRITABLE = process.platform !== 'win32' && process.getuid?.() !== 0
+
+// The audit.path faces (issue #388): a name, and a builder that lays the
+// fixture out under the tempdir and returns the configured path, the
+// exact body all three surfaces print (validate behind `Warning: `, start
+// and export behind `Invalid config: `), and the directory that must not
+// exist afterwards (undefined when the face has nothing to create).
+type AuditPathFace = { auditPath: string; expectedBody: string; absentAfter?: string }
+const AUDIT_PATH_FACES: Array<[string, (dir: string) => AuditPathFace]> = [
+  [
+    'a directory that does not exist',
+    (dir) => ({
+      auditPath: join(dir, 'no-such-dir', 'audit.db'),
+      expectedBody: `audit.path: directory ${join(dir, 'no-such-dir')} does not exist`,
+      absentAfter: join(dir, 'no-such-dir'),
+    }),
+  ],
+  [
+    'a nested directory that does not exist',
+    (dir) => ({
+      auditPath: join(dir, 'no', 'such', 'audit.db'),
+      expectedBody: `audit.path: directory ${join(dir, 'no', 'such')} does not exist`,
+      absentAfter: join(dir, 'no'),
+    }),
+  ],
+  [
+    'a parent that is a file',
+    (dir) => {
+      writeFileSync(join(dir, 'plainfile'), '')
+      return {
+        auditPath: join(dir, 'plainfile', 'audit.db'),
+        expectedBody: `audit.path: ${join(dir, 'plainfile')} is not a directory`,
+      }
+    },
+  ],
+  [
+    'a path that is a directory',
+    (dir) => ({
+      auditPath: dir,
+      expectedBody: `audit.path: ${dir} is a directory, not a file`,
+    }),
+  ],
+  [
+    'a relative path into a directory that does not exist',
+    (dir) => ({
+      auditPath: './rel-missing/audit.db',
+      // The child resolves against its cwd, which process.cwd() reports
+      // with symlinks resolved (macOS tmpdir is under /var -> /private/var).
+      expectedBody: `audit.path: directory ${join(realpathSync(dir), 'rel-missing')} does not exist`,
+      absentAfter: join(dir, 'rel-missing'),
+    }),
+  ],
+  [
+    'a path through a file',
+    (dir) => {
+      // A deeper component below a regular file: stat says ENOTDIR, a
+      // different branch from the parent-is-a-file row above.
+      writeFileSync(join(dir, 'plainfile'), '')
+      return {
+        auditPath: join(dir, 'plainfile', 'foo', 'audit.db'),
+        expectedBody: `audit.path: ${join(dir, 'plainfile', 'foo')} is not a directory`,
+      }
+    },
+  ],
+]
+
+/**
+ * Seed a WAL database and leave empty -wal and -shm sidecars beside it
+ * after the close (a clean close deletes both), then make the directory
+ * read-only. The face r1 found: SQLite needs no directory write once the
+ * sidecars exist, so all three commands must keep accepting it.
+ */
+function seedReadOnlyDirWithSidecars(dir: string): string {
+  const dbPath = join(dir, 'audit.db')
+  const db = new Database(dbPath)
+  db.pragma('journal_mode = WAL')
+  db.exec('CREATE TABLE seeded (x)')
+  db.close()
+  writeFileSync(`${dbPath}-wal`, '')
+  writeFileSync(`${dbPath}-shm`, '')
+  chmodSync(dir, 0o500)
+  return dbPath
 }
 
 /** Path of the MCP-speaking stdio child fixture (see the file's header). */
@@ -1234,6 +1345,123 @@ dashboard:
       },
       15_000,
     )
+
+    it.each(AUDIT_PATH_FACES)(
+      'warns about an audit.path with %s on one line and still prints Config is valid (issue #388)',
+      async (_name, build) => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-path-'))
+        try {
+          const { auditPath, expectedBody } = build(dir)
+          const configPath = writeAuditPathConfig(dir, auditPath)
+          const result = await runCli(['validate', '-c', configPath], undefined, dir)
+          // validate runs on whatever host has the file, which need not be the
+          // one that will run start (a config for a container, a service
+          // account's directory), so the directory state is a warning here and
+          // a refusal on start and export.
+          expect(result.code).toBe(0)
+          expect(result.stderr).toContain(
+            `Warning: ${expectedBody} (helio start will refuse this path)`,
+          )
+          expect(result.stderr).toContain('Config is valid')
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'warns about an audit.path in a directory this user cannot write and still prints Config is valid (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-ro-'))
+        const roDir = join(dir, 'ro')
+        mkdirSync(roDir)
+        chmodSync(roDir, 0o500)
+        try {
+          const configPath = writeAuditPathConfig(dir, join(roDir, 'audit.db'))
+          const result = await runCli(['validate', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(0)
+          expect(result.stderr).toContain(
+            `Warning: audit.path: directory ${roDir} is not writable by this user (helio start will refuse this path)`,
+          )
+          expect(result.stderr).toContain('Config is valid')
+        } finally {
+          chmodSync(roDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'warns about an audit.path in a directory this user cannot search and still prints Config is valid (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-wo-'))
+        const woDir = join(dir, 'wo')
+        mkdirSync(woDir)
+        chmodSync(woDir, 0o200)
+        try {
+          const auditPath = join(woDir, 'audit.db')
+          const configPath = writeAuditPathConfig(dir, auditPath)
+          const result = await runCli(['validate', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(0)
+          // The directory stat and W_OK pass on a 0200 directory; the file
+          // stat is what fails, so the line names the file.
+          expect(result.stderr).toContain(
+            `Warning: audit.path: ${auditPath} cannot be accessed (EACCES) (helio start will refuse this path)`,
+          )
+          expect(result.stderr).toContain('Config is valid')
+        } finally {
+          chmodSync(woDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'accepts an existing audit database with its sidecars in a directory this user cannot write (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-sidecars-'))
+        const dbDir = join(dir, 'db')
+        mkdirSync(dbDir)
+        try {
+          const dbPath = seedReadOnlyDirWithSidecars(dbDir)
+          const configPath = writeAuditPathConfig(dir, dbPath)
+          const result = await runCli(['validate', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(0)
+          expect(result.stderr).toContain('Config is valid')
+          // An existing file needs no directory write; nothing to warn about.
+          expect(result.stderr).not.toContain('Warning: audit.path')
+        } finally {
+          chmodSync(dbDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'accepts audit.path :memory: without looking at the working directory (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-memory-'))
+        const cwd = join(dir, 'cwd')
+        mkdirSync(cwd)
+        chmodSync(cwd, 0o500)
+        try {
+          const configPath = writeAuditPathConfig(dir, ':memory:')
+          const result = await runCli(['validate', '-c', configPath], undefined, cwd)
+          expect(result.code).toBe(0)
+          expect(result.stderr).toContain('Config is valid')
+          // :memory: has no directory: the unwritable cwd is never looked at.
+          expect(result.stderr).not.toContain('Warning: audit.path')
+        } finally {
+          chmodSync(cwd, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
   })
 
   describe('secret', () => {
@@ -2000,6 +2228,143 @@ policies:
         // The compile (warnings included) precedes the connect loop, so the
         // operator hears the policy warning even when the upstream is down.
         expect(warningIndex).toBeLessThan(failureIndex)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it.each(AUDIT_PATH_FACES)(
+      'refuses an audit.path with %s on one line before anything starts (issue #388)',
+      async (_name, build) => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-path-'))
+        try {
+          const { auditPath, expectedBody, absentAfter } = build(dir)
+          const configPath = writeAuditPathConfig(dir, auditPath)
+          const result = await runCli(['start', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(`Invalid config: ${expectedBody}`)
+          // The body validate warns with, as a refusal: no rejection wrapper, no stack.
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+          expect(result.stderr).not.toMatch(/\n\s+at /)
+          expect(result.stderr).not.toContain('Helio proxy listening')
+          // Refused, not repaired: the directory is never created.
+          if (absentAfter !== undefined) expect(existsSync(absentAfter)).toBe(false)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'refuses an audit.path in a directory this user cannot write on one line before anything starts (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-ro-'))
+        const roDir = join(dir, 'ro')
+        mkdirSync(roDir)
+        chmodSync(roDir, 0o500)
+        try {
+          const configPath = writeAuditPathConfig(dir, join(roDir, 'audit.db'))
+          const result = await runCli(['start', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(
+            `Invalid config: audit.path: directory ${roDir} is not writable by this user`,
+          )
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+          expect(result.stderr).not.toMatch(/\n\s+at /)
+          expect(result.stderr).not.toContain('Helio proxy listening')
+        } finally {
+          chmodSync(roDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'refuses an audit.path in a directory this user cannot search on one line before anything starts (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-wo-'))
+        const woDir = join(dir, 'wo')
+        mkdirSync(woDir)
+        chmodSync(woDir, 0o200)
+        try {
+          const auditPath = join(woDir, 'audit.db')
+          const configPath = writeAuditPathConfig(dir, auditPath)
+          const result = await runCli(['start', '-c', configPath], undefined, dir)
+          expect(result.code).toBe(1)
+          expect(result.stderr).toContain(
+            `Invalid config: audit.path: ${auditPath} cannot be accessed (EACCES)`,
+          )
+          expect(result.stderr).not.toContain('Unhandled promise rejection')
+          expect(result.stderr).not.toMatch(/\n\s+at /)
+          expect(result.stderr).not.toContain('Helio proxy listening')
+        } finally {
+          chmodSync(woDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'boots on an existing audit database with its sidecars in a directory this user cannot write (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-sidecars-'))
+        const dbDir = join(dir, 'db')
+        mkdirSync(dbDir)
+        try {
+          const dbPath = seedReadOnlyDirWithSidecars(dbDir)
+          const configPath = writeAuditPathConfig(dir, dbPath)
+          // The Audit: line prints after the listening line and the snapshot
+          // resolves on the first match, so wait for both before asserting on it.
+          const stderr = await startAndCaptureStderr(['-c', configPath], {
+            readyMarker: [/Helio proxy listening/, /Audit: /],
+          })
+          expect(stderr).toContain('Helio proxy listening')
+          expect(stderr).toContain(`Audit: ${dbPath}`)
+          expect(stderr).not.toContain('Invalid config: audit.path')
+        } finally {
+          chmodSync(dbDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it('refuses a missing audit directory before a missing stdio command is spawned (issue #388)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-stdio-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = randomChildPort()
+      // An absolute path that does not exist: spawn fails fast with ENOENT
+      // (the #324 shape), so the outcome is deterministic on either ordering.
+      const missingCommand = join(dir, 'nonexistent-helio-stdio-388')
+      const missingDir = join(dir, 'no-such-dir')
+      writeFileSync(
+        configPath,
+        `version: "1"
+upstream:
+  transport: stdio
+  command: "${missingCommand}"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "${join(missingDir, 'audit.db')}"
+`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath])
+        expect(result.code).toBe(1)
+        // The audit check refuses the file before the connect loop, so the
+        // stdio command is never spawned and ENOENT never appears.
+        expect(result.stderr).toContain(
+          `Invalid config: audit.path: directory ${missingDir} does not exist`,
+        )
+        expect(result.stderr).not.toContain('ENOENT')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -3467,6 +3832,68 @@ audit:
 
       return { dir, configPath }
     }
+
+    it('refuses an audit.path whose directory does not exist on one line (issue #388)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-export-'))
+      const missingDir = join(dir, 'no-such-dir')
+      try {
+        const configPath = writeAuditPathConfig(dir, join(missingDir, 'audit.db'))
+        const result = await runCli(['export', '-c', configPath])
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain(
+          `Invalid config: audit.path: directory ${missingDir} does not exist`,
+        )
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+        expect(result.stdout).toBe('')
+        expect(existsSync(missingDir)).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'exports from an existing audit database with its sidecars in a directory this user cannot write (issue #388)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-sidecars-'))
+        const dbDir = join(dir, 'db')
+        mkdirSync(dbDir)
+        try {
+          const dbPath = seedReadOnlyDirWithSidecars(dbDir)
+          const configPath = writeAuditPathConfig(dir, dbPath)
+          const result = await runCli(['export', '-c', configPath])
+          expect(result.code).toBe(0)
+          expect(result.stderr).toContain('Exported 0 of 0 records')
+          expect(result.stdout.trim()).toBe('[]')
+        } finally {
+          chmodSync(dbDir, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      15_000,
+    )
+
+    it('prints the audit store schema mismatch on one line without the rejection wrapper (issue #388)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-stale-'))
+      const staleDb = join(dir, 'stale.db')
+      try {
+        const stale = new Database(staleDb)
+        stale.exec('CREATE TABLE audit_records (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL)')
+        stale.close()
+        const configPath = writeAuditPathConfig(dir, staleDb)
+        const result = await runCli(['export', '-c', configPath])
+        expect(result.code).toBe(1)
+        // The store's own StartupError, printed verbatim through the same
+        // door as start: no rejection wrapper, no stack.
+        expect(result.stderr).toContain(
+          '[helio] Audit DB schema mismatch: missing required columns',
+        )
+        expect(result.stderr).toContain(`Delete "${staleDb}"`)
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+        expect(result.stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
 
     it('names the offending key when the config is invalid (issue #167)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
