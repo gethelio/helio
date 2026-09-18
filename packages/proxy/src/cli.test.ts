@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -1462,6 +1463,63 @@ dashboard:
       },
       15_000,
     )
+
+    it('reports an empty audit.path as a schema error and exits 1 (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-empty-'))
+      try {
+        const configPath = writeAuditPathConfig(dir, '')
+        const result = await runCli(['validate', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        expect(result.stderr).not.toContain('Config is valid')
+        // The schema names the blank field; the directory check never runs,
+        // so the working directory is not diagnosed as "a directory".
+        expect(result.stderr).not.toContain('is a directory, not a file')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('reports a whitespace-only audit.path as a schema error and exits 1 (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-spaces-'))
+      try {
+        const configPath = writeAuditPathConfig(dir, '   ')
+        const result = await runCli(['validate', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        expect(result.stderr).not.toContain('Config is valid')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('reports an audit.path that interpolates to nothing as a schema error (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-empty-var-'))
+      try {
+        // A variable that is set but empty substitutes '' (an unset one is
+        // already an interpolation error), so the blank reaches the schema.
+        const configPath = writeAuditPathConfig(dir, '${HELIO406_TEST_PATH}')
+        const result = await runCli(
+          ['validate', '-c', configPath],
+          { ...process.env, HELIO406_TEST_PATH: '' },
+          dir,
+        )
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Invalid config: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        expect(result.stderr).not.toContain('Config is valid')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
   })
 
   describe('secret', () => {
@@ -2365,6 +2423,69 @@ audit:
         )
         expect(result.stderr).not.toContain('ENOENT')
         expect(result.stderr).not.toContain('Unhandled promise rejection')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses an empty audit.path as a schema error before anything starts (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-empty-start-'))
+      try {
+        const configPath = writeAuditPathConfig(dir, '')
+        const result = await runCli(['start', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Error: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        expect(result.stderr).not.toContain('Helio proxy listening')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+        // The schema fires first; the directory check never sees the blank.
+        expect(result.stderr).not.toContain('is a directory, not a file')
+        expect(result.stderr).not.toContain('Audit:')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses a whitespace-only audit.path as a schema error before a missing stdio command is spawned (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-spaces-stdio-'))
+      const configPath = join(dir, 'helio.yaml')
+      const listenPort = randomChildPort()
+      // An absolute path that does not exist: spawn fails fast with ENOENT,
+      // so the outcome is deterministic on either ordering. A whitespace-only
+      // path would otherwise pass the directory check and open a temporary
+      // database, and a plain start would never exit.
+      const missingCommand = join(dir, 'nonexistent-helio-stdio-406')
+      writeFileSync(
+        configPath,
+        `version: "1"
+upstream:
+  transport: stdio
+  command: "${missingCommand}"
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+dashboard:
+  enabled: false
+audit:
+  path: "   "
+`,
+      )
+      try {
+        const result = await runCli(['start', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Error: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        // Refused by the schema before the connect loop: the stdio command is
+        // never spawned, nothing listens, nothing is recorded or created.
+        expect(result.stderr).not.toContain('ENOENT')
+        expect(result.stderr).not.toContain('Helio proxy listening')
+        expect(result.stderr).not.toContain('Unhandled promise rejection')
+        expect(result.stderr).not.toContain('is a directory, not a file')
+        expect(readdirSync(dir)).toEqual(['helio.yaml'])
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -3890,6 +4011,40 @@ audit:
         expect(result.stderr).toContain(`Delete "${staleDb}"`)
         expect(result.stderr).not.toContain('Unhandled promise rejection')
         expect(result.stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses an empty audit.path as a schema error (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-empty-export-'))
+      try {
+        const configPath = writeAuditPathConfig(dir, '')
+        const result = await runCli(['export', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Error: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        // The schema fires first; the directory check never sees the blank.
+        expect(result.stderr).not.toContain('is a directory, not a file')
+        expect(result.stdout).toBe('')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses a whitespace-only audit.path instead of exporting from a temporary database (issue #406)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-audit-spaces-export-'))
+      try {
+        const configPath = writeAuditPathConfig(dir, '   ')
+        const result = await runCli(['export', '-c', configPath], undefined, dir)
+        expect(result.code).toBe(1)
+        expect(result.stderr).toContain('Error: Invalid configuration (1 error)')
+        expect(result.stderr).toContain(
+          '  audit.path: Too small: expected string to have >=1 characters',
+        )
+        expect(result.stdout).toBe('')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }

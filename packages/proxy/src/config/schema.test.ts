@@ -3404,6 +3404,44 @@ describe('helioConfigSchema', () => {
     })
   })
 
+  describe('audit.path (issue #406)', () => {
+    const tooSmall = 'Too small: expected string to have >=1 characters'
+
+    it('rejects an empty audit.path', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ audit: { path: '' } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['audit', 'path'])
+      expect(result.error.issues[0]?.message).toBe(tooSmall)
+    })
+
+    it('rejects a whitespace-only audit.path', () => {
+      // better-sqlite3 trims the filename it opens, so three spaces would be
+      // an anonymous, temporary database: the schema trims before min(1).
+      const result = helioConfigSchema.safeParse(minimalConfig({ audit: { path: '   ' } }))
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['audit', 'path'])
+      expect(result.error.issues[0]?.message).toBe(tooSmall)
+    })
+
+    it('trims a padded audit.path to what SQLite opens', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ audit: { path: ' ./padded.db ' } }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.audit.path).toBe('./padded.db')
+    })
+
+    it('keeps the default when audit.path is omitted', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig({ audit: {} }))
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.audit.path).toBe('./helio-audit.db')
+    })
+  })
+
   describe('unknown top-level keys (issue #167)', () => {
     it('rejects a top-level rules: key, naming it', () => {
       const result = helioConfigSchema.safeParse(
