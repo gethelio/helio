@@ -3925,6 +3925,40 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
 })
 
 // ---------------------------------------------------------------------------
+// Evidence written through audit() is immune to request mutation (issue #379)
+// ---------------------------------------------------------------------------
+
+describe('evidence written through audit() is immune to request mutation (issue #379)', () => {
+  // A direct embedder of the exported GovernanceService keeps the
+  // evidence_data object it passed to audit(). The store snapshots it at the
+  // write boundary, so the rewrite below must not reach the stored entry.
+
+  // T8
+  it('stores a copy of evidence_data, so a later rewrite by the embedder does not reach the store', () => {
+    const h = makeService({ withEvidence: true })
+    const ev = h.service.evaluate(evalInput({ session_id: 'oc:s1' }))
+    const id = ev.body['evaluation_id'] as string
+    const data: Record<string, unknown> = { to: 'a@b.com', nested: { k: 'original' } }
+    const res = h.service.audit(
+      auditInput(id, {
+        status: 'success',
+        evidence: [{ evidence_key: 'recipient', evidence_data: data }],
+      }),
+      'h',
+    )
+    expect(res.status).toBe(201)
+    expect(res.body['evidence']).toEqual([{ evidence_key: 'recipient', stored: true }])
+
+    data['to'] = 'forged@evil.example'
+    ;(data['nested'] as Record<string, unknown>)['k'] = 'forged'
+
+    const stored = h.evidenceStore?.getEvidence('oc:s1', 'recipient')?.data
+    expect(stored).toEqual({ to: 'a@b.com', nested: { k: 'original' } })
+    expect(stored).not.toBe(data)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Session identity on the sideband door (issue #218)
 // ---------------------------------------------------------------------------
 

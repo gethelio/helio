@@ -56,6 +56,18 @@ Maintainer notes:
 
 ### Fixed
 
+- **The evidence store no longer aliases the caller's `evidence_data`
+  and context values.** A library embedder of `GovernanceService` or
+  `EvidenceStore` could mutate the object it had passed to `audit()`,
+  `putEvidence`, or `putContext` after the call returned, and the
+  stored entry changed with it, so the session-state routes and any
+  direct read showed the rewrite. Both writes now snapshot the value
+  at the store's boundary with the helper the audit records already
+  use; the snapshot tolerates values that cannot be cloned by falling
+  back to their JSON form, never mutates the caller's objects, and
+  never throws. Policy decisions were never affected: evidence gates
+  check presence and expiry, not content. The HTTP routes parse a
+  fresh body per request, so remote clients never had this alias.
 - **An empty or whitespace-only `audit.path` is now refused by the
   schema with the field named.** A blank `path` under `audit:` (or a
   `${VAR}` that interpolated to nothing) opened a private temporary

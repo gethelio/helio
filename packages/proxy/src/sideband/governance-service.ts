@@ -27,6 +27,7 @@ import { ToolAnnotationCache } from '../policy/annotation-cache.js'
 import type { ToolDriftChange } from '../policy/annotation-cache.js'
 import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
+import { snapshotValue } from '../util/snapshot.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
@@ -835,7 +836,7 @@ export class GovernanceService {
         // embedder mutating its arguments object after /evaluate must not
         // rewrite it (same guard as the pending entry's evidence below). The
         // helper tolerates a value structuredClone refuses (issue #192).
-        tool_input: snapshotForAudit(req.arguments ?? {}),
+        tool_input: snapshotValue(req.arguments ?? {}),
         matched_rule: decision.matchedRule,
         session_id: sessionId,
         origin: req.origin,
@@ -866,8 +867,8 @@ export class GovernanceService {
       // admission. The HTTP route always builds fresh objects; this guards
       // the library surface. The helper tolerates a value structuredClone
       // refuses (issue #192).
-      toolInput: snapshotForAudit(req.arguments ?? {}),
-      metadata: snapshotForAudit(req.metadata),
+      toolInput: snapshotValue(req.arguments ?? {}),
+      metadata: snapshotValue(req.metadata),
       action: decision.action,
       matchedRuleName,
       matchedRuleIndex,
@@ -1838,7 +1839,7 @@ export class GovernanceService {
       agent_id: args.agentId,
       environment: this.environment ?? null,
       tool_name: args.toolName,
-      tool_input: snapshotForAudit(args.toolInput),
+      tool_input: snapshotValue(args.toolInput),
       policy_decision: args.action,
       block_reason: blockReason,
       matched_rule: args.matchedRuleName,
@@ -1847,7 +1848,7 @@ export class GovernanceService {
       approval_status: args.approvalStatus ?? null,
       approved_by: args.approvedBy ?? null,
       upstream_response:
-        args.upstreamResponse == null ? null : snapshotForAudit(args.upstreamResponse),
+        args.upstreamResponse == null ? null : snapshotValue(args.upstreamResponse),
       upstream_error: args.upstreamError ?? null,
       upstream_http_status: null,
       upstream_latency_ms: args.upstreamLatencyMs ?? null,
@@ -1858,7 +1859,7 @@ export class GovernanceService {
       dry_run: args.dryRun,
       record_kind: args.recordKind,
       origin: args.origin,
-      metadata: args.metadata === null ? null : snapshotForAudit(args.metadata),
+      metadata: args.metadata === null ? null : snapshotValue(args.metadata),
       // The sideband has no MCP wire, so no protocol claim exists.
       protocol_version: null,
       // No door on the sideband either: upstream attribution is MCP-only.
@@ -1889,31 +1890,6 @@ export class GovernanceService {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Snapshot a caller-owned value before it enters a buffered audit record
- * (issue #192). structuredClone first (the sibling guards at the pending
- * entry and the ticket use it; it keeps cycles, Dates, BigInt); a value it
- * refuses (a function, a symbol, an exotic object) falls back to the JSON
- * form, which is exactly what the store persists; a value neither can
- * serialize (a throwing getter, a throwing toJSON) is returned as is,
- * because the store could not persist that record either (its insert fails
- * per record and is logged). Cycles never reach the fallbacks:
- * structuredClone keeps them. Never throws: a snapshot failure must not
- * block a decision that has already been made.
- */
-function snapshotForAudit<T>(value: T): T {
-  try {
-    return structuredClone(value)
-  } catch {
-    // fall through
-  }
-  try {
-    return JSON.parse(JSON.stringify(value)) as T
-  } catch {
-    return value
-  }
-}
 
 interface WriteAuditArgs {
   /** Caller-supplied record id (pre-allocated when ledger rows reference it). */
