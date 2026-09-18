@@ -93,23 +93,23 @@ function makeService(opts?: {
   const approvalRouter =
     opts?.withApprovals && queue
       ? new ApprovalRouter({
-          defaultTimeoutMs: 300_000,
-          defaultOnTimeout: 'deny',
-          channels: new Map(),
-          queue,
-          now,
-        })
+        defaultTimeoutMs: 300_000,
+        defaultOnTimeout: 'deny',
+        channels: new Map(),
+        queue,
+        now,
+      })
       : undefined
   const evidenceStore = opts?.withEvidence ? new EvidenceStore({ now }) : undefined
   const budgetEngine = opts?.budgets
     ? new BudgetEngine({
-        budgets: compileBudgets(opts.budgets),
-        now,
-        cleanupIntervalMs: 0,
-        ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
-        ...(opts.onBudgetBreach && { onBreach: opts.onBudgetBreach }),
-        ...(opts.onBudgetCommit && { onCommit: opts.onBudgetCommit }),
-      })
+      budgets: compileBudgets(opts.budgets),
+      now,
+      cleanupIntervalMs: 0,
+      ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
+      ...(opts.onBudgetBreach && { onBreach: opts.onBudgetBreach }),
+      ...(opts.onBudgetCommit && { onCommit: opts.onBudgetCommit }),
+    })
     : undefined
 
   const service = new GovernanceService({
@@ -368,6 +368,27 @@ describe('GovernanceService.evaluate', () => {
         evalInput({ origin: 'hermes', tool: { name: 'send', description: 'vX' } }),
       )
       expect(other.body['decision']).toBe('allow')
+    })
+
+    it('does not allow caller mutation to disarm the drift baseline', () => {
+      const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
+      const { service } = makeService({ policy })
+
+      const tool = {
+        name: 'rm',
+        annotations: { destructiveHint: true },
+      }
+
+      const first = service.evaluate(evalInput({ tool }))
+
+      expect(first.body['decision']).toBe('allow')
+
+      tool.annotations.destructiveHint = false
+
+      const second = service.evaluate(evalInput({ tool }))
+
+      expect(second.body['decision']).toBe('deny')
+      expect(second.body['tool_drift']).toBeTruthy()
     })
   })
 
@@ -1503,7 +1524,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('records the supplied version, updates last-write-wins, and keeps first_seen', () => {
     const { service, advance } = makeService()
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => { })
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     advance(5_000)
     service.evaluate(evalInput({ adapter_version: '0.2.0' }))
@@ -1519,7 +1540,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('retains the last supplied version when a later evaluate omits it', () => {
     const { service, advance } = makeService()
-    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => { })
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     advance(1_000)
     service.evaluate(evalInput())
@@ -1531,7 +1552,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('ignores an empty or over-64-char adapter_version (embedder path)', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
     service.evaluate(evalInput({ adapter_version: '' }))
     expect(service.listAdapters()[0]?.adapter_version).toBeNull()
     service.evaluate(evalInput({ adapter_version: 'v'.repeat(65) }))
@@ -1541,7 +1562,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('escapes a caller-controlled origin in version log lines (embedder path)', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
     const evil = 'x\n[helio] forged line'
     service.evaluate(evalInput({ origin: evil, adapter_version: '1.0' }))
     const line = String(spy.mock.calls[0]?.[0])
@@ -1575,7 +1596,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('logs first sighting and version changes with the version JSON-escaped', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     service.evaluate(evalInput({ adapter_version: '0.2\n"evil' }))
 
@@ -1590,7 +1611,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('caps version log lines at 5 per origin per boot, then one suppression summary', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
     for (let i = 1; i <= 7; i++) {
       service.evaluate(evalInput({ adapter_version: `0.${String(i)}.0` }))
     }
@@ -3527,8 +3548,8 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
     const evalId = (
       service.evaluate(evalInput({ tool: { name: 'send_email' }, metadata: { sender_id: 'U1' } }))
         .body as {
-        evaluation_id: string
-      }
+          evaluation_id: string
+        }
     ).evaluation_id
     const audit = service.audit(auditInput(evalId), 'h') // audit(req, payloadHash) — both required
     expect(audit.body['finalized_by']).toBe('evaluate')
@@ -3691,11 +3712,11 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
   })
   const forgeArgs = (args: Record<string, unknown>) => {
     args['to'] = 'attacker@example.com'
-    ;(args['nested'] as Record<string, unknown>)['note'] = 'forged'
+      ; (args['nested'] as Record<string, unknown>)['note'] = 'forged'
   }
   const forgeMetadata = (metadata: Record<string, unknown>) => {
     metadata['channel_id'] = 'FORGED'
-    ;(metadata['nested'] as Record<string, unknown>)['k'] = 'forged'
+      ; (metadata['nested'] as Record<string, unknown>)['k'] = 'forged'
   }
   const originalPackage = () =>
     // The type declares five string fields; a JS embedder is not stopped
@@ -3706,7 +3727,7 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
     }
   const forgePackage = (pkg: Record<string, unknown>) => {
     pkg['name'] = 'forged-top-level'
-    ;(pkg['extra'] as Record<string, unknown>)['deep'] = 'forged'
+      ; (pkg['extra'] as Record<string, unknown>)['deep'] = 'forged'
   }
 
   // T1
