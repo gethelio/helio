@@ -945,4 +945,106 @@ describe('EvidenceStore', () => {
       expect(store.evidenceCount('s1')).toBe(0)
     })
   })
+
+  // -----------------------------------------------------------------------
+  // write-boundary snapshots (issue #379)
+  // -----------------------------------------------------------------------
+
+  describe('write-boundary snapshots (issue #379)', () => {
+    // A direct embedder of the exported EvidenceStore keeps the objects it
+    // passed in. Every test below mutates AFTER the call returned and reads
+    // the store. The HTTP routes parse a fresh body per request and cannot
+    // reach this.
+
+    // T1
+    it('keeps the evidence data the caller wrote, not a later rewrite', () => {
+      const { store } = createStore()
+      const data: Record<string, unknown> = { to: 'a@b.com', nested: { k: 'original' } }
+      store.putEvidence('s1', { evidence_key: 'k', data, tool_name: 't' })
+
+      data['to'] = 'forged@evil.example'
+      ;(data['nested'] as Record<string, unknown>)['k'] = 'forged'
+
+      const original = { to: 'a@b.com', nested: { k: 'original' } }
+      expect(store.getEvidence('s1', 'k')?.data).toEqual(original)
+      expect(store.getSessionState('s1').evidence['k']?.data).toEqual(original)
+    })
+
+    // T2
+    it('stores its own copy of the evidence data and leaves the caller object untouched', () => {
+      const { store } = createStore()
+      const data: Record<string, unknown> = { to: 'a@b.com', nested: { k: 'original' } }
+      store.putEvidence('s1', { evidence_key: 'k', data, tool_name: 't' })
+
+      expect(store.getEvidence('s1', 'k')?.data).not.toBe(data)
+      expect(data).toEqual({ to: 'a@b.com', nested: { k: 'original' } })
+      expect(Object.isFrozen(data)).toBe(false)
+    })
+
+    // T3
+    it('keeps the context value the caller wrote, not a later rewrite', () => {
+      const { store } = createStore()
+      const value: Record<string, unknown> = { plan: 'original', nested: { k: 'original' } }
+      store.putContext('s1', 'ctx', value)
+
+      value['plan'] = 'forged'
+      ;(value['nested'] as Record<string, unknown>)['k'] = 'forged'
+
+      const original = { plan: 'original', nested: { k: 'original' } }
+      expect(store.getContext('s1', 'ctx')).toEqual(original)
+      expect(store.getSessionState('s1').context['ctx']).toEqual(original)
+    })
+
+    // T4
+    it('stores its own copy of a context value and leaves the caller object untouched', () => {
+      const { store } = createStore()
+      const value: Record<string, unknown> = { plan: 'original', nested: { k: 'original' } }
+      store.putContext('s1', 'ctx', value)
+
+      expect(store.getContext('s1', 'ctx')).not.toBe(value)
+      expect(value).toEqual({ plan: 'original', nested: { k: 'original' } })
+    })
+
+    // T5
+    it('falls back to the JSON form for evidence data structuredClone refuses', () => {
+      const { store } = createStore()
+      const data: Record<string, unknown> = { to: 'x', cb: () => 1 }
+      let result: ReturnType<EvidenceStore['putEvidence']> | undefined
+      expect(() => {
+        result = store.putEvidence('s1', { evidence_key: 'k', data, tool_name: 't' })
+      }).not.toThrow()
+      expect(result).toEqual({ stored: true })
+      expect(Object.keys(store.getEvidence('s1', 'k')?.data as object)).toEqual(['to'])
+    })
+
+    // T6
+    it('keeps the reference for a context value neither clone nor JSON can serialize', () => {
+      const { store } = createStore()
+      const value = {
+        get x(): never {
+          throw new Error('boom')
+        },
+      }
+      let result: ReturnType<EvidenceStore['putContext']> | undefined
+      expect(() => {
+        result = store.putContext('s1', 'ctx', value)
+      }).not.toThrow()
+      expect(result).toEqual({ stored: true })
+      expect(store.getContext('s1', 'ctx')).toBe(value)
+    })
+
+    // T7
+    it('keeps a cyclic evidence value as a cycle on the store-owned copy', () => {
+      const { store } = createStore()
+      const cyc: Record<string, unknown> = { a: 1 }
+      cyc['self'] = cyc
+      store.putEvidence('s1', { evidence_key: 'k', data: cyc, tool_name: 't' })
+
+      const stored = store.getEvidence('s1', 'k')?.data as Record<string, unknown>
+      expect(stored).not.toBe(cyc)
+      expect(stored['self']).toBe(stored)
+      cyc['a'] = 2
+      expect(stored['a']).toBe(1)
+    })
+  })
 })

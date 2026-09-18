@@ -146,6 +146,8 @@ Counters are consumed here (not at `/evaluate`), and only when the call actually
 
 The optional `evidence` array lets an adapter ground a call's outcome — e.g. recording the recipient a `send` tool actually resolved — so a later [evidence-grounded rule](./policies.md) (`evidence.requires`) can enforce on it. This is the **only** way the adapter token writes evidence; the SDK-scoped `POST /evidence` route is not available to it (see [Authentication](#authentication)). Each entry is `{ evidence_key, evidence_data, ttl_seconds? }`. The proxy binds the write to the **pending evaluation's own** `session_id` and `tool_name` — an adapter cannot target another session — and stores it via the same evidence store the SDK path uses.
 
+The store keeps its own copy of `evidence_data`: a library embedder that mutates the object it passed after `audit()` returns does not change the stored evidence.
+
 Rules:
 
 - **Success-only.** Evidence is written only when `status: "success"`. On `error`/`not_executed` it is ignored (a failed tool must not ground later calls).

@@ -7,6 +7,7 @@ import type {
   PutEvidenceResult,
   SessionState,
 } from './types.js'
+import { snapshotValue } from '../util/snapshot.js'
 
 // ---------------------------------------------------------------------------
 // EvidenceStore — in-memory per-session evidence cache with TTL expiry.
@@ -14,6 +15,10 @@ import type {
 // Evidence entries are written by the SDK via the sideband API and read by
 // the policy engine to enforce evidence requirements. Context entries are
 // arbitrary key-value pairs set by the SDK for session-level metadata.
+//
+// Stored values are the store's own copies, snapshotted at the write
+// boundary (issue #379). Readers receive the stored entry and must not
+// mutate it.
 //
 // TTL is enforced in two places:
 // 1. On read (lazy eviction) — expired entries are deleted and never returned.
@@ -94,7 +99,7 @@ export class EvidenceStore {
 
     const entry: EvidenceEntry = {
       evidence_key: input.evidence_key,
-      data: input.data,
+      data: snapshotValue(input.data),
       tool_name: input.tool_name,
       timestamp: new Date(this.now()).toISOString(),
       expires_at: this.now() + ttl * 1_000,
@@ -111,7 +116,7 @@ export class EvidenceStore {
 
     const session = this.ensureSession(sessionId)
     this.touchSession(session)
-    session.context.set(key, value)
+    session.context.set(key, snapshotValue(value))
     return { stored: true }
   }
 
