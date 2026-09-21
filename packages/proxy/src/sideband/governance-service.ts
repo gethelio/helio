@@ -27,6 +27,7 @@ import { ToolAnnotationCache } from '../policy/annotation-cache.js'
 import type { ToolDriftChange } from '../policy/annotation-cache.js'
 import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
+import { snapshotValue } from '../util/snapshot.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
@@ -835,7 +836,7 @@ export class GovernanceService {
         // embedder mutating its arguments object after /evaluate must not
         // rewrite it (same guard as the pending entry's evidence below). The
         // helper tolerates a value structuredClone refuses (issue #192).
-        tool_input: snapshotForAudit(req.arguments ?? {}),
+        tool_input: snapshotValue(req.arguments ?? {}),
         matched_rule: decision.matchedRule,
         session_id: sessionId,
         origin: req.origin,
@@ -866,8 +867,8 @@ export class GovernanceService {
       // admission. The HTTP route always builds fresh objects; this guards
       // the library surface. The helper tolerates a value structuredClone
       // refuses (issue #192).
-      toolInput: snapshotForAudit(req.arguments ?? {}),
-      metadata: snapshotForAudit(req.metadata),
+      toolInput: snapshotValue(req.arguments ?? {}),
+      metadata: snapshotValue(req.metadata),
       action: decision.action,
       matchedRuleName,
       matchedRuleIndex,
@@ -956,9 +957,9 @@ export class GovernanceService {
           ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
           ...(resolution.escalatedAt
             ? {
-              escalated_at: resolution.escalatedAt,
-              escalated_to: [...(resolution.escalatedTo ?? [])],
-            }
+                escalated_at: resolution.escalatedAt,
+                escalated_to: [...(resolution.escalatedTo ?? [])],
+              }
             : {}),
         }
       }
@@ -1472,15 +1473,15 @@ export class GovernanceService {
       const approvalContext: ApprovalAuditContext | undefined =
         entry.approvalTicketId && resolution && (resolution.denialReason || resolution.escalatedAt)
           ? {
-            ticket_id: entry.approvalTicketId,
-            ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
-            ...(resolution.escalatedAt
-              ? {
-                escalated_at: resolution.escalatedAt,
-                escalated_to: [...(resolution.escalatedTo ?? [])],
-              }
-              : {}),
-          }
+              ticket_id: entry.approvalTicketId,
+              ...(resolution.denialReason ? { denial_reason: resolution.denialReason } : {}),
+              ...(resolution.escalatedAt
+                ? {
+                    escalated_at: resolution.escalatedAt,
+                    escalated_to: [...(resolution.escalatedTo ?? [])],
+                  }
+                : {}),
+            }
           : undefined
       const auditId = this.writeAudit({
         ...(committed ? { id: committed.auditId } : {}),
@@ -1520,10 +1521,10 @@ export class GovernanceService {
       console.error(
         committed
           ? `[helio] Sideband evaluation ${entry.evaluationId} expired after a failed ` +
-          `/audit finalization (origin=${entry.origin}, tool=${entry.toolName}) — ` +
-          `recorded as evaluation_expired under the committed audit id`
+              `/audit finalization (origin=${entry.origin}, tool=${entry.toolName}) — ` +
+              `recorded as evaluation_expired under the committed audit id`
           : `[helio] Sideband evaluation ${entry.evaluationId} expired without /audit ` +
-          `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
+              `(origin=${entry.origin}, tool=${entry.toolName}) — recorded as evaluation_expired`,
       )
       return 'expired'
     }
@@ -1582,11 +1583,11 @@ export class GovernanceService {
     senderId: string | null,
   ):
     | {
-      plan?: LimitPlan
-      block?: Record<string, unknown>
-      allowed: boolean
-      sessionUnresolved?: true
-    }
+        plan?: LimitPlan
+        block?: Record<string, unknown>
+        allowed: boolean
+        sessionUnresolved?: true
+      }
     | undefined {
     const matchedRule = decision.matchedRule
     const limits = matchedRule?.limits
@@ -1631,11 +1632,11 @@ export class GovernanceService {
     senderId: string | null,
   ):
     | {
-      plan?: LimitPlan
-      block?: Record<string, unknown>
-      allowed: boolean
-      sessionUnresolved?: true
-    }
+        plan?: LimitPlan
+        block?: Record<string, unknown>
+        allowed: boolean
+        sessionUnresolved?: true
+      }
     | undefined {
     const maxSpend = decision.matchedRule?.limits?.maxSpend
     if (!this.spendLimiter || !maxSpend) return { allowed: true }
@@ -1838,7 +1839,7 @@ export class GovernanceService {
       agent_id: args.agentId,
       environment: this.environment ?? null,
       tool_name: args.toolName,
-      tool_input: snapshotForAudit(args.toolInput),
+      tool_input: snapshotValue(args.toolInput),
       policy_decision: args.action,
       block_reason: blockReason,
       matched_rule: args.matchedRuleName,
@@ -1847,7 +1848,7 @@ export class GovernanceService {
       approval_status: args.approvalStatus ?? null,
       approved_by: args.approvedBy ?? null,
       upstream_response:
-        args.upstreamResponse == null ? null : snapshotForAudit(args.upstreamResponse),
+        args.upstreamResponse == null ? null : snapshotValue(args.upstreamResponse),
       upstream_error: args.upstreamError ?? null,
       upstream_http_status: null,
       upstream_latency_ms: args.upstreamLatencyMs ?? null,
@@ -1858,7 +1859,7 @@ export class GovernanceService {
       dry_run: args.dryRun,
       record_kind: args.recordKind,
       origin: args.origin,
-      metadata: args.metadata === null ? null : snapshotForAudit(args.metadata),
+      metadata: args.metadata === null ? null : snapshotValue(args.metadata),
       // The sideband has no MCP wire, so no protocol claim exists.
       protocol_version: null,
       // No door on the sideband either: upstream attribution is MCP-only.
@@ -1880,8 +1881,8 @@ export class GovernanceService {
     if (!policyCanRequireApproval(policy) || this.approvalRouter) return
     throw new GovernanceConfigError(
       '[helio] GovernanceService misconfiguration: approval-capable policy ' +
-      '(a require_approval rule, or flag_destructive/on_tool_drift set to require_approval) ' +
-      'requires an approvalRouter',
+        '(a require_approval rule, or flag_destructive/on_tool_drift set to require_approval) ' +
+        'requires an approvalRouter',
     )
   }
 }
@@ -1889,31 +1890,6 @@ export class GovernanceService {
 // ---------------------------------------------------------------------------
 // Free helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Snapshot a caller-owned value before it enters a buffered audit record
- * (issue #192). structuredClone first (the sibling guards at the pending
- * entry and the ticket use it; it keeps cycles, Dates, BigInt); a value it
- * refuses (a function, a symbol, an exotic object) falls back to the JSON
- * form, which is exactly what the store persists; a value neither can
- * serialize (a throwing getter, a throwing toJSON) is returned as is,
- * because the store could not persist that record either (its insert fails
- * per record and is logged). Cycles never reach the fallbacks:
- * structuredClone keeps them. Never throws: a snapshot failure must not
- * block a decision that has already been made.
- */
-function snapshotForAudit<T>(value: T): T {
-  try {
-    return structuredClone(value)
-  } catch {
-    // fall through
-  }
-  try {
-    return JSON.parse(JSON.stringify(value)) as T
-  } catch {
-    return value
-  }
-}
 
 interface WriteAuditArgs {
   /** Caller-supplied record id (pre-allocated when ledger rows reference it). */
@@ -2105,23 +2081,17 @@ function definitionProvided(tool: WireToolDefinition): boolean {
 /** Map the wire tool object to an MCP-shaped definition for the cache. */
 function toMcpToolDef(tool: WireToolDefinition): Record<string, unknown> {
   const def: Record<string, unknown> = { name: tool.name }
-
   if (tool.description !== undefined) def['description'] = tool.description
-
   if (tool.input_schema !== undefined) {
-    def['inputSchema'] = snapshotForAudit(tool.input_schema)
+    def['inputSchema'] = snapshotValue(tool.input_schema)
   }
-
   if (tool.output_schema !== undefined) {
-    def['outputSchema'] = snapshotForAudit(tool.output_schema)
+    def['outputSchema'] = snapshotValue(tool.output_schema)
   }
-
   if (tool.title !== undefined) def['title'] = tool.title
-
   if (tool.annotations !== undefined) {
-    def['annotations'] = snapshotForAudit(tool.annotations)
+    def['annotations'] = snapshotValue(tool.annotations)
   }
-
   return def
 }
 
@@ -2194,12 +2164,12 @@ function planBytes(plans: readonly Plan[]): number {
     total += byteLength(
       plan.kind === 'budget'
         ? {
-          kind: plan.kind,
-          name: plan.budget.name,
-          key: plan.bucketKey,
-          amount: plan.amount,
-          breached: plan.breached,
-        }
+            kind: plan.kind,
+            name: plan.budget.name,
+            key: plan.bucketKey,
+            amount: plan.amount,
+            breached: plan.breached,
+          }
         : { kind: plan.kind, key: plan.key, amount: plan.amount ?? 0 },
     )
   }

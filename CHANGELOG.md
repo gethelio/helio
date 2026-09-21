@@ -41,8 +41,69 @@ Maintainer notes:
   The release assets `sbom.json` and `sbom-dashboard.json` are
   unchanged.
 
+### Changed
+
+- **The README, the package README, and the npm package description
+  now lead with the outcome:
+  `Open-source governance for MCP agents: useful autonomy without unlimited authority.`**
+  The stateless-protocol argument moves from "How Helio Compares" to
+  directly under the intro, and a five-line authority example
+  (`ALLOW`, `APPROVE`, `DENY`, `BUDGET`, `REQUIRE`) follows the install
+  command. The `@gethelio/proxy` description and the README npm ships
+  with this version now read the same; GitHub shows them from this
+  commit, npm when this version is published. Nothing else in the
+  READMEs changes.
+
 ### Fixed
 
+- **The evidence store no longer aliases the caller's `evidence_data`
+  and context values.** A library embedder of `GovernanceService` or
+  `EvidenceStore` could mutate the object it had passed to `audit()`,
+  `putEvidence`, or `putContext` after the call returned, and the
+  stored entry changed with it, so the session-state routes and any
+  direct read showed the rewrite. Both writes now snapshot the value
+  at the store's boundary with the helper the audit records already
+  use; the snapshot tolerates values that cannot be cloned by falling
+  back to their JSON form, never mutates the caller's objects, and
+  never throws. Policy decisions were never affected: evidence gates
+  check presence and expiry, not content. The HTTP routes parse a
+  fresh body per request, so remote clients never had this alias.
+- **An empty or whitespace-only `audit.path` is now refused by the
+  schema with the field named.** A blank `path` under `audit:` (or a
+  `${VAR}` that interpolated to nothing) opened a private temporary
+  database, so the proxy booted and recorded an audit trail and a
+  budget ledger that vanished on exit; since #404 the empty string was
+  refused, but as `<cwd> is a directory, not a file`, naming the
+  working directory instead of the blank field, and a whitespace-only
+  value still booted. The schema now trims the value and requires at
+  least one character, so all three commands print
+  `audit.path: Too small: expected string to have >=1 characters`
+  under the usual `Invalid configuration` line and exit 1. A path with
+  leading or trailing spaces is trimmed to the file SQLite opens, which
+  is also what the `Audit:` startup line and the directory check now
+  use (a padded `:memory:` is the in-memory store it always was to
+  SQLite).
+- **`helio start` and `helio export` now refuse an `audit.path` whose
+  directory is missing on one line, before any upstream is touched.**
+  A path whose directory did not exist, was not a directory, could not
+  be searched, or could not be written by the proxy user when the
+  database had to be created (or that named an existing directory)
+  passed `helio validate` and crashed `helio start` and `helio export`
+  as `[helio] Unhandled promise rejection: TypeError: Cannot open database because the directory does not exist`
+  (or `SqliteError: unable to open database file`). On `helio start`
+  the crash came after every upstream had been connected, which left a
+  stdio upstream's child process running after the exit. `helio start`
+  and `helio export` now print
+  `Invalid config: audit.path: directory <dir> does not exist` (or the
+  matching line for the other cases), naming the resolved path, and
+  exit 1; `helio start` checks before it connects to any upstream and
+  never creates the directory. `helio validate` prints the same
+  diagnosis as a `Warning:` and still reports the file valid, since it
+  is often run on a machine that will not run the proxy. An existing
+  database keeps opening as before, whatever its directory's
+  permissions. `helio export` now also prints the audit store's own
+  refusals, such as the schema mismatch line, verbatim instead of
+  inside the rejection wrapper.
 - **`helio start` now refuses a config that does not compile on one
   line, before any upstream is touched.** A file whose YAML validates
   but whose policy rule or budget contributor carries a `regex` that

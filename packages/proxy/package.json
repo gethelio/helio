@@ -2,7 +2,7 @@
   "name": "@gethelio/proxy",
   "version": "0.0.0",
   "type": "module",
-  "description": "Open-source MCP governance proxy for AI agents",
+  "description": "Open-source governance for MCP agents: useful autonomy without unlimited authority",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

@@ -683,12 +683,12 @@ See [Approval Workflows — Slack App Setup](./approvals.md#slack-app-setup) for
 
 Audit trail configuration. See [Audit Trail](./audit.md) for what's recorded and how to export.
 
-| Field               | Type     | Required | Default            | Description                                                                     |
-| ------------------- | -------- | -------- | ------------------ | ------------------------------------------------------------------------------- |
-| `storage`           | string   | No       | `sqlite`           | Storage backend. Only `sqlite` is supported.                                    |
-| `path`              | string   | No       | `./helio-audit.db` | Path to the SQLite database file.                                               |
-| `retention`         | duration | No       | `90d`              | Records older than this are automatically deleted.                              |
-| `include_responses` | boolean  | No       | `true`             | Store full upstream JSON-RPC responses. Set to `false` to store only a summary. |
+| Field               | Type     | Required | Default            | Description                                                                                                                                                                                                                                                                                                                                          |
+| ------------------- | -------- | -------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`           | string   | No       | `sqlite`           | Storage backend. Only `sqlite` is supported.                                                                                                                                                                                                                                                                                                         |
+| `path`              | string   | No       | `./helio-audit.db` | Path to the SQLite database file. A relative path resolves against the directory `helio start` runs in. Its directory must already exist, and must be writable by the proxy user when the database does not exist yet; Helio does not create it. The value must not be empty; leading and trailing whitespace is trimmed, as SQLite itself trims it. |
+| `retention`         | duration | No       | `90d`              | Records older than this are automatically deleted.                                                                                                                                                                                                                                                                                                   |
+| `include_responses` | boolean  | No       | `true`             | Store full upstream JSON-RPC responses. Set to `false` to store only a summary.                                                                                                                                                                                                                                                                      |
 
 Audit rows also include:
 
@@ -895,6 +895,8 @@ The `validate` command runs the full pipeline: YAML parsing, environment variabl
 
 When the dashboard is enabled, validation also confirms that bundled dashboard assets are present.
 
+Validation also looks at the directory of `audit.path` and prints a warning when `helio start` would refuse it (see the audit section below); the file is still reported valid, because `helio validate` is often run on a machine that will not run the proxy.
+
 ```bash
 # Validate a specific config file
 helio validate -c production.yaml
@@ -930,6 +932,14 @@ A file that validates but does not compile (a rule or a budget contributor whose
 ```
 Invalid policy: Policy rule 0 ("bad"): catastrophic regex "(a+)+$" for input path "$.memo": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.
 Invalid budget: Budget "daily-cap": contributor 0: invalid regex "[z-a]" for input path "$.memo": Invalid regular expression: /[z-a]/: Range out of order in character class
+```
+
+A `path` under `audit:` whose directory does not exist, is not a directory, cannot be searched, or (for a database that does not exist yet) cannot be written by the proxy user, or that names an existing directory, is refused on one line naming the resolved path by `helio start` and `helio export`, exit 1. `helio start` checks the directory before it connects to any upstream, so nothing is started for a file it refuses. Helio does not create the directory: create it with the owner and mode you want the audit trail to have (the [deployment recipes](./deployment-separate-user.md) do), or point `path` at one that exists. `helio validate` prints the same diagnosis as a warning and still reports the file valid, because it is often run on a machine that will not run the proxy (a config for a container, or for a service account's directory):
+
+```
+Invalid config: audit.path: directory /srv/helio/no-such-dir does not exist
+Invalid config: audit.path: directory /srv/helio/data is not writable by this user
+Warning: audit.path: directory /srv/helio/no-such-dir does not exist (helio start will refuse this path)
 ```
 
 The one exception is top-level keys beginning with lowercase `x-`. They are reserved as extension keys — holders for reusable YAML anchors, in the docker-compose style — and are ignored by the schema:

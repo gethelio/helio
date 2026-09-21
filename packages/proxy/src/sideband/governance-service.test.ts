@@ -93,23 +93,23 @@ function makeService(opts?: {
   const approvalRouter =
     opts?.withApprovals && queue
       ? new ApprovalRouter({
-        defaultTimeoutMs: 300_000,
-        defaultOnTimeout: 'deny',
-        channels: new Map(),
-        queue,
-        now,
-      })
+          defaultTimeoutMs: 300_000,
+          defaultOnTimeout: 'deny',
+          channels: new Map(),
+          queue,
+          now,
+        })
       : undefined
   const evidenceStore = opts?.withEvidence ? new EvidenceStore({ now }) : undefined
   const budgetEngine = opts?.budgets
     ? new BudgetEngine({
-      budgets: compileBudgets(opts.budgets),
-      now,
-      cleanupIntervalMs: 0,
-      ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
-      ...(opts.onBudgetBreach && { onBreach: opts.onBudgetBreach }),
-      ...(opts.onBudgetCommit && { onCommit: opts.onBudgetCommit }),
-    })
+        budgets: compileBudgets(opts.budgets),
+        now,
+        cleanupIntervalMs: 0,
+        ...(opts.budgetLedger && { ledger: opts.budgetLedger }),
+        ...(opts.onBudgetBreach && { onBreach: opts.onBudgetBreach }),
+        ...(opts.onBudgetCommit && { onCommit: opts.onBudgetCommit }),
+      })
     : undefined
 
   const service = new GovernanceService({
@@ -1524,7 +1524,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('records the supplied version, updates last-write-wins, and keeps first_seen', () => {
     const { service, advance } = makeService()
-    vi.spyOn(console, 'error').mockImplementation(() => { })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     advance(5_000)
     service.evaluate(evalInput({ adapter_version: '0.2.0' }))
@@ -1540,7 +1540,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('retains the last supplied version when a later evaluate omits it', () => {
     const { service, advance } = makeService()
-    vi.spyOn(console, 'error').mockImplementation(() => { })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     advance(1_000)
     service.evaluate(evalInput())
@@ -1552,7 +1552,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('ignores an empty or over-64-char adapter_version (embedder path)', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     service.evaluate(evalInput({ adapter_version: '' }))
     expect(service.listAdapters()[0]?.adapter_version).toBeNull()
     service.evaluate(evalInput({ adapter_version: 'v'.repeat(65) }))
@@ -1562,7 +1562,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('escapes a caller-controlled origin in version log lines (embedder path)', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const evil = 'x\n[helio] forged line'
     service.evaluate(evalInput({ origin: evil, adapter_version: '1.0' }))
     const line = String(spy.mock.calls[0]?.[0])
@@ -1596,7 +1596,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('logs first sighting and version changes with the version JSON-escaped', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     service.evaluate(evalInput({ adapter_version: '0.1.0' }))
     service.evaluate(evalInput({ adapter_version: '0.2\n"evil' }))
 
@@ -1611,7 +1611,7 @@ describe('GovernanceService adapter liveness registry', () => {
 
   it('caps version log lines at 5 per origin per boot, then one suppression summary', () => {
     const { service } = makeService()
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => { })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
     for (let i = 1; i <= 7; i++) {
       service.evaluate(evalInput({ adapter_version: `0.${String(i)}.0` }))
     }
@@ -3548,8 +3548,8 @@ describe('GovernanceService — dry-run rule-limit simulation (#146)', () => {
     const evalId = (
       service.evaluate(evalInput({ tool: { name: 'send_email' }, metadata: { sender_id: 'U1' } }))
         .body as {
-          evaluation_id: string
-        }
+        evaluation_id: string
+      }
     ).evaluation_id
     const audit = service.audit(auditInput(evalId), 'h') // audit(req, payloadHash) — both required
     expect(audit.body['finalized_by']).toBe('evaluate')
@@ -3712,11 +3712,11 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
   })
   const forgeArgs = (args: Record<string, unknown>) => {
     args['to'] = 'attacker@example.com'
-      ; (args['nested'] as Record<string, unknown>)['note'] = 'forged'
+    ;(args['nested'] as Record<string, unknown>)['note'] = 'forged'
   }
   const forgeMetadata = (metadata: Record<string, unknown>) => {
     metadata['channel_id'] = 'FORGED'
-      ; (metadata['nested'] as Record<string, unknown>)['k'] = 'forged'
+    ;(metadata['nested'] as Record<string, unknown>)['k'] = 'forged'
   }
   const originalPackage = () =>
     // The type declares five string fields; a JS embedder is not stopped
@@ -3727,7 +3727,7 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
     }
   const forgePackage = (pkg: Record<string, unknown>) => {
     pkg['name'] = 'forged-top-level'
-      ; (pkg['extra'] as Record<string, unknown>)['deep'] = 'forged'
+    ;(pkg['extra'] as Record<string, unknown>)['deep'] = 'forged'
   }
 
   // T1
@@ -3942,6 +3942,40 @@ describe('GovernanceService — audit rows are immune to request mutation (issue
     expect(res?.body['decision']).toBe('require_approval')
     const approval = res?.body['approval'] as { id: string }
     expect(harness.approvalRouter?.getTicket(approval.id)?.tool_input).toEqual({ to: 'x' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Evidence written through audit() is immune to request mutation (issue #379)
+// ---------------------------------------------------------------------------
+
+describe('evidence written through audit() is immune to request mutation (issue #379)', () => {
+  // A direct embedder of the exported GovernanceService keeps the
+  // evidence_data object it passed to audit(). The store snapshots it at the
+  // write boundary, so the rewrite below must not reach the stored entry.
+
+  // T8
+  it('stores a copy of evidence_data, so a later rewrite by the embedder does not reach the store', () => {
+    const h = makeService({ withEvidence: true })
+    const ev = h.service.evaluate(evalInput({ session_id: 'oc:s1' }))
+    const id = ev.body['evaluation_id'] as string
+    const data: Record<string, unknown> = { to: 'a@b.com', nested: { k: 'original' } }
+    const res = h.service.audit(
+      auditInput(id, {
+        status: 'success',
+        evidence: [{ evidence_key: 'recipient', evidence_data: data }],
+      }),
+      'h',
+    )
+    expect(res.status).toBe(201)
+    expect(res.body['evidence']).toEqual([{ evidence_key: 'recipient', stored: true }])
+
+    data['to'] = 'forged@evil.example'
+    ;(data['nested'] as Record<string, unknown>)['k'] = 'forged'
+
+    const stored = h.evidenceStore?.getEvidence('oc:s1', 'recipient')?.data
+    expect(stored).toEqual({ to: 'a@b.com', nested: { k: 'original' } })
+    expect(stored).not.toBe(data)
   })
 })
 

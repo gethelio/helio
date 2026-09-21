@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">Helio</h1>
-  <p align="center">Open-source governance proxy for AI agents</p>
+  <p align="center">Open-source governance for MCP agents: useful autonomy without unlimited authority.</p>
 </p>
 
 <p align="center">
@@ -17,11 +17,28 @@
 
 Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, caps cumulative spend, and records everything - **without changing your agent code or your MCP servers.**
 
+The `2026-07-28` MCP revision made the protocol itself stateless: no handshake, no
+protocol-level sessions, cross-call state carried as handles the model passes between
+tools. That pattern works for application state and fails for governance state,
+because a budget key the model can see is a budget key the model can change. Helio
+keeps session identity, budgets, and evidence in the proxy, outside the agent's
+context, which is why those controls still mean something after the protocol
+stopped tracking sessions. See
+[stateless protocol, stateful governance](https://github.com/gethelio/helio/blob/main/docs/policies.md#stateless-protocol-stateful-governance).
+
 ```bash
 npx @gethelio/proxy init
 ```
 
 `@gethelio/proxy` is the only Node package you install. It ships the proxy runtime and bundled dashboard UI assets together.
+
+```
+ALLOW      read_customer
+APPROVE    refund > £50
+DENY       production.delete
+BUDGET     £500/day across matching paid tools
+REQUIRE    order.lookup succeeded before refund
+```
 
 ## Why Helio?
 
@@ -316,15 +333,6 @@ Rate limits per tool and per session. Per-rule spend limits that block a matched
 Every tool call recorded: timestamp, agent identity, tool name, inputs, policy decision, evidence chain, approval status, downstream response, and latency. Searchable dashboard. Export to JSON or CSV.
 
 ## How Helio Compares
-
-The `2026-07-28` MCP revision made the protocol itself stateless: no handshake, no
-protocol-level sessions, cross-call state carried as handles the model passes between
-tools. That pattern works for application state and fails for governance state,
-because a budget key the model can see is a budget key the model can change. Helio
-keeps session identity, budgets, and evidence in the proxy, outside the agent's
-context, which is why those controls still mean something after the protocol
-stopped tracking sessions. See
-[stateless protocol, stateful governance](https://github.com/gethelio/helio/blob/main/docs/policies.md#stateless-protocol-stateful-governance).
 
 |                                              | Helio                                    | Obot                           | Cerbos                            | Built-in (Anthropic / OpenAI)         | Framework (LangChain / CrewAI)      |
 | -------------------------------------------- | ---------------------------------------- | ------------------------------ | --------------------------------- | ------------------------------------- | ----------------------------------- |

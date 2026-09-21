@@ -789,7 +789,12 @@ const approvalSchema = z
 const auditSchema = z
   .object({
     storage: z.enum(['sqlite']).default('sqlite'),
-    path: z.string().default('./helio-audit.db'),
+    // Trim first: better-sqlite3 trims the filename it opens, so the value
+    // Helio prints and preflights must be the value SQLite uses, and a
+    // whitespace-only path would otherwise open a temporary database and
+    // record nothing (issue #406). The order matters: min(1) runs on the
+    // trimmed value.
+    path: z.string().trim().min(1).default('./helio-audit.db'),
     retention: durationSchema.default('90d'),
     include_responses: z.boolean().default(true),
   })
