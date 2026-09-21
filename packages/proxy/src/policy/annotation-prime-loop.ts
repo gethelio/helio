@@ -13,6 +13,16 @@ const ANNOTATION_PRIME_RETRY_MAX_MS = 30_000
 const ANNOTATION_PRIME_RETRY_JITTER_MS = 250
 
 export interface AnnotationPrimeController {
+  /** True once a prime attempt has succeeded in this process. */
+  readonly primed: boolean
+  /**
+   * The reason the door is not primed, read at print time by the startup
+   * surface line (issue #396): the last attempt's failure reason, the
+   * rejection message of an attempt that threw, or the untagged
+   * `priming did not complete within <n>ms` after the startup race. Cleared
+   * by a later success.
+   */
+  readonly lastFailure: string | undefined
   stop(): void
   /**
    * Apply a hot-reloaded `policies.tool_revalidation` section. Enabling,
@@ -71,6 +81,7 @@ export async function startAnnotationPrimeLoop(
   const tag = helioLogTag(upstreamName)
   let stopped = false
   let primed = false
+  let lastFailure: string | undefined
   let retryAttempt = 0
   let retryTimer: ReturnType<typeof setTimeout> | undefined
   let current = revalidation
@@ -163,6 +174,7 @@ export async function startAnnotationPrimeLoop(
 
     if (result.success) {
       primed = true
+      lastFailure = undefined
       clearRetryTimer()
       const prefix =
         phase === 'initial'
@@ -176,6 +188,7 @@ export async function startAnnotationPrimeLoop(
     }
 
     const reason = result.reason ?? 'unknown reason'
+    lastFailure = reason
     if (phase === 'initial') {
       console.error(
         `${tag} Annotation cache priming failed: ${reason} — undocumented tools will be denied (fail-closed) until priming succeeds`,
@@ -199,6 +212,7 @@ export async function startAnnotationPrimeLoop(
       // crash the process. Late rejections after stop/prime stay silent,
       // mirroring handlePrimeResult's orphan discipline.
       if (stopped || primed) return
+      lastFailure = describeRejection(reason)
       console.error(
         `${tag} Tool revalidation attempt failed unexpectedly: ${describeRejection(reason)} — keeping the cadence`,
       )
@@ -217,11 +231,23 @@ export async function startAnnotationPrimeLoop(
   ])
 
   if (initialOutcome === 'timeout') {
+    // The tagged sentence stays on stderr; the surface line nests only the
+    // untagged reason (no prefix, no "continuing startup" clause).
+    lastFailure = `priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms`
     console.error(
       `${tag} Annotation cache priming did not complete within ${String(ANNOTATION_PRIME_INITIAL_WAIT_MS)}ms; continuing startup fail-closed and retrying in background`,
     )
     scheduleRetry()
   }
 
-  return { stop, reconfigure }
+  return {
+    get primed() {
+      return primed
+    },
+    get lastFailure() {
+      return lastFailure
+    },
+    stop,
+    reconfigure,
+  }
 }

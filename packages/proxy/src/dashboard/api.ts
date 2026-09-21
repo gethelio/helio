@@ -27,6 +27,8 @@ import type { AdapterLivenessEntry } from '../sideband/governance-service.js'
 import type { BudgetState } from '../budget/engine.js'
 import type { BudgetEventsPage } from '../budget/ledger.js'
 import { budgetEventsToCsv } from '../budget/csv.js'
+import { DEFAULT_STATUS_WINDOW, parseStatusWindow } from '../policy/status.js'
+import type { PolicyStatusReport } from '../policy/status.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,6 +63,14 @@ export interface DashboardAppDeps {
     listEvents(name: string, page: { limit: number; offset: number }): BudgetEventsPage
     listEventsForExport(name: string, limit: number): BudgetEventsPage
   }
+  /**
+   * The authority report for `GET /api/policy/status` (issue #396), assembled
+   * by `helio start` over its primed surface, the loaded policy and the audit
+   * store at request time. Absent (direct embedders, tests without it), the
+   * endpoint answers 503 and says so rather than serving an empty report:
+   * the surface lives only in the running proxy.
+   */
+  readonly policyStatus?: { report(window: string): PolicyStatusReport }
 }
 
 /** Options for the dashboard API. */
@@ -190,6 +200,11 @@ const analyticsQuerySchema = z.object({
   from: optionalQueryString,
   to: optionalQueryString,
   upstream: optionalQueryString,
+})
+
+/** The window is validated by `parseStatusWindow` so an empty value is refused, not defaulted. */
+const policyStatusQuerySchema = z.object({
+  window: z.string().optional(),
 })
 
 const authSessionBodySchema = z.object({
@@ -322,6 +337,7 @@ export function createDashboardAppWithLifecycle(
     eventBus,
     adapterLiveness,
     budgets,
+    policyStatus,
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
@@ -721,6 +737,22 @@ export function createDashboardAppWithLifecycle(
 
     const stats = auditStore.aggregate(from, to, { upstream: query.upstream })
     return c.json(stats)
+  })
+
+  // -------------------------------------------------------------------------
+  // Policy status: the authority surface, coverage and persisted window
+  // (issue #396). Raw-shape, auth required like analytics.
+  // -------------------------------------------------------------------------
+
+  app.get('/api/policy/status', (c) => {
+    if (!policyStatus) {
+      return c.json({ error: 'policy status is not available in this process' }, 503)
+    }
+    const query = policyStatusQuerySchema.parse(c.req.query())
+    const window = query.window ?? DEFAULT_STATUS_WINDOW
+    const parsed = parseStatusWindow(window)
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400)
+    return c.json(policyStatus.report(window))
   })
 
   // -------------------------------------------------------------------------

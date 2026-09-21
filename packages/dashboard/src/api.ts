@@ -20,6 +20,7 @@ import type {
   BudgetEventsResponse,
   AnalyticsResponse,
   EvidenceResponse,
+  PolicyStatusResponse,
 } from './types'
 
 // ---------------------------------------------------------------------------
@@ -227,6 +228,11 @@ export function fetchBudgetEvents(
 
 export function fetchAnalytics(from?: string, to?: string): Promise<AnalyticsResponse> {
   return apiFetch('/api/analytics' + qs({ from, to }), getInit())
+}
+
+/** The authority report (issue #396); `window` is a duration between 1m and 30d, default 4h server-side. */
+export function fetchPolicyStatus(window?: string): Promise<PolicyStatusResponse> {
+  return apiFetch('/api/policy/status' + qs({ window }), getInit())
 }
 
 export function fetchEvidence(sessionId: string): Promise<EvidenceResponse> {

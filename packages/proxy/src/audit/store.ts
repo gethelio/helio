@@ -7,6 +7,7 @@ import { StartupError } from '../startup-error.js'
 import { extractResponseSummary } from '../upstream/response-summary.js'
 import { clamp } from '../util/clamp.js'
 import type {
+  PersistedSummary,
   AuditRecord,
   AuditRecordInput,
   AuditQueryFilters,
@@ -102,7 +103,38 @@ CREATE INDEX IF NOT EXISTS idx_audit_record_kind     ON audit_records (record_ki
 CREATE INDEX IF NOT EXISTS idx_audit_origin          ON audit_records (origin);
 CREATE INDEX IF NOT EXISTS idx_audit_upstream        ON audit_records (upstream);
 CREATE INDEX IF NOT EXISTS idx_audit_config_sha256   ON audit_records (config_sha256);
+CREATE INDEX IF NOT EXISTS idx_audit_kind_created_at ON audit_records (record_kind, created_at);
 `
+
+/**
+ * The index the persisted-window statements are served from (issue #396).
+ * Without it SQLite picks `idx_audit_record_kind` for
+ * `record_kind = 'tool_call' AND created_at >= ?` and visits every row.
+ */
+const KIND_CREATED_AT_INDEX = 'idx_audit_kind_created_at'
+
+/**
+ * The persisted-window statements behind `persistedSummary` (issue #396):
+ * a positive `record_kind = 'tool_call'` filter (which leaves out reload,
+ * drift-event, install-scan and expired rows and every future non-tool kind)
+ * plus the non-tool decision list the top-tools ranking uses. The pairs are
+ * grouped by `tool_name, upstream, origin`: a sideband row's door is its
+ * origin (`upstream` is always null there), so a singular-mode MCP row and an
+ * adapter row for one tool name are two doors.
+ * @internal Exported so the store tests can assert the query plan.
+ */
+export const PERSISTED_SUMMARY_SQL = {
+  totals: `SELECT COUNT(*) AS calls, COUNT(DISTINCT session_id) AS sessions, MIN(created_at) AS first_seen_in_window
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND created_at >= ? AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`,
+  pairs: `SELECT tool_name, upstream, origin, COUNT(*) AS calls
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND created_at >= ? AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
+    GROUP BY tool_name, upstream, origin`,
+  first_seen: `SELECT MIN(created_at) AS first_seen
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`,
+} as const
 
 const INSERT_SQL = `
 INSERT INTO audit_records (
@@ -439,6 +471,16 @@ export class AuditStore {
       console.error(`[helio] Audit DB migrated: added column "${name}"`)
     }
     this.assertRequiredSchema(options.path)
+    // The one-time build of the (record_kind, created_at) index runs here,
+    // before `helio start` binds its port and before `helio export` writes
+    // its first byte: about two seconds per million rows, once. Say so on a
+    // non-empty database; a fresh file builds its indexes silently.
+    if (this.needsKindCreatedAtIndexBuild()) {
+      // eslint-disable-next-line no-console -- Intentional operational notice; stderr keeps stdout clean for piped exports
+      console.error(
+        `[helio] Audit DB migrated: adding index "${KIND_CREATED_AT_INDEX}" (once; about two seconds per million rows)`,
+      )
+    }
     this.db.exec(CREATE_INDEX_DDL)
 
     // Prepare the insert statement once
@@ -801,6 +843,49 @@ export class AuditStore {
       approval_rate,
       per_hour,
     }
+  }
+
+  /**
+   * What the store holds for the authority report (issue #396): the tool
+   * calls persisted since `sinceIso` (denied, dry-run and sideband rows
+   * included), the pairs they were called on, and the earliest persisted
+   * tool call within retention. `created_at` is insert time, so the window
+   * is "persisted in", not "occurred in". Every statement is one range
+   * search on `idx_audit_kind_created_at`; the retention-wide part is a
+   * single `MIN` seek. No retention-wide COUNT runs here.
+   */
+  persistedSummary(sinceIso: string): PersistedSummary {
+    const totals = this.db.prepare(PERSISTED_SUMMARY_SQL.totals).get(sinceIso) as {
+      calls: number
+      sessions: number
+      first_seen_in_window: string | null
+    }
+    const pairs = this.db.prepare(PERSISTED_SUMMARY_SQL.pairs).all(sinceIso) as Array<{
+      tool_name: string
+      upstream: string | null
+      origin: string
+      calls: number
+    }>
+    const first = this.db.prepare(PERSISTED_SUMMARY_SQL.first_seen).get() as {
+      first_seen: string | null
+    }
+    return {
+      since: sinceIso,
+      calls: totals.calls,
+      sessions: totals.sessions,
+      first_seen_in_window: totals.first_seen_in_window,
+      pairs,
+      first_seen: first.first_seen,
+    }
+  }
+
+  /** True when the table holds rows and the composite index is not there yet. */
+  private needsKindCreatedAtIndexBuild(): boolean {
+    const index = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get(KIND_CREATED_AT_INDEX)
+    if (index !== undefined) return false
+    return this.db.prepare('SELECT 1 FROM audit_records LIMIT 1').get() !== undefined
   }
 
   /** Delete records older than the retention period. Returns the count of deleted records. */

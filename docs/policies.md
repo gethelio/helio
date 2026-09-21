@@ -983,6 +983,45 @@ policies:
         channel: slack
 ```
 
+## Policy coverage: `helio policy status`
+
+After the annotation caches are primed and the listening line is out, `helio start` prints two lines beside the `Policies:` line:
+
+```
+Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive
+Policy coverage: 2 of 7 have a rule that can match them, default allow
+```
+
+The same vocabulary carries through the startup lines, the `helio policy status` report and [`GET /api/policy/status`](./sideband-api.md#get-apipolicystatus):
+
+- **Tool-door pair**: one tool name on one door. A door is an upstream (one per `upstream` or `upstreams` entry) or a sideband adapter origin. The same tool name on two upstreams is two pairs; adapter tools are on no MCP door and are counted as their own origins.
+- **Annotated destructive**: the tool's baseline definition sets `destructiveHint: true` explicitly. **Destructive by MCP default**: the definition has no `annotations` object or no `destructiveHint` key, so the MCP default applies and an `annotations: { destructiveHint: true }` rule and `flag_destructive` both reach it. A door whose tools carry no annotations prints `none annotated` instead of a count; the report says how many tools are destructive by default.
+- **Have a rule that can match them** (a `matched` pair): some rule's full match fires for the pair with the door's baseline annotations, the configured `environment` and the upstream name filled in, and no arguments. Coverage goes through the same `matchRule` as live calls, first-match-wins, so the deciding rule is the first that matches.
+- **Covered only when arguments match** (a `conditional` pair): every present dimension of a rule matches except `match.input`, which exists only per call. On an adapter origin the same holds for `match.metadata`; on the MCP path a `match.metadata` rule is inert, never conditional. The report lists such rules ahead of the deciding rule with their action, because an argument-less evaluation skips them.
+- **Uncovered**: no rule can match; the pair falls through to `policies.default`.
+- **Effective action**: what an argument-less call to the pair gets, folded the way the decision pipeline folds it: the matched rule or the default; the stricter of the baseline and current annotations for a drifted tool under `on_tool_drift: log`; `flag_destructive: require_approval` for a destructive tool with no matching rule; then the drift gate under `block` or `require_approval` over everything before it. Global `dry_run` is reported at policy level and does not rewrite a pair's action. A grounded rule (`evidence.requires`, `requires`) shows its own action: coverage describes rules, not one caller's session.
+- **Persisted** and **called**: `record_kind: tool_call` rows in the audit store, counted by `created_at` (insert time), so the window is "persisted in the last 4h", not "occurred". Denied, dry-run and sideband calls are included. A persisted row with `origin: mcp` belongs to the MCP door named by its `upstream` column (null is the singular door); a row with any other origin belongs to that adapter's door. An adapter that declares `origin: mcp` therefore shares the singular MCP door's persisted counts, while its cache stays a separate door on the surface side.
+
+A door whose prime has not succeeded when the lines print gets its own line instead, `Authority surface: not primed on <name> (<reason>). helio policy status reports coverage once priming succeeds.`, and the counts cover the primed doors; with no primed door the coverage line is omitted. A hot reload that changes the rules prints `[helio] Policy coverage: ...` right after `[helio] Policy reloaded: ...`, against the same primed surface, so a saved rule visibly changes the count.
+
+### The report
+
+```bash
+helio policy status [-c helio.yaml] [--format text|json] [--window 4h]
+```
+
+The command reads the running proxy through its dashboard API (the primed surface lives only in that process), so `dashboard.enabled` must be true and the command presents the secret: `HELIO_DASHBOARD_SECRET` from the environment, else a plaintext `dashboard.api_secret` from the file. A resolved value that is a `sha256:` digest is refused with one line before any request. An unreachable API, a disabled dashboard and a refused secret each get one line and exit 1. `--format json` prints the endpoint's body verbatim; `--window` accepts the config duration grammar from `1m` to `30d` (default `4h`) and is named on every persisted line. Against an empty audit store the surface and coverage blocks are complete and the persisted block reads zero, with `no tool calls persisted yet`.
+
+### The readiness line
+
+Once per boot, when the loaded policy enforces nothing (zero rules, `default: allow`, no dry-run: the predicate behind the no-enforcement warning, so any rule, an allow-only rule set included, ends it) and the store holds at least 100 tool calls across 3 tool-door pairs persisted in the last 4 hours, `helio start` prints one more line after the coverage line:
+
+```
+Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 23 Jun 2026). helio policy status lists which tools are called and which have no rule.
+```
+
+The date is the earliest persisted tool call within retention. The dashboard shows the same sentence as a dismissable notice. Nothing is generated or applied.
+
 ## Tool definition drift
 
 Helio baselines every tool's definition — annotations, input/output schema,
