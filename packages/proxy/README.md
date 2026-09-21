@@ -15,7 +15,7 @@
 
 ---
 
-Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, checks evidence, routes approvals, caps cumulative spend, and records everything - **without changing your agent code or your MCP servers.**
+Helio is an MCP proxy that sits between your AI agents and the tools they use. Every tool call passes through Helio, which enforces policies, requires prerequisites, checks evidence, routes approvals, caps cumulative spend, and records everything - **without changing your agent code or your MCP servers.**
 
 The `2026-07-28` MCP revision made the protocol itself stateless: no handshake, no
 protocol-level sessions, cross-call state carried as handles the model passes between
@@ -238,9 +238,23 @@ policies:
       action: require_approval
 ```
 
+### Multi-Upstream Governance
+
+One proxy governs several MCP servers. A named `upstreams:` list takes the place of the singular `upstream:` (a config carries one form or the other, never both; the singular form stays supported), and each named upstream is served at its own `/mcp/<name>` and `/sse/<name>` door with no merged tool set.
+
+Governance is unified across the doors: one policy file, in which a rule can scope itself with `match.upstreams`, one budget engine, one approval queue, one audit trail, and one dashboard. See [upstreams](https://github.com/gethelio/helio/blob/main/docs/configuration.md#upstreams) in the configuration reference, [upstreams](https://github.com/gethelio/helio/blob/main/docs/policies.md#upstreams) in the policy guide, and the [multi-upstream example](https://github.com/gethelio/helio/tree/main/examples/multi-upstream).
+
+```yaml
+upstreams:
+  - name: files
+    url: 'http://localhost:8081/mcp'
+  - name: payments
+    url: 'http://localhost:8082/mcp'
+```
+
 ### Cross-Tool Spend Budgets
 
-Cumulative cross-tool spend enforcement: one depleting pot aggregates spend across every tool that feeds it — Stripe and PayPal into one cap, each exposing the amount under its own argument field. Deterministic at the MCP gate, persistent across restarts via a durable spend ledger, with break-glass approvals for overages and a live dashboard view.
+One budget across tools and servers: one depleting pot aggregates spend across every tool that feeds it, on whichever MCP server the tool sits behind and whichever argument field carries the amount (Stripe and PayPal into one cap). Deterministic at the MCP gate, persistent across restarts via a durable spend ledger, with break-glass approvals for overages and a live dashboard view.
 
 ```yaml
 budgets:
@@ -262,14 +276,14 @@ Budgets govern tools that expose what they are spending in an argument field. Wa
 
 ### Evidence Grounding
 
-Require proof before high-stakes actions. A refund requires a prior order lookup. A deployment requires a passing test run. The optional SDK marks tool outputs as evidence; the proxy enforces evidence requirements.
+Require fresh application-provided evidence. The optional SDK posts an evidence key for the session; the proxy checks that the key is on the policy allowlist, present, and not expired (the caller sets a TTL per entry; the SDK default is 300 seconds). Helio verifies the presence and freshness of the evidence signal, not what it contains, and the SDK token lives in the agent's process, so treat an evidence gate as a guard against a step skipped by mistake, not against an agent that intends to skip it. See [SECURITY.md](https://github.com/gethelio/helio/blob/main/SECURITY.md#process-and-filesystem-boundaries).
 
 ```yaml
 policies:
   rules:
     - match:
         tool: 'process_refund'
-      action: deny
+      action: allow
       evidence:
         requires: ['orders.lookup']
 ```
@@ -309,7 +323,7 @@ When Helio blocks an action, it returns structured feedback explaining what fail
 
 ### Action Dependency Chains
 
-Declare prerequisite actions in policy. The proxy tracks completed actions per session and blocks anything where prerequisites aren't met.
+Require a successful prerequisite action. No refund unless `orders.lookup` already succeeded this session. The proxy observes the call itself: by default a dependency is satisfied only by a routed tool call that returned an upstream result rather than an error. Set `requires_success: false` to count any attempt.
 
 ```yaml
 policies:
@@ -322,7 +336,7 @@ policies:
 
 ### Approval Workflows
 
-Route sensitive actions to Slack, webhook, or the Helio dashboard. Configurable timeout and escalation, plus a dashboard-only break-glass override (REST API and dashboard UI; not exposed as a Slack button).
+Escalate only what needs you, and show the approver the arguments. Route a sensitive call to Slack, a webhook, or the Helio dashboard; the ticket carries the tool, the upstream, the rule that fired, and the call's arguments, and the call goes nowhere until a human decides. Configurable timeout and escalation, plus a dashboard-only break-glass override (REST API and dashboard UI; not exposed as a Slack button).
 
 ### Rate & Spend Limits
 
@@ -330,7 +344,7 @@ Rate limits per tool and per session. Per-rule spend limits that block a matched
 
 ### Audit Trail
 
-Every tool call recorded: timestamp, agent identity, tool name, inputs, policy decision, evidence chain, approval status, downstream response, and latency. Searchable dashboard. Export to JSON or CSV.
+Every tool call recorded: timestamp, agent identity, tool name, inputs, policy decision, evidence chain, approval status, downstream response, latency, and the hash of the config in force when the record was written. Searchable dashboard. Export to JSON or CSV.
 
 ## How Helio Compares
 

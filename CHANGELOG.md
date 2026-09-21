@@ -53,6 +53,18 @@ Maintainer notes:
   with this version now read the same; GitHub shows them from this
   commit, npm when this version is published. Nothing else in the
   READMEs changes.
+- **The README Features section states dependency chains and evidence
+  grounding as two claims.** Dependency chains (`requires`) are
+  proxy-observed: a dependency is satisfied by a routed tool call that
+  returned an upstream result rather than an error. Evidence grounding
+  (`evidence.requires`) is cooperative: the proxy checks that an
+  allowlisted evidence key is present for the session and not expired,
+  not what it contains. The retired sentence made one claim over both.
+  The section also gains a Multi-Upstream Governance subsection with
+  the named `upstreams:` shape, and its evidence example now pairs the
+  evidence block with `action: allow`, because the evidence block of a
+  deny rule is never evaluated. The package README npm ships changes
+  with it.
 
 ### Fixed
 
