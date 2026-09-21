@@ -255,6 +255,36 @@ export interface AnalyticsResponse {
   readonly per_hour: readonly TimeBucket[]
 }
 
+// -- Policy status (issue #396) ---------------------------------------------
+
+/** The readiness block of `GET /api/policy/status`: recent activity against the floor. */
+export interface PolicyStatusReadiness {
+  readonly ready: boolean
+  /** True when the loaded policy enforces something; the banner never shows then. */
+  readonly suppressed: boolean
+  readonly calls_in_window: number
+  readonly tool_doors_called_in_window: number
+  /** The earliest persisted tool call within retention, or null on an empty store. */
+  readonly first_seen: string | null
+  readonly thresholds: { readonly min_calls: number; readonly min_tool_doors: number }
+}
+
+/**
+ * `GET /api/policy/status`, schema version 1. The dashboard reads the window
+ * and the readiness block; the other blocks are the CLI's and are typed
+ * loosely here on purpose.
+ */
+export interface PolicyStatusResponse {
+  readonly schema_version: number
+  readonly generated_at: string
+  readonly window: string
+  readonly policy: Readonly<Record<string, unknown>>
+  readonly surface: Readonly<Record<string, unknown>>
+  readonly coverage: Readonly<Record<string, unknown>>
+  readonly persisted: Readonly<Record<string, unknown>>
+  readonly readiness: PolicyStatusReadiness
+}
+
 // -- Evidence ----------------------------------------------------------------
 
 export interface EvidenceResponse {

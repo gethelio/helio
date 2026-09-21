@@ -19,6 +19,7 @@ import {
   fetchBudgetEvents,
   fetchAnalytics,
   fetchEvidence,
+  fetchPolicyStatus,
   approveTicket,
   denyTicket,
   breakGlassTicket,
@@ -329,6 +330,18 @@ describe('read endpoints', () => {
     const url = calledUrl()
     expect(url).toContain('from=')
     expect(url).toContain('to=')
+  })
+
+  it('fetchPolicyStatus hits /api/policy/status with no query by default', async () => {
+    mockFetch.mockReturnValue(okJson({ schema_version: 1 }))
+    await fetchPolicyStatus()
+    expect(calledUrl()).toBe('/api/policy/status')
+  })
+
+  it('fetchPolicyStatus passes the window when given', async () => {
+    mockFetch.mockReturnValue(okJson({ schema_version: 1 }))
+    await fetchPolicyStatus('7d')
+    expect(calledUrl()).toBe('/api/policy/status?window=7d')
   })
 
   it('fetchEvidence encodes session ID', async () => {

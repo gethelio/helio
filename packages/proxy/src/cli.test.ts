@@ -4545,3 +4545,553 @@ audit:
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// helio policy status, the startup surface lines and the readiness nudge
+// (issue #396), through the built dist/cli.js
+// ---------------------------------------------------------------------------
+
+describe('helio policy status and the startup surface lines (issue #396)', () => {
+  const ANNOTATED_TOOLS = [
+    { name: 'send_email', annotations: { readOnlyHint: false, destructiveHint: false } },
+    { name: 'delete_record', annotations: { readOnlyHint: false, destructiveHint: true } },
+  ]
+  const BARE_TOOLS = [{ name: 'read_file' }, { name: 'exec' }]
+
+  /** A mock upstream whose tools/list lists `tools`. */
+  function startToolsUpstream(tools: unknown[]): Promise<MockMcpServer> {
+    return startMockMcpServer((payload) => {
+      const id = payload['id'] ?? null
+      if (payload['method'] === 'tools/list') return { jsonrpc: '2.0', id, result: { tools } }
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+    })
+  }
+
+  /**
+   * A raw upstream for the failure shapes the canned-200 mock cannot
+   * express: tools/list answers `status` after `delayMs`, everything else 200.
+   */
+  async function startRawUpstream(options: {
+    status: number
+    delayMs?: number
+  }): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => {
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        let payload: Record<string, unknown> = {}
+        try {
+          payload = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>
+        } catch {
+          payload = {}
+        }
+        const id = payload['id'] ?? null
+        const respond = () => {
+          if (payload['method'] === 'tools/list') {
+            res.writeHead(options.status, { 'content-type': 'application/json' })
+            res.end(
+              options.status >= 400
+                ? JSON.stringify({ error: 'boom' })
+                : JSON.stringify({ jsonrpc: '2.0', id, result: { tools: ANNOTATED_TOOLS } }),
+            )
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ jsonrpc: '2.0', id, result: {} }))
+        }
+        if (payload['method'] === 'tools/list' && options.delayMs)
+          setTimeout(respond, options.delayMs)
+        else respond()
+      })
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const port = (server.address() as AddressInfo).port
+    return {
+      url: `http://127.0.0.1:${String(port)}/mcp`,
+      close: () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((err) => {
+            if (err) reject(err)
+            else resolve()
+          })
+        }),
+    }
+  }
+
+  /** Write a config against `upstreamUrl`; the dashboard is off unless a secret is given. */
+  function writeConfig(options: {
+    upstreamUrl: string
+    rules?: string
+    dashboardSecret?: string
+    dashboardEnabled?: boolean
+  }): {
+    dir: string
+    configPath: string
+    auditPath: string
+    listenPort: number
+    dashboardPort: number
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-policy-status-'))
+    const configPath = join(dir, 'helio.yaml')
+    const auditPath = join(dir, 'audit.db')
+    const listenPort = randomChildPort()
+    const dashboardPort = listenPort + 1
+    const dashboard =
+      options.dashboardSecret !== undefined
+        ? `dashboard:
+  enabled: ${String(options.dashboardEnabled ?? true)}
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "${options.dashboardSecret}"
+`
+        : `dashboard:
+  enabled: false
+`
+    writeFileSync(
+      configPath,
+      `
+version: "1"
+upstream:
+  url: "${options.upstreamUrl}"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+policies:
+  default: allow
+  rules:${options.rules ?? ' []'}
+${dashboard}audit:
+  path: "${auditPath}"
+`,
+    )
+    return { dir, configPath, auditPath, listenPort, dashboardPort }
+  }
+
+  const DENY_DESTRUCTIVE_RULE = `
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny`
+
+  /** Seed `calls` tool_call rows round-robin over `pairs` tool names at insert time. */
+  function seedCalls(auditPath: string, calls: number, pairs: number): void {
+    const store = new AuditStore({
+      path: auditPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const records: AuditRecordInput[] = []
+    for (let i = 0; i < calls; i++) {
+      records.push({
+        timestamp: new Date().toISOString(),
+        session_id: `s-${String(i % 5)}`,
+        session_source: null,
+        protocol_version: null,
+        upstream: null,
+        agent_id: null,
+        environment: null,
+        tool_name: `tool_${String(i % pairs)}`,
+        tool_input: {},
+        policy_decision: 'allow',
+        block_reason: null,
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: 200,
+        upstream_latency_ms: 1,
+        total_duration_ms: 1,
+        approval_wait_ms: 0,
+        proxy_compute_ms: 1,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+      })
+    }
+    const inserted = store.insertBatch(records)
+    store.close()
+    if (inserted !== calls) throw new Error(`seeded ${String(inserted)} of ${String(calls)}`)
+  }
+
+  const NUDGE_TAIL = 'helio policy status lists which tools are called and which have no rule.'
+
+  /** Boot against a primed annotated upstream and return stderr through the Upstream: line. */
+  async function bootStderr(args: {
+    rules?: string
+    seed?: { calls: number; pairs: number }
+    tools?: unknown[]
+  }): Promise<string> {
+    const upstream = await startToolsUpstream(args.tools ?? ANNOTATED_TOOLS)
+    const { dir, configPath, auditPath } = writeConfig({
+      upstreamUrl: upstream.url,
+      rules: args.rules,
+    })
+    try {
+      if (args.seed) seedCalls(auditPath, args.seed.calls, args.seed.pairs)
+      return await startAndCaptureStderr(['-c', configPath], {
+        readyMarker: /^Upstream: /m,
+        timeoutMs: 10_000,
+      })
+    } finally {
+      await upstream.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('(a) helio policy without a subcommand prints the group help and exits 1', async () => {
+    const { code, stdout, stderr } = await runCli(['policy'])
+    expect(code).toBe(1)
+    expect(`${stdout}${stderr}`).toContain('status')
+    expect(`${stdout}${stderr}`).toContain('Usage: helio policy')
+  })
+
+  it('(b) prints the surface and coverage lines between the listening and Upstream lines with zero rules', async () => {
+    const stderr = await bootStderr({})
+    const listening = stderr.indexOf('Helio proxy listening')
+    const surface = stderr.indexOf(
+      'Authority surface: 2 tool-door pairs across 1 upstream, 1 annotated destructive\n',
+    )
+    const coverage = stderr.indexOf(
+      'Policy coverage: 0 of 2 have a rule that can match them, default allow\n',
+    )
+    const upstreamLine = stderr.search(/^Upstream: /m)
+    expect(surface).toBeGreaterThan(listening)
+    expect(coverage).toBeGreaterThan(surface)
+    expect(upstreamLine).toBeGreaterThan(coverage)
+    expect(stderr).not.toContain('[helio] Authority surface')
+    expect(stderr).not.toContain('Persisted:')
+  }, 15_000)
+
+  it('(c) counts the pairs a loaded rule can match', async () => {
+    const stderr = await bootStderr({ rules: DENY_DESTRUCTIVE_RULE })
+    expect(stderr).toContain(
+      'Policy coverage: 1 of 2 have a rule that can match them, default allow',
+    )
+  }, 15_000)
+
+  it('(d) prints the not-primed form and no coverage line when tools/list fails', async () => {
+    const upstream = await startRawUpstream({ status: 500 })
+    const { dir, configPath } = writeConfig({ upstreamUrl: upstream.url })
+    try {
+      const stderr = await startAndCaptureStderr(['-c', configPath], {
+        readyMarker: /^Upstream: /m,
+        timeoutMs: 10_000,
+      })
+      expect(stderr).toContain(
+        `Authority surface: not primed on ${upstream.url} (upstream returned HTTP 500 to tools/list (session/initialize may be required)). helio policy status reports coverage once priming succeeds.`,
+      )
+      expect(stderr).not.toContain('Policy coverage:')
+    } finally {
+      await upstream.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('(e) prints none annotated for a zero-annotation upstream', async () => {
+    const stderr = await bootStderr({ tools: BARE_TOOLS })
+    expect(stderr).toContain(
+      'Authority surface: 2 tool-door pairs across 1 upstream, none annotated',
+    )
+    expect(stderr).toContain(
+      'Policy coverage: 0 of 2 have a rule that can match them, default allow',
+    )
+  }, 15_000)
+
+  describe('(f) helio policy status against the running proxy', () => {
+    it('prints the report as text and as json, echoing the window', async () => {
+      const upstream = await startToolsUpstream(ANNOTATED_TOOLS)
+      const secret = `status-secret-${String(randomChildPort())}`
+      const { dir, configPath, dashboardPort } = writeConfig({
+        upstreamUrl: upstream.url,
+        dashboardSecret: secret,
+        rules: DENY_DESTRUCTIVE_RULE,
+      })
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      const waitFor = async (predicate: () => boolean): Promise<void> => {
+        const started = Date.now()
+        while (Date.now() - started < 10_000) {
+          if (predicate()) return
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        throw new Error(`Timed out. stderr:\n${stderr}`)
+      }
+      try {
+        await waitFor(() => stderr.includes('Dashboard API listening'))
+
+        // The secret from the environment.
+        const text = await runCli(['policy', 'status', '-c', configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: secret,
+        })
+        expect(text.stderr).toBe('')
+        expect(text.code).toBe(0)
+        expect(text.stdout).toContain('Authority surface')
+        expect(text.stdout).toContain('2 tool-door pairs across 1 upstream')
+        expect(text.stdout).toContain('1 annotated destructive')
+        expect(text.stdout).toContain('1 of 2 have a rule that can match them')
+        expect(text.stdout).toContain('Persisted (last 4h)')
+        expect(text.stdout).toMatch(/delete_record\s+upstream\s+deny\s+rule "block-destructive"/)
+
+        // The plaintext secret from the config file, no environment.
+        const env = { ...process.env }
+        delete env['HELIO_DASHBOARD_SECRET']
+        const fromConfig = await runCli(['policy', 'status', '-c', configPath], env)
+        expect(fromConfig.code).toBe(0)
+        expect(fromConfig.stdout).toContain('Authority surface')
+
+        const json = await runCli(
+          ['policy', 'status', '-c', configPath, '--format', 'json', '--window', '7d'],
+          { ...process.env, HELIO_DASHBOARD_SECRET: secret },
+        )
+        expect(json.code).toBe(0)
+        const body = JSON.parse(json.stdout) as {
+          schema_version: number
+          window: string
+          surface: { pairs: number }
+          coverage: { matched: number }
+          persisted: { window: string; calls_in_window: number }
+          readiness: { suppressed: boolean }
+        }
+        expect(body.schema_version).toBe(1)
+        expect(body.window).toBe('7d')
+        expect(body.persisted.window).toBe('7d')
+        expect(body.surface.pairs).toBe(2)
+        expect(body.coverage.matched).toBe(1)
+        expect(body.readiness.suppressed).toBe(true)
+
+        const text7 = await runCli(['policy', 'status', '-c', configPath, '--window', '7d'], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: secret,
+        })
+        expect(text7.stdout).toContain('Persisted (last 7d)')
+
+        // A wrong secret is a 401 with one line naming the source tried.
+        const wrong = await runCli(['policy', 'status', '-c', configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: 'not-the-secret',
+        })
+        expect(wrong.code).toBe(1)
+        expect(wrong.stdout).toBe('')
+        expect(wrong.stderr).toContain(
+          `Error: the Helio dashboard API at http://127.0.0.1:${String(dashboardPort)} refused the secret from HELIO_DASHBOARD_SECRET`,
+        )
+      } finally {
+        child.kill('SIGTERM')
+        await waitForChildExit(child, 5_000).catch(() => undefined)
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it('refuses a bad --window or --format before any request', async () => {
+      const { dir, configPath } = writeConfig({
+        upstreamUrl: 'http://127.0.0.1:1/mcp',
+        dashboardSecret: 'plain',
+      })
+      try {
+        const window = await runCli(['policy', 'status', '-c', configPath, '--window', '31d'])
+        expect(window.code).toBe(1)
+        expect(window.stderr).toContain(
+          'Error: --window must be a duration between 1m and 30d (for example 4h, 240m or 7d)',
+        )
+        const format = await runCli(['policy', 'status', '-c', configPath, '--format', 'xml'])
+        expect(format.code).toBe(1)
+        expect(format.stderr).toContain('Error: --format must be text or json')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('(g) exits 1 with one line when the dashboard API is not reachable', async () => {
+      const { dir, configPath, dashboardPort } = writeConfig({
+        upstreamUrl: 'http://127.0.0.1:1/mcp',
+        dashboardSecret: 'plain',
+      })
+      try {
+        const { code, stdout, stderr } = await runCli(['policy', 'status', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(
+          `Error: cannot reach the Helio dashboard API at http://127.0.0.1:${String(dashboardPort)} (is helio start running with dashboard.enabled: true?)`,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('exits 1 with one line when the dashboard is disabled in the config', async () => {
+      const { dir, configPath } = writeConfig({ upstreamUrl: 'http://127.0.0.1:1/mcp' })
+      try {
+        const { code, stderr } = await runCli(['policy', 'status', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain(
+          `Error: helio policy status reads the running proxy through the dashboard API, and dashboard.enabled is false in ${configPath}`,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('(i) refuses a resolved secret that is a digest before any request, whatever its source', async () => {
+      const digest = secretDigest('the-real-secret')
+      const { dir, configPath, dashboardPort } = writeConfig({
+        upstreamUrl: 'http://127.0.0.1:1/mcp',
+        dashboardSecret: digest,
+      })
+      let requests = 0
+      const sink = createServer((_req, res) => {
+        requests += 1
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      })
+      await new Promise<void>((resolve) => {
+        sink.listen(dashboardPort, '127.0.0.1', resolve)
+      })
+      try {
+        const fromEnv = await runCli(['policy', 'status', '-c', configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: digest,
+        })
+        expect(fromEnv.code).toBe(1)
+        expect(fromEnv.stderr.trim()).toBe(
+          'Error: the dashboard secret from HELIO_DASHBOARD_SECRET is a sha256: digest; present the secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun',
+        )
+
+        const env = { ...process.env }
+        delete env['HELIO_DASHBOARD_SECRET']
+        const fromConfig = await runCli(['policy', 'status', '-c', configPath], env)
+        expect(fromConfig.code).toBe(1)
+        expect(fromConfig.stderr.trim()).toBe(
+          `Error: the dashboard secret from dashboard.api_secret in ${configPath} is a sha256: digest; present the secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
+        )
+        expect(requests).toBe(0)
+      } finally {
+        await new Promise<void>((resolve) => {
+          sink.close(() => {
+            resolve()
+          })
+        })
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+  })
+
+  describe('(h) the readiness nudge', () => {
+    it('prints once when 100 calls across 7 pairs are persisted in the window and nothing is enforced', async () => {
+      const stderr = await bootStderr({ seed: { calls: 100, pairs: 7 } })
+      const line = 'Persisted: 100 calls across 7 tool-door pairs in the last 4h (audit rows since '
+      expect(stderr).toContain(line)
+      expect(stderr.split(line)).toHaveLength(2)
+      expect(stderr).toContain(NUDGE_TAIL)
+      expect(stderr).not.toContain('generate')
+      expect(stderr.indexOf(line)).toBeGreaterThan(stderr.indexOf('Policy coverage:'))
+    }, 15_000)
+
+    it('is absent at 99 calls across 7 pairs', async () => {
+      const stderr = await bootStderr({ seed: { calls: 99, pairs: 7 } })
+      expect(stderr).not.toContain('Persisted:')
+    }, 15_000)
+
+    it('is absent at 100 calls across 2 pairs', async () => {
+      const stderr = await bootStderr({ seed: { calls: 100, pairs: 2 } })
+      expect(stderr).not.toContain('Persisted:')
+    }, 15_000)
+
+    it('is absent once a rule is loaded', async () => {
+      const stderr = await bootStderr({
+        seed: { calls: 100, pairs: 7 },
+        rules: DENY_DESTRUCTIVE_RULE,
+      })
+      expect(stderr).not.toContain('Persisted:')
+      expect(stderr).toContain('Policy coverage: 1 of 2')
+    }, 15_000)
+  })
+
+  it('(j) reprints the coverage line after a hot reload that adds a rule', async () => {
+    const upstream = await startToolsUpstream(ANNOTATED_TOOLS)
+    const { dir, configPath } = writeConfig({ upstreamUrl: upstream.url })
+    const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8')
+    })
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      const started = Date.now()
+      while (Date.now() - started < 10_000) {
+        if (predicate()) return
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      throw new Error(`Timed out. stderr:\n${stderr}`)
+    }
+    try {
+      await waitFor(() => stderr.includes(`Watching ${configPath} for policy changes`))
+      expect(stderr).toContain(
+        'Policy coverage: 0 of 2 have a rule that can match them, default allow',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      const original = readFileSync(configPath, 'utf-8')
+      writeFileSync(configPath, original.replace('  rules: []', `  rules:${DENY_DESTRUCTIVE_RULE}`))
+      await waitFor(() => stderr.includes('[helio] Policy coverage:'))
+      const reloaded = stderr.indexOf('[helio] Policy reloaded: 1 rule (default: allow)')
+      const coverage = stderr.indexOf(
+        '[helio] Policy coverage: 1 of 2 have a rule that can match them, default allow',
+      )
+      expect(reloaded).toBeGreaterThan(-1)
+      expect(coverage).toBeGreaterThan(reloaded)
+      // The surface did not change on a reload: its line is not reprinted.
+      expect(stderr.split('Authority surface:')).toHaveLength(2)
+    } finally {
+      child.kill('SIGTERM')
+      await waitForChildExit(child, 5_000).catch(() => undefined)
+      await upstream.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 20_000)
+
+  it('(k) a slow tools/list yields a surface line that agrees with whether the primed line preceded it', async () => {
+    const upstream = await startRawUpstream({ status: 200, delayMs: 2_000 })
+    const { dir, configPath } = writeConfig({ upstreamUrl: upstream.url })
+    try {
+      const stderr = await startAndCaptureStderr(['-c', configPath], {
+        readyMarker: /^Upstream: /m,
+        timeoutMs: 10_000,
+      })
+      const primedAt = stderr.indexOf('Annotation cache primed:')
+      const surfaceAt = stderr.indexOf('Authority surface:')
+      expect(surfaceAt).toBeGreaterThan(-1)
+      if (primedAt !== -1 && primedAt < surfaceAt) {
+        expect(stderr).toContain(
+          'Authority surface: 2 tool-door pairs across 1 upstream, 1 annotated destructive',
+        )
+      } else {
+        expect(stderr).toContain('Annotation cache priming did not complete within 1500ms')
+        expect(stderr).toContain(
+          `Authority surface: not primed on ${upstream.url} (priming did not complete within 1500ms). helio policy status reports coverage once priming succeeds.`,
+        )
+        expect(stderr).not.toContain('Policy coverage:')
+      }
+    } finally {
+      await upstream.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+})

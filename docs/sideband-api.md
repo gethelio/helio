@@ -44,9 +44,9 @@ Clients that need a page number compute it as `Math.floor(offset / limit) + 1`.
 
 Endpoints that return a computed view of in-memory state are not "resources" in the REST sense, and wrapping them in `{ data }` adds ceremony without signal. They return their computed view directly, with shapes specific to each endpoint.
 
-Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`, `GET /api/budgets`.
+Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/policy/status`, `GET /api/limits`, `GET /api/adapters`, `GET /api/budgets`.
 
-Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/limits`, `GET /api/adapters`, and `GET /api/budgets` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
+Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/policy/status`, `GET /api/limits`, `GET /api/adapters`, and `GET /api/budgets` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
 
 `GET /api/health` in particular is preserved in this form so that container orchestrators (Kubernetes, Docker Compose, Nomad) can point healthcheck probes at it without a custom JSON parser: probes only evaluate the HTTP status code, and the flat `status`, `version`, and `uptime` keys stay easy to read for the humans and scripts that hit the same URL.
 
@@ -233,6 +233,168 @@ Aggregated statistics for the dashboard charts. Computed from the audit store fo
 - `per_hour` — hourly buckets of record counts over the window.
 
 **Raw-shape endpoint:** this is an RPC-style view, not a resource lookup.
+
+#### GET /api/policy/status
+
+The authority report (issue #396): the tool surface the running proxy primed, the loaded policy's coverage of it, what the audit store holds for a window, and the readiness block. This is what `helio policy status` prints (`--format json` is this body verbatim) and what the dashboard's readiness notice reads. The vocabulary is defined in the [Policy Guide](./policies.md#policy-coverage-helio-policy-status).
+
+**Query parameters:**
+
+| Parameter | Default | Description                                                                                                                      |
+| --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `window`  | `4h`    | The persisted window, in the config duration grammar, from `1m` to `30d`. Echoed as sent (`240m` stays `240m`); otherwise `400`. |
+
+**Response (200):**
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-21T13:08:43.335Z",
+  "window": "4h",
+  "policy": {
+    "rule_count": 1,
+    "default_action": "allow",
+    "dry_run": false,
+    "flag_destructive": null,
+    "on_tool_drift": "block",
+    "enforces_nothing": false
+  },
+  "surface": {
+    "pairs": 2,
+    "upstream_count": 1,
+    "adapter_origin_count": 0,
+    "annotated_destructive": 1,
+    "default_destructive": 0,
+    "annotation_free_doors": [],
+    "doors": [
+      {
+        "kind": "upstream",
+        "name": null,
+        "available": true,
+        "unavailable_reason": null,
+        "tool_count": 2,
+        "annotated_count": 2,
+        "annotated_destructive": 1
+      }
+    ],
+    "unavailable": []
+  },
+  "coverage": {
+    "matched": 1,
+    "conditional": 0,
+    "uncovered": 1,
+    "default_action": "allow",
+    "by_effective_action": {
+      "allow": 1,
+      "deny": 1,
+      "require_approval": 0,
+      "rate_limit": 0,
+      "spend_limit": 0,
+      "dry_run": 0
+    },
+    "pairs": [
+      {
+        "door": { "kind": "upstream", "name": null },
+        "tool": "send_email",
+        "destructive": "no",
+        "drifted": false,
+        "flagged_destructive": false,
+        "status": "uncovered",
+        "matched_rule": null,
+        "conditional_rules": [],
+        "effective_action": "allow",
+        "effective_source": "default"
+      },
+      {
+        "door": { "kind": "upstream", "name": null },
+        "tool": "delete_record",
+        "destructive": "annotated",
+        "drifted": false,
+        "flagged_destructive": false,
+        "status": "matched",
+        "matched_rule": { "name": "block-destructive", "index": 0, "action": "deny" },
+        "conditional_rules": [],
+        "effective_action": "deny",
+        "effective_source": "rule"
+      }
+    ]
+  },
+  "persisted": {
+    "window": "4h",
+    "since": "2026-09-21T09:08:43.335Z",
+    "calls_in_window": 4,
+    "sessions_in_window": 2,
+    "tool_doors_called_in_window": 2,
+    "pairs_called_in_window": [
+      { "door": { "kind": "upstream", "name": null }, "tool": "delete_record", "calls": 1 },
+      { "door": { "kind": "upstream", "name": null }, "tool": "send_email", "calls": 3 }
+    ],
+    "reachable_permitted_never_called_in_window": 0,
+    "called_not_reachable_in_window": 0,
+    "first_seen": "2026-09-21T13:08:42.133Z"
+  },
+  "readiness": {
+    "ready": false,
+    "suppressed": true,
+    "calls_in_window": 4,
+    "tool_doors_called_in_window": 2,
+    "first_seen": "2026-09-21T13:08:42.133Z",
+    "thresholds": { "min_calls": 100, "min_tool_doors": 3 }
+  }
+}
+```
+
+Top level:
+
+| Field            | Description                                                                                                                                                                                                                                                |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema_version` | `1`. Bumped only for a breaking change to this shape; additive fields do not bump it.                                                                                                                                                                      |
+| `generated_at`   | When the report was assembled (ISO 8601).                                                                                                                                                                                                                  |
+| `window`         | The `window` query parameter as sent, or `4h`.                                                                                                                                                                                                             |
+| `policy`         | `rule_count`, `default_action`, `dry_run`, `flag_destructive` (`log`, `require_approval` or null), `on_tool_drift` (the effective mode, `block` when unset), and `enforces_nothing` (zero rules, default allow, no dry-run: the no-enforcement predicate). |
+
+`surface`, the doors the proxy primed:
+
+| Field                   | Description                                                                                                                                                                                                                                           |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pairs`                 | Tool-door pairs on every available door, adapter origins included.                                                                                                                                                                                    |
+| `upstream_count`        | Primed upstream doors.                                                                                                                                                                                                                                |
+| `adapter_origin_count`  | Sideband origins whose `/evaluate` calls carried a tool definition.                                                                                                                                                                                   |
+| `annotated_destructive` | Pairs whose baseline sets `destructiveHint: true` explicitly.                                                                                                                                                                                         |
+| `default_destructive`   | Pairs destructive by MCP default: no `annotations` object, or no `destructiveHint` key.                                                                                                                                                               |
+| `annotation_free_doors` | Names of doors with tools where no tool carries an annotations object.                                                                                                                                                                                |
+| `doors[]`               | One entry per door: `kind` (`upstream` or `adapter`), `name` (the upstream name, null in singular mode) or `origin`, `available`, `unavailable_reason` (the prime failure reason, or null), `tool_count`, `annotated_count`, `annotated_destructive`. |
+| `unavailable[]`         | The doors not primed when the report was assembled, `{ name, reason }`; `name` is the upstream URL or command in singular mode.                                                                                                                       |
+
+`coverage`, the loaded policy against those pairs:
+
+| Field                 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `matched`             | Pairs some rule's full match fires for (with the door's baseline annotations, the configured environment and the upstream name, and no arguments).                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `conditional`         | Pairs no rule fully matches but some rule matches once `match.input` (or `match.metadata`, on an adapter origin) is set aside.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `uncovered`           | Pairs no rule can match; they fall through to `default_action`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `default_action`      | `policies.default`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `by_effective_action` | Pairs by `effective_action`, one key per action.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pairs[]`             | One entry per pair: `door` (`{ kind, name }` or `{ kind, origin }`), `tool`, `destructive` (`annotated`, `default` or `no`), `drifted`, `flagged_destructive` (true when `flag_destructive` would fire for an argument-less call), `status` (`matched`, `conditional` or `uncovered`), `matched_rule` (`{ name, index, action }` or null), `conditional_rules[]` (`{ name, index, action, on }` with `on` `arguments` or `metadata`, the rules ahead of the deciding one that fire only for some calls), `effective_action`, and `effective_source` (`rule`, `default`, `flag_destructive` or `drift`). |
+
+`persisted`, what the audit store holds for the window (`record_kind: tool_call` rows, non-tool decisions excluded, denied and dry-run calls included; `created_at` is insert time, so "persisted in", not "occurred in"):
+
+| Field                                        | Description                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `window`, `since`                            | The window and its start (ISO 8601).                                                                                                                                                                                                                                                                                                          |
+| `calls_in_window`                            | Tool calls persisted in the window.                                                                                                                                                                                                                                                                                                           |
+| `sessions_in_window`                         | Distinct session ids among them.                                                                                                                                                                                                                                                                                                              |
+| `tool_doors_called_in_window`                | Distinct `(tool_name, upstream, origin)` groups among them.                                                                                                                                                                                                                                                                                   |
+| `pairs_called_in_window[]`                   | Those groups as `{ door, tool, calls }`. A row with `origin: mcp` belongs to the MCP door named by its `upstream` (null is the singular door); any other origin is that adapter's door. An adapter that declares `origin: mcp` therefore shares the singular MCP door's persisted counts, while its cache stays a separate door in `surface`. |
+| `reachable_permitted_never_called_in_window` | Surface pairs whose `effective_action` is `allow` that no persisted call in the window names.                                                                                                                                                                                                                                                 |
+| `called_not_reachable_in_window`             | Called pairs on no primed door: a door not primed, a tool that left the list, or an adapter origin the surface does not list.                                                                                                                                                                                                                 |
+| `first_seen`                                 | The earliest persisted tool call within retention (not the install date), or null on an empty store.                                                                                                                                                                                                                                          |
+
+`readiness`, the startup nudge's inputs: `ready` (the window holds at least `thresholds.min_calls` calls across `thresholds.min_tool_doors` pairs: 100 across 3), `suppressed` (the policy enforces something, the negation of `policy.enforces_nothing`), `calls_in_window`, `tool_doors_called_in_window`, `first_seen` and `thresholds`. The dashboard shows its notice when `ready` and not `suppressed`.
+
+**Errors:** `400` `{ "error": "window must be a duration between 1m and 30d (for example 4h, 240m or 7d)" }`; `503` `{ "error": "policy status is not available in this process" }` when the app was created without a report source (a direct embedder), because the surface lives only in the running proxy.
+
+**Raw-shape endpoint:** an RPC-style view computed at request time from the primed caches, the loaded policy and the audit store.
 
 #### GET /api/limits
 

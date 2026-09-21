@@ -9,6 +9,7 @@ import {
   warnIfStdioUrlIgnored,
   warnIfDashboardSecretLiteral,
   warnIfConfigWritableByProxyUser,
+  enforcesNothing,
 } from './startup-warnings.js'
 
 describe('warnIfManyUpstreams', () => {
@@ -583,5 +584,47 @@ describe('warnIfConfigWritableByProxyUser (issue #341)', () => {
         (m) => messages.push(m),
       ),
     ).toBe(false)
+  })
+})
+
+describe('enforcesNothing (issue #396)', () => {
+  const policy = (args: {
+    readonly ruleCount?: number
+    readonly defaultAction?: 'allow' | 'deny'
+    readonly dryRun?: boolean
+  }) => ({
+    rules: Array.from({ length: args.ruleCount ?? 0 }, (_, i) => ({ name: `rule-${String(i)}` })),
+    defaultAction: args.defaultAction ?? 'allow',
+    dryRun: args.dryRun,
+  })
+
+  it('is true for zero rules, default allow and no dry-run', () => {
+    expect(enforcesNothing(policy({}))).toBe(true)
+  })
+
+  it('is false once any rule is loaded, an allow-only rule included', () => {
+    expect(enforcesNothing(policy({ ruleCount: 1 }))).toBe(false)
+  })
+
+  it('is false when the default action is deny', () => {
+    expect(enforcesNothing(policy({ defaultAction: 'deny' }))).toBe(false)
+  })
+
+  it('is false in dry-run mode', () => {
+    expect(enforcesNothing(policy({ dryRun: true }))).toBe(false)
+  })
+
+  it('is the predicate warnIfNoEnforcement prints on', () => {
+    for (const args of [
+      {},
+      { ruleCount: 1 },
+      { defaultAction: 'deny' as const },
+      { dryRun: true },
+    ]) {
+      const messages: string[] = []
+      const warned = warnIfNoEnforcement(policy(args), (m) => messages.push(m))
+      expect(warned).toBe(enforcesNothing(policy(args)))
+      expect(messages).toHaveLength(warned ? 1 : 0)
+    }
   })
 })

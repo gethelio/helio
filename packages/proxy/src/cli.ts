@@ -17,10 +17,10 @@ import {
   readConfigPin,
   isNamedConfig,
 } from './config/index.js'
-import type { SingularHelioConfig } from './config/index.js'
+import type { HelioConfig, SingularHelioConfig } from './config/index.js'
 import { DEFAULT_REARM_INTERVAL_MS } from './config/watcher.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
-import { secretDigest } from './auth/bearer.js'
+import { isSecretDigest, secretDigest } from './auth/bearer.js'
 import {
   SANDBOX_DEFAULT_DIR,
   SANDBOX_FILES,
@@ -42,6 +42,17 @@ import type { GovernedForwarderOptions } from './policy/governed-forwarder.js'
 import { compileSessionIdentity } from './mcp/session-resolver.js'
 import { startAnnotationPrimeLoop } from './policy/annotation-prime-loop.js'
 import type { AnnotationPrimeController } from './policy/annotation-prime-loop.js'
+import { classifySurface, formatCoverageLine, formatSurfaceLine } from './policy/surface.js'
+import type { SurfaceDoor } from './policy/surface.js'
+import {
+  buildPolicyStatus,
+  DEFAULT_STATUS_WINDOW,
+  evaluateReadiness,
+  formatReadinessLine,
+  parseStatusWindow,
+  renderPolicyStatusText,
+} from './policy/status.js'
+import type { PolicyStatusReport } from './policy/status.js'
 import {
   AuditStore,
   AuditWriter,
@@ -81,6 +92,7 @@ import {
   warnIfSdkSidebandExposed,
   warnIfDashboardOpenMode,
   warnIfNoEnforcement,
+  enforcesNothing,
   warnIfBudgetWindowExceedsRetention,
   warnIfManyUpstreams,
   warnIfStdioUrlIgnored,
@@ -804,6 +816,59 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     )
   }
 
+  // The authority surface (issue #396) is assembled AT PRINT TIME from the
+  // prime controllers' state and the caches' snapshots: an initial prime
+  // that lost the 1.5 s race and succeeded before the posture block prints
+  // has set `primed` by then, and the surface line agrees with the primed
+  // line above it. The policy read here follows every applied reload.
+  const singularUpstreamLabel = isNamedConfig(config)
+    ? undefined
+    : (config.upstream.url ?? config.upstream.command)
+  const surfaceDoors = (): SurfaceDoor[] => {
+    const surface: SurfaceDoor[] = []
+    for (const stack of stacks) {
+      const label = stack.name ?? singularUpstreamLabel
+      // Both getters are read once, together: a success sets `primed` and
+      // clears `lastFailure` in one synchronous step, and nothing runs
+      // between these two reads, so a door that is not primed always
+      // carries its reason here; the fallback is for the type, not a state.
+      const { primed, lastFailure } = stack.annotationPrime
+      if (primed) {
+        const { upstream, tools } = stack.governedForwarder.snapshotSurface()
+        surface.push({ kind: 'upstream', name: upstream, label, tools })
+      } else {
+        surface.push({
+          kind: 'upstream',
+          name: stack.name,
+          label,
+          unavailable: lastFailure ?? 'priming has not completed',
+        })
+      }
+    }
+    for (const adapter of governanceService?.snapshotSurfaces() ?? []) {
+      surface.push({ kind: 'adapter', origin: adapter.origin, tools: adapter.tools })
+    }
+    return surface
+  }
+  let currentPolicy: CompiledPolicy = policy
+  const classifyCurrentSurface = (activePolicy: CompiledPolicy) =>
+    classifySurface({
+      doors: surfaceDoors(),
+      policy: activePolicy,
+      environment: config.environment,
+    })
+  const policyStatusReport = (window: string): PolicyStatusReport => {
+    const parsed = parseStatusWindow(window)
+    if (!parsed.ok) throw new Error(parsed.error)
+    return buildPolicyStatus({
+      surface: classifyCurrentSurface(currentPolicy),
+      policy: currentPolicy,
+      persisted: auditStore.persistedSummary(new Date(Date.now() - parsed.ms).toISOString()),
+      window,
+      now: new Date(),
+    })
+  }
+
   // Conditionally start the dashboard API server
   let dashboardHandle: ServerHandle | undefined
   let closeDashboardApp: (() => void) | undefined
@@ -827,6 +892,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
           listEvents: (name, page) => budgetLedger.listEvents(name, page),
           listEventsForExport: (name, limit) => budgetLedger.listEventsForExport(name, limit),
         },
+        // The authority report for GET /api/policy/status (issue #396): the
+        // primed surface lives only in this process, so the CLI reads it here.
+        policyStatus: { report: policyStatusReport },
       },
       {
         apiSecret: config.dashboard.api_secret,
@@ -851,6 +919,24 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     `Policies: ${String(ruleCount)} rule${ruleCount !== 1 ? 's' : ''} loaded (default: ${policy.defaultAction})`,
   )
   warnIfNoEnforcement(policy)
+  // The authority surface and the policy's coverage of it (issue #396),
+  // computed now (after priming, after the bind), like the Policies: line
+  // beside them. A door not primed at this moment gets its own line.
+  const bootSurface = classifyCurrentSurface(policy)
+  console.error(formatSurfaceLine(bootSurface))
+  const bootCoverage = formatCoverageLine(bootSurface)
+  if (bootCoverage !== undefined) console.error(bootCoverage)
+  // The readiness nudge, once per boot: recent activity in the default
+  // window (one range search on the composite index; no retention-wide
+  // COUNT), only when the policy enforces nothing.
+  if (enforcesNothing(policy)) {
+    const windowMs = parseDuration(DEFAULT_STATUS_WINDOW)
+    const readiness = evaluateReadiness(
+      auditStore.persistedSummary(new Date(Date.now() - windowMs).toISOString()),
+      policy,
+    )
+    if (readiness.ready) console.error(formatReadinessLine(readiness, DEFAULT_STATUS_WINDOW))
+  }
   if (isNamedConfig(config)) {
     for (const entry of config.upstreams) {
       if (entry.transport === 'stdio') {
@@ -967,6 +1053,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         auditWriter.setConfigSha256(facts.sha256After)
         applyReloadedPolicy(stacks, newPolicy)
         governanceService?.updatePolicy(newPolicy)
+        currentPolicy = newPolicy
         // The one success-path persist site: the swap is done, the record
         // says so, and it precedes the first call the new policy serves.
         auditWriter.pushImmediate(buildPolicyReloadRecord(facts, config.environment ?? null))
@@ -978,6 +1065,11 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         console.error(
           `[helio] Policy reloaded: ${String(count)} rule${count !== 1 ? 's' : ''} (default: ${newPolicy.defaultAction})`,
         )
+        // Coverage gets the same treatment as the rule count: the saved
+        // rule visibly changes the count, or not. The surface did not
+        // change on a reload, so its line is not reprinted.
+        const reloadedCoverage = formatCoverageLine(classifyCurrentSurface(newPolicy))
+        if (reloadedCoverage !== undefined) console.error(`[helio] ${reloadedCoverage}`)
         for (const w of reloadWarnings) {
           const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
           console.error(`[helio] Warning: policy ${label}: ${w.message}`)
@@ -1377,6 +1469,109 @@ function registerShutdown(
 // Program
 // ---------------------------------------------------------------------------
 
+interface PolicyStatusOptions {
+  config: string
+  format: string
+  window: string
+}
+
+/**
+ * The dashboard secret `helio policy status` presents, in order: the
+ * HELIO_DASHBOARD_SECRET environment variable, else a plaintext
+ * `dashboard.api_secret` in the loaded config, else none (open mode).
+ */
+function resolveDashboardSecret(
+  config: HelioConfig,
+  configPath: string,
+): { secret: string | undefined; source: string | undefined } {
+  const fromEnv = process.env['HELIO_DASHBOARD_SECRET']
+  if (fromEnv !== undefined && fromEnv.length > 0) {
+    return { secret: fromEnv, source: 'HELIO_DASHBOARD_SECRET' }
+  }
+  const fromConfig = config.dashboard.api_secret
+  if (fromConfig !== undefined && fromConfig.length > 0) {
+    return { secret: fromConfig, source: `dashboard.api_secret in ${configPath}` }
+  }
+  return { secret: undefined, source: undefined }
+}
+
+/**
+ * `helio policy status` (issue #396): the authority report of the RUNNING
+ * proxy, read through its dashboard API, because the primed surface lives
+ * only in that process. Every refusal is one StartupError line.
+ */
+async function policyStatusCommand(opts: PolicyStatusOptions): Promise<void> {
+  if (opts.format !== 'text' && opts.format !== 'json') {
+    throw new StartupError(`Error: --format must be text or json (got "${opts.format}")`)
+  }
+  const window = parseStatusWindow(opts.window)
+  if (!window.ok) throw new StartupError(`Error: --${window.error}`)
+
+  let config: HelioConfig
+  try {
+    config = await loadConfig(opts.config)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      printConfigErrorDetails(err)
+      process.exit(1)
+    }
+    throw err
+  }
+  if (!config.dashboard.enabled) {
+    throw new StartupError(
+      `Error: helio policy status reads the running proxy through the dashboard API, and ` +
+        `dashboard.enabled is false in ${opts.config}. Enable the dashboard and restart helio start.`,
+    )
+  }
+
+  const { secret, source } = resolveDashboardSecret(config, opts.config)
+  // verifyBearer hashes the presented value, so a digest sent as Bearer is
+  // a 401 that names the wrong cause: refuse it here, before any request.
+  if (secret !== undefined && isSecretDigest(secret)) {
+    throw new StartupError(
+      `Error: the dashboard secret from ${source ?? 'the config'} is a sha256: digest; present the ` +
+        `secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
+    )
+  }
+
+  const host = config.dashboard.host.includes(':')
+    ? `[${config.dashboard.host}]`
+    : config.dashboard.host
+  const base = `http://${host}:${String(config.dashboard.port)}`
+  let response: Response
+  try {
+    response = await fetch(`${base}/api/policy/status?window=${encodeURIComponent(opts.window)}`, {
+      headers: secret !== undefined ? { authorization: `Bearer ${secret}` } : {},
+    })
+  } catch {
+    throw new StartupError(
+      `Error: cannot reach the Helio dashboard API at ${base} (is helio start running with dashboard.enabled: true?)`,
+    )
+  }
+  if (response.status === 401) {
+    throw new StartupError(
+      `Error: the Helio dashboard API at ${base} refused the secret from ${source ?? 'no source (none was found)'}; ` +
+        `set HELIO_DASHBOARD_SECRET to the secret helio init printed and rerun`,
+    )
+  }
+  const body: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const message =
+      typeof body === 'object' &&
+      body !== null &&
+      typeof (body as { error?: unknown }).error === 'string'
+        ? (body as { error: string }).error
+        : `HTTP ${String(response.status)}`
+    throw new StartupError(`Error: the Helio dashboard API at ${base} answered: ${message}`)
+  }
+  if (opts.format === 'json') {
+    console.log(JSON.stringify(body, null, 2))
+    return
+  }
+  console.log(renderPolicyStatusText(body as PolicyStatusReport))
+}
+
 /**
  * A StartupError message is the complete operator diagnosis: print it
  * verbatim and exit 1, no stack, no rejection wrapper (#233, #388).
@@ -1461,5 +1656,18 @@ configCommand
   .description('Print the SHA-256 of the config file bytes, the value HELIO_CONFIG_SHA256 pins')
   .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
   .action((opts: { config: string }) => configHashCommand(opts.config))
+
+const policyCommand = program
+  .command('policy')
+  .description('Inspect the loaded policy against the running proxy')
+policyCommand
+  .command('status')
+  .description(
+    'Report the authority surface, policy coverage and persisted calls of the running proxy',
+  )
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option('--format <format>', 'Output format: text or json', 'text')
+  .option('--window <duration>', 'Persisted window, 1m to 30d', DEFAULT_STATUS_WINDOW)
+  .action((opts: PolicyStatusOptions) => policyStatusCommand(opts).catch(exitOnStartupError))
 
 program.parse()
