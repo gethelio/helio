@@ -2100,10 +2100,16 @@ function definitionProvided(tool: WireToolDefinition): boolean {
 function toMcpToolDef(tool: WireToolDefinition): Record<string, unknown> {
   const def: Record<string, unknown> = { name: tool.name }
   if (tool.description !== undefined) def['description'] = tool.description
-  if (tool.input_schema !== undefined) def['inputSchema'] = tool.input_schema
-  if (tool.output_schema !== undefined) def['outputSchema'] = tool.output_schema
+  if (tool.input_schema !== undefined) {
+    def['inputSchema'] = snapshotValue(tool.input_schema)
+  }
+  if (tool.output_schema !== undefined) {
+    def['outputSchema'] = snapshotValue(tool.output_schema)
+  }
   if (tool.title !== undefined) def['title'] = tool.title
-  if (tool.annotations !== undefined) def['annotations'] = tool.annotations
+  if (tool.annotations !== undefined) {
+    def['annotations'] = snapshotValue(tool.annotations)
+  }
   return def
 }
 

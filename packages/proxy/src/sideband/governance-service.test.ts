@@ -369,6 +369,27 @@ describe('GovernanceService.evaluate', () => {
       )
       expect(other.body['decision']).toBe('allow')
     })
+
+    it('does not allow caller mutation to disarm the drift baseline', () => {
+      const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
+      const { service } = makeService({ policy })
+
+      const tool = {
+        name: 'rm',
+        annotations: { destructiveHint: true },
+      }
+
+      const first = service.evaluate(evalInput({ tool }))
+
+      expect(first.body['decision']).toBe('allow')
+
+      tool.annotations.destructiveHint = false
+
+      const second = service.evaluate(evalInput({ tool }))
+
+      expect(second.body['decision']).toBe('deny')
+      expect(second.body['tool_drift']).toBeTruthy()
+    })
   })
 
   describe('memory budgets', () => {
