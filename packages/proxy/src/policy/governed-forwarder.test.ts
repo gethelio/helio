@@ -7662,3 +7662,46 @@ describe('tool definition drift — call gating', () => {
     expect(inner.forward).toHaveBeenCalledTimes(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// snapshotSurface (issue #396): the door's primed surface as snapshots
+// ---------------------------------------------------------------------------
+
+describe('GovernedForwarder.snapshotSurface', () => {
+  it('is empty before priming and carries the configured upstream name', () => {
+    const governed = new GovernedForwarder(
+      mockForwarder(),
+      compile({ default: 'allow', rules: [] }),
+      {
+        upstreamName: 'crm',
+      },
+    )
+    expect(governed.snapshotSurface()).toEqual({ upstream: 'crm', tools: [] })
+  })
+
+  it('lists every primed tool with fresh annotation objects after primeAnnotationCache()', async () => {
+    const safeAnnotations = { destructiveHint: false, readOnlyHint: true }
+    const inner = mockForwarder(
+      toolsListResult([
+        { name: 'safe_tool', annotations: safeAnnotations },
+        { name: 'danger_tool', annotations: { destructiveHint: true } },
+        { name: 'plain_tool' },
+      ]),
+    )
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+    await governed.primeAnnotationCache()
+
+    const surface = governed.snapshotSurface()
+    expect(surface.upstream).toBeUndefined()
+    expect(surface.tools.map((t) => t.name).sort()).toEqual([
+      'danger_tool',
+      'plain_tool',
+      'safe_tool',
+    ])
+    const safe = surface.tools.find((t) => t.name === 'safe_tool')
+    expect(safe?.annotations).toEqual(safeAnnotations)
+    expect(safe?.annotations).not.toBe(safeAnnotations)
+    expect(safe?.drifted).toBe(false)
+    expect(surface.tools.find((t) => t.name === 'plain_tool')?.annotations).toBeUndefined()
+  })
+})

@@ -40,9 +40,46 @@ Maintainer notes:
   the same on every build, and the signature covers the attestation.
   The release assets `sbom.json` and `sbom-dashboard.json` are
   unchanged.
+- **`helio start` now reports the authority surface it primed and the
+  policy's coverage of it, and `helio policy status` prints the full
+  report.** After the annotation caches are primed and the listening
+  line is out, two lines follow `Policies:`:
+  `Authority surface: N tool-door pairs across M upstreams, K annotated destructive`
+  (a door with no annotations reads `none annotated`; a door not
+  primed gets its own line naming the reason) and
+  `Policy coverage: C of N have a rule that can match them, default allow|deny`,
+  computed through the same rule matcher as live calls; a hot reload
+  reprints the coverage line under `[helio] Policy reloaded:`. Once
+  per boot, when the policy enforces nothing and the audit store holds
+  at least 100 tool calls across 3 tool-door pairs persisted in the
+  last four hours, a third line states that and names
+  `helio policy status`; the dashboard shows the same sentence as a
+  dismissable notice. `helio policy status [--format json] [--window 4h]`
+  reads the running proxy through the new `GET /api/policy/status`
+  (schema version 1, documented in `docs/sideband-api.md`) with the
+  secret from `HELIO_DASHBOARD_SECRET` or a plaintext
+  `dashboard.api_secret`, and prints the surface, the coverage with
+  each pair's effective action, and the calls persisted in the window.
+  Nothing is generated or applied, `helio validate` is unchanged, and
+  the request path is untouched.
 
 ### Changed
 
+- **The audit store gains one index, `idx_audit_kind_created_at` on
+  `(record_kind, created_at)`, built once on the next open of an
+  existing database.** The persisted-window statements behind
+  `helio policy status` filter on
+  `record_kind = 'tool_call' AND created_at >= ?`; with the
+  single-column indexes SQLite chose the `record_kind` index and
+  visited every row (1.4 to 2.6 s per statement at one million rows,
+  measured), and with the composite index a four-hour window costs
+  under 2 ms. The build runs inside the store constructor, about two
+  seconds per million rows, before `helio start` prints its listening
+  line and before `helio export` writes its first byte; on a non-empty
+  database the store prints
+  `[helio] Audit DB migrated: adding index "idx_audit_kind_created_at" (once; about two seconds per million rows)`
+  first. A fresh file builds it silently, and every later open finds
+  it in place.
 - **The README, the package README, and the npm package description
   now lead with the outcome:
   `Open-source governance for MCP agents: useful autonomy without unlimited authority.`**
@@ -53,6 +90,18 @@ Maintainer notes:
   with this version now read the same; GitHub shows them from this
   commit, npm when this version is published. Nothing else in the
   READMEs changes.
+- **The README Features section states dependency chains and evidence
+  grounding as two claims.** Dependency chains (`requires`) are
+  proxy-observed: a dependency is satisfied by a routed tool call that
+  returned an upstream result rather than an error. Evidence grounding
+  (`evidence.requires`) is cooperative: the proxy checks that an
+  allowlisted evidence key is present for the session and not expired,
+  not what it contains. The retired sentence made one claim over both.
+  The section also gains a Multi-Upstream Governance subsection with
+  the named `upstreams:` shape, and its evidence example now pairs the
+  evidence block with `action: allow`, because the evidence block of a
+  deny rule is never evaluated. The package README npm ships changes
+  with it.
 
 ### Fixed
 

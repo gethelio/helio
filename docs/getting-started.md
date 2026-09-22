@@ -106,8 +106,12 @@ npx @gethelio/proxy start
 You should see output like:
 
 ```
+[helio] Upstream MCP era detected: legacy (initialize handshake)
+[helio] Annotation cache primed: 7 tool definitions baselined for drift detection ...
 Helio proxy listening on http://127.0.0.1:3000
 Policies: 2 rules loaded (default: allow)
+Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive
+Policy coverage: 2 of 7 have a rule that can match them, default allow
 Upstream: http://localhost:8080/mcp (streamable-http)
 Audit: ./helio-audit.db (retention: 90d)
 Dashboard API listening on http://127.0.0.1:3100
@@ -118,6 +122,8 @@ Budgets: 0 configured
 Config: helio.yaml
 Watching helio.yaml for policy changes
 ```
+
+The two lines after `Policies:` describe your system. `Authority surface` counts the tool-door pairs the agent can reach through Helio right now (one tool name on one upstream is one pair) and how many of them the upstream annotates `destructiveHint: true`; of the echo server's seven tools that is one, `delete_record`. `Policy coverage` says how many of those pairs have a rule that can match them: `block-destructive` matches `delete_record`, `allow-reads` matches `get_weather`, and the other five fall through to `default: allow`. With the scaffolded config (zero rules) the second line reads `0 of 7 have a rule that can match them, default allow`, and the no-enforcement warning prints above it. [Step 8](#step-8-see-what-your-agent-can-reach) prints the full report.
 
 The final `Watching` line prints once the config watcher is armed — an edit to `helio.yaml` made after it appears will be picked up (see [Hot Reload](./configuration.md#hot-reload)).
 
@@ -224,7 +230,10 @@ Save the file. The proxy detects the change and reloads:
 ```
 [helio] Budgets reloaded: 0 budgets
 [helio] Policy reloaded: 3 rules (default: allow)
+[helio] Policy coverage: 3 of 7 have a rule that can match them, default allow
 ```
+
+The coverage line is reprinted after every reload: `send_email` now counts among the pairs a rule can match.
 
 Check the rule count. It should now read `3 rules`: the two rules from Step 2 plus the new one. If the proxy instead prints `Config reload failed (keeping current configuration)` with `Unrecognized key: "rules"`, the rule did not land inside `policies.rules` — a `rules:` key at the top level of the file is rejected, and the proxy keeps enforcing the previous 2 rules until you fix the nesting.
 
@@ -237,6 +246,47 @@ curl -s -X POST http://localhost:3000/mcp \
 ```
 
 The response includes a structured error with the feedback message and suggestion — information an AI agent can use to self-correct.
+
+## Step 8: See What Your Agent Can Reach
+
+With the proxy still running, ask it for the full report:
+
+```bash
+helio policy status
+```
+
+It prints the surface the proxy primed at startup, what the loaded rules cover, and what the audit store holds for the last four hours. After Step 7's rule and the two calls above, it reads:
+
+```
+Authority surface
+  7 tool-door pairs across 1 upstream
+  1 annotated destructive
+
+Policy coverage
+  3 of 7 have a rule that can match them
+  4 fall through to the default: allow
+  Effective action: allow 5, deny 2
+  on_tool_drift: block
+
+Persisted (last 4h)
+  2 calls across 2 tool-door pairs, 0 sessions (denied and dry-run calls included)
+  4 reachable and permitted, never called in the last 4h
+  audit rows since 21 Sep 2026
+  Readiness: suppressed, the policy enforces something (2 calls across 2 tool-door pairs in the last 4h)
+
+Tool-door pairs (calls in the last 4h)
+  get_weather     upstream  allow  rule "allow-reads"        1
+  send_email      upstream  deny   rule "block-email"        1
+  delete_record   upstream  deny   rule "block-destructive"  0
+  create_payment  upstream  allow  no rule, default allow    0
+  create_refund   upstream  allow  no rule, default allow    0
+  stripe_charge   upstream  allow  no rule, default allow    0
+  paypal_payout   upstream  allow  no rule, default allow    0
+```
+
+`--format json` prints the same report as JSON for scripts, and `--window 7d` widens the persisted window (1 minute to 30 days; the window is named on every persisted line). The vocabulary is defined in [Policy coverage](./policies.md#policy-coverage-helio-policy-status).
+
+> **The secret.** `helio policy status` reads the running proxy through its dashboard API on `dashboard.host:port`, because the primed surface exists only in that process. The dashboard must be enabled, and the command needs the secret itself: it reads `HELIO_DASHBOARD_SECRET` from the environment (the value you exported in Step 2, or the one `helio init` printed), else a plaintext `dashboard.api_secret` from the file. The `sha256:` digest `helio init` writes into the file is refused with one line before any request, because the API verifies the secret, not its digest.
 
 ## Docker
 

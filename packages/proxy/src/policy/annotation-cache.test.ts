@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { ToolAnnotationCache } from './annotation-cache.js'
+import { classifySurface } from './surface.js'
+import { matchRule } from './matchers.js'
+import { compilePolicies } from './parser.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -496,5 +499,127 @@ describe('updateSingle', () => {
     expect(cache.updateSingle(null).updated).toBe(false)
     expect(cache.updateSingle({ noName: true }).updated).toBe(false)
     expect(cache.size).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// snapshotTools (issue #396): a read surface that returns snapshots, never a
+// reference into the cache's maps (the #380 constraint carried into D3)
+// ---------------------------------------------------------------------------
+
+describe('ToolAnnotationCache.snapshotTools', () => {
+  it('lists one entry per present tool after update() with fresh annotation objects', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(
+      toolsListResponse([
+        { name: 'get_weather', annotations: { readOnlyHint: true, destructiveHint: false } },
+        { name: 'delete_record', annotations: { destructiveHint: true } },
+        { name: 'plain_tool' },
+      ]),
+    )
+    const tools = cache.snapshotTools()
+    expect(tools.map((t) => t.name).sort()).toEqual(['delete_record', 'get_weather', 'plain_tool'])
+    const weather = tools.find((t) => t.name === 'get_weather')
+    expect(weather?.annotations).toEqual({ readOnlyHint: true, destructiveHint: false })
+    expect(weather?.annotations).not.toBe(cache.get('get_weather'))
+    expect(weather?.current_annotations).toEqual({ readOnlyHint: true, destructiveHint: false })
+    expect(weather?.current_annotations).not.toBe(cache.getCurrent('get_weather'))
+    expect(weather?.drifted).toBe(false)
+    expect(tools.find((t) => t.name === 'plain_tool')?.annotations).toBeUndefined()
+    expect(tools.find((t) => t.name === 'plain_tool')?.current_annotations).toBeUndefined()
+  })
+
+  it('mutating a snapshot leaves get() and getCurrent() unchanged', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 'get_weather', annotations: { readOnlyHint: true } }]))
+    const snapshot = cache.snapshotTools()[0]
+    const annotations = snapshot?.annotations as Record<string, unknown>
+    annotations['readOnlyHint'] = false
+    annotations['destructiveHint'] = true
+    const current = snapshot?.current_annotations as Record<string, unknown>
+    current['readOnlyHint'] = false
+    expect(cache.get('get_weather')).toEqual({ readOnlyHint: true })
+    expect(cache.getCurrent('get_weather')).toEqual({ readOnlyHint: true })
+  })
+
+  it('lists tools merged through updateSingle()', () => {
+    const cache = new ToolAnnotationCache()
+    cache.updateSingle({ name: 'post_message', annotations: { destructiveHint: false } })
+    cache.updateSingle({ name: 'read_channel' })
+    const tools = cache.snapshotTools()
+    expect(tools.map((t) => t.name).sort()).toEqual(['post_message', 'read_channel'])
+    const post = tools.find((t) => t.name === 'post_message')
+    expect(post?.annotations).toEqual({ destructiveHint: false })
+    expect(post?.annotations).not.toBe(cache.get('post_message'))
+  })
+
+  it('flips drifted with a drifted definition and keeps the baseline as annotations', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([{ name: 'send', annotations: { destructiveHint: false } }]))
+    cache.update(toolsListResponse([{ name: 'send', annotations: { destructiveHint: true } }]))
+    const send = cache.snapshotTools().find((t) => t.name === 'send')
+    expect(send?.drifted).toBe(true)
+    expect(send?.annotations).toEqual({ destructiveHint: false })
+    expect(send?.current_annotations).toEqual({ destructiveHint: true })
+    expect(send?.current_annotations).not.toBe(cache.getCurrent('send'))
+  })
+
+  it('current_annotations follows the latest list, undefined for a tool that left it', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(
+      toolsListResponse([
+        { name: 'keep', annotations: { readOnlyHint: true } },
+        { name: 'gone', annotations: { readOnlyHint: true } },
+      ]),
+    )
+    cache.update(toolsListResponse([{ name: 'keep', annotations: { readOnlyHint: true } }]))
+    const tools = cache.snapshotTools()
+    expect(tools.map((t) => t.name)).toEqual(['keep'])
+  })
+
+  it('picks the hints onto a fresh object even when the annotations object cannot be cloned', () => {
+    // structuredClone refuses a function-valued key and JSON collapses the
+    // object to the primitive its toJSON returns: snapshotValue would hand
+    // back a string here. The pick reads the four keys and nothing else.
+    const cache = new ToolAnnotationCache()
+    const raw = {
+      readOnlyHint: true,
+      destructiveHint: false,
+      toJSON: () => 'not-an-object',
+    }
+    cache.update({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'odd', annotations: raw }] } })
+    const odd = cache.snapshotTools().find((t) => t.name === 'odd')
+    expect(odd?.annotations).toEqual({ readOnlyHint: true, destructiveHint: false })
+    expect(odd?.annotations).not.toBe(cache.get('odd'))
+    expect(typeof odd?.annotations).toBe('object')
+    const mutable = odd?.annotations as Record<string, unknown>
+    mutable['destructiveHint'] = true
+    expect(cache.get('odd')?.destructiveHint).toBe(false)
+  })
+
+  it('copies a present non-boolean hint as is, so coverage sees what matchAnnotations sees', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { tools: [{ name: 'odd', annotations: { destructiveHint: 'yes' } }] },
+    })
+    const odd = cache.snapshotTools().find((t) => t.name === 'odd')
+    expect(odd?.annotations).toEqual({ destructiveHint: 'yes' })
+    const policy = compilePolicies({
+      default: 'allow',
+      dry_run: false,
+      rules: [{ match: { annotations: { destructiveHint: true } }, action: 'deny' }],
+    }).policy
+    const rule = policy.rules[0]
+    if (!rule || !odd) throw new Error('fixture')
+    const raw = matchRule(rule, { toolName: 'odd', annotations: cache.get('odd') })
+    const report = classifySurface({
+      doors: [{ kind: 'upstream', name: undefined, tools: [odd] }],
+      policy,
+      environment: undefined,
+    })
+    expect(report.coverage.pairs[0]?.status).toBe(raw ? 'matched' : 'uncovered')
+    expect(raw).toBe(false)
   })
 })

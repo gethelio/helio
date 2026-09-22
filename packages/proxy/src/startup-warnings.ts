@@ -206,6 +206,20 @@ export function warnIfDashboardSecretLiteral(
 }
 
 /**
+ * True when the loaded policy enforces nothing: zero rules, `default: allow`
+ * and no dry-run. The one predicate behind the no-enforcement warning and
+ * the readiness nudge (issue #396); any rule, an allow-only rule set
+ * included, ends both.
+ */
+export function enforcesNothing(policy: {
+  rules: ReadonlyArray<unknown>
+  defaultAction: 'allow' | 'deny'
+  dryRun?: boolean
+}): boolean {
+  return policy.rules.length === 0 && policy.defaultAction === 'allow' && !policy.dryRun
+}
+
+/**
  * Emit a startup warning when the loaded policy enforces nothing — zero rules
  * with `default: allow`. In that state Helio records a full audit trail but
  * blocks no tool calls, which is easy to miss in the "Policies: 0 rules loaded
@@ -220,7 +234,7 @@ export function warnIfNoEnforcement(
   },
   log: (message: string) => void = console.error,
 ): boolean {
-  if (policy.rules.length > 0 || policy.defaultAction !== 'allow' || policy.dryRun) return false
+  if (!enforcesNothing(policy)) return false
 
   log(
     '[helio] No policy rules are loaded and the default action is "allow" - ' +

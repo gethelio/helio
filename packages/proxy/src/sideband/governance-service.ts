@@ -24,6 +24,7 @@ import type {
 } from '../policy/types.js'
 import { decide } from '../policy/decision-pipeline.js'
 import { ToolAnnotationCache } from '../policy/annotation-cache.js'
+import type { SurfaceTool } from '../policy/surface.js'
 import type { ToolDriftChange } from '../policy/annotation-cache.js'
 import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
@@ -1539,6 +1540,23 @@ export class GovernanceService {
       this.snapshotTicketResolution(entry)
     }
     return 'active'
+  }
+
+  /**
+   * Every adapter origin whose calls carried a tool definition, with its
+   * cache's surface as snapshots (issue #396). An origin that only ever
+   * evaluated without a definition has baselined nothing and is not listed.
+   */
+  snapshotSurfaces(): ReadonlyArray<{
+    readonly origin: string
+    readonly tools: readonly SurfaceTool[]
+  }> {
+    const surfaces: { origin: string; tools: readonly SurfaceTool[] }[] = []
+    for (const [origin, cache] of this.caches) {
+      if (cache.size === 0) continue
+      surfaces.push({ origin, tools: cache.snapshotTools() })
+    }
+    return surfaces
   }
 
   private cacheFor(origin: string): ToolAnnotationCache {

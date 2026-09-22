@@ -500,3 +500,75 @@ describe('startAnnotationPrimeLoop', () => {
     controller.stop()
   })
 })
+
+// ---------------------------------------------------------------------------
+// primed and lastFailure (issue #396): the controller exposes the closure
+// state the startup surface line reads at print time
+// ---------------------------------------------------------------------------
+
+describe('AnnotationPrimeController.primed and lastFailure', () => {
+  let logged: string[] = []
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    logged = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('reads primed with no failure after a successful initial attempt', async () => {
+    const controller = await startAnnotationPrimeLoop(fakeForwarder([ok(4)], ok(4)), undefined)
+    expect(controller.primed).toBe(true)
+    expect(controller.lastFailure).toBeUndefined()
+    controller.stop()
+  })
+
+  it('reads not primed with the failure reason, then primed and cleared after the retry', async () => {
+    const forwarder = fakeForwarder([fail('still down')], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, undefined)
+    expect(controller.primed).toBe(false)
+    expect(controller.lastFailure).toBe('still down')
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(forwarder.calls).toBe(2)
+    expect(controller.primed).toBe(true)
+    expect(controller.lastFailure).toBeUndefined()
+    controller.stop()
+  })
+
+  it('reads the untagged timeout reason after the race, then primed once the late attempt succeeds', async () => {
+    const slowInitial = deferred<AnnotationCachePrimeResult>()
+    const forwarder = fakeForwarder([slowInitial.promise], ok(2))
+
+    const startPromise = startAnnotationPrimeLoop(forwarder, undefined, 'crm')
+    await vi.advanceTimersByTimeAsync(INITIAL_WAIT_MS)
+    const controller = await startPromise
+    expect(controller.primed).toBe(false)
+    expect(controller.lastFailure).toBe('priming did not complete within 1500ms')
+    expect(logged).toContain(
+      '[helio][crm] Annotation cache priming did not complete within 1500ms; continuing startup fail-closed and retrying in background',
+    )
+
+    slowInitial.resolve(ok(3))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(controller.primed).toBe(true)
+    expect(controller.lastFailure).toBeUndefined()
+    expect(forwarder.calls).toBe(1)
+    controller.stop()
+  })
+
+  it('reads the rejection message when the initial attempt throws', async () => {
+    const forwarder = fakeForwarder([() => Promise.reject(new Error('handshake exploded'))], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, undefined)
+    expect(controller.primed).toBe(false)
+    expect(controller.lastFailure).toBe('handshake exploded')
+    controller.stop()
+  })
+})

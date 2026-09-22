@@ -1,4 +1,5 @@
 import type { ToolAnnotationHints } from './types.js'
+import type { SurfaceTool } from './surface.js'
 import { canonicalize } from '../util/canonical-json.js'
 
 /** Aspects of a tool definition reported in drift events. */
@@ -293,6 +294,46 @@ export class ToolAnnotationCache {
   getDrift(toolName: string): ToolDriftEvent | undefined {
     return this.driftedTools.get(toolName)
   }
+
+  /**
+   * The tools present in the most recent tools/list, as snapshots for the
+   * authority surface (issue #396). Each entry's `annotations` (the baseline)
+   * and `current_annotations` (the latest claim) are fresh objects carrying
+   * the four MCP hints picked by key, so nothing returned references a
+   * cache-held object (the #380 constraint); `get()` and `getCurrent()` are
+   * unchanged. Every present key is copied whatever its value, so coverage
+   * sees exactly what `matchAnnotations` sees. Not `snapshotValue`: its
+   * last-resort branch returns the caller's reference.
+   */
+  snapshotTools(): readonly SurfaceTool[] {
+    const tools: SurfaceTool[] = []
+    for (const name of this.present) {
+      tools.push({
+        name,
+        annotations: pickHints(this.baselines.get(name)?.annotations),
+        current_annotations: pickHints(this.currentAnnotations.get(name)),
+        drifted: this.driftedTools.has(name),
+      })
+    }
+    return tools
+  }
+}
+
+/** The four MCP hint keys `matchAnnotations` reads. */
+const HINT_KEYS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const
+
+/**
+ * Pick the four hints onto a fresh object. A present key is copied whatever
+ * its value (a nested object value is shared, a stated residual that
+ * `matchAnnotations` never dereferences); an absent source stays undefined.
+ */
+function pickHints(source: ToolAnnotationHints | undefined): ToolAnnotationHints | undefined {
+  if (source === undefined) return undefined
+  const picked: Record<string, unknown> = {}
+  for (const key of HINT_KEYS) {
+    if (key in source) picked[key] = source[key]
+  }
+  return picked as ToolAnnotationHints
 }
 
 /** Extract the annotations object from a raw tool definition. */

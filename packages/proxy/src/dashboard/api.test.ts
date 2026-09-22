@@ -23,6 +23,9 @@ import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
 import { secretDigest } from '../auth/bearer.js'
+import { classifySurface } from '../policy/surface.js'
+import { buildPolicyStatus, DEFAULT_STATUS_WINDOW } from '../policy/status.js'
+import { compilePolicies } from '../policy/parser.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,6 +46,7 @@ function setup(options?: {
   apiSecret?: string
   adapterLiveness?: DashboardAppDeps['adapterLiveness']
   budgets?: DashboardAppDeps['budgets']
+  policyStatus?: DashboardAppDeps['policyStatus']
 }) {
   const auditStore = new AuditStore({
     path: ':memory:',
@@ -74,6 +78,7 @@ function setup(options?: {
       eventBus,
       adapterLiveness: options?.adapterLiveness,
       budgets: options?.budgets,
+      policyStatus: options?.policyStatus,
     },
     { apiSecret: options?.apiSecret },
   )
@@ -2925,5 +2930,98 @@ describe('stored digest secret', () => {
       .digest('base64url')
     expect(signature).not.toBe(forgedFromDigest)
     expect(signature).not.toBe(forgedFromPlaintext)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// GET /api/policy/status (issue #396)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/policy/status', () => {
+  /** A real report over one primed door and an empty store, keyed by the window asked for. */
+  function policyStatusDep(): NonNullable<DashboardAppDeps['policyStatus']> {
+    const policy = compilePolicies({ default: 'allow', dry_run: false, rules: [] }).policy
+    const surface = classifySurface({
+      doors: [
+        {
+          kind: 'upstream',
+          name: undefined,
+          tools: [
+            {
+              name: 'get_weather',
+              annotations: { readOnlyHint: true, destructiveHint: false },
+              current_annotations: { readOnlyHint: true, destructiveHint: false },
+              drifted: false,
+            },
+          ],
+        },
+      ],
+      policy,
+      environment: undefined,
+    })
+    return {
+      report: (window) =>
+        buildPolicyStatus({
+          surface,
+          policy,
+          persisted: {
+            since: '2026-09-21T08:00:00.000Z',
+            calls: 0,
+            sessions: 0,
+            first_seen_in_window: null,
+            pairs: [],
+            first_seen: null,
+          },
+          window,
+          now: new Date('2026-09-21T12:00:00.000Z'),
+        }),
+    }
+  }
+
+  it('requires auth when a secret is set and serves the raw report with bearer', async () => {
+    const { get } = setup({ apiSecret: 'top-secret', policyStatus: policyStatusDep() })
+    const denied = await get('/api/policy/status')
+    expect(denied.status).toBe(401)
+    expect(await denied.json()).toEqual({ error: 'Unauthorized' })
+
+    const res = await get('/api/policy/status', { authorization: 'Bearer top-secret' })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body['schema_version']).toBe(1)
+    expect(body['window']).toBe(DEFAULT_STATUS_WINDOW)
+    expect(body).toHaveProperty('policy')
+    expect(body).toHaveProperty('surface')
+    expect(body).toHaveProperty('coverage')
+    expect(body).toHaveProperty('persisted')
+    expect(body).toHaveProperty('readiness')
+  })
+
+  it('echoes an accepted window as sent', async () => {
+    const { get } = setup({ policyStatus: policyStatusDep() })
+    const res = await get('/api/policy/status?window=7d')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { window: string; persisted: { window: string } }
+    expect(body.window).toBe('7d')
+    expect(body.persisted.window).toBe('7d')
+    const minutes = await get('/api/policy/status?window=240m')
+    expect(((await minutes.json()) as { window: string }).window).toBe('240m')
+  })
+
+  it('refuses a window that is not a duration or is outside 1m to 30d with 400', async () => {
+    const { get } = setup({ policyStatus: policyStatusDep() })
+    for (const bad of ['x', '31d', '30s', '']) {
+      const res = await get(`/api/policy/status?window=${bad}`)
+      expect(res.status, bad).toBe(400)
+      expect(await res.json()).toEqual({
+        error: 'window must be a duration between 1m and 30d (for example 4h, 240m or 7d)',
+      })
+    }
+  })
+
+  it('answers 503 with a sentence when the process has no policy status source', async () => {
+    const { get } = setup()
+    const res = await get('/api/policy/status')
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'policy status is not available in this process' })
   })
 })

@@ -204,6 +204,30 @@ export interface AuditTimeBucket {
   readonly count: number
 }
 
+/** One called tool-door pair in the persisted window (issue #396). */
+export interface PersistedPair {
+  readonly tool_name: string
+  /** The MCP door's configured name; null in singular mode and for every sideband row. */
+  readonly upstream: string | null
+  /** `mcp` for the proxy path, the adapter's declared origin for sideband rows. */
+  readonly origin: string
+  readonly calls: number
+}
+
+/**
+ * What the audit store holds for the authority report (issue #396). Every
+ * window figure counts tool calls persisted since `since`; `first_seen` is
+ * the earliest persisted tool call within retention.
+ */
+export interface PersistedSummary {
+  readonly since: string
+  readonly calls: number
+  readonly sessions: number
+  readonly first_seen_in_window: string | null
+  readonly pairs: readonly PersistedPair[]
+  readonly first_seen: string | null
+}
+
 /** Aggregated statistics for the dashboard. */
 export interface AuditAggregateStats {
   /** Total number of records in the time range. */

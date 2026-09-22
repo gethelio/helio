@@ -12,6 +12,7 @@ import type { CompiledPolicy } from './types.js'
 import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
+import type { SurfaceTool } from './surface.js'
 import type { ToolDriftEvent, ToolCacheUpdateResult } from './annotation-cache.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecordInput } from '../audit/types.js'
@@ -365,6 +366,19 @@ export class GovernedForwarder implements McpForwarder {
         reason: error instanceof Error ? error.message : String(error),
       }
     }
+  }
+
+  /**
+   * This door's primed surface for the authority report (issue #396): the
+   * configured upstream name and one snapshot per tool in the cache's most
+   * recent list. Empty before the first successful prime. Every entry is a
+   * fresh object; nothing references the cache (see `snapshotTools`).
+   */
+  snapshotSurface(): {
+    readonly upstream: string | undefined
+    readonly tools: readonly SurfaceTool[]
+  } {
+    return { upstream: this.upstreamName, tools: this.annotationCache.snapshotTools() }
   }
 
   async forward(request: McpRequest): Promise<ForwardResult> {

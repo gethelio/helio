@@ -4209,3 +4209,38 @@ describe('session identity (issue #218)', () => {
     expect(buckets?.[0]?.spent).toBe(42)
   })
 })
+
+// ---------------------------------------------------------------------------
+// snapshotSurfaces (issue #396): one entry per origin whose calls carried a
+// definition, as snapshots
+// ---------------------------------------------------------------------------
+
+describe('GovernanceService.snapshotSurfaces', () => {
+  it('is empty before any adapter has called', () => {
+    const { service } = makeService()
+    expect(service.snapshotSurfaces()).toEqual([])
+  })
+
+  it('lists one entry per origin with the definitions its /evaluate calls carried', () => {
+    const { service } = makeService()
+    const sendAnnotations = { destructiveHint: true }
+    service.evaluate(
+      evalInput({ origin: 'openclaw', tool: { name: 'send', annotations: sendAnnotations } }),
+    )
+    service.evaluate(evalInput({ origin: 'openclaw', tool: { name: 'read', description: 'r' } }))
+    service.evaluate(
+      evalInput({ origin: 'slack', tool: { name: 'post', annotations: { readOnlyHint: false } } }),
+    )
+    // A call that carries no definition baselines nothing: no surface to list.
+    service.evaluate(evalInput({ origin: 'silent', tool: { name: 'x' } }))
+
+    const surfaces = service.snapshotSurfaces()
+    expect(surfaces.map((s) => s.origin).sort()).toEqual(['openclaw', 'slack'])
+    const openclaw = surfaces.find((s) => s.origin === 'openclaw')
+    expect(openclaw?.tools.map((t) => t.name).sort()).toEqual(['read', 'send'])
+    const send = openclaw?.tools.find((t) => t.name === 'send')
+    expect(send?.annotations).toEqual(sendAnnotations)
+    expect(send?.annotations).not.toBe(sendAnnotations)
+    expect(openclaw?.tools.find((t) => t.name === 'read')?.annotations).toBeUndefined()
+  })
+})

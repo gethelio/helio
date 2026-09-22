@@ -3,9 +3,18 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
-import { AuditStore, EXPORT_MAX_RECORDS, migrateAdditiveAuditColumns } from './store.js'
+import {
+  AuditStore,
+  EXPORT_MAX_RECORDS,
+  PERSISTED_SUMMARY_SQL,
+  migrateAdditiveAuditColumns,
+} from './store.js'
 import { StartupError } from '../startup-error.js'
 import type { AuditRecord, AuditRecordInput } from './types.js'
+
+/** The one-time index build notice (issue #396). */
+const MIGRATION_LINE =
+  '[helio] Audit DB migrated: adding index "idx_audit_kind_created_at" (once; about two seconds per million rows)'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -818,7 +827,13 @@ CREATE TABLE IF NOT EXISTS audit_records (
       try {
         const opened = openAndCollectNotices(dbPath)
         migrated = opened.store
-        expect(opened.notices).toEqual(['[helio] Audit DB migrated: added column "config_sha256"'])
+        // A non-empty legacy file also lacks the (record_kind, created_at)
+        // index (issue #396): its one-time build is announced after the
+        // column notices, once.
+        expect(opened.notices).toEqual([
+          '[helio] Audit DB migrated: added column "config_sha256"',
+          MIGRATION_LINE,
+        ])
         expect(migrated.get('pre-1')?.config_sha256).toBeNull()
         expect(migrated.get('pre-1')?.upstream).toBeNull()
         const id = migrated.insert(makeRecord({ config_sha256: 'a'.repeat(64) }))
@@ -838,6 +853,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
         expect(opened.notices).toEqual([
           '[helio] Audit DB migrated: added column "upstream"',
           '[helio] Audit DB migrated: added column "config_sha256"',
+          MIGRATION_LINE,
         ])
         expect(migrated.get('pre-1')?.config_sha256).toBeNull()
       } finally {
@@ -1855,5 +1871,302 @@ CREATE TABLE IF NOT EXISTS audit_records (
       expect(record.upstream_error).toBe('error\nwith\nnewlines\tand\ttabs')
       expect(record.session_id).toBe('unicode-session')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// persistedSummary and the (record_kind, created_at) index (issue #396)
+// ---------------------------------------------------------------------------
+
+/** Seed `n` tool_call rows round-robin over `pairs` through one transaction. */
+function seedToolCalls(
+  target: AuditStore,
+  n: number,
+  opts: {
+    pairs: ReadonlyArray<{ tool: string; upstream: string | null; origin?: string }>
+    sessions?: number
+    decision?: string
+    dryRun?: boolean
+  },
+): void {
+  const records: InsertRecord[] = []
+  for (let i = 0; i < n; i++) {
+    const pair = opts.pairs[i % opts.pairs.length]
+    if (!pair) throw new Error('no pairs')
+    records.push(
+      makeRecord({
+        tool_name: pair.tool,
+        upstream: pair.upstream,
+        origin: pair.origin ?? 'mcp',
+        session_id: `s-${String(i % (opts.sessions ?? 1))}`,
+        policy_decision: opts.decision ?? 'allow',
+        dry_run: opts.dryRun ?? false,
+      }),
+    )
+  }
+  target.insertBatch(records)
+}
+
+describe('AuditStore.persistedSummary', () => {
+  const since = () => new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
+
+  it('groups called pairs by tool_name, upstream and origin', () => {
+    const s = createStore()
+    try {
+      seedToolCalls(s, 5, {
+        pairs: [
+          { tool: 'send', upstream: null },
+          { tool: 'send', upstream: null, origin: 'openclaw' },
+          { tool: 'send', upstream: 'crm' },
+          { tool: 'send', upstream: 'files' },
+          { tool: 'send', upstream: null },
+        ],
+        sessions: 2,
+      })
+      const summary = s.persistedSummary(since())
+      expect(summary.calls).toBe(5)
+      expect(summary.sessions).toBe(2)
+      expect(summary.first_seen).not.toBeNull()
+      expect(summary.first_seen_in_window).toBe(summary.first_seen)
+      const pairs = [...summary.pairs].sort((a, b) =>
+        `${a.upstream ?? ''}|${a.origin}`.localeCompare(`${b.upstream ?? ''}|${b.origin}`),
+      )
+      expect(pairs).toEqual([
+        { tool_name: 'send', upstream: null, origin: 'mcp', calls: 2 },
+        { tool_name: 'send', upstream: null, origin: 'openclaw', calls: 1 },
+        { tool_name: 'send', upstream: 'crm', origin: 'mcp', calls: 1 },
+        { tool_name: 'send', upstream: 'files', origin: 'mcp', calls: 1 },
+      ])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('is empty against an empty store', () => {
+    const s = createStore()
+    try {
+      const at = since()
+      expect(s.persistedSummary(at)).toEqual({
+        since: at,
+        calls: 0,
+        sessions: 0,
+        first_seen_in_window: null,
+        pairs: [],
+        first_seen: null,
+      })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('does not move when reload, drift, rejected, install and expired rows land', () => {
+    const s = createStore()
+    try {
+      seedToolCalls(s, 6, {
+        pairs: [
+          { tool: 'a', upstream: null },
+          { tool: 'b', upstream: null },
+          { tool: 'c', upstream: null },
+        ],
+        sessions: 3,
+      })
+      const before = s.persistedSummary(since())
+      expect(before.calls).toBe(6)
+      expect(before.pairs).toHaveLength(3)
+      expect(before.sessions).toBe(3)
+
+      // policy_reload (store.test.ts reload shape)
+      s.insert(
+        makeRecord({
+          tool_name: 'helio.yaml',
+          tool_input: {},
+          policy_decision: 'policy_reload',
+          record_kind: 'policy_reload',
+          origin: 'config',
+          upstream_response: null,
+          upstream_http_status: null,
+          upstream_latency_ms: null,
+          evidence_chain: { policy_reload: { outcome: 'applied' } },
+        }),
+      )
+      // drift event in its production shape (governed-forwarder.ts drift audit)
+      s.insert(
+        makeRecord({
+          tool_name: 'a',
+          policy_decision: 'tool_drift',
+          record_kind: 'drift_event',
+          origin: 'mcp',
+          upstream_response: null,
+          upstream_http_status: null,
+          upstream_latency_ms: null,
+        }),
+      )
+      // reverted drift and a header-mismatch rejection, both as tool_call rows
+      s.insert(makeRecord({ tool_name: 'a', policy_decision: 'tool_drift_reverted' }))
+      s.insert(
+        makeRecord({
+          tool_name: '<nameless>',
+          tool_input: { raw_params: null, body_method: 'tools/call', mismatch_reason: 'x' },
+          policy_decision: 'rejected',
+          block_reason: 'header_mismatch',
+          upstream_response: null,
+          upstream_http_status: null,
+          upstream_latency_ms: null,
+          record_kind: 'tool_call',
+          origin: 'mcp',
+        }),
+      )
+      s.insert(
+        makeRecord({ tool_name: 'left-pad', record_kind: 'install_scan', origin: 'openclaw' }),
+      )
+      s.insert(
+        makeRecord({
+          tool_name: 'd',
+          policy_decision: 'evaluation_expired',
+          record_kind: 'evaluation_expired',
+          origin: 'openclaw',
+        }),
+      )
+
+      const after = s.persistedSummary(since())
+      expect(after.calls).toBe(before.calls)
+      expect(after.pairs).toHaveLength(before.pairs.length)
+      expect(after.sessions).toBe(before.sessions)
+      expect(after.first_seen).toBe(before.first_seen)
+
+      // A dry-run call and a deny are calls: included, as documented.
+      s.insert(makeRecord({ tool_name: 'a', policy_decision: 'dry_run', dry_run: true }))
+      s.insert(makeRecord({ tool_name: 'b', policy_decision: 'deny', block_reason: 'policy' }))
+      expect(s.persistedSummary(since()).calls).toBe(before.calls + 2)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('excludes rows persisted before the window and dates first_seen from them', () => {
+    const s = createStore()
+    try {
+      const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+      s.insert(makeRecord({ tool_name: 'old' }), tenDaysAgo)
+      const summary = s.persistedSummary(since())
+      expect(summary.calls).toBe(0)
+      expect(summary.pairs).toEqual([])
+      expect(summary.first_seen_in_window).toBeNull()
+      expect(summary.first_seen).toBe(tenDaysAgo)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('folds an adapter that declares origin mcp into the singular door (documented residual)', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ tool_name: 'send', upstream: null, origin: 'mcp' }))
+      s.insert(makeRecord({ tool_name: 'send', upstream: null, origin: 'mcp', metadata: { k: 1 } }))
+      s.insert(makeRecord({ tool_name: 'send', upstream: null, origin: 'openclaw' }))
+      const summary = s.persistedSummary(since())
+      expect(summary.pairs).toHaveLength(2)
+      expect(summary.pairs.find((p) => p.origin === 'mcp')?.calls).toBe(2)
+      expect(summary.pairs.find((p) => p.origin === 'openclaw')?.calls).toBe(1)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('serves every shipped statement from idx_audit_kind_created_at', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-audit-plan-'))
+    const dbPath = join(dir, 'audit.db')
+    const fileStore = new AuditStore({
+      path: dbPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    try {
+      seedToolCalls(fileStore, 300, {
+        pairs: [
+          { tool: 'a', upstream: null },
+          { tool: 'b', upstream: 'crm' },
+          { tool: 'c', upstream: null, origin: 'openclaw' },
+        ],
+        sessions: 5,
+      })
+      const raw = new Database(dbPath, { readonly: true })
+      try {
+        const indexes = raw
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit_records'",
+          )
+          .all() as Array<{ name: string }>
+        expect(indexes.map((i) => i.name)).toContain('idx_audit_kind_created_at')
+        for (const [label, sql] of Object.entries(PERSISTED_SUMMARY_SQL)) {
+          const params = sql.includes('?') ? [since()] : []
+          const plan = raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{
+            detail: string
+          }>
+          const detail = plan.map((row) => row.detail).join(' | ')
+          expect(detail, label).toContain('idx_audit_kind_created_at')
+        }
+      } finally {
+        raw.close()
+      }
+    } finally {
+      fileStore.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('prints the migration line once when a non-empty database without the index is opened', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-audit-index-migrate-'))
+    const dbPath = join(dir, 'audit.db')
+    const lines: string[] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      lines.push(String(args[0]))
+    })
+    try {
+      const open = () =>
+        new AuditStore({
+          path: dbPath,
+          retention: '90d',
+          includeResponses: true,
+          cleanupIntervalMs: 0,
+        })
+      const dropIndex = () => {
+        const raw = new Database(dbPath)
+        try {
+          raw.exec('DROP INDEX IF EXISTS idx_audit_kind_created_at')
+        } finally {
+          raw.close()
+        }
+      }
+
+      // A fresh file: nothing printed.
+      const fresh = open()
+      fresh.close()
+      expect(lines).not.toContain(MIGRATION_LINE)
+
+      // An existing EMPTY database without the index: nothing printed.
+      dropIndex()
+      const emptyReopen = open()
+      emptyReopen.close()
+      expect(lines).not.toContain(MIGRATION_LINE)
+
+      // An existing non-empty database without the index: the line, once.
+      const seeded = open()
+      seedToolCalls(seeded, 10, { pairs: [{ tool: 'a', upstream: null }] })
+      seeded.close()
+      dropIndex()
+      const migrated = open()
+      migrated.close()
+      expect(lines.filter((l) => l === MIGRATION_LINE)).toHaveLength(1)
+
+      // A second open of the migrated database: nothing more.
+      const again = open()
+      again.close()
+      expect(lines.filter((l) => l === MIGRATION_LINE)).toHaveLength(1)
+    } finally {
+      spy.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -232,6 +232,15 @@ If priming succeeds quickly, startup logs:
 [helio] Annotation cache primed: <n> tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)
 ```
 
+Once every door is primed (or its initial attempt has failed or timed out), the posture block after the listening line adds two lines describing what was primed and what the loaded rules cover:
+
+```
+Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive
+Policy coverage: 2 of 7 have a rule that can match them, default allow
+```
+
+A door that is not primed when they print gets `Authority surface: not primed on <name> (<reason>). helio policy status reports coverage once priming succeeds.` instead, and the counts cover the primed doors. See [Policy coverage](./policies.md#policy-coverage-helio-policy-status) for the vocabulary and the `helio policy status` report.
+
 If upstream is unavailable or slow, Helio continues boot, logs a fail-closed warning, and retries priming in the background with backoff:
 
 ```

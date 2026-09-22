@@ -18,4 +18,6 @@ export type {
   AuditAggregateStats,
   AuditTimeBucket,
   AuditStoreOptions,
+  PersistedPair,
+  PersistedSummary,
 } from './types.js'
