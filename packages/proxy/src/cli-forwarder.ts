@@ -59,6 +59,7 @@ export async function createForwarderFromConfig(
       const stdio = new StdioForwarder({
         command: config.upstream.command as string,
         args: config.upstream.args,
+        env: config.upstream.env,
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
         upstreamName,
       })

@@ -11,6 +11,9 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
@@ -867,6 +870,950 @@ describe('CLI', () => {
         rmSync(dir, { recursive: true, force: true })
       }
     }, 15_000)
+  })
+
+  // --- helio init --client (issue #398) ---
+
+  describe('init --client', () => {
+    /** A three-format, four-server tree: one stdio and one HTTP entry for Claude Code, one stdio each for Cursor and VS Code. */
+    function writeAdoptTree(dir: string): void {
+      mkdirSync(join(dir, '.cursor'), { recursive: true })
+      mkdirSync(join(dir, '.vscode'), { recursive: true })
+      writeFileSync(
+        join(dir, '.mcp.json'),
+        JSON.stringify(
+          {
+            mcpServers: {
+              files: {
+                command: 'node',
+                args: [STDIO_MCP_FIXTURE, 'files_ping'],
+                env: { FILES_ROOT: '/tmp' },
+              },
+              github: {
+                type: 'http',
+                url: 'http://127.0.0.1:8087/mcp',
+                headers: { Authorization: 'Bearer ${GITHUB_TOKEN}' },
+              },
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      )
+      writeFileSync(
+        join(dir, '.cursor', 'mcp.json'),
+        JSON.stringify(
+          {
+            mcpServers: {
+              payments: { command: 'node', args: [STDIO_MCP_FIXTURE, 'payments_ping'] },
+            },
+          },
+          null,
+          2,
+        ) + '\n',
+      )
+      writeFileSync(
+        join(dir, '.vscode', 'mcp.json'),
+        JSON.stringify(
+          {
+            servers: {
+              search: { type: 'stdio', command: 'node', args: [STDIO_MCP_FIXTURE, 'search_ping'] },
+            },
+            inputs: [],
+          },
+          null,
+          2,
+        ) + '\n',
+      )
+    }
+
+    /** Every file under the tree with its bytes, for the "tree unchanged" assertions. */
+    function snapshotTree(dir: string): Record<string, string> {
+      const out: Record<string, string> = {}
+      const walk = (d: string, rel: string): void => {
+        for (const name of readdirSync(d).sort()) {
+          const full = join(d, name)
+          const relName = rel ? `${rel}/${name}` : name
+          if (name === 'helio-audit.db') continue
+          const st = statSync(full)
+          if (st.isDirectory()) walk(full, relName)
+          else out[relName] = createHash('sha256').update(readFileSync(full)).digest('hex')
+        }
+      }
+      walk(dir, '')
+      return out
+    }
+
+    const NEXT_LINE =
+      'Next: run `helio start`. Restart your MCP client. In Claude Code, run `claude` and approve the project servers (`claude mcp list` stays at pending approval until you do).'
+
+    it('adopts the three project files: backups first, the manifest, the config, the rewrites, the lines in order', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const originals = {
+          mcp: readFileSync(join(dir, '.mcp.json')),
+          cursor: readFileSync(join(dir, '.cursor', 'mcp.json')),
+          vscode: readFileSync(join(dir, '.vscode', 'mcp.json')),
+        }
+        const { code, stderr, stdout } = await runCli(['init', '--client'], undefined, dir)
+        expect(stdout).toBe('')
+        expect(code, stderr).toBe(0)
+        const lines = stderr.split('\n')
+        const expectedOrder = [
+          'Found 4 servers in 3 client configs:',
+          '  .mcp.json: files (stdio), github (http)',
+          '  .cursor/mcp.json: payments (stdio)',
+          '  .vscode/mcp.json: search (stdio)',
+          'Backed up .mcp.json to .mcp.json.helio-backup',
+          'Backed up .cursor/mcp.json to .cursor/mcp.json.helio-backup',
+          'Backed up .vscode/mcp.json to .vscode/mcp.json.helio-backup',
+          'Wrote .helio-init-client.json (undo reads it; tied to this directory)',
+          '.helio-init-client.json and the .helio-backup files are local to this machine; do not commit them.',
+          'Created helio.yaml (4 upstreams; doors at http://127.0.0.1:3000/mcp/<name>)',
+          'Copied env for files into helio.yaml (FILES_ROOT); the file now holds those values',
+          `Set CLAUDE_PROJECT_DIR=${dir} for files in helio.yaml (Claude Code sets it for stdio servers; update it if the project moves)`,
+          'Rewrote .mcp.json: files, github now point at Helio',
+          'Rewrote .cursor/mcp.json: payments now points at Helio',
+          'Rewrote .vscode/mcp.json: search now points at Helio',
+          'Environment variables helio.yaml needs (helio start and helio policy status): GITHUB_TOKEN',
+          'Dashboard secret (shown once; the file stores only its SHA-256 digest):',
+          'helio policy status needs this secret in HELIO_DASHBOARD_SECRET.',
+          NEXT_LINE,
+          'Undo: from this directory, helio init --client --undo',
+        ]
+        let cursor = -1
+        for (const line of expectedOrder) {
+          const index = lines.indexOf(line)
+          expect(index, `line missing: ${line}\n${stderr}`).toBeGreaterThan(cursor)
+          cursor = index
+        }
+        expect(stderr).toContain('Store it in your password manager.')
+
+        // The backups hold the original bytes.
+        expect(readFileSync(join(dir, '.mcp.json.helio-backup'))).toEqual(originals.mcp)
+        expect(readFileSync(join(dir, '.cursor', 'mcp.json.helio-backup'))).toEqual(
+          originals.cursor,
+        )
+        expect(readFileSync(join(dir, '.vscode', 'mcp.json.helio-backup'))).toEqual(
+          originals.vscode,
+        )
+
+        // The manifest names every backup and the output, as absolute paths.
+        const manifest = JSON.parse(
+          readFileSync(join(dir, '.helio-init-client.json'), 'utf-8'),
+        ) as Record<string, unknown>
+        expect(manifest).toEqual({
+          version: 1,
+          output: join(dir, 'helio.yaml'),
+          output_backup: null,
+          clients: [
+            { path: join(dir, '.mcp.json'), backup: join(dir, '.mcp.json.helio-backup') },
+            {
+              path: join(dir, '.cursor', 'mcp.json'),
+              backup: join(dir, '.cursor', 'mcp.json.helio-backup'),
+            },
+            {
+              path: join(dir, '.vscode', 'mcp.json'),
+              backup: join(dir, '.vscode', 'mcp.json.helio-backup'),
+            },
+          ],
+          created_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) as unknown,
+        })
+
+        // The rewritten entries, in the shape each client documents.
+        expect(JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf-8'))).toEqual({
+          mcpServers: {
+            files: { type: 'http', url: 'http://127.0.0.1:3000/mcp/files' },
+            github: { type: 'http', url: 'http://127.0.0.1:3000/mcp/github' },
+          },
+        })
+        expect(JSON.parse(readFileSync(join(dir, '.cursor', 'mcp.json'), 'utf-8'))).toEqual({
+          mcpServers: { payments: { url: 'http://127.0.0.1:3000/mcp/payments' } },
+        })
+        expect(JSON.parse(readFileSync(join(dir, '.vscode', 'mcp.json'), 'utf-8'))).toEqual({
+          servers: { search: { type: 'http', url: 'http://127.0.0.1:3000/mcp/search' } },
+          inputs: [],
+        })
+
+        // The config: the scaffold with a live upstreams: list and a live listen:, the digest only.
+        const contents = readFileSync(join(dir, 'helio.yaml'), 'utf-8')
+        expect(contents).toContain(
+          '# Written by helio init --client from .mcp.json, .cursor/mcp.json and .vscode/mcp.json\n',
+        )
+        expect(contents).toContain('# Undo: from this directory, helio init --client --undo\n')
+        expect(contents).toContain(
+          '\nupstreams:\n  - name: "files"\n    transport: "stdio"\n    command: "node"\n',
+        )
+        expect(contents).toContain(
+          '    env:\n      FILES_ROOT: "/tmp"\n      CLAUDE_PROJECT_DIR: "',
+        )
+        expect(contents).toContain(
+          '  - name: "github"\n    transport: "streamable-http"\n    url: "http://127.0.0.1:8087/mcp"\n    headers:\n      Authorization: "Bearer ${GITHUB_TOKEN}"\n',
+        )
+        expect(contents).toContain('\n# upstream:\n')
+        expect(contents).not.toContain('\n# upstreams:\n')
+        expect(contents).toContain('\nlisten:\n  port: 3000\n  host: 127.0.0.1\n')
+        const printed = /^ {2}([a-f0-9]{64})$/m.exec(stderr)?.[1]
+        expect(printed).toBeDefined()
+        expect(contents).toContain(`api_secret: "${secretDigest(printed ?? '')}"`)
+        expect(contents).not.toContain(printed ?? 'never')
+        expect(stderr.match(/[a-f0-9]{64}/g)).toHaveLength(1)
+
+        // The written file passes validate once the variable is exported, and keeps the canonical order.
+        const validate = await runCli(['validate', '-c', join(dir, 'helio.yaml')], {
+          ...process.env,
+          GITHUB_TOKEN: 'x',
+        })
+        expect(validate.code, validate.stderr).toBe(0)
+        expect(validate.stderr).toContain('(0 policy rules, 0 budgets)')
+        const canonicalOrder = [
+          'version',
+          'upstreams',
+          'upstream',
+          'listen',
+          'environment',
+          'session',
+          'policies',
+          'budgets',
+          'approval',
+          'audit',
+          'dashboard',
+          'sdk',
+        ]
+        let at = -1
+        for (const key of canonicalOrder) {
+          const match = new RegExp(`^(?:#\\s*)?${key}:`, 'm').exec(contents)
+          expect(match, `top-level \`${key}:\` stub missing`).not.toBeNull()
+          expect(match?.index ?? -1, `\`${key}:\` is out of canonical order`).toBeGreaterThan(at)
+          at = match?.index ?? -1
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('--client <path> adopts one file and the Undo line names the path', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const target = join(dir, 'copy', '.mcp.json')
+        mkdirSync(join(dir, 'copy'))
+        writeFileSync(target, readFileSync(join(dir, '.mcp.json')))
+        const { code, stderr } = await runCli(
+          ['init', '--client', 'copy/.mcp.json'],
+          undefined,
+          dir,
+        )
+        expect(code, stderr).toBe(0)
+        expect(stderr).toContain(
+          'Found 2 servers in 1 client config:\n  copy/.mcp.json: files (stdio), github (http)\n',
+        )
+        expect(stderr).toContain('Backed up copy/.mcp.json to copy/.mcp.json.helio-backup\n')
+        expect(stderr).toContain(
+          'Undo: from this directory, helio init --client copy/.mcp.json --undo\n',
+        )
+        expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(target + '.helio-backup')).toBe(true)
+        const contents = readFileSync(join(dir, 'helio.yaml'), 'utf-8')
+        expect(contents).toContain('# Written by helio init --client from copy/.mcp.json\n')
+        expect(contents).toContain(
+          '# Undo: from this directory, helio init --client copy/.mcp.json --undo\n',
+        )
+        expect(contents).toContain(`CLAUDE_PROJECT_DIR: "${join(dir, 'copy')}"`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('-o other.yaml then --undo restores every file byte for byte and names other.yaml', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const before = snapshotTree(dir)
+        const adopt = await runCli(['init', '--client', '-o', 'other.yaml'], undefined, dir)
+        expect(adopt.code, adopt.stderr).toBe(0)
+        expect(adopt.stderr).toContain(
+          'Created other.yaml (4 upstreams; doors at http://127.0.0.1:3000/mcp/<name>)',
+        )
+        expect(adopt.stderr).toContain(
+          'Copied env for files into other.yaml (FILES_ROOT); the file now holds those values\n',
+        )
+        expect(adopt.stderr).toContain(
+          `Set CLAUDE_PROJECT_DIR=${dir} for files in other.yaml (Claude Code sets it for stdio servers; update it if the project moves)\n`,
+        )
+        expect(adopt.stderr).not.toContain('in helio.yaml')
+        expect(adopt.stderr).not.toContain('into helio.yaml')
+        expect(existsSync(join(dir, 'other.yaml'))).toBe(true)
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+        // An edit after the adoption is discarded by the restore, and the line says so.
+        writeFileSync(join(dir, '.mcp.json'), '{"mcpServers": {}}')
+
+        const undo = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(undo.code, undo.stderr).toBe(0)
+        const mcpBytes = readFileSync(join(dir, '.mcp.json')).length
+        expect(undo.stderr).toContain(
+          `Replaced .mcp.json with the backup (${String(mcpBytes)} bytes). Edits since the adoption, if there were any, are discarded.\n`,
+        )
+        expect(undo.stderr).toMatch(/Replaced \.cursor\/mcp\.json with the backup \(\d+ bytes\)\./)
+        expect(undo.stderr).toMatch(/Replaced \.vscode\/mcp\.json with the backup \(\d+ bytes\)\./)
+        expect(undo.stderr).toContain(
+          'other.yaml was left in place (from .helio-init-client.json); delete it if you no longer want it.\n',
+        )
+        expect(undo.stderr).toContain('Restart your MCP client to pick the restored files up.\n')
+        expect(existsSync(join(dir, '.helio-init-client.json'))).toBe(false)
+        expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(join(dir, '.cursor', 'mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(join(dir, '.vscode', 'mcp.json.helio-backup'))).toBe(false)
+        rmSync(join(dir, 'other.yaml'))
+        expect(snapshotTree(dir)).toEqual(before)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('--force backs up an existing output and --undo restores it', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        writeFileSync(join(dir, 'helio.yaml'), 'old content\n')
+        const refused = await runCli(['init', '--client'], undefined, dir)
+        expect(refused.code).toBe(1)
+        expect(refused.stderr).toContain(
+          'Error: helio.yaml already exists. Use --force to overwrite.',
+        )
+        expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+
+        const forced = await runCli(['init', '--client', '--force'], undefined, dir)
+        expect(forced.code, forced.stderr).toBe(0)
+        expect(forced.stderr).toContain('Backed up helio.yaml to helio.yaml.helio-backup\n')
+        expect(readFileSync(join(dir, 'helio.yaml.helio-backup'), 'utf-8')).toBe('old content\n')
+        const manifest = JSON.parse(
+          readFileSync(join(dir, '.helio-init-client.json'), 'utf-8'),
+        ) as { output_backup: string }
+        expect(manifest.output_backup).toBe(join(dir, 'helio.yaml.helio-backup'))
+
+        const undo = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(undo.code, undo.stderr).toBe(0)
+        expect(undo.stderr).toContain(
+          'Replaced helio.yaml with the backup (12 bytes). Edits since the adoption, if there were any, are discarded.\n',
+        )
+        expect(readFileSync(join(dir, 'helio.yaml'), 'utf-8')).toBe('old content\n')
+        expect(existsSync(join(dir, 'helio.yaml.helio-backup'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('refuses every flag combination and unaccepted path in one line, exit 1, before anything is written', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const before = snapshotTree(dir)
+        const cases: Array<[string[], string]> = [
+          [['init', '--client', '--sandbox'], 'Error: --client does not combine with --sandbox.'],
+          [['init', '--undo'], 'Error: --undo requires --client.'],
+          [
+            ['init', '--client', '--undo', '-o', 'x.yaml'],
+            'Error: --output does not apply to --undo.',
+          ],
+          [['init', '--client', '--undo', '--force'], 'Error: --force does not apply to --undo.'],
+          [
+            ['init', '--client', 'helio.yaml'],
+            'Error: helio.yaml is not a client config Helio adopts (accepted: .mcp.json, .cursor/mcp.json, .vscode/mcp.json, .claude.json). Nothing changed.',
+          ],
+          [
+            ['init', '--client='],
+            'Error: "" is not a client config Helio adopts (accepted: .mcp.json, .cursor/mcp.json, .vscode/mcp.json, .claude.json). Nothing changed.',
+          ],
+          [
+            ['init', '--client', '-'],
+            'Error: - is not a client config Helio adopts (accepted: .mcp.json, .cursor/mcp.json, .vscode/mcp.json, .claude.json). Nothing changed.',
+          ],
+          [
+            ['init', '--client', 'missing/.mcp.json'],
+            'Error: missing/.mcp.json does not exist. Nothing changed.',
+          ],
+          [
+            ['init', '--client', 'claude_desktop_config.json'],
+            'Error: claude_desktop_config.json: Claude Desktop reaches HTTP servers through Settings > Connectors, not this file, so Helio cannot repoint it. Nothing changed.',
+          ],
+        ]
+        for (const [args, line] of cases) {
+          const { code, stderr } = await runCli(args, undefined, dir)
+          expect(code, args.join(' ')).toBe(1)
+          expect(stderr.trim(), args.join(' ')).toBe(line)
+        }
+        expect(snapshotTree(dir)).toEqual(before)
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it('refuses when no client config is found, naming the three paths', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+        expect(code).toBe(1)
+        expect(stderr.trim()).toBe(
+          `Error: no MCP client config found in ${dir} (looked for .mcp.json, .cursor/mcp.json, .vscode/mcp.json). Pass a path: helio init --client <path>`,
+        )
+        expect(readdirSync(dir)).toEqual([])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses an unreadable file, a collision, an empty name and a door with the plan lines and the tree unchanged', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        const run = async (mcp: string, cursor?: string): Promise<string> => {
+          rmSync(join(dir, '.cursor'), { recursive: true, force: true })
+          writeFileSync(join(dir, '.mcp.json'), mcp)
+          if (cursor !== undefined) {
+            mkdirSync(join(dir, '.cursor'))
+            writeFileSync(join(dir, '.cursor', 'mcp.json'), cursor)
+          }
+          const before = snapshotTree(dir)
+          const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+          expect(code, stderr).toBe(1)
+          expect(snapshotTree(dir)).toEqual(before)
+          expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+          return stderr
+        }
+        expect(await run('{"mcpServers": }')).toMatch(
+          /^Error: \.mcp\.json is not JSON after comment removal: .+\. Nothing changed\.\n$/,
+        )
+        expect(await run('﻿{"mcpServers": {}}')).toBe(
+          'Error: .mcp.json starts with a byte-order mark. Nothing changed.\n',
+        )
+        expect(await run('{"mcpServers": {"a": {"command": "x", "n": 9007199254740993}}}')).toBe(
+          'Error: .mcp.json would not survive a rewrite: mcpServers.a.n holds a number a rewrite would change: an integer beyond 2^53 precision, a negative zero, or a non-finite value such as 1e309. Edit it by hand. Nothing changed.\n',
+        )
+        expect(await run('{"mcpServers": {"!!!": {"command": "x"}}}')).toBe(
+          'Error: the name "!!!" in .mcp.json has no letters or digits to make an upstream name from. Rename it and rerun. Nothing changed.\n',
+        )
+        expect(
+          await run(
+            '{"mcpServers": {"github": {"command": "x"}}}',
+            '{"mcpServers": {"github": {"command": "y"}}}',
+          ),
+        ).toBe(
+          'Error: "github" is defined differently in .mcp.json and .cursor/mcp.json. Adopt one file: helio init --client .mcp.json\n',
+        )
+        expect(
+          await run(
+            '{"mcpServers": {"github": {"type": "http", "url": "http://127.0.0.1:3000/mcp/github"}}}',
+          ),
+        ).toBe(
+          'Error: "github" in .mcp.json already looks like a Helio door (http://127.0.0.1:3000/mcp/github). Pass --force if it is not. Nothing changed.\n',
+        )
+        expect(await run('{"mcpServers": {"ws": {"type": "ws", "url": "ws://x"}}}')).toBe(
+          'Found 1 server in 1 client config:\n  .mcp.json: ws (skipped)\nSkipped "ws" in .mcp.json: type "ws" has no Helio transport; it stays direct.\nError: no server in .mcp.json can be adopted (1 skipped, see above). Nothing changed.\n',
+        )
+        expect(
+          await run(
+            '{"mcpServers": {"h": {"type": "http", "url": "http://x/m", "headers": {"Mcp-Session-Id": "x"}}}}',
+          ),
+        ).toContain(
+          'Error: the helio.yaml built from .mcp.json does not validate: upstreams.0.headers.Mcp-Session-Id: upstream.headers must not set reserved header "Mcp-Session-Id". Nothing changed.',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    it('names the -o output in the collapse refusal and in the validation refusal', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify({
+            mcpServers: { api: { type: 'http', url: 'http://bob:pw@127.0.0.1:9/${BASE}' } },
+          }),
+        )
+        const collapse = await runCli(
+          ['init', '--client', '-o', 'other.yaml'],
+          { ...process.env, BASE: '/foo' },
+          dir,
+        )
+        expect(collapse.code).toBe(1)
+        expect(collapse.stderr.trim()).toBe(
+          'Error: "api" in .mcp.json: its url already carries a username and password, and Claude Code would collapse its leading //; writing that collapsed url into other.yaml would copy the credential. Fix the url by hand. Nothing changed.',
+        )
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify({
+            mcpServers: { api: { type: 'http', url: 'http://user:token@${HOST}/${API_PATH}' } },
+          }),
+        )
+        const host = await runCli(
+          ['init', '--client', '-o', 'other.yaml'],
+          { ...process.env, HOST: 'h', API_PATH: '/v1' },
+          dir,
+        )
+        expect(host.code).toBe(1)
+        expect(host.stderr.trim()).toBe(
+          'Error: "api" in .mcp.json: its url already carries a username and password, and Claude Code would collapse its leading //; writing that collapsed url into other.yaml would copy the credential. Fix the url by hand. Nothing changed.',
+        )
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify({
+            mcpServers: {
+              h: { type: 'http', url: 'http://x/m', headers: { 'Mcp-Session-Id': 'x' } },
+            },
+          }),
+        )
+        const invalid = await runCli(['init', '--client', '-o', 'other.yaml'], undefined, dir)
+        expect(invalid.code).toBe(1)
+        expect(invalid.stderr.trim()).toBe(
+          'Error: the other.yaml built from .mcp.json does not validate: upstreams.0.headers.Mcp-Session-Id: upstream.headers must not set reserved header "Mcp-Session-Id". Nothing changed.',
+        )
+        expect(existsSync(join(dir, 'other.yaml'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('a second run refuses on each marker, and --force passes only the door marker', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        expect((await runCli(['init', '--client'], undefined, dir)).code).toBe(0)
+        // Marker 1: the manifest.
+        const again = await runCli(['init', '--client', '--force'], undefined, dir)
+        expect(again.code).toBe(1)
+        expect(again.stderr.trim()).toBe(
+          'Error: .helio-init-client.json exists; this project was already adopted. Run helio init --client --undo first. Nothing changed.',
+        )
+        // Marker 2: a backup sibling, with the manifest gone.
+        rmSync(join(dir, '.helio-init-client.json'))
+        const backupOnly = await runCli(['init', '--client', '--force'], undefined, dir)
+        expect(backupOnly.code).toBe(1)
+        expect(backupOnly.stderr.trim()).toBe(
+          'Error: .mcp.json.helio-backup already exists; this file was already adopted. Run helio init --client --undo first. Nothing changed.',
+        )
+        // Marker 3: the door URL, with every backup gone; --force passes it.
+        for (const b of [
+          '.mcp.json.helio-backup',
+          '.cursor/mcp.json.helio-backup',
+          '.vscode/mcp.json.helio-backup',
+        ])
+          rmSync(join(dir, b))
+        const door = await runCli(['init', '--client', '-o', 'second.yaml'], undefined, dir)
+        expect(door.code).toBe(1)
+        expect(door.stderr.trim()).toBe(
+          'Error: "files" in .mcp.json already looks like a Helio door (http://127.0.0.1:3000/mcp/files). Pass --force if it is not. Nothing changed.',
+        )
+        const forced = await runCli(
+          ['init', '--client', '-o', 'second.yaml', '--force'],
+          undefined,
+          dir,
+        )
+        expect(forced.code, forced.stderr).toBe(0)
+        expect(forced.stderr).toContain(
+          'Created second.yaml (4 upstreams; doors at http://127.0.0.1:3000/mcp/<name>)',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it('a failed backup refuses with the could-not-back-up line and removes the backups already copied', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        // The step-4 writability check catches a read-only directory first; a
+        // directory in the backup's place makes copyFile itself fail (EISDIR).
+        mkdirSync(join(dir, '.cursor', 'mcp.json.helio-backup'))
+        const before = snapshotTree(dir)
+        const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+        expect(code).toBe(1)
+        expect(stderr.trim().split('\n').at(-1)).toBe(
+          'Error: .cursor/mcp.json.helio-backup already exists; this file was already adopted. Run helio init --client --undo first. Nothing changed.',
+        )
+        rmSync(join(dir, '.cursor', 'mcp.json.helio-backup'), { recursive: true })
+        // A read-only directory is caught by the step-4 writability check, one line.
+        chmodSync(join(dir, '.vscode'), 0o500)
+        try {
+          const ro = await runCli(['init', '--client'], undefined, dir)
+          expect(ro.code).toBe(1)
+          expect(ro.stderr.trim()).toBe(
+            `Error: ${join(dir, '.vscode')} is not writable (EACCES). Nothing changed.`,
+          )
+          expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+        } finally {
+          chmodSync(join(dir, '.vscode'), 0o700)
+        }
+        // A dangling symlink at the third backup path passes every step-4 check
+        // (nothing exists there, the directory is writable) and makes copyFile
+        // fail at step 5, after the first two backups were copied.
+        symlinkSync(join(dir, 'missing', 'target'), join(dir, '.vscode', 'mcp.json.helio-backup'))
+        const failed = await runCli(['init', '--client'], undefined, dir)
+        expect(failed.code).toBe(1)
+        expect(failed.stderr.trim().split('\n').at(-1)).toBe(
+          'Error: could not back up .vscode/mcp.json (ENOENT). Nothing changed.',
+        )
+        expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(join(dir, '.cursor', 'mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(join(dir, '.helio-init-client.json'))).toBe(false)
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+        unlinkSync(join(dir, '.vscode', 'mcp.json.helio-backup'))
+        expect(snapshotTree(dir)).toEqual(before)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('a failed manifest write (step 6) removes the backups it wrote and says so', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        // The manifest's temp sibling is a directory, so its write fails after the backups.
+        mkdirSync(join(dir, '.helio-init-client.json.helio-tmp'))
+        const before = snapshotTree(dir)
+        const { code, stderr } = await runCli(['init', '--client', '--force'], undefined, dir)
+        expect(code).toBe(1)
+        expect(stderr.trim().split('\n').at(-1)).toBe(
+          'Error: could not write .helio-init-client.json (EISDIR). The backups were removed; nothing changed.',
+        )
+        expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(false)
+        expect(existsSync(join(dir, '.helio-init-client.json'))).toBe(false)
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+        expect(snapshotTree(dir)).toEqual(before)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('a failed client rewrite (step 8) names what was written, the way back, and the temp it could not remove; --undo restores everything', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const before = snapshotTree(dir)
+        // The third client file's temp sibling is a directory: writeFile fails
+        // with EISDIR after helio.yaml and the first two files were written,
+        // and the unlink of that temp fails too, so the line names it.
+        mkdirSync(join(dir, '.vscode', 'mcp.json.helio-tmp'))
+        const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+        expect(code).toBe(1)
+        const tail = stderr.trim().split('\n').slice(-2)
+        expect(tail[0]).toBe(
+          'Error: writing .vscode/mcp.json failed (EISDIR) after helio.yaml, .mcp.json and .cursor/mcp.json were written. Run helio init --client --undo to restore everything.',
+        )
+        expect(tail[1]).toBe('Could not remove .vscode/mcp.json.helio-tmp; delete it.')
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(true)
+        expect(readFileSync(join(dir, '.mcp.json'), 'utf-8')).toContain('/mcp/files')
+        expect(readFileSync(join(dir, '.vscode', 'mcp.json'), 'utf-8')).toContain('search_ping')
+        rmSync(join(dir, '.vscode', 'mcp.json.helio-tmp'), { recursive: true })
+
+        const undo = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(undo.code, undo.stderr).toBe(0)
+        expect(undo.stderr).toContain(
+          'helio.yaml was left in place (from .helio-init-client.json); delete it if you no longer want it.',
+        )
+        rmSync(join(dir, 'helio.yaml'))
+        expect(snapshotTree(dir)).toEqual(before)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('a failed config write (step 7) prints no success-tense line, and --undo then says the config was not written', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const before = snapshotTree(dir)
+        mkdirSync(join(dir, 'helio.yaml.helio-tmp'))
+        const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+        expect(code).toBe(1)
+        expect(stderr).not.toContain('Copied env')
+        expect(stderr).not.toContain('Set CLAUDE_PROJECT_DIR')
+        const tail = stderr.trim().split('\n').slice(-2)
+        expect(tail[0]).toBe(
+          'Error: writing helio.yaml failed (EISDIR) before any client file was rewritten. Run helio init --client --undo to clear the backups and the manifest.',
+        )
+        expect(tail[1]).toBe('Could not remove helio.yaml.helio-tmp; delete it.')
+        expect(existsSync(join(dir, 'helio.yaml'))).toBe(false)
+        rmSync(join(dir, 'helio.yaml.helio-tmp'), { recursive: true })
+        const undo = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(undo.code, undo.stderr).toBe(0)
+        expect(undo.stderr).toContain(
+          'helio.yaml was not written (from .helio-init-client.json); nothing to remove.\n',
+        )
+        expect(undo.stderr).not.toContain('was left in place')
+        expect(snapshotTree(dir)).toEqual(before)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('--undo names the read error of an unreadable manifest and leaves it alone', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        expect((await runCli(['init', '--client'], undefined, dir)).code).toBe(0)
+        chmodSync(join(dir, '.helio-init-client.json'), 0o000)
+        try {
+          const { code, stderr } = await runCli(['init', '--client', '--undo'], undefined, dir)
+          expect(code).toBe(1)
+          expect(stderr.trim()).toBe(
+            'Error: could not read .helio-init-client.json (EACCES). Nothing changed.',
+          )
+          expect(existsSync(join(dir, '.mcp.json.helio-backup'))).toBe(true)
+        } finally {
+          chmodSync(join(dir, '.helio-init-client.json'), 0o644)
+        }
+        writeFileSync(join(dir, '.helio-init-client.json'), '{"version": 2}')
+        const bad = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(bad.code).toBe(1)
+        expect(bad.stderr.trim()).toBe(
+          'Error: .helio-init-client.json is not a manifest this version reads. Nothing changed.',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('a step-8 failure on the only client file says the config was written, singular', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify({ mcpServers: { files: { command: 'node' } } }),
+        )
+        mkdirSync(join(dir, '.mcp.json.helio-tmp'))
+        const { code, stderr } = await runCli(['init', '--client'], undefined, dir)
+        expect(code).toBe(1)
+        expect(stderr).toContain(
+          'Error: writing .mcp.json failed (EISDIR) after helio.yaml was written. Run helio init --client --undo to restore everything.\n',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('--undo without a manifest restores the backups it can see and says the output was not recorded; with nothing, refuses', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        writeAdoptTree(dir)
+        const before = snapshotTree(dir)
+        expect((await runCli(['init', '--client'], undefined, dir)).code).toBe(0)
+        rmSync(join(dir, '.helio-init-client.json'))
+        const undo = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(undo.code, undo.stderr).toBe(0)
+        expect(undo.stderr).toContain(
+          'No manifest found; the helio.yaml this adoption wrote was not recorded and is left in place.\n',
+        )
+        expect(undo.stderr).toMatch(/Replaced \.mcp\.json with the backup/)
+        rmSync(join(dir, 'helio.yaml'))
+        expect(snapshotTree(dir)).toEqual(before)
+
+        const nothing = await runCli(['init', '--client', '--undo'], undefined, dir)
+        expect(nothing.code).toBe(1)
+        expect(nothing.stderr.trim()).toBe(
+          'Error: no backup found for .mcp.json (.mcp.json.helio-backup), .cursor/mcp.json (.cursor/mcp.json.helio-backup), .vscode/mcp.json (.vscode/mcp.json.helio-backup) and no manifest. Nothing to undo.',
+        )
+        const pathed = await runCli(['init', '--client', '.mcp.json', '--undo'], undefined, dir)
+        expect(pathed.code).toBe(1)
+        expect(pathed.stderr.trim()).toBe(
+          'Error: no backup found for .mcp.json (.mcp.json.helio-backup) and no manifest. Nothing to undo.',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('--client on a .claude.json warns below two servers and drops the approval sentence from Next', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-')))
+      try {
+        const file = join(dir, '.claude.json')
+        writeFileSync(
+          file,
+          JSON.stringify(
+            {
+              numStartups: 3,
+              mcpServers: { helio: { type: 'http', url: 'http://127.0.0.1:8080/mcp' } },
+              projects: { '/p': { mcpServers: { x: { command: 'node' } } } },
+            },
+            null,
+            2,
+          ) + '\n',
+        )
+        const { code, stderr } = await runCli(['init', '--client', file], undefined, dir)
+        expect(code, stderr).toBe(0)
+        expect(stderr).toContain(
+          `Warning: ${file} holds 1 server under mcpServers (per-project servers under projects.<dir>.mcpServers were not counted or adopted). Claude Code plugins and claude.ai connectors are not in this file and cannot be routed through Helio.\n`,
+        )
+        expect(stderr).toContain(
+          'Next: run `helio start`. Restart your MCP client. Claude Code connects user-scope servers on its next start; no approval step.\n',
+        )
+        expect(stderr).toContain(`Undo: from this directory, helio init --client ${file} --undo\n`)
+        const doc = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>
+        expect(doc['numStartups']).toBe(3)
+        expect(doc['mcpServers']).toEqual({
+          helio: { type: 'http', url: 'http://127.0.0.1:3000/mcp/helio' },
+        })
+        expect(doc['projects']).toEqual({ '/p': { mcpServers: { x: { command: 'node' } } } })
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('adopts a two-server .mcp.json and helio start serves both doors with the authority lines (end to end)', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-e2e-')))
+      const listenPort = randomChildPort()
+      const dashboardPort = randomChildPort()
+      try {
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify(
+            {
+              mcpServers: {
+                files: { command: 'node', args: [STDIO_MCP_FIXTURE, 'files_ping'] },
+                github: { command: 'node', args: [STDIO_MCP_FIXTURE, 'github_ping'] },
+              },
+            },
+            null,
+            2,
+          ),
+        )
+        const adopt = await runCli(
+          ['init', '--client', '-o', join(dir, 'helio.yaml')],
+          undefined,
+          dir,
+        )
+        expect(adopt.code, adopt.stderr).toBe(0)
+        // The written ports are 3000 and 3100; the test moves them off the fixed ports.
+        const text = readFileSync(join(dir, 'helio.yaml'), 'utf-8')
+          .replace('\nlisten:\n  port: 3000\n', `\nlisten:\n  port: ${String(listenPort)}\n`)
+          .replace('\n  port: 3100\n', `\n  port: ${String(dashboardPort)}\n`)
+        writeFileSync(join(dir, 'helio.yaml'), text)
+        const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+        const child = spawn('node', [CLI_PATH, 'start', '-c', join(dir, 'helio.yaml')], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          cwd: dir,
+        })
+        let stderr = ''
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf-8')
+        })
+        try {
+          await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
+          await vi.waitFor(
+            () => {
+              expect(stderr).toContain(
+                'Authority surface: 2 tool-door pairs across 2 upstreams, none annotated',
+              )
+            },
+            { timeout: 5_000, interval: 50 },
+          )
+          expect(stderr).toContain(
+            'Policy coverage: 0 of 2 have a rule that can match them, default allow',
+          )
+          expect(stderr).toContain('Upstream[files]: node (stdio)')
+          expect(stderr).toContain('Upstream[github]: node (stdio)')
+          for (const [name, toolName] of [
+            ['files', 'files_ping'],
+            ['github', 'github_ping'],
+          ] as const) {
+            const res = await fetch(`${baseUrl}/mcp/${name}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+            })
+            expect(res.status).toBe(200)
+            const body = (await res.json()) as { result: { tools: Array<{ name: string }> } }
+            expect(body.result.tools[0]?.name).toBe(toolName)
+          }
+        } finally {
+          child.kill('SIGTERM')
+          await new Promise<void>((resolve) =>
+            child.once('close', () => {
+              resolve()
+            }),
+          )
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it('passes an adopted entry env to the spawned child (end to end)', async () => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'helio-cli-adopt-env-')))
+      const listenPort = randomChildPort()
+      const dashboardPort = randomChildPort()
+      // The child names its tool after a variable set only in the entry's env.
+      const script = [
+        "const rl = require('readline').createInterface({ input: process.stdin });",
+        "rl.on('line', (line) => {",
+        '  let req; try { req = JSON.parse(line) } catch { return }',
+        '  if (req.id === undefined || req.id === null) return;',
+        '  let result = {};',
+        "  if (req.method === 'initialize') result = { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'envprobe', version: '0' } };",
+        "  else if (req.method === 'tools/list') result = { tools: [{ name: 'env_' + (process.env.HELIO_ADOPT_PROBE || 'UNSET'), description: 'x', inputSchema: { type: 'object' } }] };",
+        "  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + String.fromCharCode(10));",
+        '});',
+      ].join('\n')
+      try {
+        writeFileSync(
+          join(dir, '.mcp.json'),
+          JSON.stringify(
+            {
+              mcpServers: {
+                probe: {
+                  command: 'node',
+                  args: ['-e', script],
+                  env: { HELIO_ADOPT_PROBE: 'from-entry-env' },
+                },
+              },
+            },
+            null,
+            2,
+          ),
+        )
+        const adopt = await runCli(['init', '--client'], undefined, dir)
+        expect(adopt.code, adopt.stderr).toBe(0)
+        expect(adopt.stderr).toContain(
+          'Copied env for probe into helio.yaml (HELIO_ADOPT_PROBE); the file now holds those values',
+        )
+        const text = readFileSync(join(dir, 'helio.yaml'), 'utf-8')
+          .replace('\nlisten:\n  port: 3000\n', `\nlisten:\n  port: ${String(listenPort)}\n`)
+          .replace('\n  port: 3100\n', `\n  port: ${String(dashboardPort)}\n`)
+        writeFileSync(join(dir, 'helio.yaml'), text)
+        const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+        const child = spawn('node', [CLI_PATH, 'start', '-c', join(dir, 'helio.yaml')], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          cwd: dir,
+          env: { ...process.env, HELIO_ADOPT_PROBE: undefined },
+        })
+        let stderr = ''
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString('utf-8')
+        })
+        try {
+          await waitForProxyHealthOrExit(child, baseUrl, 8_000, () => stderr)
+          const res = await fetch(`${baseUrl}/mcp/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+          })
+          expect(res.status).toBe(200)
+          const body = (await res.json()) as { result: { tools: Array<{ name: string }> } }
+          expect(body.result.tools[0]?.name).toBe('env_from-entry-env')
+        } finally {
+          child.kill('SIGTERM')
+          await new Promise<void>((resolve) =>
+            child.once('close', () => {
+              resolve()
+            }),
+          )
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 30_000)
   })
 
   // --- helio validate ---

@@ -21,6 +21,12 @@ export interface StdioForwarderOptions {
   command: string
   /** Arguments to pass to the command. */
   args?: string[]
+  /**
+   * Variables set in the child's environment on top of the proxy's own
+   * (`{ ...process.env, ...env }`): an entry overrides the proxy, and the
+   * proxy's `PATH` survives (issue #398).
+   */
+  env?: Record<string, string>
   /** Maximum number of auto-restart attempts on crash. */
   maxRetries?: number
   /** Delay in milliseconds between restart attempts. */
@@ -43,6 +49,7 @@ export interface StdioForwarderOptions {
 export class StdioForwarder implements McpForwarder {
   private readonly command: string
   private readonly args: string[]
+  private readonly env: Record<string, string> | undefined
   private readonly maxRetries: number
   private readonly retryDelayMs: number
   private readonly pending: PendingRequests
@@ -57,6 +64,7 @@ export class StdioForwarder implements McpForwarder {
   constructor(options: StdioForwarderOptions) {
     this.command = options.command
     this.args = options.args ?? []
+    this.env = options.env
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
     this.pending = new PendingRequests(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS)
@@ -69,6 +77,7 @@ export class StdioForwarder implements McpForwarder {
     return new Promise<void>((resolve, reject) => {
       const child = spawn(this.command, this.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...(this.env === undefined ? {} : { env: { ...process.env, ...this.env } }),
       })
       this.child = child
 

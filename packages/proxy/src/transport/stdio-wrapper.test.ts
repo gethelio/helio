@@ -361,4 +361,34 @@ describe('StdioForwarder', () => {
     const result = await forwarder.forward(makeRequest(1, 'ping'))
     expect(result.response.body).toEqual({ jsonrpc: '2.0', id: 1, result: {} })
   })
+
+  it('spawns the child with `env` spread over the proxy environment (issue #398)', async () => {
+    // The child reports the option's variable and whether PATH survived the
+    // spread: an option-only environment would lose PATH.
+    const envScript = `
+      const readline = require('readline');
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on('line', (line) => {
+        const req = JSON.parse(line);
+        const res = { jsonrpc: '2.0', id: req.id, result: {
+          probe: process.env.HELIO_TEST_PROBE ?? 'UNSET',
+          hasPath: typeof process.env.PATH === 'string',
+        } };
+        process.stdout.write(JSON.stringify(res) + '\\n');
+      });
+    `
+    forwarder = new StdioForwarder({
+      command: process.execPath,
+      args: ['-e', envScript],
+      env: { HELIO_TEST_PROBE: 'from-options' },
+    })
+    await forwarder.start()
+
+    const result = await forwarder.forward(makeRequest(1, 'ping'))
+    expect(result.response.body).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      result: { probe: 'from-options', hasPath: true },
+    })
+  })
 })

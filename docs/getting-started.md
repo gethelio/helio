@@ -96,6 +96,108 @@ If you started from `helio init`, the generated `helio.yaml` already stores the 
 
 See the [Configuration Reference](./configuration.md) for all available fields and defaults.
 
+### Already have MCP servers wired to a client?
+
+If Claude Code, Cursor or VS Code already reaches your servers through a project file (`.mcp.json`, `.cursor/mcp.json` or `.vscode/mcp.json` in the directory you are in), let Helio write the config for you:
+
+```bash
+helio init --client
+```
+
+It backs each client file up, writes a `helio.yaml` whose `upstreams:` list holds every server it found, and repoints each entry at its Helio door. With a `.mcp.json` like this one:
+
+```json
+{
+  "mcpServers": {
+    "files": {
+      "command": "node",
+      "args": ["./files-server.js"],
+      "env": { "FILES_ROOT": "/tmp" }
+    },
+    "github": {
+      "type": "http",
+      "url": "http://127.0.0.1:8087/mcp",
+      "headers": { "Authorization": "Bearer ${GITHUB_TOKEN}" }
+    }
+  }
+}
+```
+
+it prints:
+
+```
+Found 2 servers in 1 client config:
+  .mcp.json: files (stdio), github (http)
+Backed up .mcp.json to .mcp.json.helio-backup
+Wrote .helio-init-client.json (undo reads it; tied to this directory)
+.helio-init-client.json and the .helio-backup files are local to this machine; do not commit them.
+Created helio.yaml (2 upstreams; doors at http://127.0.0.1:3000/mcp/<name>)
+Copied env for files into helio.yaml (FILES_ROOT); the file now holds those values
+Set CLAUDE_PROJECT_DIR=/home/you/project for files in helio.yaml (Claude Code sets it for stdio servers; update it if the project moves)
+Rewrote .mcp.json: files, github now point at Helio
+Environment variables helio.yaml needs (helio start and helio policy status): GITHUB_TOKEN
+
+Dashboard secret (shown once; the file stores only its SHA-256 digest):
+  <64 hex characters>
+
+Store it in your password manager. Use it to log in to the dashboard and
+as the Bearer credential for sideband API clients (127.0.0.1:3100 by
+default). If you lose it, run `helio secret`, paste the new digest into
+dashboard.api_secret, and restart the proxy.
+helio policy status needs this secret in HELIO_DASHBOARD_SECRET.
+
+Next: run `helio start`. Restart your MCP client. In Claude Code, run `claude` and approve the project servers (`claude mcp list` stays at pending approval until you do).
+Undo: from this directory, helio init --client --undo
+```
+
+The written `helio.yaml` is the `helio init` scaffold with a live `upstreams:` list in place of `upstream:` and a live `listen:` block, so the door URLs in the client file and the port in this file agree:
+
+```yaml
+upstreams:
+  - name: 'files'
+    transport: 'stdio'
+    command: 'node'
+    args:
+      - './files-server.js'
+    env:
+      FILES_ROOT: '/tmp'
+      CLAUDE_PROJECT_DIR: '/home/you/project'
+  - name: 'github'
+    transport: 'streamable-http'
+    url: 'http://127.0.0.1:8087/mcp'
+    headers:
+      Authorization: 'Bearer ${GITHUB_TOKEN}'
+
+listen:
+  port: 3000
+  host: 127.0.0.1
+```
+
+and `.mcp.json` now reads:
+
+```json
+{
+  "mcpServers": {
+    "files": { "type": "http", "url": "http://127.0.0.1:3000/mcp/files" },
+    "github": { "type": "http", "url": "http://127.0.0.1:3000/mcp/github" }
+  }
+}
+```
+
+Export the variables the `Environment variables` line names, run `helio start`, then restart your client. In Claude Code, project servers need an interactive approval: run `claude` and approve them, or `claude mcp list` stays at "pending approval". A Cursor entry is rewritten to `url` alone and a VS Code entry to `type: "http"` plus `url`, the shapes those clients document.
+
+`helio init --client <path>` adopts one named file instead, which is the only way a user-level file is touched: `helio init --client ~/.claude.json` rewrites the top-level `mcpServers` of Claude Code's user file (run it with no Claude Code session open; user-scope servers connect on the next start with no approval step, and per-project servers under `projects.<dir>.mcpServers` are left alone). `claude_desktop_config.json` is refused: Claude Desktop reaches HTTP servers through Settings > Connectors, not that file. A second run refuses when it finds the manifest, a backup, or an entry that already points at a Helio door, so Helio never wraps Helio.
+
+To put everything back, from the same directory:
+
+```bash
+helio init --client --undo
+```
+
+restores every backup byte for byte, removes the backups and the manifest, and leaves `helio.yaml` in place for you to delete. Edits made to a client file after the adoption are discarded by the restore. The manifest (`.helio-init-client.json`) and the `.helio-backup` files hold your original configuration, literal secrets included, and absolute paths: they are local to this machine, so keep them out of version control even though Claude Code tells teams to commit `.mcp.json`.
+
+What survives a rewrite: unrelated keys, their order and their values. Comments, trailing commas, and escape spellings do not, because the file is re-serialized (the backup has them), and a file whose values or key order would change is refused before anything is written. Substitution tokens are rewritten to what each client actually sends: Cursor's and VS Code's `${env:NAME}` becomes Helio's `${NAME}` and `${workspaceFolder}` becomes the directory; in a Claude Code file the command emulates Claude Code's own expansion, drops the credential names Claude Code reads as empty (`ANTHROPIC_API_KEY` and its siblings) and refuses an entry whose header or URL Claude Code would send with a bare placeholder in it. Every such decision prints one line.
+
 ## Step 3: Start the Proxy
 
 ```bash
@@ -137,19 +239,39 @@ The final `Watching` line prints once the config watcher is armed — an edit to
 
 ## Step 4: Point Your MCP Client at Helio
 
-Instead of connecting your MCP client directly to the upstream server, point it at the proxy on `http://localhost:3000/mcp`. With a named [`upstreams:`](./configuration.md#upstreams) list, each upstream is served at its own door instead — point the client at `http://localhost:3000/mcp/<name>`.
+Instead of connecting your MCP client directly to the upstream server, point it at the proxy on `http://localhost:3000/mcp`. With a named [`upstreams:`](./configuration.md#upstreams) list, each upstream is served at its own door instead: point the client at `http://localhost:3000/mcp/<name>`. If you ran `helio init --client` in Step 2, the files it rewrote already point there.
 
-**Claude Desktop** (`claude_desktop_config.json`):
+**Claude Code** (`.mcp.json` in the project root; a remote entry needs `type`):
 
 ```json
 {
   "mcpServers": {
-    "my-server": {
-      "url": "http://localhost:3000/mcp"
-    }
+    "my-server": { "type": "http", "url": "http://localhost:3000/mcp" }
   }
 }
 ```
+
+**Cursor** (`.cursor/mcp.json`; a remote entry is `url` alone):
+
+```json
+{
+  "mcpServers": {
+    "my-server": { "url": "http://localhost:3000/mcp" }
+  }
+}
+```
+
+**VS Code** (`.vscode/mcp.json`; the top-level key is `servers`):
+
+```json
+{
+  "servers": {
+    "my-server": { "type": "http", "url": "http://localhost:3000/mcp" }
+  }
+}
+```
+
+Claude Desktop reaches HTTP servers through Settings > Connectors, not its config file.
 
 **Any HTTP MCP client** — change the server URL from `http://localhost:8080/mcp` to `http://localhost:3000/mcp`. The proxy is fully transparent: it forwards all MCP methods unchanged and only intercepts `tools/call` for policy evaluation.
 

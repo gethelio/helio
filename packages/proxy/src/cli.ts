@@ -1,15 +1,17 @@
 /* eslint-disable no-console -- CLI entry point, console is the intended output */
 import { Command } from 'commander'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import type { Stats } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { dirname, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import {
   loadConfig,
   loadConfigWithMeta,
+  parseConfigSource,
   readConfigSource,
   ConfigError,
   ConfigWatcher,
@@ -29,6 +31,21 @@ import {
   renderSandboxReadme,
   sandboxImageTag,
 } from './sandbox-scaffold.js'
+import {
+  BACKUP_SUFFIX,
+  MANIFEST_FILE,
+  PROJECT_CLIENT_FILES,
+  TEMP_SUFFIX,
+  adoptServers,
+  backupFile,
+  classifyClientPath,
+  detectClientConfigs,
+  readManifest,
+  restoreBackups,
+  writeFileAtomic,
+  writeManifest,
+} from './client-adopt.js'
+import type { ClientFormat, ClientSource, Manifest } from './client-adopt.js'
 import type { Hono } from 'hono'
 import { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
 import { applyReloadedPolicy } from './reload-fanout.js'
@@ -1191,6 +1208,468 @@ async function sandboxCommand(dir: string, force: boolean): Promise<void> {
   )
 }
 
+// ---------------------------------------------------------------------------
+// `helio init --client` (issue #398)
+// ---------------------------------------------------------------------------
+
+/** What the adopted branch of the template needs beyond the digest. */
+interface AdoptedTemplateInput {
+  /** The `upstreams:` block from `renderUpstreamBlock`. */
+  readonly block: string
+  /** The client files, as displayed. */
+  readonly sources: readonly string[]
+  /** The undo invocation for the header. */
+  readonly undo: string
+  readonly port: number
+  readonly host: string
+}
+
+const ADOPT_LISTEN_PORT = 3000
+const ADOPT_LISTEN_HOST = '127.0.0.1'
+const ACCEPTED_CLIENT_PATHS = '.mcp.json, .cursor/mcp.json, .vscode/mcp.json, .claude.json'
+
+/** "a, b and c" for the printed lines. */
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names.join('')
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1] ?? ''}`
+}
+
+/**
+ * The scaffold with the live `upstream:` block replaced by the adopted
+ * `upstreams:` list, the pointer stub flipped, and `listen:` made live.
+ * Built by replacing segments of the default text so that the
+ * default branch stays the untouched template literal.
+ */
+function renderAdoptedConfigTemplate(
+  apiSecretDigest: string,
+  adopted: AdoptedTemplateInput,
+): string {
+  const base = renderConfigTemplate(apiSecretDigest)
+  const replaceOnce = (text: string, pattern: RegExp, replacement: string): string => {
+    const matches = text.match(pattern)
+    if (matches === null || matches.length !== 1) {
+      throw new Error(
+        `init --client: the scaffold no longer has the segment ${pattern.source.slice(0, 40)}`,
+      )
+    }
+    return text.replace(pattern, () => replacement)
+  }
+  const header = replaceOnce(
+    base,
+    /^# Docs: https:\/\/github\.com\/gethelio\/helio\n/m,
+    `# Written by helio init --client from ${joinNames(adopted.sources)}\n# Undo: from this directory, ${adopted.undo}\n# Docs: https://github.com/gethelio/helio\n`,
+  )
+  const upstreams = replaceOnce(
+    header,
+    /^upstream:\n(?:(?: {2}|#)[^\n]*\n)+\n# Multiple named upstreams[^\n]*\n# set exactly one of the two\. See docs\/configuration\.md\.\n# upstreams:\n# {3}- name: files\n# {5}url: "http:\/\/localhost:8081\/mcp"\n/m,
+    `${adopted.block.trimEnd()}\n\n# A single upstream (singular mode) replaces \`upstreams:\`; set exactly one\n# of the two. See docs/configuration.md.\n# upstream:\n#   url: "http://localhost:8080/mcp"\n#   transport: streamable-http\n`,
+  )
+  return replaceOnce(
+    upstreams,
+    /^# listen:\n# {3}port: 3000\n# {3}host: 127\.0\.0\.1\n/m,
+    `listen:\n  port: ${String(adopted.port)}\n  host: ${adopted.host}\n`,
+  )
+}
+
+function errnoCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException).code
+  return typeof code === 'string' ? code : err instanceof Error ? err.message : String(err)
+}
+
+/** A path shown relative to the working directory when it is under it. */
+function displayUnder(cwd: string, path: string): string {
+  const rel = relative(cwd, path)
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) ? rel : path
+}
+
+function refuseInit(line: string): never {
+  console.error(line)
+  process.exit(1)
+}
+
+/**
+ * Resolve the client files an invocation targets: the three project files
+ * under the working directory, or the one named path.
+ */
+function resolveClientTargets(
+  clientArg: string | true,
+  cwd: string,
+): {
+  readonly targets: ReadonlyArray<{ path: string; display: string; format: ClientFormat }>
+  readonly undo: string
+} {
+  if (clientArg === true) {
+    const found = detectClientConfigs(cwd)
+    if (found.length === 0) {
+      refuseInit(
+        `Error: no MCP client config found in ${cwd} (looked for ${PROJECT_CLIENT_FILES.map((f) => f.display).join(', ')}). Pass a path: helio init --client <path>`,
+      )
+    }
+    return { targets: found, undo: 'helio init --client --undo' }
+  }
+  const shown = clientArg === '' ? '""' : clientArg
+  const kind = classifyClientPath(clientArg)
+  if (!kind.ok) {
+    if (kind.kind === 'desktop') {
+      refuseInit(
+        'Error: claude_desktop_config.json: Claude Desktop reaches HTTP servers through Settings > Connectors, not this file, so Helio cannot repoint it. Nothing changed.',
+      )
+    }
+    refuseInit(
+      `Error: ${shown} is not a client config Helio adopts (accepted: ${ACCEPTED_CLIENT_PATHS}). Nothing changed.`,
+    )
+  }
+  return {
+    targets: [{ path: resolve(cwd, clientArg), display: clientArg, format: kind.format }],
+    undo: `helio init --client ${clientArg} --undo`,
+  }
+}
+
+/** `helio init --client [path]`: nine steps, "nothing changed" true on every refusal. */
+async function initClientCommand(
+  clientArg: string | true,
+  outputPath: string,
+  force: boolean,
+): Promise<void> {
+  const cwd = process.cwd()
+  const { targets, undo } = resolveClientTargets(clientArg, cwd)
+  const outputAbs = resolve(cwd, outputPath)
+  const manifestPath = join(cwd, MANIFEST_FILE)
+
+  // 1. Read every target file.
+  const sources: ClientSource[] = []
+  for (const target of targets) {
+    if (!existsSync(target.path))
+      refuseInit(`Error: ${target.display} does not exist. Nothing changed.`)
+    let text: string
+    try {
+      text = await readFile(target.path, 'utf-8')
+    } catch (err) {
+      refuseInit(`Error: could not read ${target.display} (${errnoCode(err)}). Nothing changed.`)
+    }
+    sources.push({ path: target.path, display: target.display, format: target.format, text })
+  }
+
+  // 2. Compute the adoption.
+  const plan = adoptServers(sources, {
+    port: ADOPT_LISTEN_PORT,
+    host: ADOPT_LISTEN_HOST,
+    env: process.env,
+    cwd,
+    home: homedir(),
+    pathSeparator: sep,
+    force,
+    outputName: outputPath,
+  })
+  if (!plan.ok) {
+    // Every refusal is one line; the one that says "see above" needs the skip lines first.
+    if (plan.error.includes('see above')) for (const line of plan.lines) console.error(line)
+    refuseInit(plan.error)
+  }
+
+  // 3. Validate the config text in-process, every referenced variable given a dummy value.
+  const secret = randomBytes(32).toString('hex')
+  // The files the run changes: a source none of whose entries were adopted stays as it is.
+  const changed = plan.files
+  const displays = changed.map((f) => f.display)
+  const text = renderAdoptedConfigTemplate(secretDigest(secret), {
+    block: plan.upstreamBlock,
+    sources: displays,
+    undo,
+    port: ADOPT_LISTEN_PORT,
+    host: ADOPT_LISTEN_HOST,
+  })
+  const dummies = Object.fromEntries(
+    plan.variables.map((name) => [name, 'helio-init-client-dummy']),
+  )
+  try {
+    parseConfigSource({ raw: text, sha256: '' }, outputPath, { ...dummies, ...process.env })
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      const detail = err.details?.[0]
+      const why = detail === undefined ? err.message : `${detail.path}: ${detail.message}`
+      refuseInit(
+        `Error: the ${outputPath} built from ${joinNames(displays)} does not validate: ${why}. Nothing changed.`,
+      )
+    }
+    throw err
+  }
+
+  // 4. The markers, the output path, and every target directory's writability.
+  if (existsSync(manifestPath)) {
+    refuseInit(
+      `Error: ${MANIFEST_FILE} exists; this project was already adopted. Run ${undo} first. Nothing changed.`,
+    )
+  }
+  for (const file of changed) {
+    if (existsSync(file.path + BACKUP_SUFFIX)) {
+      refuseInit(
+        `Error: ${file.display}${BACKUP_SUFFIX} already exists; this file was already adopted. Run ${undo} first. Nothing changed.`,
+      )
+    }
+  }
+  if (existsSync(outputAbs) && !force) {
+    refuseInit(`Error: ${outputPath} already exists. Use --force to overwrite.`)
+  }
+  const outputBackupPath = force && existsSync(outputAbs) ? outputAbs + BACKUP_SUFFIX : null
+  if (outputBackupPath !== null && existsSync(outputBackupPath)) {
+    refuseInit(
+      `Error: ${outputPath}${BACKUP_SUFFIX} already exists; this file was already adopted. Run ${undo} first. Nothing changed.`,
+    )
+  }
+  for (const dir of new Set([...changed.map((f) => dirname(f.path)), dirname(outputAbs), cwd])) {
+    try {
+      accessSync(dir, constants.W_OK)
+    } catch (err) {
+      refuseInit(`Error: ${dir} is not writable (${errnoCode(err)}). Nothing changed.`)
+    }
+  }
+
+  // Nothing refuses past this point without a way back, so the plan is printed now.
+  for (const line of plan.lines) console.error(line)
+
+  // 5. Backups first: the client files, then the output under --force.
+  const backupsWritten: string[] = []
+  const removeBackups = async (): Promise<string[]> => {
+    const left: string[] = []
+    for (const backup of backupsWritten) {
+      try {
+        await unlink(backup)
+      } catch {
+        left.push(backup)
+      }
+    }
+    return left
+  }
+  // A copy that failed part way can leave a partial destination: it is removed
+  // with the backups already written, and any survivor is named.
+  const refuseBackup = async (display: string, err: unknown, partial: string): Promise<never> => {
+    const code = errnoCode(err)
+    if (existsSync(partial)) backupsWritten.push(partial)
+    const left = await removeBackups()
+    if (left.length === 0)
+      refuseInit(`Error: could not back up ${display} (${code}). Nothing changed.`)
+    refuseInit(
+      `Error: could not back up ${display} (${code}). Left behind: ${left.map((b) => displayUnder(cwd, b)).join(', ')} (delete ${left.length === 1 ? 'it' : 'them'}; nothing was adopted).`,
+    )
+  }
+  const backupLines: string[] = []
+  for (const file of changed) {
+    try {
+      await backupFile(file.path)
+    } catch (err) {
+      await refuseBackup(file.display, err, file.path + BACKUP_SUFFIX)
+    }
+    backupsWritten.push(file.path + BACKUP_SUFFIX)
+    backupLines.push(`Backed up ${file.display} to ${file.display}${BACKUP_SUFFIX}`)
+  }
+  if (outputBackupPath !== null) {
+    try {
+      await backupFile(outputAbs)
+    } catch (err) {
+      await refuseBackup(outputPath, err, outputBackupPath)
+    }
+    backupsWritten.push(outputBackupPath)
+    backupLines.push(`Backed up ${outputPath} to ${outputPath}${BACKUP_SUFFIX}`)
+  }
+  for (const line of backupLines) console.error(line)
+
+  // 6. The manifest; a failure removes the backups or names every survivor.
+  try {
+    await writeManifest(manifestPath, {
+      version: 1,
+      output: outputAbs,
+      output_backup: outputBackupPath,
+      clients: changed.map((f) => ({ path: f.path, backup: f.path + BACKUP_SUFFIX })),
+      created_at: new Date().toISOString(),
+    })
+  } catch (err) {
+    const code = errnoCode(err)
+    const left = await removeBackups()
+    if (left.length === 0) {
+      refuseInit(
+        `Error: could not write ${MANIFEST_FILE} (${code}). The backups were removed; nothing changed.`,
+      )
+    }
+    const clientLeft = left.filter((b) => b !== outputBackupPath).map((b) => displayUnder(cwd, b))
+    const parts: string[] = []
+    if (clientLeft.length > 0) {
+      parts.push(`${clientLeft.join(', ')} (run ${undo} from this directory to restore them)`)
+    }
+    if (outputBackupPath !== null && left.includes(outputBackupPath)) {
+      parts.push(`${outputPath}${BACKUP_SUFFIX} (delete it: ${outputPath} was not modified)`)
+    }
+    refuseInit(
+      `Error: could not write ${MANIFEST_FILE} (${code}). Left behind: ${parts.join('; ')}.`,
+    )
+  }
+  console.error(`Wrote ${MANIFEST_FILE} (undo reads it; tied to this directory)`)
+  console.error(
+    `${MANIFEST_FILE} and the ${BACKUP_SUFFIX} files are local to this machine; do not commit them.`,
+  )
+
+  // 7. The config, then 8. every client file; each through a temp sibling and rename.
+  const written: string[] = []
+  const writeOrFail = async (path: string, display: string, data: string): Promise<void> => {
+    try {
+      await writeFileAtomic(path, data)
+    } catch (err) {
+      const code = errnoCode(err)
+      const tempLeft = existsSync(path + TEMP_SUFFIX)
+      if (written.length === 0) {
+        console.error(
+          `Error: writing ${display} failed (${code}) before any client file was rewritten. Run ${undo} to clear the backups and the manifest.`,
+        )
+      } else {
+        console.error(
+          `Error: writing ${display} failed (${code}) after ${joinNames(written)} ${written.length === 1 ? 'was' : 'were'} written. Run ${undo} to restore everything.`,
+        )
+      }
+      if (tempLeft) console.error(`Could not remove ${display}${TEMP_SUFFIX}; delete it.`)
+      process.exit(1)
+    }
+    written.push(display)
+  }
+  await writeOrFail(outputAbs, outputPath, text)
+  const doorPattern = `http://${ADOPT_LISTEN_HOST}:${String(ADOPT_LISTEN_PORT)}/mcp/<name>`
+  console.error(
+    `Created ${outputPath} (${String(plan.entries.length)} upstream${plan.entries.length === 1 ? '' : 's'}; doors at ${doorPattern})`,
+  )
+  for (const line of plan.outputLines) console.error(line)
+  for (const file of plan.files) {
+    await writeOrFail(file.path, file.display, file.text)
+    console.error(
+      `Rewrote ${file.display}: ${file.adopted.join(', ')} now point${file.adopted.length === 1 ? 's' : ''} at Helio`,
+    )
+    for (const line of file.notes) console.error(line)
+  }
+
+  // 9. The variables, the secret, the next actions, and the undo line.
+  if (plan.variables.length > 0) {
+    console.error(
+      `Environment variables ${outputPath} needs (helio start and helio policy status): ${plan.variables.join(', ')}`,
+    )
+  }
+  console.error('')
+  console.error('Dashboard secret (shown once; the file stores only its SHA-256 digest):')
+  console.error(`  ${secret}`)
+  console.error('')
+  console.error('Store it in your password manager. Use it to log in to the dashboard and')
+  console.error('as the Bearer credential for sideband API clients (127.0.0.1:3100 by')
+  console.error('default). If you lose it, run `helio secret`, paste the new digest into')
+  console.error('dashboard.api_secret, and restart the proxy.')
+  console.error('helio policy status needs this secret in HELIO_DASHBOARD_SECRET.')
+  console.error('')
+  const clientStep = plan.claudeUserFile
+    ? 'Claude Code connects user-scope servers on its next start; no approval step.'
+    : plan.claudeProjectFile
+      ? 'In Claude Code, run `claude` and approve the project servers (`claude mcp list` stays at pending approval until you do).'
+      : null
+  console.error(
+    `Next: run \`helio start\`. Restart your MCP client.${clientStep === null ? '' : ` ${clientStep}`}`,
+  )
+  console.error(`Undo: from this directory, ${undo}`)
+}
+
+/** `helio init --client [path] --undo`: restore the set the manifest names, else the backups the invocation can see. */
+async function initClientUndoCommand(clientArg: string | true): Promise<void> {
+  const cwd = process.cwd()
+  const manifestPath = join(cwd, MANIFEST_FILE)
+  let manifest: Manifest | null
+  try {
+    manifest = await readManifest(manifestPath)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (typeof code === 'string') {
+      refuseInit(`Error: could not read ${MANIFEST_FILE} (${code}). Nothing changed.`)
+    }
+    refuseInit(`Error: ${MANIFEST_FILE} is not a manifest this version reads. Nothing changed.`)
+  }
+  const replacedLine = (display: string, bytes: number): string =>
+    `Replaced ${display} with the backup (${String(bytes)} bytes). Edits since the adoption, if there were any, are discarded.`
+  const restoreOrFail = async (
+    items: ReadonlyArray<{ path: string; backup: string }>,
+  ): Promise<Array<{ path: string; backup: string; bytes: number }>> => {
+    try {
+      return await restoreBackups(items)
+    } catch (err) {
+      refuseInit(
+        `Error: could not restore a backup (${errnoCode(err)}). The remaining backups are still in place.`,
+      )
+    }
+  }
+
+  if (manifest !== null) {
+    const restored = await restoreOrFail(manifest.clients)
+    for (const item of restored)
+      console.error(replacedLine(displayUnder(cwd, item.path), item.bytes))
+    for (const client of manifest.clients) {
+      if (!restored.some((r) => r.path === client.path)) {
+        console.error(
+          `No backup found for ${displayUnder(cwd, client.path)} (${displayUnder(cwd, client.backup)}); it was left as is.`,
+        )
+      }
+    }
+    const outputDisplay = displayUnder(cwd, manifest.output)
+    if (manifest.output_backup !== null) {
+      const [output] = await restoreOrFail([
+        { path: manifest.output, backup: manifest.output_backup },
+      ])
+      if (output !== undefined) console.error(replacedLine(outputDisplay, output.bytes))
+      else
+        console.error(
+          `No backup found for ${outputDisplay} (${displayUnder(cwd, manifest.output_backup)}); it was left in place.`,
+        )
+    } else if (existsSync(manifest.output)) {
+      console.error(
+        `${outputDisplay} was left in place (from ${MANIFEST_FILE}); delete it if you no longer want it.`,
+      )
+    } else {
+      console.error(`${outputDisplay} was not written (from ${MANIFEST_FILE}); nothing to remove.`)
+    }
+    try {
+      await unlink(manifestPath)
+    } catch (err) {
+      refuseInit(`Error: could not remove ${MANIFEST_FILE} (${errnoCode(err)}); delete it by hand.`)
+    }
+  } else {
+    let candidates: ReadonlyArray<{ path: string; display: string }>
+    if (clientArg === true) {
+      candidates = PROJECT_CLIENT_FILES.map((f) => ({
+        path: join(cwd, ...f.display.split('/')),
+        display: f.display,
+      }))
+    } else {
+      const kind = classifyClientPath(clientArg)
+      if (!kind.ok) {
+        refuseInit(
+          `Error: ${clientArg === '' ? '""' : clientArg} is not a client config Helio adopts (accepted: ${ACCEPTED_CLIENT_PATHS}). Nothing changed.`,
+        )
+      }
+      candidates = [{ path: resolve(cwd, clientArg), display: clientArg }]
+    }
+    const items = candidates.map((c) => ({
+      path: c.path,
+      backup: c.path + BACKUP_SUFFIX,
+      display: c.display,
+    }))
+    if (!items.some((i) => existsSync(i.backup))) {
+      refuseInit(
+        `Error: no backup found for ${items.map((i) => `${i.display} (${i.display}${BACKUP_SUFFIX})`).join(', ')} and no manifest. Nothing to undo.`,
+      )
+    }
+    const restored = await restoreOrFail(items)
+    for (const item of restored) {
+      const display = items.find((i) => i.path === item.path)?.display ?? item.path
+      console.error(replacedLine(display, item.bytes))
+    }
+    console.error(
+      'No manifest found; the helio.yaml this adoption wrote was not recorded and is left in place.',
+    )
+  }
+  console.error('Restart your MCP client to pick the restored files up.')
+}
+
 function secretCommand(): void {
   const secret = randomBytes(32).toString('hex')
   console.log(`secret: ${secret}`)
@@ -1610,16 +2089,44 @@ program
     '--sandbox [dir]',
     `Write the sidecar layout (compose.yaml, helio/helio.yaml, helio/README.md) into <dir> (default: ${SANDBOX_DEFAULT_DIR}) instead of a helio.yaml`,
   )
-  .action((opts: { output: string; force: boolean; sandbox?: string | true }, command: Command) => {
-    if (opts.sandbox === undefined) return initCommand(opts.output, opts.force)
-    if (command.getOptionValueSource('output') === 'cli') {
-      console.error(
-        'Error: --output does not apply to --sandbox; pass the directory as --sandbox <dir>.',
-      )
-      process.exit(1)
-    }
-    return sandboxCommand(opts.sandbox === true ? SANDBOX_DEFAULT_DIR : opts.sandbox, opts.force)
-  })
+  .option(
+    '--client [path]',
+    'Adopt an existing MCP client configuration: the project .mcp.json, .cursor/mcp.json and .vscode/mcp.json under the current directory, or the one file at <path>; backs each file up, writes a helio.yaml with every server as an upstream, and repoints the client at Helio',
+  )
+  .option('--undo', 'With --client: restore the backups the adoption wrote and remove them', false)
+  .action(
+    (
+      opts: {
+        output: string
+        force: boolean
+        sandbox?: string | true
+        client?: string | true
+        undo: boolean
+      },
+      command: Command,
+    ) => {
+      if (opts.client !== undefined && opts.sandbox !== undefined) {
+        refuseInit('Error: --client does not combine with --sandbox.')
+      }
+      if (opts.undo && opts.client === undefined) refuseInit('Error: --undo requires --client.')
+      if (opts.undo && opts.client !== undefined) {
+        if (command.getOptionValueSource('output') === 'cli') {
+          refuseInit('Error: --output does not apply to --undo.')
+        }
+        if (opts.force) refuseInit('Error: --force does not apply to --undo.')
+        return initClientUndoCommand(opts.client)
+      }
+      if (opts.client !== undefined) return initClientCommand(opts.client, opts.output, opts.force)
+      if (opts.sandbox === undefined) return initCommand(opts.output, opts.force)
+      if (command.getOptionValueSource('output') === 'cli') {
+        console.error(
+          'Error: --output does not apply to --sandbox; pass the directory as --sandbox <dir>.',
+        )
+        process.exit(1)
+      }
+      return sandboxCommand(opts.sandbox === true ? SANDBOX_DEFAULT_DIR : opts.sandbox, opts.force)
+    },
+  )
 
 program
   .command('validate')

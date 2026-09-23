@@ -180,4 +180,17 @@ describe('createForwarderFromConfig', () => {
     await createForwarderFromConfig(stdio, 'github')
     expect(stdioCtor).toHaveBeenCalledWith(expect.objectContaining({ upstreamName: 'github' }))
   })
+
+  it('passes upstream.env into the stdio forwarder options (issue #398)', async () => {
+    const stdio = makeConfig({
+      upstream: {
+        transport: 'stdio',
+        command: 'node',
+        request_timeout: '30s',
+        env: { FILES_ROOT: '/tmp' },
+      },
+    })
+    await createForwarderFromConfig(stdio, 'files')
+    expect(stdioCtor).toHaveBeenCalledWith(expect.objectContaining({ env: { FILES_ROOT: '/tmp' } }))
+  })
 })

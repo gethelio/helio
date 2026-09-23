@@ -718,6 +718,51 @@ describe('helioConfigSchema', () => {
       expect(result.success).toBe(true)
     })
 
+    it('accepts env on a stdio entry as a string map (issue #398)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [
+            {
+              name: 'files',
+              transport: 'stdio',
+              command: 'node',
+              env: { FILES_ROOT: '/tmp', API_KEY: '${API_KEY}' },
+            },
+          ],
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success || !isNamedConfig(result.data)) return
+      expect(result.data.upstreams[0]?.env).toEqual({ FILES_ROOT: '/tmp', API_KEY: '${API_KEY}' })
+    })
+
+    it('refuses env on a non-stdio entry, naming the transport rule (issue #398)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [{ name: 'github', url: 'http://localhost:8081/mcp', env: { X: 'y' } }],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        {
+          path: ['upstreams', 0, 'env'],
+          message: '"env" applies only when transport is "stdio"',
+        },
+      ])
+    })
+
+    it('refuses a non-string env value on a stdio entry (issue #398)', () => {
+      const result = helioConfigSchema.safeParse(
+        namedMinimal({
+          upstreams: [{ name: 'files', transport: 'stdio', command: 'node', env: { PORT: 8080 } }],
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues[0]?.path).toEqual(['upstreams', 0, 'env', 'PORT'])
+    })
+
     it('forwards the named sse missing-url issue with its full path (issue #313)', () => {
       const result = helioConfigSchema.safeParse(
         namedMinimal({
@@ -1420,6 +1465,30 @@ describe('helioConfigSchema', () => {
         }),
       )
       expect(result.success).toBe(true)
+    })
+
+    it('accepts env on a singular stdio upstream (issue #398)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: { transport: 'stdio', command: 'node', env: { FILES_ROOT: '/tmp' } },
+        }),
+      )
+      expect(result.success).toBe(true)
+      if (!result.success || !isSingularConfig(result.data)) return
+      expect(result.data.upstream.env).toEqual({ FILES_ROOT: '/tmp' })
+    })
+
+    it('refuses env on a singular non-stdio upstream at path upstream.env (issue #398)', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({
+          upstream: { url: 'http://localhost:8080', transport: 'sse', env: { X: 'y' } },
+        }),
+      )
+      expect(result.success).toBe(false)
+      if (result.success) return
+      expect(result.error.issues.map((i) => ({ path: i.path, message: i.message }))).toStrictEqual([
+        { path: ['upstream', 'env'], message: '"env" applies only when transport is "stdio"' },
+      ])
     })
 
     it('reports the missing command, not url, for a stdio upstream with neither (issue #313)', () => {

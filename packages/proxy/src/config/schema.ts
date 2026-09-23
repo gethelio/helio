@@ -83,6 +83,7 @@ const upstreamObjectSchema = z
     request_timeout: durationSchema.default('30s'),
     forward_headers: z.array(z.string().min(1)).default([]),
     headers: z.record(z.string(), z.string()).default({}),
+    env: z.record(z.string(), z.string()).optional(),
   })
   .strict()
 
@@ -106,6 +107,17 @@ function upstreamEntryChecks(
       code: 'custom',
       path: ['url'],
       message: `"url" is required when transport is "${data.transport}"`,
+    })
+  }
+
+  // `env` is spawned into the stdio child; the HTTP transports have no child,
+  // and silently ignoring it would make an adopted entry's preservation claim
+  // false (issue #398), so it is refused rather than warned about.
+  if (data.transport !== 'stdio' && data.env !== undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['env'],
+      message: '"env" applies only when transport is "stdio"',
     })
   }
 
