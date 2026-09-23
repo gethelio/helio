@@ -21,6 +21,22 @@ Maintainer notes:
 
 ### Added
 
+- **`helio init --client` adopts an existing MCP client configuration.**
+  It reads the project's `.mcp.json` (Claude Code, or VS Code's portable
+  file), `.cursor/mcp.json` (Cursor) and `.vscode/mcp.json` (VS Code),
+  backs each client file up to a `.helio-backup` sibling, writes a
+  `helio.yaml` whose `upstreams:` list is every server found, rewrites
+  every adopted server to its `http://127.0.0.1:3000/mcp/<name>` door,
+  and prints what changed, the variables `helio start` needs, and the
+  undo command. `helio init --client <path>` adopts one named file, the
+  only way a user-level file such as `~/.claude.json` is touched;
+  `helio init --client --undo` reads the `.helio-init-client.json`
+  manifest the adoption wrote and restores every backup byte for byte;
+  both are local files, not for version control. A second run refuses
+  rather than wrapping Helio in Helio. Stdio upstream entries gain an
+  `env` field, passed to the spawned server over the proxy's own
+  environment, so an adopted server keeps the variables its client gave
+  it.
 - **Every release now attaches a second SBOM, `sbom-dashboard.json`,
   for the dashboard bundle.** The dashboard the proxy serves is built
   by Vite from `react`, `react-dom`, `react-router`, and `recharts`,
