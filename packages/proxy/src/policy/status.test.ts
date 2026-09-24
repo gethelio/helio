@@ -436,7 +436,7 @@ describe('evaluateReadiness', () => {
   it('formats the once-per-boot line naming helio policy status', () => {
     const r = evaluateReadiness(calls(1851, 600), nothing)
     expect(formatReadinessLine(r, '4h')).toBe(
-      'Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 23 Jun 2026). helio policy status lists which tools are called and which have no rule.',
+      'Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 2026-06-23). helio policy status lists which tools are called and which have no rule.',
     )
     expect(formatReadinessLine(r, '4h')).not.toContain('generate')
   })
@@ -518,7 +518,7 @@ describe('renderPolicyStatusText', () => {
     )
     expect(block).toContain('1 reachable and permitted, never called in the last 4h')
     expect(block).toContain('1 called in the last 4h on no primed door')
-    expect(block).toContain('audit rows since 23 Jun 2026')
+    expect(block).toContain('audit rows since 2026-06-23')
   })
 
   it('lists which tools are called and which have no rule', () => {

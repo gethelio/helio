@@ -4,6 +4,7 @@ import {
   formatLabel,
   formatLatency,
   formatTimestamp,
+  formatUtcDay,
   timeAgo,
   truncateForDisplay,
   truncateId,
@@ -147,6 +148,17 @@ describe('timeAgo', () => {
 
   it('returns "0s ago" for a timestamp exactly equal to now', () => {
     expect(timeAgo(NOW.toISOString())).toBe('0s ago')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// formatUtcDay
+// ---------------------------------------------------------------------------
+
+describe('formatUtcDay', () => {
+  it('prints the ISO 8601 calendar day in UTC', () => {
+    expect(formatUtcDay('2026-09-23T12:27:38.535Z')).toBe('2026-09-23')
+    expect(formatUtcDay('2026-09-23T23:30:00.000-05:00')).toBe('2026-09-24')
   })
 })
 

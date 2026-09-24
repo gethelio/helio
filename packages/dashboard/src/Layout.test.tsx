@@ -52,7 +52,7 @@ function statusReport(readiness: {
 }
 
 const BANNER_TEXT =
-  'Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 23 Jun 2026). helio policy status lists which tools are called and which have no rule.'
+  'Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 2026-06-23). helio policy status lists which tools are called and which have no rule.'
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -176,7 +176,7 @@ describe('Layout', () => {
       ),
     )
     renderLayout()
-    expect(await screen.findByText(/audit rows since 1 Jul 2026/)).toBeTruthy()
+    expect(await screen.findByText(/audit rows since 2026-07-01/)).toBeTruthy()
   })
 
   it('still hides the banner on Dismiss when localStorage throws', async () => {

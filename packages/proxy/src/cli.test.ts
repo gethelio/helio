@@ -6042,3 +6042,1045 @@ ${dashboard}audit:
     }
   }, 15_000)
 })
+
+describe('helio report activation (issue #400)', () => {
+  const MINUTE = 60_000
+  const HOUR = 60 * MINUTE
+  const HASH_A = 'a'.repeat(64)
+  const HASH_B = 'b'.repeat(64)
+  const CONNECT_LINE = /connect: attempting to connect to ([^\s]+)/g
+
+  /** Every string the redaction whitelist exists to stop, planted in the database or the config. */
+  const PLANTED = {
+    environment: 'probe-env-label',
+    session: 's-planted-session',
+    secondSession: 's-second-session',
+    channelSession: 'chan-planted',
+    tools: ['get_weather', 'send_email', 'delete_record', 'transfer_funds', 'send_message'],
+    rules: ['allow-reads', 'block-email', 'block-destructive', 'big-transfer'],
+    adapterOrigin: 'openclaw',
+    approvedBy: 'approver@planted',
+    agentId: 'agent-planted',
+    senderId: 'U-planted',
+    channelId: 'C-planted',
+    removedRule: 'removed-rule-planted',
+    reloadError: 'planted refusal message',
+    restartPath: 'listen.port-planted',
+    probeReason: 'x-probe-reason',
+    upstreamError: 'planted-upstream-error',
+    inputValue: 'planted-input-value',
+    responseText: 'planted-response-text',
+  } as const
+
+  const RULES_NO_APPROVAL = `
+    - name: allow-reads
+      match:
+        tool: get_weather
+      action: allow
+    - name: block-email
+      match:
+        tool: send_email
+      action: deny
+    - name: block-destructive
+      match:
+        annotations:
+          destructiveHint: true
+      action: deny`
+
+  function writeReportConfig(options: {
+    upstreamUrl?: string
+    dashboardSecret?: string
+    dashboardEnabled?: boolean
+    rules?: string
+    auditPath?: string
+  }): {
+    dir: string
+    configPath: string
+    auditPath: string
+    listenPort: number
+    dashboardPort: number
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-report-'))
+    const configPath = join(dir, 'helio.yaml')
+    const auditPath = options.auditPath ?? join(dir, 'audit.db')
+    const listenPort = randomChildPort()
+    const dashboardPort = listenPort + 1
+    const dashboard =
+      options.dashboardSecret !== undefined
+        ? `dashboard:
+  enabled: ${String(options.dashboardEnabled ?? true)}
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "${options.dashboardSecret}"
+`
+        : `dashboard:
+  enabled: false
+  port: ${String(dashboardPort)}
+`
+    writeFileSync(
+      configPath,
+      `version: "1"
+upstream:
+  url: "${options.upstreamUrl ?? 'http://127.0.0.1:1/mcp'}"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+environment: ${PLANTED.environment}
+policies:
+  default: allow
+  rules:${options.rules ?? RULES_NO_APPROVAL}
+${dashboard}audit:
+  path: "${auditPath}"
+`,
+    )
+    return { dir, configPath, auditPath, listenPort, dashboardPort }
+  }
+
+  /**
+   * Seed an activation history at fixed offsets from `base` through the
+   * store's own write path: an epoch with no rule, an epoch under rules,
+   * blocked, dry-run, anonymous, approved, sideband, drift, rejected and
+   * odd-reason rows, an applied and a refused reload. Every planted string
+   * of PLANTED lands in some column.
+   */
+  function seedActivationHistory(auditPath: string, base: Date): void {
+    const store = new AuditStore({
+      path: auditPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const at = (minutes: number) => new Date(base.getTime() + minutes * MINUTE).toISOString()
+    const row = (overrides: Partial<AuditRecordInput>): AuditRecordInput => ({
+      timestamp: new Date().toISOString(),
+      session_id: PLANTED.session,
+      session_source: 'header',
+      protocol_version: null,
+      upstream: null,
+      agent_id: null,
+      environment: PLANTED.environment,
+      tool_name: 'get_weather',
+      tool_input: { q: PLANTED.inputValue },
+      policy_decision: 'allow',
+      block_reason: null,
+      matched_rule: null,
+      matched_rule_index: null,
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: { content: [{ type: 'text', text: PLANTED.responseText }] },
+      upstream_error: null,
+      upstream_http_status: 200,
+      upstream_latency_ms: 1,
+      total_duration_ms: 1,
+      approval_wait_ms: 0,
+      proxy_compute_ms: 1,
+      flagged_destructive: false,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
+      config_sha256: HASH_A,
+      ...overrides,
+    })
+    const rows: Array<[string, AuditRecordInput]> = []
+    // Epoch A: ten allow rows under no rule, three of them anonymous.
+    for (let i = 0; i < 10; i++) {
+      rows.push([
+        at(i),
+        row({
+          tool_name: i % 2 === 0 ? 'get_weather' : 'transfer_funds',
+          session_id: i % 3 === 2 ? null : PLANTED.session,
+        }),
+      ])
+    }
+    rows.push([
+      at(15),
+      row({
+        tool_name: '<nameless>',
+        tool_input: {},
+        policy_decision: 'rejected',
+        block_reason: 'missing_tool_name',
+        session_id: null,
+        upstream_response: null,
+        upstream_http_status: null,
+      }),
+    ])
+    rows.push([
+      at(20),
+      row({
+        tool_name: 'send_email',
+        policy_decision: 'deny',
+        block_reason: 'policy_denied',
+        dry_run: true,
+        upstream_response: null,
+        upstream_http_status: null,
+      }),
+    ])
+    rows.push([at(25), row({ session_id: PLANTED.secondSession, dry_run: true })])
+    // Epoch B: under rules.
+    const b = (overrides: Partial<AuditRecordInput>) => row({ config_sha256: HASH_B, ...overrides })
+    for (let i = 31; i <= 33; i++) {
+      rows.push([
+        at(i),
+        b({
+          tool_name: 'send_email',
+          policy_decision: 'deny',
+          block_reason: 'policy_denied',
+          matched_rule: 'block-email',
+          matched_rule_index: 1,
+          upstream_response: null,
+          upstream_http_status: null,
+        }),
+      ])
+    }
+    rows.push([
+      at(34),
+      b({
+        tool_name: 'delete_record',
+        policy_decision: 'deny',
+        block_reason: 'policy_denied',
+        matched_rule: 'block-destructive',
+        matched_rule_index: 2,
+        flagged_destructive: true,
+        upstream_response: null,
+        upstream_http_status: null,
+      }),
+    ])
+    rows.push([at(35), b({ matched_rule: 'allow-reads', matched_rule_index: 0 })])
+    rows.push([
+      at(36),
+      b({
+        tool_name: 'transfer_funds',
+        policy_decision: 'require_approval',
+        matched_rule: 'big-transfer',
+        matched_rule_index: 3,
+        approval_status: 'approved',
+        approved_by: PLANTED.approvedBy,
+        agent_id: PLANTED.agentId,
+        approval_wait_ms: 1200,
+      }),
+    ])
+    rows.push([
+      at(37),
+      b({
+        tool_name: 'send_message',
+        origin: PLANTED.adapterOrigin,
+        session_id: PLANTED.channelSession,
+        session_source: 'sideband',
+        metadata: { channel_id: PLANTED.channelId, sender_id: PLANTED.senderId },
+      }),
+    ])
+    rows.push([
+      at(38),
+      b({
+        record_kind: 'drift_event',
+        policy_decision: 'tool_drift',
+        session_id: null,
+        upstream_response: null,
+        upstream_http_status: null,
+      }),
+    ])
+    rows.push([
+      at(39),
+      b({
+        tool_name: 'transfer_funds',
+        policy_decision: 'deny',
+        block_reason: PLANTED.probeReason,
+        session_id: null,
+        upstream_response: null,
+        upstream_http_status: null,
+      }),
+    ])
+    rows.push([
+      at(40),
+      b({
+        tool_name: 'helio.yaml',
+        tool_input: {},
+        policy_decision: 'policy_reload',
+        record_kind: 'policy_reload',
+        origin: 'config',
+        session_id: null,
+        session_source: null,
+        upstream_response: null,
+        upstream_http_status: null,
+        evidence_chain: {
+          policy_reload: {
+            outcome: 'applied',
+            config_path: '/home/planted-user/helio.yaml',
+            sha256_before: HASH_A,
+            sha256_after: HASH_B,
+            rules_added: ['block-email'],
+            rules_removed: [],
+          },
+        },
+      }),
+    ])
+    rows.push([
+      at(41),
+      b({
+        upstream_error: PLANTED.upstreamError,
+        upstream_response: null,
+        upstream_http_status: 500,
+      }),
+    ])
+    rows.push([
+      at(120),
+      b({
+        tool_name: 'helio.yaml',
+        tool_input: {},
+        policy_decision: 'policy_reload',
+        block_reason: 'rejected_invalid',
+        record_kind: 'policy_reload',
+        origin: 'config',
+        session_id: null,
+        session_source: null,
+        upstream_response: null,
+        upstream_http_status: null,
+        evidence_chain: {
+          policy_reload: {
+            outcome: 'rejected_invalid',
+            config_path: '/home/planted-user/helio.yaml',
+            sha256_before: HASH_B,
+            sha256_after: 'c'.repeat(64),
+            rules_removed: [PLANTED.removedRule],
+            error: PLANTED.reloadError,
+            restart_required_paths: [PLANTED.restartPath],
+          },
+        },
+      }),
+    ])
+    store.database.transaction(() => {
+      for (const [createdAt, record] of rows) store.insert(record, createdAt)
+    })()
+    store.close()
+  }
+
+  /** Run the CLI with NODE_DEBUG=net so every connection attempt of the child lands on stderr. */
+  function runReport(
+    args: string[],
+    env: NodeJS.ProcessEnv = {},
+  ): Promise<{ code: number; stdout: string; stderr: string; connects: string[] }> {
+    const merged = { ...process.env, NODE_DEBUG: 'net', ...env }
+    return runCli(['report', 'activation', ...args], merged).then((r) => ({
+      ...r,
+      connects: [...r.stderr.matchAll(CONNECT_LINE)].map((m) => m[1] ?? ''),
+    }))
+  }
+
+  /** Every key and every string value of a JSON value, depth first. */
+  function stringsOf(value: unknown, out: string[] = []): string[] {
+    if (typeof value === 'string') out.push(value)
+    else if (Array.isArray(value)) for (const v of value) stringsOf(v, out)
+    else if (value !== null && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        out.push(k)
+        stringsOf(v, out)
+      }
+    }
+    return out
+  }
+
+  /** The ISO 8601 day the CLI prints for a person (UTC). */
+  function dayOf(date: Date): string {
+    return date.toISOString().slice(0, 10)
+  }
+
+  /** The planted strings that must never appear in a default artifact (paths and host included). */
+  function neverInDefault(fixture: { configPath: string; auditPath: string }): string[] {
+    return [
+      fixture.configPath,
+      fixture.auditPath,
+      '127.0.0.1',
+      HASH_A,
+      HASH_B,
+      'c'.repeat(64),
+      PLANTED.environment,
+      PLANTED.session,
+      PLANTED.secondSession,
+      PLANTED.channelSession,
+      ...PLANTED.tools,
+      ...PLANTED.rules,
+      PLANTED.adapterOrigin,
+      PLANTED.approvedBy,
+      PLANTED.agentId,
+      PLANTED.senderId,
+      PLANTED.channelId,
+      PLANTED.removedRule,
+      PLANTED.reloadError,
+      PLANTED.restartPath,
+      PLANTED.probeReason,
+      PLANTED.upstreamError,
+      PLANTED.inputValue,
+      PLANTED.responseText,
+      'planted-user',
+      'HELIO_DASHBOARD_SECRET',
+    ]
+  }
+
+  /** The planted strings that stay out even with --include-names. */
+  function neverEvenWithNames(fixture: { configPath: string; auditPath: string }): string[] {
+    return neverInDefault(fixture).filter(
+      (s) =>
+        !(PLANTED.tools as readonly string[]).includes(s) &&
+        !(PLANTED.rules as readonly string[]).includes(s) &&
+        s !== PLANTED.adapterOrigin,
+    )
+  }
+
+  it('(a) helio report without a subject prints the group help and exits 1', async () => {
+    const { code, stdout, stderr } = await runCli(['report'])
+    expect(code).toBe(1)
+    expect(`${stdout}${stderr}`).toContain('Usage: helio report')
+    expect(`${stdout}${stderr}`).toContain('activation')
+  })
+
+  it('(b) helio report --help prints the group help and exits 0', async () => {
+    const { code, stdout, stderr } = await runCli(['report', '--help'])
+    expect(code).toBe(0)
+    expect(`${stdout}${stderr}`).toContain('Usage: helio report')
+    expect(`${stdout}${stderr}`).toContain('activation')
+  })
+
+  describe('(c) over the seeded database with no proxy', () => {
+    it('prints the timeline and the persisted block as text with no name, path, host or hash, naming the absent snapshot', async () => {
+      const fixture = writeReportConfig({ dashboardSecret: 'plain' })
+      const base = new Date(Date.now() - 3 * HOUR)
+      try {
+        seedActivationHistory(fixture.auditPath, base)
+        const { code, stdout, stderr, connects } = await runReport(['-c', fixture.configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain(
+          `Snapshot: No proxy answered on the configured dashboard port (dashboard http://127.0.0.1:${String(fixture.dashboardPort)}, config ${fixture.configPath})`,
+        )
+        // One attempt to the configured port, and nothing else.
+        expect(connects).toEqual([`127.0.0.1:${String(fixture.dashboardPort)}`])
+        expect(stdout).toContain('Helio activation report\n')
+        expect(stdout).toContain(
+          'Names: excluded (--include-names restores tool, door and rule names).\n',
+        )
+        expect(stdout).toContain(
+          '  Counts cover the last 7d; dates are within the audit retention of 90d.\n',
+        )
+        expect(stdout).toContain(
+          '  Sources: the audit database (read; this config file is NOT the one that last wrote policy to it). No proxy answered on the configured dashboard port, so the snapshot section is absent.\n',
+        )
+        expect(stdout).toContain(
+          `  First call observed            ${dayOf(base)}   earliest persisted tool call\n`,
+        )
+        expect(stdout).toContain(
+          `  First rule                     ${dayOf(new Date(base.getTime() + 31 * MINUTE))}   first call a rule decided\n` +
+            '                                 Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.\n' +
+            '  First generation               not available in this version\n' +
+            '  First simulation               not available in this version\n' +
+            '  First apply                    not available in this version\n' +
+            `  First enforcement decision     ${dayOf(new Date(base.getTime() + 31 * MINUTE))}   first blocked call (policy_denied)\n`,
+        )
+        expect(stdout).toContain(
+          'Persisted (last 7d)\n' +
+            '  21 calls across 5 tool-door pairs, 3 sessions, 4 calls without a session id (denied and dry-run calls included)\n' +
+            '  Decisions: 14 permitted, 5 blocked (policy_denied 4, other 1), 2 dry-run, 1 approvals requested\n' +
+            '  Config versions seen: 2\n' +
+            '  Config reloads: 2 (1 applied)\n' +
+            `  audit rows since ${dayOf(base)}\n`,
+        )
+        expect(stdout).not.toContain('Snapshot (')
+        for (const planted of neverInDefault(fixture)) {
+          expect(stdout, planted).not.toContain(planted)
+        }
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('prints the same object as JSON, every key and value clean, and restores names on request', async () => {
+      const fixture = writeReportConfig({ dashboardSecret: 'plain' })
+      const base = new Date(Date.now() - 3 * HOUR)
+      try {
+        seedActivationHistory(fixture.auditPath, base)
+        const json = await runReport(['-c', fixture.configPath, '--format', 'json'])
+        expect(json.code).toBe(0)
+        const report = JSON.parse(json.stdout) as {
+          schema_version: number
+          names_included: boolean
+          window: string
+          retention: string
+          sources: Record<string, unknown>
+          timeline: { first_rule: { source: string; rule_name?: string } }
+          persisted: { calls_in_window: number; decisions: Record<string, number> }
+          snapshot: unknown
+        }
+        expect(report.schema_version).toBe(1)
+        expect(report.names_included).toBe(false)
+        expect(report.window).toBe('7d')
+        expect(report.retention).toBe('90d')
+        expect(report.sources).toEqual({
+          audit_database: 'read',
+          config_file_vs_last_policy_write: 'mismatch',
+          proxy_snapshot: 'absent',
+          proxy_snapshot_absent_reason: 'no_proxy_answered',
+          proxy_snapshot_verified: false,
+        })
+        expect(report.snapshot).toBeNull()
+        expect(report.timeline.first_rule.source).toBe('first_rule_decided_call')
+        expect(report.persisted.calls_in_window).toBe(21)
+        expect(report.persisted.decisions).toEqual({
+          permitted: 14,
+          blocked: 5,
+          dry_run: 2,
+          approvals_requested: 1,
+        })
+        const strings = stringsOf(report)
+        for (const planted of neverInDefault(fixture)) {
+          for (const s of strings) expect(s, `${planted} in ${s}`).not.toContain(planted)
+        }
+
+        const named = await runReport([
+          '-c',
+          fixture.configPath,
+          '--format',
+          'json',
+          '--include-names',
+        ])
+        expect(named.code).toBe(0)
+        const namedReport = JSON.parse(named.stdout) as typeof report & {
+          persisted: { pairs_called_in_window: Array<{ tool_name: string; origin: string }> }
+          timeline: { first_enforcement_decision: { tool: string } }
+        }
+        expect(namedReport.names_included).toBe(true)
+        expect(namedReport.timeline.first_rule.rule_name).toBe('block-email')
+        expect(namedReport.timeline.first_enforcement_decision.tool).toBe('send_email')
+        expect(namedReport.persisted.pairs_called_in_window.map((p) => p.tool_name).sort()).toEqual(
+          [...PLANTED.tools].sort(),
+        )
+        const namedStrings = stringsOf(namedReport)
+        for (const planted of neverEvenWithNames(fixture)) {
+          for (const s of namedStrings) expect(s, `${planted} in ${s}`).not.toContain(planted)
+        }
+        const namedText = await runReport(['-c', fixture.configPath, '--include-names'])
+        expect(namedText.stdout).toContain(
+          'Names: INCLUDED (tool, door and rule names are in this file).',
+        )
+        expect(namedText.stdout).toContain('first call a rule decided (rule "block-email")')
+        expect(namedText.stdout).toContain('first blocked call (policy_denied, tool send_email)')
+        for (const planted of neverEvenWithNames(fixture)) {
+          expect(namedText.stdout, planted).not.toContain(planted)
+        }
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('writes the same bytes to --out, refuses an existing file without --force, and is deterministic once the clocks are stripped', async () => {
+      const fixture = writeReportConfig({})
+      const base = new Date(Date.now() - 3 * HOUR)
+      const out1 = join(fixture.dir, 'one.json')
+      const out2 = join(fixture.dir, 'two.json')
+      const outText = join(fixture.dir, 'report.txt')
+      try {
+        seedActivationHistory(fixture.auditPath, base)
+        const first = await runReport(['-c', fixture.configPath, '--format', 'json', '--out', out1])
+        expect(first.code).toBe(0)
+        expect(first.stdout).toBe('')
+        const bytes = statSync(out1).size
+        expect(first.stderr).toContain(`Wrote ${out1} (json, ${String(bytes)} bytes)`)
+        expect(readFileSync(out1, 'utf-8').endsWith('}\n')).toBe(true)
+        const second = await runReport([
+          '-c',
+          fixture.configPath,
+          '--format',
+          'json',
+          '--out',
+          out2,
+        ])
+        expect(second.code).toBe(0)
+        const strip = (path: string): string => {
+          const value = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
+          const scrub = (v: unknown): unknown => {
+            if (Array.isArray(v)) return v.map(scrub)
+            if (v !== null && typeof v === 'object') {
+              return Object.fromEntries(
+                Object.entries(v as Record<string, unknown>)
+                  .filter(([k]) => k !== 'generated_at' && k !== 'since')
+                  .map(([k, inner]) => [k, scrub(inner)]),
+              )
+            }
+            return v
+          }
+          return JSON.stringify(scrub(value))
+        }
+        expect(strip(out1)).toBe(strip(out2))
+
+        const refused = await runReport([
+          '-c',
+          fixture.configPath,
+          '--format',
+          'json',
+          '--out',
+          out1,
+        ])
+        expect(refused.code).toBe(1)
+        expect(refused.stderr.trim()).toBe(
+          `Error: ${out1} already exists. Pass --force to overwrite it.`,
+        )
+        expect(refused.connects).toEqual([])
+        const forced = await runReport(['-c', fixture.configPath, '--out', out1, '--force'])
+        expect(forced.code).toBe(0)
+        expect(forced.stderr).toContain(`Wrote ${out1} (text, `)
+        const orphanForce = await runReport(['-c', fixture.configPath, '--force'])
+        expect(orphanForce.code).toBe(1)
+        expect(orphanForce.stderr.trim()).toBe('Error: --force applies only with --out')
+
+        const text = await runReport(['-c', fixture.configPath])
+        const written = await runReport(['-c', fixture.configPath, '--out', outText])
+        expect(written.code).toBe(0)
+        // The file is the terminal's bytes plus a trailing newline; the two
+        // runs differ only by their clocks, so compare line by line.
+        const fileLines = readFileSync(outText, 'utf-8').split('\n')
+        const stdoutLines = text.stdout.split('\n')
+        expect(fileLines).toHaveLength(stdoutLines.length)
+        for (const [i, line] of stdoutLines.entries()) {
+          if (line.startsWith('  Written by Helio')) continue
+          expect(fileLines[i], `line ${String(i)}`).toBe(line)
+        }
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it('names the window on every persisted line for 4h and 30d, and refuses bad flags before any open or socket', async () => {
+      const fixture = writeReportConfig({ dashboardSecret: 'plain' })
+      const base = new Date(Date.now() - 3 * HOUR)
+      try {
+        seedActivationHistory(fixture.auditPath, base)
+        for (const window of ['4h', '30d']) {
+          const { code, stdout } = await runReport(['-c', fixture.configPath, '--window', window])
+          expect(code, window).toBe(0)
+          expect(stdout, window).toContain(`  Counts cover the last ${window};`)
+          expect(stdout, window).toContain(`Persisted (last ${window})`)
+        }
+        const short = await runReport(['-c', fixture.configPath, '--window', '30s'])
+        expect(short.code).toBe(1)
+        expect(short.stderr.trim()).toBe(
+          'Error: --window must be a duration between 1m and 30d (for example 4h, 240m or 7d)',
+        )
+        expect(short.connects).toEqual([])
+        const long = await runReport(['-c', fixture.configPath, '--window', '31d'])
+        expect(long.code).toBe(1)
+        expect(long.stderr.trim()).toBe(
+          'Error: --window must be a duration between 1m and 30d (for example 4h, 240m or 7d)',
+        )
+        const format = await runReport(['-c', fixture.configPath, '--format', 'xml'])
+        expect(format.code).toBe(1)
+        expect(format.stderr.trim()).toBe('Error: --format must be text or json (got "xml")')
+        expect(format.connects).toEqual([])
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('refuses a missing database with one line and creates nothing', async () => {
+      const fixture = writeReportConfig({ dashboardSecret: 'plain' })
+      try {
+        const { code, stdout, stderr, connects } = await runReport(['-c', fixture.configPath])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(
+          `Error: no audit database at ${fixture.auditPath}. helio start writes it on the first governed call; nothing has been recorded on this machine.`,
+        )
+        expect(connects).toEqual([])
+        expect(existsSync(fixture.auditPath)).toBe(false)
+        expect(readdirSync(fixture.dir)).toEqual(['helio.yaml'])
+        // A bad window is refused before the database is even looked for.
+        const window = await runReport(['-c', fixture.configPath, '--window', '31d'])
+        expect(window.stderr).toContain('Error: --window must be a duration')
+        expect(existsSync(fixture.auditPath)).toBe(false)
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses a :memory: audit path as a missing database', async () => {
+      const fixture = writeReportConfig({ auditPath: ':memory:' })
+      try {
+        const { code, stderr } = await runReport(['-c', fixture.configPath])
+        expect(code).toBe(1)
+        expect(stderr.trim()).toBe(
+          'Error: no audit database at :memory:. helio start writes it on the first governed call; nothing has been recorded on this machine.',
+        )
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('prints a text file at audit.path as one SQLITE_NOTADB line, no rejection wrapper', async () => {
+      const fixture = writeReportConfig({})
+      try {
+        writeFileSync(fixture.auditPath, 'this is not a database\n')
+        const { code, stdout, stderr } = await runReport(['-c', fixture.configPath])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(
+          `Error: audit.path: cannot open ${fixture.auditPath} (SQLITE_NOTADB: file is not a database)`,
+        )
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('prints the store schema clean-break line unchanged on a stale database', async () => {
+      const fixture = writeReportConfig({})
+      try {
+        const stale = new Database(fixture.auditPath)
+        stale.exec('CREATE TABLE audit_records (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL)')
+        stale.close()
+        const { code, stderr } = await runReport(['-c', fixture.configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain('[helio] Audit DB schema mismatch: missing required columns')
+        expect(stderr).toContain(`Delete "${fixture.auditPath}"`)
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(stderr).not.toMatch(/\n\s+at /)
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('states a disabled dashboard and a digest secret as absent-snapshot reasons with zero connection attempts', async () => {
+      const disabled = writeReportConfig({})
+      const digest = writeReportConfig({ dashboardSecret: secretDigest('the-real-secret') })
+      const base = new Date(Date.now() - 3 * HOUR)
+      let requests = 0
+      const sink = createServer((_req, res) => {
+        requests += 1
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      })
+      await new Promise<void>((resolve) => {
+        sink.listen(digest.dashboardPort, '127.0.0.1', resolve)
+      })
+      try {
+        seedActivationHistory(disabled.auditPath, base)
+        seedActivationHistory(digest.auditPath, base)
+        const off = await runReport(['-c', disabled.configPath, '--format', 'json'])
+        expect(off.code).toBe(0)
+        expect(off.connects).toEqual([])
+        expect(off.stderr).toContain(
+          `Snapshot: The dashboard is disabled in the config file (dashboard http://127.0.0.1:${String(disabled.dashboardPort)}, config ${disabled.configPath})`,
+        )
+        expect(
+          (JSON.parse(off.stdout) as { sources: { proxy_snapshot_absent_reason: string } }).sources
+            .proxy_snapshot_absent_reason,
+        ).toBe('dashboard_disabled')
+        const offText = await runReport(['-c', disabled.configPath])
+        expect(offText.stdout).toContain(
+          'The dashboard is disabled in the config file, so the snapshot section is absent.',
+        )
+
+        const env = { ...process.env }
+        delete env['HELIO_DASHBOARD_SECRET']
+        const dig = await runReport(['-c', digest.configPath], env)
+        expect(dig.code).toBe(0)
+        expect(dig.connects).toEqual([])
+        expect(requests).toBe(0)
+        expect(dig.stdout).toContain(
+          'The dashboard secret found is a sha256: digest, not the secret, so the snapshot section is absent.',
+        )
+        expect(dig.stderr).toContain(
+          'Snapshot: The dashboard secret found is a sha256: digest, not the secret (dashboard http://127.0.0.1:',
+        )
+      } finally {
+        await new Promise<void>((resolve) => {
+          sink.close(() => {
+            resolve()
+          })
+        })
+        rmSync(disabled.dir, { recursive: true, force: true })
+        rmSync(digest.dir, { recursive: true, force: true })
+      }
+    }, 20_000)
+
+    it('exits 1 with the loader line when the secret placeholder is unset, as export and policy status do', async () => {
+      const fixture = writeReportConfig({ dashboardSecret: '${HELIO_DASHBOARD_SECRET}' })
+      const env = { ...process.env }
+      delete env['HELIO_DASHBOARD_SECRET']
+      try {
+        seedActivationHistory(fixture.auditPath, new Date(Date.now() - HOUR))
+        const { code, stdout, stderr } = await runReport(['-c', fixture.configPath], env)
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr).toContain('Error: Environment variable "HELIO_DASHBOARD_SECRET" is not set')
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+  })
+
+  describe('(d) against a running proxy', () => {
+    const ANNOTATED_TOOLS = [
+      { name: 'get_weather', annotations: { readOnlyHint: true, destructiveHint: false } },
+      { name: 'send_email', annotations: { readOnlyHint: false, destructiveHint: false } },
+      { name: 'delete_record', annotations: { destructiveHint: true } },
+      { name: 'transfer_funds', inputSchema: { type: 'object' } },
+    ]
+    const BARE_TOOLS = [{ name: 'read_file' }, { name: 'exec' }]
+
+    function startToolsUpstream(tools: unknown[]): Promise<MockMcpServer> {
+      return startMockMcpServer((payload) => {
+        const id = payload['id'] ?? null
+        if (payload['method'] === 'tools/list') return { jsonrpc: '2.0', id, result: { tools } }
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+      })
+    }
+
+    /** tools/list answers 500; everything else 200. */
+    async function startFailingUpstream(): Promise<{ url: string; close: () => Promise<void> }> {
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = []
+        req.on('data', (chunk: Buffer) => {
+          chunks.push(chunk)
+        })
+        req.on('end', () => {
+          let payload: Record<string, unknown> = {}
+          try {
+            payload = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Record<string, unknown>
+          } catch {
+            payload = {}
+          }
+          if (payload['method'] === 'tools/list') {
+            res.writeHead(500, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'boom' }))
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: payload['id'] ?? null, result: {} }))
+        })
+      })
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', resolve)
+      })
+      const port = (server.address() as AddressInfo).port
+      return {
+        url: `http://127.0.0.1:${String(port)}/mcp`,
+        close: () =>
+          new Promise<void>((resolve, reject) => {
+            server.close((err) => {
+              if (err) reject(err)
+              else resolve()
+            })
+          }),
+      }
+    }
+
+    /** Boot `helio start` and resolve once the dashboard API is listening (the #396 poll loop). */
+    async function bootProxy(configPath: string): Promise<{
+      child: ReturnType<typeof spawn>
+      stderr: () => string
+      waitFor: (predicate: () => boolean) => Promise<void>
+    }> {
+      const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+      })
+      const waitFor = async (predicate: () => boolean): Promise<void> => {
+        const started = Date.now()
+        while (Date.now() - started < 10_000) {
+          if (predicate()) return
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        throw new Error(`Timed out. stderr:\n${stderr}`)
+      }
+      await waitFor(() => stderr.includes('Dashboard API listening'))
+      return { child, stderr: () => stderr, waitFor }
+    }
+
+    async function stopProxy(child: ReturnType<typeof spawn>): Promise<void> {
+      child.kill('SIGTERM')
+      await waitForChildExit(child, 5_000).catch(() => undefined)
+    }
+
+    it('carries the proxy snapshot, matches the config file to the last write, and opens exactly one loopback connection', async () => {
+      const upstream = await startToolsUpstream(ANNOTATED_TOOLS)
+      const secret = `report-secret-${String(randomChildPort())}`
+      const fixture = writeReportConfig({ upstreamUrl: upstream.url, dashboardSecret: secret })
+      const env = { HELIO_DASHBOARD_SECRET: secret }
+      seedActivationHistory(fixture.auditPath, new Date(Date.now() - 3 * HOUR))
+      const proxy = await bootProxy(fixture.configPath)
+      try {
+        // One governed call so the newest record carries THIS file's hash.
+        const call = await fetch(`http://127.0.0.1:${String(fixture.listenPort)}/mcp`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            'x-helio-session-id': 'live-1',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'get_weather', arguments: {} },
+          }),
+        })
+        expect(call.status).toBe(200)
+        await call.text()
+
+        type Report = {
+          sources: { proxy_snapshot: string; config_file_vs_last_policy_write: string }
+          snapshot: {
+            surface: { pairs: number; annotation_free_door_count: number; doors: unknown[] }
+            coverage: { matched: number; pairs?: unknown[] }
+          } | null
+          persisted: { calls_in_window: number }
+        }
+        let report: Report | undefined
+        let run: Awaited<ReturnType<typeof runReport>> | undefined
+        // The audit writer flushes asynchronously: poll the report until the
+        // live call is the newest record (the #396 poll loop, never a fixed sleep).
+        const started = Date.now()
+        while (Date.now() - started < 10_000) {
+          run = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+          report = JSON.parse(run.stdout) as Report
+          if (report.sources.config_file_vs_last_policy_write === 'match') break
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        if (run === undefined || report === undefined) throw new Error('no run')
+        expect(run.code).toBe(0)
+        expect(run.stderr).not.toContain('Snapshot:')
+        expect(run.connects).toEqual([`127.0.0.1:${String(fixture.dashboardPort)}`])
+        expect(report.sources.proxy_snapshot).toBe('present')
+        expect(report.sources.config_file_vs_last_policy_write).toBe('match')
+        expect(report.snapshot?.surface.pairs).toBe(4)
+        // transfer_funds carries no annotations: destructive by MCP default,
+        // so block-destructive matches it too.
+        expect(report.snapshot?.coverage.matched).toBe(4)
+        expect(report.snapshot?.coverage.pairs).toBeUndefined()
+        expect(report.persisted.calls_in_window).toBe(22)
+        const strings = stringsOf(report)
+        for (const planted of neverInDefault(fixture)) {
+          for (const s of strings) expect(s, `${planted} in ${s}`).not.toContain(planted)
+        }
+        const text = await runReport(['-c', fixture.configPath], env)
+        expect(text.stdout).toContain('Snapshot (running proxy, ')
+        expect(text.stdout).toContain(
+          '  Authority surface: 4 tool-door pairs across 1 upstream; 1 annotated destructive; 1 destructive by MCP default\n' +
+            '  Policy: 3 rules, default allow, on_tool_drift block\n' +
+            '  Policy coverage: 4 of 4 have a rule that can match them; 0 fall through to the default: allow\n' +
+            '  Effective action: allow 1, deny 3\n',
+        )
+        expect(text.stdout).toContain('(from the proxy)')
+        expect(text.stdout).toContain(
+          '  Doors: 1 upstream primed, 0 not primed, 0 without annotations, 0 adapter origins',
+        )
+        for (const planted of neverInDefault(fixture)) {
+          expect(text.stdout, planted).not.toContain(planted)
+        }
+
+        // helio policy status over the same proxy agrees with the snapshot.
+        const status = await runCli(
+          ['policy', 'status', '-c', fixture.configPath, '--format', 'json', '--window', '7d'],
+          { ...process.env, ...env },
+        )
+        expect(status.code).toBe(0)
+        const statusBody = JSON.parse(status.stdout) as {
+          surface: { pairs: number }
+          coverage: { matched: number }
+        }
+        expect(statusBody.surface.pairs).toBe(report.snapshot?.surface.pairs)
+        expect(statusBody.coverage.matched).toBe(report.snapshot?.coverage.matched)
+
+        // With names: the per-pair table with the rule names, and still no session id or path.
+        const named = await runReport(['-c', fixture.configPath, '--include-names'], env)
+        expect(named.code).toBe(0)
+        expect(named.stdout).toMatch(/send_email\s+upstream\s+deny\s+rule "block-email"/)
+        expect(named.stdout).toMatch(/delete_record\s+upstream\s+deny\s+rule "block-destructive"/)
+        expect(named.stdout).toMatch(/get_weather\s+upstream\s+allow\s+rule "allow-reads"/)
+        expect(named.stdout).toMatch(/transfer_funds\s+upstream\s+deny\s+rule "block-destructive"/)
+        for (const planted of neverEvenWithNames(fixture)) {
+          expect(named.stdout, planted).not.toContain(planted)
+        }
+      } finally {
+        await stopProxy(proxy.child)
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    it('keeps a bare-tools upstream URL label out of the default output and restores it with names', async () => {
+      const upstream = await startToolsUpstream(BARE_TOOLS)
+      const secret = `report-secret-${String(randomChildPort())}`
+      const fixture = writeReportConfig({ upstreamUrl: upstream.url, dashboardSecret: secret })
+      const env = { HELIO_DASHBOARD_SECRET: secret }
+      seedActivationHistory(fixture.auditPath, new Date(Date.now() - 3 * HOUR))
+      const proxy = await bootProxy(fixture.configPath)
+      try {
+        const plain = await runReport(['-c', fixture.configPath], env)
+        expect(plain.code).toBe(0)
+        expect(plain.stdout).toContain(
+          '  Doors: 1 upstream primed, 0 not primed, 1 without annotations, 0 adapter origins',
+        )
+        expect(plain.stdout).not.toContain(upstream.url)
+        expect(plain.stdout).not.toContain('127.0.0.1')
+        const json = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(stringsOf(JSON.parse(json.stdout))).not.toContain(upstream.url)
+        const named = await runReport(['-c', fixture.configPath, '--include-names'], env)
+        expect(named.stdout).toContain(`    no annotations: ${upstream.url}`)
+        const namedJson = await runReport(
+          ['-c', fixture.configPath, '--format', 'json', '--include-names'],
+          env,
+        )
+        expect(
+          (
+            JSON.parse(namedJson.stdout) as {
+              snapshot: { surface: { annotation_free_doors: string[] } }
+            }
+          ).snapshot.surface.annotation_free_doors,
+        ).toEqual([upstream.url])
+      } finally {
+        await stopProxy(proxy.child)
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    it('keeps a not-primed door URL and its failure text out of the default output and restores both with names', async () => {
+      const upstream = await startFailingUpstream()
+      const secret = `report-secret-${String(randomChildPort())}`
+      const fixture = writeReportConfig({ upstreamUrl: upstream.url, dashboardSecret: secret })
+      const env = { HELIO_DASHBOARD_SECRET: secret }
+      seedActivationHistory(fixture.auditPath, new Date(Date.now() - 3 * HOUR))
+      const proxy = await bootProxy(fixture.configPath)
+      const failure =
+        'upstream returned HTTP 500 to tools/list (session/initialize may be required)'
+      try {
+        const plain = await runReport(['-c', fixture.configPath], env)
+        expect(plain.code).toBe(0)
+        expect(plain.stdout).toContain(
+          '  Doors: 0 upstream primed, 1 not primed, 0 without annotations, 0 adapter origins',
+        )
+        expect(plain.stdout).not.toContain(upstream.url)
+        expect(plain.stdout).not.toContain(failure)
+        expect(plain.stdout).not.toContain('127.0.0.1')
+        const named = await runReport(['-c', fixture.configPath, '--include-names'], env)
+        expect(named.stdout).toContain(`    not primed: ${upstream.url} (${failure})`)
+        const namedJson = await runReport(
+          ['-c', fixture.configPath, '--format', 'json', '--include-names'],
+          env,
+        )
+        expect(
+          (JSON.parse(namedJson.stdout) as { snapshot: { surface: { unavailable: unknown[] } } })
+            .snapshot.surface.unavailable,
+        ).toEqual([{ name: upstream.url, reason: failure }])
+      } finally {
+        await stopProxy(proxy.child)
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+  })
+})

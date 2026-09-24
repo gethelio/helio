@@ -22,7 +22,7 @@ import {
 import type { HelioConfig, SingularHelioConfig } from './config/index.js'
 import { DEFAULT_REARM_INTERVAL_MS } from './config/watcher.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
-import { isSecretDigest, secretDigest } from './auth/bearer.js'
+import { secretDigest } from './auth/bearer.js'
 import {
   SANDBOX_DEFAULT_DIR,
   SANDBOX_FILES,
@@ -70,6 +70,10 @@ import {
   renderPolicyStatusText,
 } from './policy/status.js'
 import type { PolicyStatusReport } from './policy/status.js'
+import { fetchPolicyStatus } from './policy/status-fetch.js'
+import { buildActivationReport, renderActivationText, windowSince } from './report/activation.js'
+import type { ConfigFileVsLastPolicyWrite, SnapshotAbsentReason } from './report/activation.js'
+import type { ActivationTimeline, ActivationWindow, PersistedSummary } from './audit/types.js'
 import {
   AuditStore,
   AuditWriter,
@@ -1955,29 +1959,11 @@ interface PolicyStatusOptions {
 }
 
 /**
- * The dashboard secret `helio policy status` presents, in order: the
- * HELIO_DASHBOARD_SECRET environment variable, else a plaintext
- * `dashboard.api_secret` in the loaded config, else none (open mode).
- */
-function resolveDashboardSecret(
-  config: HelioConfig,
-  configPath: string,
-): { secret: string | undefined; source: string | undefined } {
-  const fromEnv = process.env['HELIO_DASHBOARD_SECRET']
-  if (fromEnv !== undefined && fromEnv.length > 0) {
-    return { secret: fromEnv, source: 'HELIO_DASHBOARD_SECRET' }
-  }
-  const fromConfig = config.dashboard.api_secret
-  if (fromConfig !== undefined && fromConfig.length > 0) {
-    return { secret: fromConfig, source: `dashboard.api_secret in ${configPath}` }
-  }
-  return { secret: undefined, source: undefined }
-}
-
-/**
  * `helio policy status` (issue #396): the authority report of the RUNNING
  * proxy, read through its dashboard API, because the primed surface lives
- * only in that process. Every refusal is one StartupError line.
+ * only in that process. Every refusal is one StartupError line; the read
+ * itself is the shared `fetchPolicyStatus` (#400), whose codes map onto
+ * the lines below.
  */
 async function policyStatusCommand(opts: PolicyStatusOptions): Promise<void> {
   if (opts.format !== 'text' && opts.format !== 'json') {
@@ -1997,58 +1983,202 @@ async function policyStatusCommand(opts: PolicyStatusOptions): Promise<void> {
     }
     throw err
   }
-  if (!config.dashboard.enabled) {
-    throw new StartupError(
-      `Error: helio policy status reads the running proxy through the dashboard API, and ` +
-        `dashboard.enabled is false in ${opts.config}. Enable the dashboard and restart helio start.`,
-    )
-  }
 
-  const { secret, source } = resolveDashboardSecret(config, opts.config)
-  // verifyBearer hashes the presented value, so a digest sent as Bearer is
-  // a 401 that names the wrong cause: refuse it here, before any request.
-  if (secret !== undefined && isSecretDigest(secret)) {
-    throw new StartupError(
-      `Error: the dashboard secret from ${source ?? 'the config'} is a sha256: digest; present the ` +
-        `secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
-    )
-  }
-
-  const host = config.dashboard.host.includes(':')
-    ? `[${config.dashboard.host}]`
-    : config.dashboard.host
-  const base = `http://${host}:${String(config.dashboard.port)}`
-  let response: Response
-  try {
-    response = await fetch(`${base}/api/policy/status?window=${encodeURIComponent(opts.window)}`, {
-      headers: secret !== undefined ? { authorization: `Bearer ${secret}` } : {},
-    })
-  } catch {
-    throw new StartupError(
-      `Error: cannot reach the Helio dashboard API at ${base} (is helio start running with dashboard.enabled: true?)`,
-    )
-  }
-  if (response.status === 401) {
-    throw new StartupError(
-      `Error: the Helio dashboard API at ${base} refused the secret from ${source ?? 'no source (none was found)'}; ` +
-        `set HELIO_DASHBOARD_SECRET to the secret helio init printed and rerun`,
-    )
-  }
-  const body: unknown = await response.json().catch(() => undefined)
-  if (!response.ok) {
-    const message =
-      typeof body === 'object' &&
-      body !== null &&
-      typeof (body as { error?: unknown }).error === 'string'
-        ? (body as { error: string }).error
-        : `HTTP ${String(response.status)}`
-    throw new StartupError(`Error: the Helio dashboard API at ${base} answered: ${message}`)
+  const result = await fetchPolicyStatus(config, opts.config, opts.window)
+  if (!result.ok) {
+    const { base, source, message } = result.detail
+    switch (result.code) {
+      case 'dashboard_disabled':
+        throw new StartupError(
+          `Error: helio policy status reads the running proxy through the dashboard API, and ` +
+            `dashboard.enabled is false in ${opts.config}. Enable the dashboard and restart helio start.`,
+        )
+      case 'secret_is_digest':
+        throw new StartupError(
+          `Error: the dashboard secret from ${source ?? 'the config'} is a sha256: digest; present the ` +
+            `secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
+        )
+      case 'no_proxy_answered':
+        throw new StartupError(
+          `Error: cannot reach the Helio dashboard API at ${base} (is helio start running with dashboard.enabled: true?)`,
+        )
+      case 'secret_refused':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} refused the secret from ${source ?? 'no source (none was found)'}; ` +
+            `set HELIO_DASHBOARD_SECRET to the secret helio init printed and rerun`,
+        )
+      case 'status_unavailable':
+      case 'api_error':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} answered: ${message ?? 'HTTP error'}`,
+        )
+    }
   }
   if (opts.format === 'json') {
-    console.log(JSON.stringify(body, null, 2))
+    console.log(JSON.stringify(result.report, null, 2))
     return
   }
-  console.log(renderPolicyStatusText(body as PolicyStatusReport))
+  console.log(renderPolicyStatusText(result.report))
+}
+
+// ---------------------------------------------------------------------------
+// report activation (issue #400)
+// ---------------------------------------------------------------------------
+
+interface ReportActivationOptions {
+  config: string
+  window: string
+  format: string
+  out?: string
+  force: boolean
+  includeNames: boolean
+}
+
+/** The persisted window `helio report activation` reads when none is asked for. */
+const DEFAULT_REPORT_WINDOW = '7d'
+
+/** The fixed sentence the operator's stderr line opens with, per absent-snapshot code. */
+const SNAPSHOT_ABSENT_STDERR: Readonly<Record<SnapshotAbsentReason, string>> = {
+  no_proxy_answered: 'No proxy answered on the configured dashboard port',
+  dashboard_disabled: 'The dashboard is disabled in the config file',
+  secret_is_digest: 'The dashboard secret found is a sha256: digest, not the secret',
+  secret_refused: 'The proxy refused the dashboard secret',
+  status_unavailable:
+    'A process answered but serves no policy status (a library embedding, not helio start)',
+  api_error: 'The proxy answered with an error',
+}
+
+/** The three store reads of the report, with the store closed whatever happens. */
+function readActivationFacts(
+  store: AuditStore,
+  since: string,
+): {
+  persisted: PersistedSummary
+  activationWindow: ActivationWindow
+  timeline: ActivationTimeline
+} {
+  try {
+    return {
+      persisted: store.persistedSummary(since),
+      activationWindow: store.activationWindow(since),
+      timeline: store.activationTimeline(),
+    }
+  } finally {
+    store.close()
+  }
+}
+
+/**
+ * `helio report activation` (issue #400): one redacted artifact from two
+ * sources. The audit database on disk is opened the way `helio export`
+ * opens it (migration, index build and retention purge included) and is
+ * always read; a missing file is refused, never created. The running proxy
+ * is asked through `fetchPolicyStatus` and its absence is one stated reason.
+ * Every refusal that leaves nothing to print is one StartupError line
+ * before any open or socket; nothing in the artifact carries a path, a
+ * host, a hash or a secret's source.
+ */
+async function reportActivationCommand(opts: ReportActivationOptions): Promise<void> {
+  if (opts.format !== 'text' && opts.format !== 'json') {
+    throw new StartupError(`Error: --format must be text or json (got "${opts.format}")`)
+  }
+  const window = parseStatusWindow(opts.window)
+  if (!window.ok) throw new StartupError(`Error: --${window.error}`)
+  if (opts.force && opts.out === undefined) {
+    throw new StartupError('Error: --force applies only with --out')
+  }
+  if (opts.out !== undefined && !opts.force && existsSync(opts.out)) {
+    throw new StartupError(`Error: ${opts.out} already exists. Pass --force to overwrite it.`)
+  }
+
+  let config: HelioConfig
+  try {
+    config = await loadConfig(opts.config)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      printConfigErrorDetails(err)
+      process.exit(1)
+    }
+    throw err
+  }
+  const source = await readConfigSource(opts.config)
+
+  const auditProblem = auditPathProblem(config.audit.path)
+  if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
+  if (config.audit.path === ':memory:' || !existsSync(config.audit.path)) {
+    throw new StartupError(
+      `Error: no audit database at ${config.audit.path}. helio start writes it on the first ` +
+        'governed call; nothing has been recorded on this machine.',
+    )
+  }
+
+  // The one open, wrapped: a SQLite code becomes one line; the store's own
+  // clean-break StartupError and anything else pass through unchanged.
+  let store: AuditStore
+  try {
+    store = new AuditStore({
+      path: config.audit.path,
+      retention: config.audit.retention,
+      includeResponses: config.audit.include_responses,
+      cleanupIntervalMs: 0,
+    })
+  } catch (err) {
+    const code = (err as { code?: unknown }).code
+    if (typeof code === 'string' && code.startsWith('SQLITE_')) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new StartupError(
+        `Error: audit.path: cannot open ${config.audit.path} (${code}: ${message})`,
+      )
+    }
+    throw err
+  }
+
+  const now = new Date()
+  const since = windowSince(now, window.ms)
+  const facts = readActivationFacts(store, since)
+  const { persisted, activationWindow, timeline } = facts
+  const newest = timeline.newest_record_hash
+  const sameFile: ConfigFileVsLastPolicyWrite =
+    newest === null
+      ? 'no_record'
+      : newest.hash === null
+        ? 'no_hash'
+        : newest.hash === source.sha256
+          ? 'match'
+          : 'mismatch'
+
+  const snapshot = await fetchPolicyStatus(config, opts.config, opts.window)
+  if (!snapshot.ok) {
+    console.error(
+      `Snapshot: ${SNAPSHOT_ABSENT_STDERR[snapshot.code]} (dashboard ${snapshot.detail.base}, config ${opts.config})`,
+    )
+  }
+
+  const report = buildActivationReport({
+    now,
+    helioVersion: VERSION,
+    window: opts.window,
+    windowMs: window.ms,
+    retention: config.audit.retention,
+    includeNames: opts.includeNames,
+    configFileVsLastPolicyWrite: sameFile,
+    persisted,
+    activationWindow,
+    timeline,
+    snapshot: snapshot.ok
+      ? { ok: true, report: snapshot.report }
+      : { ok: false, code: snapshot.code },
+  })
+  const rendered =
+    opts.format === 'json' ? JSON.stringify(report, null, 2) : renderActivationText(report)
+  if (opts.out === undefined) {
+    console.log(rendered)
+    return
+  }
+  const bytes = Buffer.from(`${rendered}\n`, 'utf-8')
+  await writeFile(opts.out, bytes)
+  console.error(`Wrote ${opts.out} (${opts.format}, ${String(bytes.length)} bytes)`)
 }
 
 /**
@@ -2176,5 +2306,23 @@ policyCommand
   .option('--format <format>', 'Output format: text or json', 'text')
   .option('--window <duration>', 'Persisted window, 1m to 30d', DEFAULT_STATUS_WINDOW)
   .action((opts: PolicyStatusOptions) => policyStatusCommand(opts).catch(exitOnStartupError))
+
+const reportCommand = program
+  .command('report')
+  .description('Write a report from the audit database and the running proxy')
+reportCommand
+  .command('activation')
+  .description(
+    'Write a redacted activation report: the timeline, the windowed counts and the running proxy snapshot',
+  )
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option('--window <duration>', 'Window for the counts, 1m to 30d', DEFAULT_REPORT_WINDOW)
+  .option('--format <format>', 'Output format: text or json', 'text')
+  .option('--out <file>', 'Write the report to a file instead of stdout')
+  .option('--force', 'Overwrite an existing --out file', false)
+  .option('--include-names', 'Include tool, door and rule names (the default excludes them)', false)
+  .action((opts: ReportActivationOptions) =>
+    reportActivationCommand(opts).catch(exitOnStartupError),
+  )
 
 program.parse()

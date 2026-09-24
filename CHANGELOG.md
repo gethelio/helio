@@ -21,6 +21,20 @@ Maintainer notes:
 
 ### Added
 
+- **`helio report activation` writes a redacted activation report a user
+  can hand over.** It reads the audit database on disk for a timeline
+  (first call observed, first rule, first enforcement decision, with
+  generation, simulation and apply marked as not available in this
+  version) and the windowed counts (calls, sessions, decision classes,
+  config versions seen), and asks the running proxy for the same authority
+  surface and policy coverage `helio policy status` reports; when no proxy
+  answers, the report says so and prints the rest. The default output
+  carries counts, dates and decision classes only; `--include-names`
+  restores tool, door and rule names and the report states on its face
+  that it did. `--out <file>` writes the same bytes the terminal would
+  show. The command opens no socket except one loopback request to the
+  configured dashboard port, and none without a proxy; whether the file
+  leaves the machine is the user's decision.
 - **`helio init --client` adopts an existing MCP client configuration.**
   It reads the project's `.mcp.json` (Claude Code, or VS Code's portable
   file), `.cursor/mcp.json` (Cursor) and `.vscode/mcp.json` (VS Code),

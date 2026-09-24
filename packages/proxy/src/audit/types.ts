@@ -268,6 +268,64 @@ export interface AuditAggregateStats {
 }
 
 // ---------------------------------------------------------------------------
+// Activation report types (issue #400): what the store holds for
+// `helio report activation`. Every field is a count, a date or a token; the
+// two names carried here (a rule name, a tool name) are projected out by the
+// report unless names are asked for.
+// ---------------------------------------------------------------------------
+
+/** One block reason and its count inside the report window. */
+export interface ActivationBlockReasonCount {
+  readonly reason: string
+  readonly count: number
+}
+
+/**
+ * The windowed decision classes of `helio report activation`. The three
+ * classes `permitted`, `blocked` and `dry_run` partition the persisted tool
+ * calls of the window (a dry-run row counts as dry-run whatever its
+ * `block_reason`), so they sum to `PersistedSummary.calls` over the same
+ * `since`. `blocked_by_reason` breaks down the `blocked` class only.
+ */
+export interface ActivationWindow {
+  readonly since: string
+  readonly permitted: number
+  readonly blocked: number
+  readonly dry_run: number
+  readonly approvals_requested: number
+  /** Tool calls persisted with no session id. */
+  readonly anonymous_calls: number
+  /** Distinct `config_sha256` values on the window's tool calls. */
+  readonly config_versions: number
+  readonly blocked_by_reason: readonly ActivationBlockReasonCount[]
+  /** Reload records persisted in the window, and the applied subset. */
+  readonly reloads_recorded: number
+  readonly reloads_applied: number
+}
+
+/**
+ * The retention-wide dated facts of `helio report activation`. Each `at` is
+ * the row's `created_at` (insert time). `any_policy_block` is the existence
+ * check that decides whether `first_blocked_call` was walked for at all;
+ * `newest_record_hash` is null on an empty table, and its `hash` is null
+ * when the newest row of any kind carries no config hash.
+ */
+export interface ActivationTimeline {
+  readonly first_rule_decided_call: {
+    readonly created_at: string
+    readonly matched_rule: string
+  } | null
+  readonly first_applied_reload: { readonly created_at: string } | null
+  readonly any_policy_block: boolean
+  readonly first_blocked_call: {
+    readonly created_at: string
+    readonly block_reason: string
+    readonly tool_name: string
+  } | null
+  readonly newest_record_hash: { readonly hash: string | null } | null
+}
+
+// ---------------------------------------------------------------------------
 // Store options — constructor config for the AuditStore.
 // ---------------------------------------------------------------------------
 

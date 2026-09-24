@@ -10,6 +10,7 @@
 
 import type { SurfaceCoverage, SurfaceDoorRef, SurfaceReport } from './surface.js'
 import { conditionalWhenClause } from './surface.js'
+import { formatUtcDay } from '../util/format-time.js'
 import type { CompiledPolicy, PolicyAction } from './types.js'
 import type { PersistedSummary } from '../audit/types.js'
 import { durationSchema, parseDuration } from '../config/schema.js'
@@ -206,14 +207,6 @@ export function buildPolicyStatus(input: PolicyStatusInput): PolicyStatusReport 
 // Text
 // ---------------------------------------------------------------------------
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-/** `23 Jun 2026`, in UTC. */
-function formatDay(iso: string): string {
-  const d = new Date(iso)
-  return `${String(d.getUTCDate())} ${MONTHS[d.getUTCMonth()] ?? '?'} ${String(d.getUTCFullYear())}`
-}
-
 function n(value: number): string {
   return value.toLocaleString('en-US')
 }
@@ -224,7 +217,9 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 
 /** The once-per-boot line, printed only when the readiness block is ready and not suppressed. */
 export function formatReadinessLine(readiness: PolicyStatusReadiness, window: string): string {
-  const since = readiness.first_seen ? ` (audit rows since ${formatDay(readiness.first_seen)})` : ''
+  const since = readiness.first_seen
+    ? ` (audit rows since ${formatUtcDay(readiness.first_seen)})`
+    : ''
   return (
     `Persisted: ${plural(readiness.calls_in_window, 'call')} across ` +
     `${plural(readiness.tool_doors_called_in_window, 'tool-door pair')} in the last ${window}${since}. ` +
@@ -346,7 +341,7 @@ export function renderPolicyStatusText(report: PolicyStatusReport): string {
   }
   lines.push(
     persisted.first_seen
-      ? `  audit rows since ${formatDay(persisted.first_seen)}`
+      ? `  audit rows since ${formatUtcDay(persisted.first_seen)}`
       : '  no tool calls persisted yet',
   )
   const floor = `${n(readiness.thresholds.min_calls)} across ${n(readiness.thresholds.min_tool_doors)}`

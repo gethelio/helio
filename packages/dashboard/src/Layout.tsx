@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Outlet } from 'react-router'
 import { useEventSourceContext } from './EventSourceContext'
 import { fetchPolicyStatus } from './api'
+import { formatUtcDay } from './utils'
 import type { PolicyStatusReadiness } from './types'
 import { Header } from './components/Header'
 import { Sidebar } from './components/Sidebar'
@@ -20,20 +21,15 @@ export interface LayoutProps {
 // ---------------------------------------------------------------------------
 
 const READINESS_DISMISSED_KEY = 'helio.readiness_dismissed'
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-
-function formatDay(iso: string): string {
-  const d = new Date(iso)
-  return `${String(d.getUTCDate())} ${MONTHS[d.getUTCMonth()] ?? '?'} ${String(d.getUTCFullYear())}`
-}
-
 function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${count.toLocaleString('en-US')} ${count === 1 ? singular : pluralForm}`
 }
 
 /** The persisted sentence, word for word the CLI's once-per-boot line. */
 export function readinessSentence(readiness: PolicyStatusReadiness, window: string): string {
-  const since = readiness.first_seen ? ` (audit rows since ${formatDay(readiness.first_seen)})` : ''
+  const since = readiness.first_seen
+    ? ` (audit rows since ${formatUtcDay(readiness.first_seen)})`
+    : ''
   return (
     `Persisted: ${plural(readiness.calls_in_window, 'call')} across ` +
     `${plural(readiness.tool_doors_called_in_window, 'tool-door pair')} in the last ${window}${since}. ` +
