@@ -65,11 +65,20 @@ export function formatUtcDay(iso: string): string {
   return `${String(d.getUTCFullYear())}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
 }
 
-/** Format an ISO string as YYYY-MM-DD HH:MM:SS. */
+/** `2026-09-23 14:23:45 UTC`: the day and the second-precision time of `iso` in UTC, the zone on the face. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${String(d.getFullYear())}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return `${formatUtcDay(iso)} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`
+}
+
+/**
+ * `14:00`: the zero-padded UTC hour of `iso` for a chart tick; with `label`,
+ * `14:00 UTC` for a tooltip that is read without the chart's heading.
+ */
+export function formatUtcHour(iso: string, options: { readonly label?: boolean } = {}): string {
+  const hour = `${String(new Date(iso).getUTCHours()).padStart(2, '0')}:00`
+  return options.label ? `${hour} UTC` : hour
 }
 
 /** Format a latency value in milliseconds to a human-readable string. */

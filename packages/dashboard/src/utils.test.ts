@@ -5,6 +5,7 @@ import {
   formatLatency,
   formatTimestamp,
   formatUtcDay,
+  formatUtcHour,
   timeAgo,
   truncateForDisplay,
   truncateId,
@@ -167,25 +168,44 @@ describe('formatUtcDay', () => {
 // ---------------------------------------------------------------------------
 
 describe('formatTimestamp', () => {
-  // Using an ISO string WITHOUT a timezone suffix is deterministic across
-  // test environments: JS parses it as local time, then pulls local
-  // components back out — the round-trip gives the same components we
-  // passed in regardless of the machine's TZ setting.
+  // Summer instants on purpose: the vitest config runs the suite in
+  // Europe/London, where a July instant is BST (one hour ahead of UTC), so a
+  // formatter that read local components would print a different hour.
 
-  it('formats a timestamp as YYYY-MM-DD HH:MM:SS', () => {
-    expect(formatTimestamp('2024-03-15T14:23:45')).toBe('2024-03-15 14:23:45')
+  it('formats a timestamp as YYYY-MM-DD HH:MM:SS UTC', () => {
+    expect(formatTimestamp('2024-07-15T14:23:45Z')).toBe('2024-07-15 14:23:45 UTC')
   })
 
   it('pads single-digit month, day, hour, minute, and second', () => {
-    expect(formatTimestamp('2024-01-05T09:03:07')).toBe('2024-01-05 09:03:07')
+    expect(formatTimestamp('2024-07-05T09:03:07Z')).toBe('2024-07-05 09:03:07 UTC')
+  })
+
+  it('converts a non-zero offset to UTC', () => {
+    expect(formatTimestamp('2024-07-15T23:30:00-05:00')).toBe('2024-07-16 04:30:00 UTC')
   })
 
   it('handles the end of a year', () => {
-    expect(formatTimestamp('2024-12-31T23:59:59')).toBe('2024-12-31 23:59:59')
+    expect(formatTimestamp('2024-12-31T23:59:59Z')).toBe('2024-12-31 23:59:59 UTC')
   })
 
   it('handles midnight', () => {
-    expect(formatTimestamp('2024-03-15T00:00:00')).toBe('2024-03-15 00:00:00')
+    expect(formatTimestamp('2024-07-15T00:00:00Z')).toBe('2024-07-15 00:00:00 UTC')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// formatUtcHour
+// ---------------------------------------------------------------------------
+
+describe('formatUtcHour', () => {
+  it('prints the bare UTC hour for a chart tick', () => {
+    expect(formatUtcHour('2024-07-15T14:23:45Z')).toBe('14:00')
+    expect(formatUtcHour('2024-07-15T23:30:00-05:00')).toBe('04:00')
+  })
+
+  it('labels the UTC hour for the chart tooltip', () => {
+    expect(formatUtcHour('2024-07-15T14:23:45Z', { label: true })).toBe('14:00 UTC')
+    expect(formatUtcHour('2024-07-15T23:30:00-05:00', { label: true })).toBe('04:00 UTC')
   })
 })
 

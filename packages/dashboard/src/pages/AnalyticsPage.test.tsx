@@ -230,7 +230,7 @@ describe('AnalyticsPage', () => {
     renderPage()
 
     await waitFor(() => {
-      expect(screen.getByText('Actions Per Hour')).toBeTruthy()
+      expect(screen.getByText('Actions Per Hour (UTC)')).toBeTruthy()
       expect(screen.getByText('Matched Actions')).toBeTruthy()
       expect(screen.getByText('Blocked by Reason')).toBeTruthy()
       expect(screen.getByText('Top Tools')).toBeTruthy()

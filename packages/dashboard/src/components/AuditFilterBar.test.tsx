@@ -112,10 +112,13 @@ describe('AuditFilterBar', () => {
 
   it('shows custom date inputs when Custom is clicked', () => {
     render(<AuditFilterBar {...defaultProps()} />)
+    expect(screen.queryByText('entered in your local time; rows show UTC')).toBeNull()
     fireEvent.click(screen.getByText('Custom'))
     const dateInputs = screen.getAllByDisplayValue('')
     // At minimum the two datetime-local inputs are present
     expect(dateInputs.length).toBeGreaterThanOrEqual(2)
+    // The inputs are the browser's local control; the hint beside them says so.
+    expect(screen.getByText('entered in your local time; rows show UTC')).toBeTruthy()
   })
 
   it('renders export button and dropdown', () => {

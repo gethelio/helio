@@ -7,16 +7,12 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
+import { formatUtcHour } from '../utils'
 
 interface TimeSeriesChartProps {
   data: ReadonlyArray<{ bucket: string; count: number }>
   height?: number
   color?: string
-}
-
-function formatHour(bucket: string): string {
-  const d = new Date(bucket)
-  return `${String(d.getHours()).padStart(2, '0')}:00`
 }
 
 export function TimeSeriesChart({ data, height = 240, color = '#6366f1' }: TimeSeriesChartProps) {
@@ -32,7 +28,7 @@ export function TimeSeriesChart({ data, height = 240, color = '#6366f1' }: TimeS
         <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
         <XAxis
           dataKey="bucket"
-          tickFormatter={formatHour}
+          tickFormatter={(value) => formatUtcHour(String(value))}
           tick={{ fontSize: 12, fill: '#6b7280' }}
           axisLine={{ stroke: '#e5e7eb' }}
           tickLine={false}
@@ -45,7 +41,7 @@ export function TimeSeriesChart({ data, height = 240, color = '#6366f1' }: TimeS
           width={40}
         />
         <Tooltip
-          labelFormatter={(label) => formatHour(String(label))}
+          labelFormatter={(label) => formatUtcHour(String(label), { label: true })}
           formatter={(value) => [String(value), 'Actions']}
           contentStyle={{
             fontSize: 12,

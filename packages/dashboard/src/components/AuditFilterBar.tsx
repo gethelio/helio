@@ -331,6 +331,7 @@ export function AuditFilterBar({
               }}
               className="rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-900 focus:border-gray-300 focus:outline-none"
             />
+            <span className="text-xs text-gray-400">entered in your local time; rows show UTC</span>
           </>
         )}
 

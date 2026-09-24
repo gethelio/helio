@@ -3,7 +3,7 @@
 // audit records. Renders nothing when the chain is null.
 // ---------------------------------------------------------------------------
 
-import { usageColor, usagePercent } from '../utils'
+import { formatTimestamp, usageColor, usagePercent } from '../utils'
 
 // ---------------------------------------------------------------------------
 // Internal types (runtime-narrowed from Record<string, unknown>)
@@ -294,7 +294,8 @@ export function EvidenceChain({ chain }: EvidenceChainProps) {
           )}
           {approval.escalated_at && (
             <p className="mt-1 text-xs text-gray-600">
-              <span className="font-medium">Escalated:</span> {approval.escalated_at}
+              <span className="font-medium">Escalated:</span>{' '}
+              {formatTimestamp(approval.escalated_at)}
               {approval.escalated_to && approval.escalated_to.length > 0
                 ? ` to ${approval.escalated_to.join(', ')}`
                 : ''}

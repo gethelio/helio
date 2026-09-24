@@ -95,6 +95,16 @@ Maintainer notes:
 
 ### Changed
 
+- **The dashboard shows every time in UTC and says so.** Audit rows, the
+  detail panel, every approval ticket time and the budgets ledger print
+  `2026-09-23 14:23:45 UTC`; the analytics hour axis is UTC under the
+  heading `Actions Per Hour (UTC)` and its tooltip reads `14:00 UTC`.
+  The tables had shipped the browser's local time with no zone label
+  and the ledger a locale time of day, beside CLI lines and a readiness
+  banner that already said UTC. The Audit tab's custom time range is
+  still entered in the browser's local time (its `datetime-local`
+  control) and converted for the query; a hint beside the inputs says
+  so.
 - **The audit store gains one index, `idx_audit_kind_created_at` on
   `(record_kind, created_at)`, built once on the next open of an
   existing database.** The persisted-window statements behind
