@@ -346,7 +346,7 @@ Rate limits per tool and per session. Per-rule spend limits that block a matched
 
 ### Audit Trail
 
-Every tool call recorded: timestamp, agent identity, tool name, inputs, policy decision, evidence chain, approval status, downstream response, latency, and the hash of the config in force when the record was written. Searchable dashboard. Export to JSON or CSV.
+Every tool call recorded: timestamp, agent identity, tool name, inputs, policy decision, evidence chain, approval status, downstream response, latency, and the hash of the config in force when the record was written. Searchable dashboard. Export to JSON or CSV. `helio report activation` writes a redacted activation report (the timeline, the windowed decision counts and the running proxy's coverage snapshot, names excluded by default) that you can hand to someone else; Helio itself transmits nothing.
 
 ## How Helio Compares
 

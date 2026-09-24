@@ -2,11 +2,14 @@ import Database from 'better-sqlite3'
 import type { Database as DatabaseType, Statement } from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import { chmodSync } from 'node:fs'
+import { POLICY_RELOAD_OUTCOMES } from '../config/reload-outcomes.js'
 import { parseDuration } from '../config/schema.js'
 import { StartupError } from '../startup-error.js'
 import { extractResponseSummary } from '../upstream/response-summary.js'
 import { clamp } from '../util/clamp.js'
 import type {
+  ActivationTimeline,
+  ActivationWindow,
   PersistedSummary,
   AuditRecord,
   AuditRecordInput,
@@ -134,6 +137,133 @@ export const PERSISTED_SUMMARY_SQL = {
   first_seen: `SELECT MIN(created_at) AS first_seen
     FROM audit_records
     WHERE record_kind = 'tool_call' AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`,
+} as const
+
+/**
+ * The windowed statements behind `activationWindow` (issue #400). Every one
+ * leads with `record_kind = ... AND created_at >= ?` so the planner takes
+ * `idx_audit_kind_created_at` (a range, never a scan). `classes` carries the
+ * same non-tool decision list as `PERSISTED_SUMMARY_SQL.totals`, so its three
+ * disjoint sums (`dry_run = 0` on permitted and on blocked; `dry_run = 1` on
+ * its own) add up to that statement's `calls`; every `SUM` is coalesced
+ * because `SUM` over no rows is null while `COUNT` is 0. `blocked_by_reason`
+ * carries `block_reason IS NOT NULL AND dry_run = 0`, the `blocked` class's
+ * own predicate, so it breaks that class down and nothing else. `reloads` is
+ * window-bound like the rest.
+ * @internal Exported so the store tests can assert the query plans.
+ */
+export const ACTIVATION_WINDOW_SQL = {
+  classes: `SELECT
+      COALESCE(SUM(block_reason IS NULL AND dry_run = 0), 0) AS permitted,
+      COALESCE(SUM(block_reason IS NOT NULL AND dry_run = 0), 0) AS blocked,
+      COALESCE(SUM(dry_run = 1), 0) AS dry_run,
+      COALESCE(SUM(policy_decision = 'require_approval'), 0) AS approvals_requested,
+      COALESCE(SUM(session_id IS NULL), 0) AS anonymous_calls,
+      COUNT(DISTINCT config_sha256) AS config_versions
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND created_at >= ? AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`,
+  blocked_by_reason: `SELECT block_reason AS reason, COUNT(*) AS count
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND created_at >= ? AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
+      AND block_reason IS NOT NULL AND dry_run = 0
+    GROUP BY block_reason
+    ORDER BY block_reason`,
+  reloads: `SELECT COUNT(*) AS recorded, COALESCE(SUM(block_reason IS NULL), 0) AS applied
+    FROM audit_records
+    WHERE record_kind = ${POLICY_RELOAD_KIND_SQL} AND created_at >= ?`,
+} as const
+
+/**
+ * Every `block_reason` value a shipped record can carry that is NOT a policy
+ * block on a tool call (issue #400): the nameless-call and header-mismatch
+ * rejections, the refused reload outcomes (an applied reload stores a null
+ * `block_reason` and is not listed), and the install-scan denial. Held in
+ * byte order (`Buffer.compare` over UTF-8, the order of SQLite's BINARY
+ * collation) because the list generates the range seeks of
+ * `ACTIVATION_TIMELINE_SQL.any_policy_block`. A future kind that writes a
+ * reason outside this list makes that check hit and the first-block walk run
+ * once to its end on a database with no policy block; add the value here when
+ * the kind lands.
+ */
+export const NON_BLOCK_REASONS: readonly string[] = sortByBytes([
+  'missing_tool_name',
+  'header_mismatch',
+  'install_denied',
+  ...POLICY_RELOAD_OUTCOMES.filter((outcome) => outcome !== 'applied'),
+])
+
+/** Sort strings by their UTF-8 bytes, the order SQLite's BINARY collation uses. */
+function sortByBytes(values: readonly string[]): readonly string[] {
+  return [...values].sort((a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')))
+}
+
+/**
+ * The existence check "does any block_reason outside `excluded` exist",
+ * generated as one covering range seek per GAP between the byte-sorted
+ * excluded keys (below the first, between each pair, above the last), each
+ * `LIMIT 1`, joined by `UNION ALL` under one more `LIMIT 1`. An index filter
+ * (`NOT IN`) is a scan of every excluded key sorting before the first hit, and
+ * a term the index cannot evaluate (`dry_run`) is a row lookup per key; a
+ * range seek skips both, so every branch reads only index keys and the check
+ * costs the same on every face. No upper sentinel closes the last branch: a
+ * reason sorting past a sentinel would go unseen.
+ * @internal Exported so the store tests can pin the byte order.
+ */
+export function buildAnyPolicyBlockSql(excluded: readonly string[]): string {
+  const quote = (value: string): string => `'${value.replaceAll("'", "''")}'`
+  const keys = sortByBytes(excluded)
+  const ranges: string[] = []
+  let previous: string | undefined
+  for (const key of keys) {
+    ranges.push(
+      previous === undefined
+        ? `block_reason IS NOT NULL AND block_reason < ${quote(key)}`
+        : `block_reason > ${quote(previous)} AND block_reason < ${quote(key)}`,
+    )
+    previous = key
+  }
+  ranges.push(
+    previous === undefined ? 'block_reason IS NOT NULL' : `block_reason > ${quote(previous)}`,
+  )
+  const branches = ranges.map(
+    (range) =>
+      `SELECT 1 FROM (SELECT 1 FROM audit_records INDEXED BY idx_audit_block_reason WHERE ${range} LIMIT 1)`,
+  )
+  return `${branches.join(' UNION ALL ')} LIMIT 1`
+}
+
+/**
+ * The retention-wide statements behind `activationTimeline` (issue #400).
+ * `first_applied_reload` is a seek on `idx_audit_kind_created_at`;
+ * `newest_record_hash` is one step back on `idx_audit_created_at`;
+ * `any_policy_block` is the generated gap-range check on
+ * `idx_audit_block_reason` (see {@link buildAnyPolicyBlockSql}). The two
+ * walks read `idx_audit_kind_created_at` in `created_at` order and stop at
+ * the first qualifying row: `first_rule_decided_call` (nothing indexes
+ * `matched_rule`) and `first_blocked_call` (the `blocked` class's predicate,
+ * so a dry-run deny or a rejected row is never the first enforcement
+ * decision), each bounded by the rows before its first match and costing
+ * about 2.5 s per million rows when no such row exists. The check exists so
+ * the empty face of the second walk is skipped whenever the history holds no
+ * reason outside {@link NON_BLOCK_REASONS}.
+ * @internal Exported so the store tests can assert the query plans.
+ */
+export const ACTIVATION_TIMELINE_SQL = {
+  first_rule_decided_call: `SELECT created_at, matched_rule
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND matched_rule IS NOT NULL
+    ORDER BY created_at LIMIT 1`,
+  first_applied_reload: `SELECT created_at
+    FROM audit_records
+    WHERE record_kind = ${POLICY_RELOAD_KIND_SQL} AND block_reason IS NULL
+    ORDER BY created_at LIMIT 1`,
+  any_policy_block: buildAnyPolicyBlockSql(NON_BLOCK_REASONS),
+  first_blocked_call: `SELECT created_at, block_reason, tool_name
+    FROM audit_records
+    WHERE record_kind = 'tool_call' AND block_reason IS NOT NULL AND dry_run = 0
+      AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
+    ORDER BY created_at LIMIT 1`,
+  newest_record_hash: `SELECT config_sha256 FROM audit_records ORDER BY created_at DESC LIMIT 1`,
 } as const
 
 const INSERT_SQL = `
@@ -876,6 +1006,81 @@ export class AuditStore {
       first_seen_in_window: totals.first_seen_in_window,
       pairs,
       first_seen: first.first_seen,
+    }
+  }
+
+  /**
+   * The windowed decision classes for `helio report activation` (issue
+   * #400): three disjoint sums over the tool calls persisted since
+   * `sinceIso` (they add up to `persistedSummary(sinceIso).calls`), the
+   * approvals requested, the anonymous calls, the distinct config hashes and
+   * the reload records of the window. Every statement is one range on
+   * `idx_audit_kind_created_at`; nothing here is retention-wide.
+   */
+  activationWindow(sinceIso: string): ActivationWindow {
+    const classes = this.db.prepare(ACTIVATION_WINDOW_SQL.classes).get(sinceIso) as {
+      permitted: number
+      blocked: number
+      dry_run: number
+      approvals_requested: number
+      anonymous_calls: number
+      config_versions: number
+    }
+    const reasons = this.db
+      .prepare(ACTIVATION_WINDOW_SQL.blocked_by_reason)
+      .all(sinceIso) as Array<{
+      reason: string
+      count: number
+    }>
+    const reloads = this.db.prepare(ACTIVATION_WINDOW_SQL.reloads).get(sinceIso) as {
+      recorded: number
+      applied: number
+    }
+    return {
+      since: sinceIso,
+      permitted: classes.permitted,
+      blocked: classes.blocked,
+      dry_run: classes.dry_run,
+      approvals_requested: classes.approvals_requested,
+      anonymous_calls: classes.anonymous_calls,
+      config_versions: classes.config_versions,
+      blocked_by_reason: reasons,
+      reloads_recorded: reloads.recorded,
+      reloads_applied: reloads.applied,
+    }
+  }
+
+  /**
+   * The retention-wide dated facts for `helio report activation` (issue
+   * #400). Two seeks, one covering existence check and up to two walks (see
+   * {@link ACTIVATION_TIMELINE_SQL}); the first-block walk runs only when
+   * the check finds a reason outside {@link NON_BLOCK_REASONS}. The newest
+   * record of ANY kind carries the config hash in force when it was written
+   * (the writer stamps every record at push), so that one seek is the
+   * "last policy write" the report compares the config file against.
+   */
+  activationTimeline(): ActivationTimeline {
+    const firstRule = this.db.prepare(ACTIVATION_TIMELINE_SQL.first_rule_decided_call).get() as
+      | { created_at: string; matched_rule: string }
+      | undefined
+    const firstReload = this.db.prepare(ACTIVATION_TIMELINE_SQL.first_applied_reload).get() as
+      | { created_at: string }
+      | undefined
+    const anyBlock = this.db.prepare(ACTIVATION_TIMELINE_SQL.any_policy_block).get() !== undefined
+    const firstBlocked = anyBlock
+      ? (this.db.prepare(ACTIVATION_TIMELINE_SQL.first_blocked_call).get() as
+          | { created_at: string; block_reason: string; tool_name: string }
+          | undefined)
+      : undefined
+    const newest = this.db.prepare(ACTIVATION_TIMELINE_SQL.newest_record_hash).get() as
+      | { config_sha256: string | null }
+      | undefined
+    return {
+      first_rule_decided_call: firstRule ?? null,
+      first_applied_reload: firstReload ?? null,
+      any_policy_block: anyBlock,
+      first_blocked_call: firstBlocked ?? null,
+      newest_record_hash: newest === undefined ? null : { hash: newest.config_sha256 },
     }
   }
 

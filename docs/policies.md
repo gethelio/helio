@@ -1017,7 +1017,7 @@ The command reads the running proxy through its dashboard API (the primed surfac
 Once per boot, when the loaded policy enforces nothing (zero rules, `default: allow`, no dry-run: the predicate behind the no-enforcement warning, so any rule, an allow-only rule set included, ends it) and the store holds at least 100 tool calls across 3 tool-door pairs persisted in the last 4 hours, `helio start` prints one more line after the coverage line:
 
 ```
-Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 23 Jun 2026). helio policy status lists which tools are called and which have no rule.
+Persisted: 1,851 calls across 600 tool-door pairs in the last 4h (audit rows since 2026-06-23). helio policy status lists which tools are called and which have no rule.
 ```
 
 The date is the earliest persisted tool call within retention. The dashboard shows the same sentence as a dismissable notice. Nothing is generated or applied.

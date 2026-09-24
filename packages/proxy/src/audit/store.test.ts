@@ -4,9 +4,13 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
 import {
+  ACTIVATION_TIMELINE_SQL,
+  ACTIVATION_WINDOW_SQL,
   AuditStore,
   EXPORT_MAX_RECORDS,
+  NON_BLOCK_REASONS,
   PERSISTED_SUMMARY_SQL,
+  buildAnyPolicyBlockSql,
   migrateAdditiveAuditColumns,
 } from './store.js'
 import { StartupError } from '../startup-error.js'
@@ -1887,6 +1891,14 @@ function seedToolCalls(
     sessions?: number
     decision?: string
     dryRun?: boolean
+    /** The rule name every seeded row carries (issue #400). */
+    matchedRule?: string
+    /** The block reason every seeded row carries (issue #400). */
+    blockReason?: string
+    /** The config hash every seeded row carries (issue #400). */
+    configSha256?: string
+    /** `created_at` per row; rows are inserted one by one when set (issue #400). */
+    createdAt?: (i: number) => string
   },
 ): void {
   const records: InsertRecord[] = []
@@ -1901,10 +1913,20 @@ function seedToolCalls(
         session_id: `s-${String(i % (opts.sessions ?? 1))}`,
         policy_decision: opts.decision ?? 'allow',
         dry_run: opts.dryRun ?? false,
+        matched_rule: opts.matchedRule ?? null,
+        block_reason: opts.blockReason ?? null,
+        ...(opts.configSha256 !== undefined ? { config_sha256: opts.configSha256 } : {}),
       }),
     )
   }
-  target.insertBatch(records)
+  const createdAt = opts.createdAt
+  if (createdAt === undefined) {
+    target.insertBatch(records)
+    return
+  }
+  target.database.transaction(() => {
+    for (const [i, record] of records.entries()) target.insert(record, createdAt(i))
+  })()
 }
 
 describe('AuditStore.persistedSummary', () => {
@@ -2168,5 +2190,454 @@ describe('AuditStore.persistedSummary', () => {
       spy.mockRestore()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('AuditStore activation statements (issue #400)', () => {
+  const HOUR = 60 * 60 * 1000
+  const DAY = 24 * HOUR
+  const since = () => new Date(Date.now() - 4 * HOUR).toISOString()
+  const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString()
+  const HASH_A = 'a'.repeat(64)
+  const HASH_B = 'b'.repeat(64)
+
+  /** A reload record in the store's own shape; `applied` stores a null block_reason. */
+  function reloadRecord(outcome: string, hash: string | null): InsertRecord {
+    return makeRecord({
+      tool_name: 'helio.yaml',
+      tool_input: {},
+      policy_decision: 'policy_reload',
+      block_reason: outcome === 'applied' ? null : outcome,
+      record_kind: 'policy_reload',
+      origin: 'config',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      evidence_chain: { policy_reload: { outcome, config_path: '/home/someone/helio.yaml' } },
+      ...(hash !== null ? { config_sha256: hash } : {}),
+    })
+  }
+
+  /** The shipped header-mismatch rejection shape (`policy_decision: rejected`). */
+  function rejectedRecord(hash: string | null = null): InsertRecord {
+    return makeRecord({
+      tool_name: '<nameless>',
+      tool_input: { raw_params: null, body_method: 'tools/call', mismatch_reason: 'x' },
+      policy_decision: 'rejected',
+      block_reason: 'header_mismatch',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      ...(hash !== null ? { config_sha256: hash } : {}),
+    })
+  }
+
+  describe('activationWindow', () => {
+    it('partitions a four-call window into three disjoint classes that sum to the persisted calls', () => {
+      const s = createStore()
+      try {
+        s.insert(makeRecord({ tool_name: 'a', session_id: 's-1' }))
+        s.insert(
+          makeRecord({
+            tool_name: 'b',
+            session_id: 's-1',
+            policy_decision: 'deny',
+            block_reason: 'policy_denied',
+            matched_rule: 'block-b',
+          }),
+        )
+        s.insert(makeRecord({ tool_name: 'c', session_id: null, dry_run: true }))
+        // A dry-run deny carries a block_reason on a dry_run = 1 row: it is
+        // dry-run, not blocked, and never enters the histogram.
+        s.insert(
+          makeRecord({
+            tool_name: 'd',
+            session_id: null,
+            policy_decision: 'deny',
+            block_reason: 'policy_denied',
+            dry_run: true,
+          }),
+        )
+        // A rejected row is not a call anywhere: not in the classes, not in the histogram.
+        s.insert(rejectedRecord())
+        const window = s.activationWindow(since())
+        expect(window.permitted).toBe(1)
+        expect(window.blocked).toBe(1)
+        expect(window.dry_run).toBe(2)
+        expect(window.permitted + window.blocked + window.dry_run).toBe(
+          s.persistedSummary(since()).calls,
+        )
+        expect(window.anonymous_calls).toBe(2)
+        expect(window.blocked_by_reason).toEqual([{ reason: 'policy_denied', count: 1 }])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('counts approvals requested and distinct config versions inside the window only', () => {
+      const s = createStore()
+      try {
+        seedToolCalls(s, 4, {
+          pairs: [{ tool: 'pay', upstream: null }],
+          decision: 'require_approval',
+          configSha256: HASH_A,
+        })
+        seedToolCalls(s, 2, { pairs: [{ tool: 'get', upstream: null }], configSha256: HASH_B })
+        // Outside the window: a third hash that must not count.
+        seedToolCalls(s, 1, {
+          pairs: [{ tool: 'old', upstream: null }],
+          configSha256: 'c'.repeat(64),
+          createdAt: () => at(10 * DAY),
+        })
+        const window = s.activationWindow(since())
+        expect(window.approvals_requested).toBe(4)
+        expect(window.config_versions).toBe(2)
+        expect(window.since).toBe(window.since)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('counts reload records in the window and the applied subset, a refused reload excluded from applied', () => {
+      const s = createStore()
+      try {
+        s.insert(reloadRecord('applied', HASH_B))
+        s.insert(reloadRecord('rejected_invalid', HASH_B))
+        s.insert(reloadRecord('applied', HASH_A), at(10 * DAY))
+        const window = s.activationWindow(since())
+        expect(window.reloads_recorded).toBe(2)
+        expect(window.reloads_applied).toBe(1)
+        // Reload rows are not calls: every class stays at zero.
+        expect(window.permitted + window.blocked + window.dry_run).toBe(0)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('coalesces every sum to 0 over an empty window', () => {
+      const s = createStore()
+      try {
+        const window = s.activationWindow(since())
+        expect(window).toEqual({
+          since: window.since,
+          permitted: 0,
+          blocked: 0,
+          dry_run: 0,
+          approvals_requested: 0,
+          anonymous_calls: 0,
+          config_versions: 0,
+          blocked_by_reason: [],
+          reloads_recorded: 0,
+          reloads_applied: 0,
+        })
+      } finally {
+        s.close()
+      }
+    })
+  })
+
+  describe('activationTimeline', () => {
+    it('is empty against an empty store', () => {
+      const s = createStore()
+      try {
+        expect(s.activationTimeline()).toEqual({
+          first_rule_decided_call: null,
+          first_applied_reload: null,
+          any_policy_block: false,
+          first_blocked_call: null,
+          newest_record_hash: null,
+        })
+      } finally {
+        s.close()
+      }
+    })
+
+    it('dates the first rule-decided call and the first applied reload by created_at, a refused reload skipped', () => {
+      const s = createStore()
+      try {
+        // Inserted out of order: the earliest created_at must win, not the first insert.
+        seedToolCalls(s, 1, {
+          pairs: [{ tool: 'later', upstream: null }],
+          matchedRule: 'later-rule',
+          createdAt: () => at(1 * DAY),
+        })
+        seedToolCalls(s, 1, {
+          pairs: [{ tool: 'earlier', upstream: null }],
+          matchedRule: 'earlier-rule',
+          createdAt: () => at(3 * DAY),
+        })
+        seedToolCalls(s, 1, {
+          pairs: [{ tool: 'no-rule', upstream: null }],
+          createdAt: () => at(5 * DAY),
+        })
+        s.insert(reloadRecord('rejected_invalid', HASH_A), at(4 * DAY))
+        s.insert(reloadRecord('applied', HASH_B), at(2 * DAY))
+        const timeline = s.activationTimeline()
+        expect(timeline.first_rule_decided_call?.matched_rule).toBe('earlier-rule')
+        expect(timeline.first_rule_decided_call?.created_at.slice(0, 13)).toBe(
+          at(3 * DAY).slice(0, 13),
+        )
+        expect(timeline.first_applied_reload?.created_at.slice(0, 13)).toBe(
+          at(2 * DAY).slice(0, 13),
+        )
+      } finally {
+        s.close()
+      }
+    })
+
+    it('dates the first blocked call from real blocks only: not a dry-run deny, not a rejected row', () => {
+      const s = createStore()
+      try {
+        s.insert(rejectedRecord(), at(5 * DAY))
+        s.insert(
+          makeRecord({
+            tool_name: 'dry',
+            policy_decision: 'deny',
+            block_reason: 'policy_denied',
+            dry_run: true,
+          }),
+          at(4 * DAY),
+        )
+        s.insert(
+          makeRecord({ tool_name: 'real', policy_decision: 'deny', block_reason: 'policy_denied' }),
+          at(3 * DAY),
+        )
+        s.insert(
+          makeRecord({ tool_name: 'late', policy_decision: 'deny', block_reason: 'rate_limited' }),
+          at(1 * DAY),
+        )
+        const timeline = s.activationTimeline()
+        expect(timeline.any_policy_block).toBe(true)
+        expect(timeline.first_blocked_call?.tool_name).toBe('real')
+        expect(timeline.first_blocked_call?.block_reason).toBe('policy_denied')
+        expect(timeline.first_blocked_call?.created_at.slice(0, 13)).toBe(at(3 * DAY).slice(0, 13))
+      } finally {
+        s.close()
+      }
+    })
+
+    it('misses the existence check on a store holding only excluded reasons and skips the walk', () => {
+      const s = createStore()
+      try {
+        s.insert(rejectedRecord())
+        s.insert(reloadRecord('rejected_invalid', HASH_A))
+        s.insert(
+          makeRecord({
+            tool_name: 'left-pad',
+            record_kind: 'install_scan',
+            origin: 'openclaw',
+            policy_decision: 'deny',
+            block_reason: 'install_denied',
+          }),
+        )
+        s.insert(
+          makeRecord({
+            tool_name: '<nameless>',
+            policy_decision: 'rejected',
+            block_reason: 'missing_tool_name',
+          }),
+        )
+        const timeline = s.activationTimeline()
+        expect(timeline.any_policy_block).toBe(false)
+        expect(timeline.first_blocked_call).toBeNull()
+      } finally {
+        s.close()
+      }
+    })
+
+    it('hits the existence check on one real block behind a prefix of excluded reasons', () => {
+      const s = createStore()
+      try {
+        for (let i = 0; i < 200; i++) s.insert(rejectedRecord(), at(10 * DAY - i))
+        s.insert(
+          makeRecord({ tool_name: 'real', policy_decision: 'deny', block_reason: 'policy_denied' }),
+          at(1 * DAY),
+        )
+        const timeline = s.activationTimeline()
+        expect(timeline.any_policy_block).toBe(true)
+        expect(timeline.first_blocked_call?.tool_name).toBe('real')
+      } finally {
+        s.close()
+      }
+    })
+
+    it('reads the newest record of ANY kind for the config hash', () => {
+      const cases: ReadonlyArray<{
+        label: string
+        seed: (s: AuditStore) => void
+        hash: string | null
+      }> = [
+        {
+          label: 'an applied reload with no later call carries the new hash',
+          seed: (s) => {
+            seedToolCalls(s, 2, {
+              pairs: [{ tool: 'a', upstream: null }],
+              configSha256: HASH_A,
+              createdAt: () => at(2 * DAY),
+            })
+            s.insert(reloadRecord('applied', HASH_B), at(1 * DAY))
+          },
+          hash: HASH_B,
+        },
+        {
+          label: 'a reload-only store',
+          seed: (s) => {
+            s.insert(reloadRecord('applied', HASH_B))
+          },
+          hash: HASH_B,
+        },
+        {
+          label: 'a drift-only store',
+          seed: (s) => {
+            s.insert(
+              makeRecord({
+                tool_name: 'a',
+                policy_decision: 'tool_drift',
+                record_kind: 'drift_event',
+                config_sha256: HASH_A,
+              }),
+            )
+          },
+          hash: HASH_A,
+        },
+        {
+          label: 'an install-scan-only store',
+          seed: (s) => {
+            s.insert(
+              makeRecord({
+                tool_name: 'left-pad',
+                record_kind: 'install_scan',
+                origin: 'openclaw',
+                config_sha256: HASH_A,
+              }),
+            )
+          },
+          hash: HASH_A,
+        },
+        {
+          label: 'a refused reload carrying a hash that differs from the calls before it',
+          seed: (s) => {
+            seedToolCalls(s, 1, {
+              pairs: [{ tool: 'a', upstream: null }],
+              configSha256: HASH_A,
+              createdAt: () => at(2 * DAY),
+            })
+            s.insert(reloadRecord('rejected_invalid', HASH_B), at(1 * DAY))
+          },
+          hash: HASH_B,
+        },
+        {
+          label: 'a newest row with no hash (a history that predates the column)',
+          seed: (s) => {
+            seedToolCalls(s, 1, {
+              pairs: [{ tool: 'a', upstream: null }],
+              configSha256: HASH_A,
+              createdAt: () => at(2 * DAY),
+            })
+            seedToolCalls(s, 1, {
+              pairs: [{ tool: 'b', upstream: null }],
+              createdAt: () => at(1 * DAY),
+            })
+          },
+          hash: null,
+        },
+      ]
+      for (const c of cases) {
+        const s = createStore()
+        try {
+          c.seed(s)
+          expect(s.activationTimeline().newest_record_hash, c.label).toEqual({ hash: c.hash })
+        } finally {
+          s.close()
+        }
+      }
+    })
+  })
+
+  describe('the statements and their plans', () => {
+    it('lists the non-block reasons in byte order and generates one covering range seek per gap', () => {
+      const sorted = [...NON_BLOCK_REASONS].sort((a, b) =>
+        Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')),
+      )
+      expect([...NON_BLOCK_REASONS]).toEqual(sorted)
+      expect(NON_BLOCK_REASONS).toContain('header_mismatch')
+      expect(NON_BLOCK_REASONS).toContain('missing_tool_name')
+      expect(NON_BLOCK_REASONS).toContain('install_denied')
+      expect(NON_BLOCK_REASONS).toContain('rejected_invalid')
+      expect(NON_BLOCK_REASONS).toContain('watch_failed')
+      expect(NON_BLOCK_REASONS).not.toContain('applied')
+
+      // Byte order, not JavaScript code-unit order: U+10000 (four UTF-8 bytes,
+      // a surrogate pair in UTF-16) sorts AFTER U+FFFD in SQLite's BINARY
+      // collation and BEFORE it under Array.prototype.sort.
+      const sql = buildAnyPolicyBlockSql(['�', '\u{10000}', 'm'])
+      const pos = (key: string) => sql.indexOf(`'${key}'`)
+      expect(pos('m')).toBeGreaterThan(-1)
+      expect(pos('m')).toBeLessThan(pos('�'))
+      expect(pos('�')).toBeLessThan(pos('\u{10000}'))
+      expect(sql.split('UNION ALL')).toHaveLength(4)
+      expect(sql).not.toContain('dry_run')
+      expect(sql).not.toContain('NOT IN')
+    })
+
+    it('serves every activation statement from its index', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-audit-activation-plan-'))
+      const dbPath = join(dir, 'audit.db')
+      const fileStore = new AuditStore({
+        path: dbPath,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        seedToolCalls(fileStore, 300, {
+          pairs: [
+            { tool: 'a', upstream: null },
+            { tool: 'b', upstream: 'crm' },
+          ],
+          sessions: 5,
+        })
+        const raw = new Database(dbPath, { readonly: true })
+        try {
+          const explain = (sql: string, params: unknown[]): string[] =>
+            (
+              raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>
+            ).map((row) => row.detail)
+          for (const [label, sql] of Object.entries(ACTIVATION_WINDOW_SQL)) {
+            expect(explain(sql, [since()]).join(' | '), label).toContain(
+              'idx_audit_kind_created_at',
+            )
+          }
+          for (const label of [
+            'first_rule_decided_call',
+            'first_applied_reload',
+            'first_blocked_call',
+          ] as const) {
+            expect(explain(ACTIVATION_TIMELINE_SQL[label], []).join(' | '), label).toContain(
+              'idx_audit_kind_created_at',
+            )
+          }
+          expect(explain(ACTIVATION_TIMELINE_SQL.newest_record_hash, []).join(' | ')).toContain(
+            'idx_audit_created_at',
+          )
+          const searches = explain(ACTIVATION_TIMELINE_SQL.any_policy_block, []).filter((d) =>
+            d.startsWith('SEARCH'),
+          )
+          expect(searches).toHaveLength(NON_BLOCK_REASONS.length + 1)
+          for (const [i, line] of searches.entries()) {
+            expect(line, `branch ${String(i)}`).toContain(
+              'USING COVERING INDEX idx_audit_block_reason (block_reason>?',
+            )
+            if (i < searches.length - 1)
+              expect(line, `branch ${String(i)}`).toContain('AND block_reason<?)')
+          }
+        } finally {
+          raw.close()
+        }
+      } finally {
+        fileStore.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
   })
 })

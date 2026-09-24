@@ -393,7 +393,7 @@ Policy coverage
 Persisted (last 4h)
   2 calls across 2 tool-door pairs, 0 sessions (denied and dry-run calls included)
   4 reachable and permitted, never called in the last 4h
-  audit rows since 21 Sep 2026
+  audit rows since 2026-09-21
   Readiness: suppressed, the policy enforces something (2 calls across 2 tool-door pairs in the last 4h)
 
 Tool-door pairs (calls in the last 4h)
@@ -409,6 +409,53 @@ Tool-door pairs (calls in the last 4h)
 `--format json` prints the same report as JSON for scripts, and `--window 7d` widens the persisted window (1 minute to 30 days; the window is named on every persisted line). The vocabulary is defined in [Policy coverage](./policies.md#policy-coverage-helio-policy-status).
 
 > **The secret.** `helio policy status` reads the running proxy through its dashboard API on `dashboard.host:port`, because the primed surface exists only in that process. The dashboard must be enabled, and the command needs the secret itself: it reads `HELIO_DASHBOARD_SECRET` from the environment (the value you exported in Step 2, or the one `helio init` printed), else a plaintext `dashboard.api_secret` from the file. The `sha256:` digest `helio init` writes into the file is refused with one line before any request, because the API verifies the secret, not its digest.
+
+## Step 9: Share What Happened
+
+You now have a history: two governed calls, one rule that fired, one that was added live. To show that to someone who has never seen this machine (a team lead, the Helio maintainers, a forum thread), write the activation report:
+
+```bash
+helio report activation
+```
+
+It reads the audit database on disk for a timeline and the last seven days of counts, asks the running proxy for the same coverage snapshot `helio policy status` prints, and renders one report. Over the fixture of this guide, after Step 6's call and Step 7's rule and denied call, it reads:
+
+```
+Helio activation report
+  Written by Helio 0.0.0 (unreleased build) on 2026-09-24 (UTC). Names: excluded (--include-names restores tool, door and rule names).
+  Counts cover the last 7d; dates are within the audit retention of 90d.
+  Sources: the audit database (read; this config file is the one that last wrote policy to it). The running proxy answered on the configured dashboard port (snapshot below); this command does not verify that it wrote this database.
+
+Timeline (dates within retention)
+  First call observed            2026-09-24   earliest persisted tool call
+  First rule                     2026-09-24   first call a rule decided
+                                 Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.
+  First generation               not available in this version
+  First simulation               not available in this version
+  First apply                    not available in this version
+  First enforcement decision     2026-09-24   first blocked call (policy_denied)
+
+Persisted (last 7d)
+  2 calls across 2 tool-door pairs, no session ids recorded (denied and dry-run calls included)
+  Decisions: 1 permitted, 1 blocked (policy_denied 1), 0 dry-run, 0 approvals requested
+  Config versions seen: 2
+  Config reloads: 1 (1 applied)
+  audit rows since 2026-09-24
+
+Snapshot (running proxy, 2026-09-24 08:24 UTC, window 7d)
+  Authority surface: 7 tool-door pairs across 1 upstream; 1 annotated destructive; 0 destructive by MCP default
+  Policy: 3 rules, default allow, on_tool_drift block
+  Policy coverage: 3 of 7 have a rule that can match them; 4 fall through to the default: allow
+  Effective action: allow 5, deny 2
+  Reachable and permitted, never called in the last 7d: 4 (from the proxy)
+  Called on no primed door in the last 7d: 0 (from the proxy)
+  Readiness: suppressed, the policy enforces something (2 calls across 2 tool-door pairs in the last 7d)
+  Doors: 1 upstream primed, 0 not primed, 0 without annotations, 0 adapter origins
+```
+
+Every line is meant to be pasted as it stands: the default output carries counts, dates and decision classes and no tool, rule, session or door name, no path, no host and no config hash. `--include-names` restores tool, door and rule names (never session ids) and the header line says so. A release prints its version on the first line in place of `unreleased build`. `--format json` renders the same object for scripts, `--out <file>` writes the same bytes to a file, and `--window` widens or narrows the counts (1 minute to 30 days). Without a running proxy the timeline and the counts still print and the header names the missing snapshot in one sentence. The full contract, the timeline's sources and the cost of the two retention-wide reads are in [Activation report](./audit.md#activation-report-helio-report-activation).
+
+Sharing the file is your action: Helio writes it to your terminal or to the path you name and transmits nothing anywhere.
 
 ## Docker
 

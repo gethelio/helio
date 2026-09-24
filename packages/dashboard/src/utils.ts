@@ -58,6 +58,13 @@ export function timeAgo(iso: string): string {
   return `${String(days)}d ago`
 }
 
+/** `2026-09-23`: the ISO 8601 calendar day of `iso` in UTC, the form every CLI line prints for a person. */
+export function formatUtcDay(iso: string): string {
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${String(d.getUTCFullYear())}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
+}
+
 /** Format an ISO string as YYYY-MM-DD HH:MM:SS. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)
