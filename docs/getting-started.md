@@ -304,6 +304,8 @@ The dashboard has six tabs:
 - **Budgets** — Named cross-tool spend pots with live depletion and the spend ledger
 - **Analytics** — Charts showing action volume, decision breakdown, and top tools. Each top-tools row is a (tool, upstream) pair — a same-named tool on two named upstreams stays two rows — and upstream is null in singular mode
 
+Every time the dashboard shows is UTC and says so (`2026-09-23 14:23:45 UTC` on rows and tickets, `Actions Per Hour (UTC)` on the chart), matching `helio policy status` and the activation report; the Audit tab's custom time range is entered in your local time and converted for the query.
+
 ## Step 6: Send a Test Tool Call
 
 With the proxy running, send a request through it:

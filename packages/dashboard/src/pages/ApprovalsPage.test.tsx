@@ -259,6 +259,33 @@ describe('ApprovalsPage', () => {
     })
   })
 
+  it('prints a resolved time in UTC with the zone on the face', async () => {
+    const resolvedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-resolved-utc',
+      status: 'approved',
+      resolved_at: '2026-07-13T12:00:00.000Z',
+      resolved_by: 'alice',
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [], total: 0, limit: 1000, offset: 0 }
+          : { data: [resolvedTicket], total: 1, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/Resolved/)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Resolved/))
+
+    await waitFor(() => {
+      expect(screen.getByText('2026-07-13 12:00:00 UTC')).toBeTruthy()
+    })
+  })
+
   it('renders the Upstream section in an expanded resolved row (issue #297)', async () => {
     const resolvedTicket: ApprovalTicket = {
       ...pendingTicket,

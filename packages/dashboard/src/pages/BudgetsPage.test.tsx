@@ -176,6 +176,8 @@ describe('BudgetsPage', () => {
       expect(screen.getByText('approved overage')).toBeTruthy()
       expect(container.querySelector('.bg-amber-100')).toBeTruthy()
       expect(screen.getByText('spend')).toBeTruthy()
+      // Both events carry the seeded July instant; the ledger prints it in UTC, labeled.
+      expect(screen.getAllByText('2026-07-13 12:00:00 UTC')).toHaveLength(2)
     })
   })
 

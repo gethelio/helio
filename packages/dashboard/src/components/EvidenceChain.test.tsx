@@ -91,7 +91,8 @@ describe('EvidenceChain', () => {
     }
     render(<EvidenceChain chain={chain} />)
     expect(screen.getByText('Approval')).toBeTruthy()
-    expect(screen.getByText(/2026-07-02T15:03:34\.869Z/)).toBeTruthy()
+    expect(screen.getByText(/2026-07-02 15:03:34 UTC/)).toBeTruthy()
+    expect(screen.queryByText(/2026-07-02T15:03:34\.869Z/)).toBeNull()
     expect(screen.getByText(/hooks, dashboard/)).toBeTruthy()
   })
 

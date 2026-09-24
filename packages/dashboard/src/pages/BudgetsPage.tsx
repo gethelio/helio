@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { BudgetEventRecord, BudgetState, BudgetBucketState } from '../types'
 import { fetchBudgets, fetchBudgetEvents } from '../api'
 import { useEventSourceContext } from '../EventSourceContext'
-import { usageColor, usagePercent, formatCountdown, formatCurrency } from '../utils'
+import {
+  usageColor,
+  usagePercent,
+  formatCountdown,
+  formatCurrency,
+  formatTimestamp,
+} from '../utils'
 import { PageError } from '../components/PageError'
 
 // ---------------------------------------------------------------------------
@@ -619,7 +625,7 @@ function EventsPanel({ panel }: { panel: EventsPanelState }) {
           </div>
           <div className="flex shrink-0 items-center gap-2 text-gray-500">
             <span className="tabular-nums">{formatCurrency(event.amount, event.currency)}</span>
-            <span className="text-gray-400">{new Date(event.timestamp).toLocaleTimeString()}</span>
+            <span className="text-gray-400">{formatTimestamp(event.timestamp)}</span>
           </div>
         </div>
       ))}

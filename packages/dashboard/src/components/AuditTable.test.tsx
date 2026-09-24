@@ -126,6 +126,14 @@ describe('AuditTable', () => {
     expect(screen.getByText('send_email')).toBeTruthy()
   })
 
+  it('prints the timestamp in UTC with the zone on the face', () => {
+    const records = [
+      makeRecord({ timestamp: '2025-07-15T10:00:00.000Z' }),
+    ] as readonly AuditRecord[]
+    render(<AuditTable {...defaultProps()} records={records} />)
+    expect(screen.getByText('2025-07-15 10:00:00 UTC')).toBeTruthy()
+  })
+
   it('renders column headers', () => {
     render(<AuditTable {...defaultProps()} />)
     expect(screen.getByText('Timestamp')).toBeTruthy()

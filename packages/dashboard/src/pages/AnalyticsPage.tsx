@@ -151,7 +151,7 @@ export function AnalyticsPage() {
 
       {/* Actions per hour chart */}
       <section>
-        <h2 className="mb-3 text-sm font-medium text-gray-500">Actions Per Hour</h2>
+        <h2 className="mb-3 text-sm font-medium text-gray-500">Actions Per Hour (UTC)</h2>
         <div className="rounded-md border border-gray-200 bg-white p-4">
           <TimeSeriesChart data={data.per_hour} />
         </div>

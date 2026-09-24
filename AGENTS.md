@@ -127,7 +127,7 @@ Helio sits in the critical path between AI agents and external systems. A vulner
 - **Prefer `const` over `let`.** Never use `var`.
 - **No dead code.** Remove unused imports, functions, and variables. Do not comment out code — delete it and let git history preserve it.
 - **Section separators**: `// ---...` comment blocks between logical sections in files.
-- **Human-facing dates are ISO 8601 in UTC.** A calendar day prints as `2026-09-23` and a minute-precision instant as `2026-09-23 12:27 UTC`, through `util/format-time.ts` in the proxy and `formatUtcDay` in the dashboard; never a spelled month, never a locale form. Machine-facing fields (JSON, audit columns, API bodies) carry full ISO 8601 from `toISOString()`. Durations use the config grammar (`4h`, `7d`).
+- **Human-facing dates are ISO 8601 in UTC.** A calendar day prints as `2026-09-23` and a minute-precision instant as `2026-09-23 12:27 UTC`, through `util/format-time.ts` in the proxy and, in the dashboard, `formatUtcDay`, `formatTimestamp` (`2026-09-23 14:23:45 UTC`) and `formatUtcHour` (`14:00` on the chart axis, `14:00 UTC` on its tooltip); never a spelled month, never a locale form. Machine-facing fields (JSON, audit columns, API bodies) carry full ISO 8601 from `toISOString()`. Durations use the config grammar (`4h`, `7d`).
 
 ### Python (SDK)
 
