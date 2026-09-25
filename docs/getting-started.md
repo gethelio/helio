@@ -19,6 +19,11 @@ node mcp-echo-server.mjs
 
 It prints `MCP echo server listening on http://127.0.0.1:8080` and exposes a handful of demo tools (`get_weather`, `send_email`, `delete_record`, `create_payment`, `create_refund`, `stripe_charge`, `paypal_payout`) with realistic annotations, so the policy examples below have something meaningful to match. Leave it running in its own terminal — the default `upstream.url` (`http://localhost:8080/mcp`) already points at it.
 
+No traffic to look at yet either? `npx @gethelio/proxy init --demo` writes a
+directory of sample traffic (a config, an audit database of 45 days of governed
+calls, a sample upstream) so you can see every surface with history behind it
+before your first real call; see [Sample traffic](./demo.md).
+
 ## Step 1: Install
 
 Scaffold a new configuration file:
@@ -490,6 +495,7 @@ The local steps above (`helio start`) run the proxy as the same user as your age
 
 - [Configuration Reference](./configuration.md) — Every `helio.yaml` field with defaults and types
 - [Running Helio as a Sidecar](./deployment-sidecar.md) — Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network; `helio init --sandbox` writes the layout
+- [Sample traffic](./demo.md): See the report, the dashboard and `helio policy status` over 45 days of sample history before your first real call; `helio init --demo` writes it
 - [Running Helio as its own user](./deployment-separate-user.md) — The separate-user tier on Ubuntu 24.04, run end to end
 - [Policy Guide](./policies.md) — Rule syntax, matchers, actions, rate limits, spend limits, and common patterns
 - [Approval Workflows](./approvals.md) — Route sensitive actions to humans via Slack, webhook, or dashboard

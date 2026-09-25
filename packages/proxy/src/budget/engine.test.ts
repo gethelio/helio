@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { BudgetEngine } from './engine.js'
+import { BudgetEngine, budgetBucketKey } from './engine.js'
 import type {
   BudgetBreachEvent,
   BudgetCommitEvent,
@@ -1778,5 +1778,69 @@ describe('BudgetEngine — upstream label (issue #295)', () => {
     const staleSnapshots = engine.recordAll(gated(frozen.charges), COMMIT_META)
     expect(staleSnapshots[0]?.stale).toBe(true)
     expect(staleSnapshots[0]?.upstream).toBe('payments')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The bucket key format, exported so a seed and the engine cannot drift
+// (issue #397): rows keyed otherwise hydrate into a pot the door never
+// charges.
+// ---------------------------------------------------------------------------
+
+describe('budgetBucketKey', () => {
+  it('spells the three scopes the way the engine charges them', () => {
+    expect(budgetBucketKey('daily-cap', 'global', { sessionId: null, senderId: null })).toBe(
+      'budget:daily-cap:global',
+    )
+    expect(
+      budgetBucketKey('daily-cap', 'session', {
+        sessionId: mintGatedSession('s-1'),
+        senderId: null,
+      }),
+    ).toBe('budget:daily-cap:session:s-1')
+    expect(budgetBucketKey('daily-cap', 'session', { sessionId: null, senderId: null })).toBe(
+      'budget:daily-cap:session:unknown',
+    )
+    expect(budgetBucketKey('daily-cap', 'sender_id', { sessionId: null, senderId: 'U-1' })).toBe(
+      'budget:daily-cap:sender:U-1',
+    )
+    expect(budgetBucketKey('daily-cap', 'sender_id', { sessionId: null, senderId: null })).toBe(
+      'budget:daily-cap:sender:unknown',
+    )
+  })
+
+  it('lets a row seeded through the ledger and a live charge share one bucket', () => {
+    const { boot, ledger, advance } = persistentHarness()
+    const key = budgetBucketKey('daily-cap', 'global', { sessionId: null, senderId: null })
+    ledger.writeMeta({
+      budget_name: 'daily-cap',
+      limit_amount: 100,
+      currency: 'USD',
+      window: '24h',
+      key: 'global',
+      epoch: 1,
+    })
+    ledger.commitAll([
+      {
+        budget_name: 'daily-cap',
+        bucket_key: key,
+        kind: 'spend',
+        amount: 70,
+        currency: 'USD',
+        tool_name: 'stripe_charge',
+        origin: 'mcp',
+        audit_record_id: 'seeded-1',
+        timestamp: new Date(1_000_000).toISOString(),
+        timestamp_ms: 1_000_000,
+        generation: 1,
+      },
+    ])
+    advance(60_000)
+    const engine = boot([budgetConfig()])
+    const { charges } = engine.resolveCharges(chargeCtx('stripe_charge', { amount: 20 }))
+    engine.recordAll(gated(charges), COMMIT_META)
+    const [state] = engine.listStates()
+    expect(state?.buckets).toHaveLength(1)
+    expect(state?.buckets[0]).toMatchObject({ bucket_key: key, spent: 90, remaining: 10 })
   })
 })

@@ -21,6 +21,23 @@ Maintainer notes:
 
 ### Added
 
+- **`helio init --demo` writes a directory of sample traffic to try every
+  surface before the first real call.** It writes a `helio-demo.yaml` with
+  two named upstreams, two rules and one budget, an audit database of about
+  360 governed calls over 45 days in three config epochs (a first epoch with
+  no rule, a second under an approval rule, the current one under the
+  written file), 19 budget ledger rows with the pot past its limit, and a
+  dependency-free sample MCP upstream serving the same tools on two doors.
+  Every governed call carries a `demo-` upstream name or session id, the
+  config is `helio-demo.yaml` so its reload records are titled after it,
+  every row carries the environment label `demo`, and the command says on
+  its face that the traffic is not yours. `helio report activation`,
+  `helio export`, `helio start`, `helio policy status` and the dashboard
+  read the directory as they read any other, each with
+  `-c helio-demo.yaml`; the report's default output stays nameless, so
+  share a demo report with `--include-names`. Two runs with one `--at`
+  instant write byte-identical audit rows and reports; rerun with `--force`
+  after an upgrade to regenerate the file against the current schema.
 - **`helio report activation` writes a redacted activation report a user
   can hand over.** It reads the audit database on disk for a timeline
   (first call observed, first rule, first enforcement decision, with

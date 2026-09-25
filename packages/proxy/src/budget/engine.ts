@@ -855,22 +855,8 @@ export class BudgetEngine {
     return Math.max(memory, disk) + 1
   }
 
-  /**
-   * The key format is part of the ON-DISK contract: hydrate rebuilds buckets
-   * from `budget_events.bucket_key` verbatim, so renaming any segment here
-   * would strand every persisted bucket of an unchanged tuple as an
-   * unreachable ghost (displayed, never charged). Changing the format
-   * requires folding a format version into the epoch decision.
-   */
   private bucketKey(budget: CompiledBudget, ctx: BudgetChargeContext): string {
-    switch (budget.key) {
-      case 'session':
-        return `budget:${budget.name}:session:${ctx.sessionId ?? 'unknown'}`
-      case 'sender_id':
-        return `budget:${budget.name}:sender:${ctx.senderId ?? 'unknown'}`
-      case 'global':
-        return `budget:${budget.name}:global`
-    }
+    return budgetBucketKey(budget.name, budget.key, ctx)
   }
 
   private bucketFor(name: string, key: string): BudgetBucket {
@@ -947,6 +933,35 @@ export class BudgetEngine {
       resetAtMs,
       upstream: charge.upstream ?? null,
     }
+  }
+}
+
+/**
+ * The bucket a charge lands in, as the ledger stores it. The key format is
+ * part of the ON-DISK contract: hydrate rebuilds buckets from
+ * `budget_events.bucket_key` verbatim, so renaming any segment here would
+ * strand every persisted bucket of an unchanged tuple as an unreachable
+ * ghost (displayed, never charged). Changing the format requires folding a
+ * format version into the epoch decision. Exported so a writer that seeds
+ * ledger rows (the demo corpus, issue #397) keys them the way the engine
+ * charges them; a row keyed otherwise hydrates into a pot no door charges.
+ *
+ * @param name - The budget's configured name.
+ * @param key - The budget's scope (`global`, `session` or `sender_id`).
+ * @param ctx - The gate-minted session id and the sender id of the charge; both null on a global key.
+ */
+export function budgetBucketKey(
+  name: string,
+  key: CompiledBudget['key'],
+  ctx: Pick<BudgetChargeContext, 'sessionId' | 'senderId'>,
+): string {
+  switch (key) {
+    case 'session':
+      return `budget:${name}:session:${ctx.sessionId ?? 'unknown'}`
+    case 'sender_id':
+      return `budget:${name}:sender:${ctx.senderId ?? 'unknown'}`
+    case 'global':
+      return `budget:${name}:global`
   }
 }
 

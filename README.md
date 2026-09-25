@@ -85,6 +85,8 @@ This single package includes the built-in dashboard UI bundle.
 
 Running your agent in a container? `npx @gethelio/proxy init --sandbox` writes the sidecar layout instead; see [Running Helio as a Sidecar](./docs/deployment-sidecar.md).
 
+Nothing governed yet? `npx @gethelio/proxy init --demo` writes a directory of sample traffic so every surface can be tried before the first real call; see [Sample traffic](./docs/demo.md).
+
 ### 2. Configure
 
 `npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. The singular `upstream:` form stays fully supported; to govern more than one MCP server, declare a named `upstreams:` list in its place (set exactly one of the two). Tool sets are never merged: each named upstream is served at its own `/mcp/<name>` door. See the [Configuration Reference](./docs/configuration.md#upstreams).
@@ -386,6 +388,7 @@ Helio works with any MCP-compatible agent or framework:
 - **[Audit Trail](./docs/audit.md)**: What's recorded, how to search, how to export
 - **[Running Helio as a Sidecar](./docs/deployment-sidecar.md)**: Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network
 - **[Running Helio as its own user](./docs/deployment-separate-user.md)**: The separate-user tier on Ubuntu 24.04, run end to end
+- **[Sample traffic](./docs/demo.md)**: `helio init --demo` writes a directory of sample history to try every surface before the first real call
 
 ## Examples
 
