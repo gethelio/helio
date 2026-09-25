@@ -7084,3 +7084,252 @@ ${dashboard}audit:
     }, 40_000)
   })
 })
+
+describe('helio init --demo (issue #397)', () => {
+  const DEMO_FILES = ['helio-demo.yaml', 'helio-demo-audit.db', 'mcp-demo-server.mjs', 'README.md']
+  const CONNECT_LINE = /connect: attempting to connect to ([^\s]+)/g
+  const AT = '2026-09-24T12:00:00Z'
+
+  function demoDir(): string {
+    return mkdtempSync(join(tmpdir(), 'helio-cli-demo-'))
+  }
+
+  /** Run the CLI inside a seeded directory with NODE_DEBUG=net so every connection attempt lands on stderr. */
+  function runIn(
+    dir: string,
+    args: string[],
+  ): Promise<{ code: number; stdout: string; stderr: string; connects: string[] }> {
+    return runCli(args, { ...process.env, NODE_DEBUG: 'net' }, dir).then((r) => ({
+      ...r,
+      connects: [...r.stderr.matchAll(CONNECT_LINE)].map((m) => m[1] ?? ''),
+    }))
+  }
+
+  it('writes the four files, says the traffic is sample and prints the next steps', async () => {
+    const dir = demoDir()
+    const target = join(dir, 'demo')
+    try {
+      const { code, stdout, stderr } = await runCli(['init', '--demo', target])
+      expect(code).toBe(0)
+      expect(stdout).toBe('')
+      for (const rel of DEMO_FILES) {
+        expect(existsSync(join(target, rel)), rel).toBe(true)
+        expect(stderr).toContain(`Created ${join(target, rel)}`)
+      }
+      expect(stderr).toContain(
+        `Sample traffic, not your own: every row in ${target}/helio-demo-audit.db was written by helio init --demo.`,
+      )
+      expect(stderr).toContain('Next steps')
+      expect(stderr).toContain(`cd ${target}`)
+      expect(stderr).toContain('helio report activation -c helio-demo.yaml')
+      expect(stderr).toContain('node mcp-demo-server.mjs')
+      expect(stderr).toContain('helio start -c helio-demo.yaml')
+      expect(stderr).toContain('helio policy status -c helio-demo.yaml')
+      expect(stderr).toContain('http://127.0.0.1:3100')
+      expect(stderr).not.toMatch(/[a-f0-9]{64}/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('defaults to ./helio-demo under the current directory', async () => {
+    const dir = demoDir()
+    try {
+      const { code, stderr } = await runCli(['init', '--demo'], undefined, dir)
+      expect(code).toBe(0)
+      expect(existsSync(join(dir, 'helio-demo', 'helio-demo.yaml'))).toBe(true)
+      expect(stderr).toContain(
+        'Sample traffic, not your own: every row in helio-demo/helio-demo-audit.db was written by helio init --demo.',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses an existing file without --force and overwrites with it', async () => {
+    const dir = demoDir()
+    const target = join(dir, 'demo')
+    try {
+      expect((await runCli(['init', '--demo', target])).code).toBe(0)
+      const second = await runCli(['init', '--demo', target])
+      expect(second.code).toBe(1)
+      expect(second.stderr).toBe(
+        `Error: ${join(target, 'helio-demo.yaml')} already exists. Use --force to overwrite.\n`,
+      )
+      const forced = await runCli(['init', '--demo', target, '--force'])
+      expect(forced.code).toBe(0)
+      expect(forced.stderr).toContain('Created')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses --demo with --client, --sandbox, --undo and --output, before the undo path', async () => {
+    const dir = demoDir()
+    try {
+      const faces: Array<[string[], string]> = [
+        [['init', '--demo', '--client'], 'Error: --demo does not combine with --client.'],
+        [['init', '--demo', '--sandbox'], 'Error: --demo does not combine with --sandbox.'],
+        [['init', '--demo', '--undo'], 'Error: --demo does not combine with --undo.'],
+        [['init', '--demo', '--client', '--undo'], 'Error: --demo does not combine with --client.'],
+        [
+          ['init', '--demo', '--output', 'x.yaml'],
+          'Error: --output does not apply to --demo; pass the directory as --demo <dir>.',
+        ],
+        [['init', '--at', AT], 'Error: --at applies only with --demo.'],
+        [
+          ['init', '--demo', '--at', 'yesterday'],
+          'Error: --at must be an ISO 8601 instant (got "yesterday").',
+        ],
+        [
+          ['init', '--demo', '--at', '2000-01-01T00:00:00Z'],
+          'Error: --at must be within the last 45 days (got 2000-01-01T00:00:00Z).',
+        ],
+        [
+          ['init', '--demo', '--at', '2999-01-01T00:00:00Z'],
+          'Error: --at must not be in the future (got 2999-01-01T00:00:00Z).',
+        ],
+      ]
+      for (const [args, line] of faces) {
+        const result = await runCli(args, undefined, dir)
+        expect(result.code, args.join(' ')).toBe(1)
+        expect(result.stderr, args.join(' ')).toBe(`${line}\n`)
+      }
+      expect(readdirSync(dir)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('pins the base with --at and seeds byte-equal audit rows twice', async () => {
+    const dir = demoDir()
+    try {
+      const a = join(dir, 'a')
+      const b = join(dir, 'b')
+      expect((await runCli(['init', '--demo', a, '--at', AT])).code).toBe(0)
+      expect((await runCli(['init', '--demo', b, '--at', AT])).code).toBe(0)
+      const dump = (path: string): string[] => {
+        const db = new Database(path, { readonly: true })
+        try {
+          return (
+            db.prepare('SELECT * FROM audit_records ORDER BY created_at, id').all() as Array<
+              Record<string, unknown>
+            >
+          ).map((row) => JSON.stringify(row))
+        } finally {
+          db.close()
+        }
+      }
+      const rowsA = dump(join(a, 'helio-demo-audit.db'))
+      expect(rowsA.length).toBeGreaterThan(300)
+      expect(rowsA).toEqual(dump(join(b, 'helio-demo-audit.db')))
+      // The budget refusal sits 30 minutes before the pinned base.
+      const refusal = rowsA.find((row) => row.includes('"block_reason":"budget_exceeded"')) ?? ''
+      expect(refusal).toContain(
+        `"created_at":"${new Date(new Date(AT).getTime() - 30 * 60_000).toISOString()}"`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is read by helio report activation, export and validate with -c helio-demo.yaml', async () => {
+    const dir = demoDir()
+    try {
+      expect((await runCli(['init', '--demo', dir, '--force'])).code).toBe(0)
+
+      const report = await runIn(dir, ['report', 'activation', '-c', 'helio-demo.yaml'])
+      expect(report.code).toBe(0)
+      expect(report.connects).toHaveLength(1)
+      expect(report.stdout).toContain('Helio activation report')
+      expect(report.stdout).toContain('this config file is the one that last wrote policy to it')
+      expect(report.stdout).toMatch(
+        /First enforcement decision\s+\d{4}-\d{2}-\d{2}\s+first blocked call \(policy_denied\)/,
+      )
+      expect(report.stdout).toMatch(/Config reloads: 2 \(1 applied\)/)
+      expect(report.stdout).not.toContain('demo-crm')
+      expect(report.stdout).not.toContain('helio-demo')
+
+      // With no proxy answering, the text face restores the first blocked
+      // call's tool name; the door names sit in the JSON's called pairs.
+      const named = await runIn(dir, [
+        'report',
+        'activation',
+        '-c',
+        'helio-demo.yaml',
+        '--include-names',
+      ])
+      expect(named.code).toBe(0)
+      expect(named.stdout).toContain('Names: INCLUDED')
+      expect(named.stdout).toContain('tool delete_customer')
+      const namedJson = await runIn(dir, [
+        'report',
+        'activation',
+        '-c',
+        'helio-demo.yaml',
+        '--include-names',
+        '--format',
+        'json',
+      ])
+      expect(namedJson.code).toBe(0)
+      const doors = (
+        JSON.parse(namedJson.stdout) as {
+          persisted: { pairs_called_in_window: Array<{ upstream: string | null }> }
+        }
+      ).persisted.pairs_called_in_window.map((pair) => pair.upstream)
+      expect(doors).toContain('demo-crm')
+      expect(doors).toContain('demo-billing')
+
+      const json = await runIn(dir, [
+        'report',
+        'activation',
+        '-c',
+        'helio-demo.yaml',
+        '--format',
+        'json',
+        '--window',
+        '4h',
+      ])
+      expect(json.code).toBe(0)
+      const parsed = JSON.parse(json.stdout) as {
+        persisted: { calls_in_window: number; window: string }
+      }
+      expect(parsed.persisted.window).toBe('4h')
+      expect(parsed.persisted.calls_in_window).toBeGreaterThan(100)
+
+      const exported = await runIn(dir, ['export', '-c', 'helio-demo.yaml'])
+      expect(exported.code).toBe(0)
+      expect(exported.stderr).toMatch(/Exported (\d{3}) of \1 records/)
+      const records = JSON.parse(exported.stdout) as Array<{
+        environment: string
+        upstream: string | null
+      }>
+      expect(records.length).toBeGreaterThan(300)
+      for (const record of records) expect(record.environment).toBe('demo')
+
+      const budgets = await runIn(dir, [
+        'export',
+        '-c',
+        'helio-demo.yaml',
+        '--budgets',
+        'demo-payments',
+      ])
+      expect(budgets.code).toBe(0)
+      expect(budgets.stderr).toContain('Exported 19 of 19 records')
+      expect(JSON.parse(budgets.stdout)).toHaveLength(19)
+
+      const validate = await runIn(dir, ['validate', '-c', 'helio-demo.yaml'])
+      expect(validate.code).toBe(0)
+      expect(validate.stdout + validate.stderr).toContain(
+        'Config is valid: helio-demo.yaml (2 policy rules, 1 budget)',
+      )
+
+      const bare = await runIn(dir, ['report', 'activation'])
+      expect(bare.code).toBe(1)
+      expect(bare.stderr).toContain('Error: Cannot read config file: helio.yaml')
+      expect(bare.connects).toHaveLength(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

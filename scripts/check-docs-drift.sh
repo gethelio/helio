@@ -32,6 +32,7 @@ SOURCE_DRIFT_PATTERNS=(
   '^packages/proxy/src/config/schema\.ts$'
   '^packages/proxy/src/config/loader\.ts$'
   '^packages/proxy/src/dashboard/api\.ts$'
+  '^packages/proxy/src/demo/.*\.ts$'
   '^packages/proxy/src/evidence/api\.ts$'
   '^packages/proxy/src/approval/.*\.ts$'
   '^packages/proxy/src/audit/csv\.ts$'

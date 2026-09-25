@@ -32,6 +32,14 @@ import {
   sandboxImageTag,
 } from './sandbox-scaffold.js'
 import {
+  DEMO_AUDIT_FILE,
+  DEMO_CONFIG_FILE,
+  DEMO_DEFAULT_DIR,
+  DEMO_UPSTREAM_FILE,
+} from './demo/corpus.js'
+import { DEMO_DEFAULT_PORTS } from './demo/config.js'
+import { parseDemoBase, seedDemoDirectory } from './demo/seed.js'
+import {
   BACKUP_SUFFIX,
   MANIFEST_FILE,
   PROJECT_CLIENT_FILES,
@@ -1212,6 +1220,40 @@ async function sandboxCommand(dir: string, force: boolean): Promise<void> {
   )
 }
 
+/**
+ * `helio init --demo [dir]` (issue #397): write a directory of sample
+ * traffic so every surface can be tried before the first real call. Mirrors
+ * `sandboxCommand`: refuses an existing target without `--force`, prints
+ * `Created <path>` per file and the next steps. The one extra line says the
+ * traffic is not the reader's own; every next step carries
+ * `-c helio-demo.yaml` because a bare command looks for helio.yaml.
+ */
+async function demoCommand(dir: string, options: { force: boolean; at?: string }): Promise<void> {
+  const base = parseDemoBase(options.at)
+  const result = await seedDemoDirectory(dir, { base, force: options.force })
+
+  for (const path of result.files) console.error(`Created ${path}`)
+  console.error('')
+  console.error(
+    `Sample traffic, not your own: every row in ${join(dir, DEMO_AUDIT_FILE)} was written by helio init --demo.`,
+  )
+  console.error('')
+  console.error('Next steps:')
+  console.error(`  1. cd ${dir}`)
+  console.error(
+    `  2. helio report activation -c ${DEMO_CONFIG_FILE} (no proxy needed; --include-names restores tool, door and rule names)`,
+  )
+  console.error(
+    `  3. node ${DEMO_UPSTREAM_FILE} in one terminal, then helio start -c ${DEMO_CONFIG_FILE} in another`,
+  )
+  console.error(
+    `  4. helio policy status -c ${DEMO_CONFIG_FILE}, and open http://127.0.0.1:${String(DEMO_DEFAULT_PORTS.dashboardPort)}`,
+  )
+  console.error(
+    `Every command in that directory takes -c ${DEMO_CONFIG_FILE}; a bare one looks for helio.yaml.`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // `helio init --client` (issue #398)
 // ---------------------------------------------------------------------------
@@ -2224,6 +2266,14 @@ program
     'Adopt an existing MCP client configuration: the project .mcp.json, .cursor/mcp.json and .vscode/mcp.json under the current directory, or the one file at <path>; backs each file up, writes a helio.yaml with every server as an upstream, and repoints the client at Helio',
   )
   .option('--undo', 'With --client: restore the backups the adoption wrote and remove them', false)
+  .option(
+    '--demo [dir]',
+    `Write a directory of sample traffic (${DEMO_CONFIG_FILE}, an audit database of governed calls, a sample MCP upstream, README.md) into <dir> (default: ${DEMO_DEFAULT_DIR}) instead of a helio.yaml`,
+  )
+  .option(
+    '--at <iso>',
+    'With --demo: the instant the sample history ends, within the last 45 days (default: now, to the minute); one instant writes the same rows every time',
+  )
   .action(
     (
       opts: {
@@ -2232,11 +2282,26 @@ program
         sandbox?: string | true
         client?: string | true
         undo: boolean
+        demo?: string | true
+        at?: string
       },
       command: Command,
     ) => {
       if (opts.client !== undefined && opts.sandbox !== undefined) {
         refuseInit('Error: --client does not combine with --sandbox.')
+      }
+      // The --demo refusals sit before the undo branch's return, so
+      // `--demo --client --undo` never reaches the undo path.
+      if (opts.demo !== undefined && opts.client !== undefined) {
+        refuseInit('Error: --demo does not combine with --client.')
+      }
+      if (opts.demo !== undefined && opts.sandbox !== undefined) {
+        refuseInit('Error: --demo does not combine with --sandbox.')
+      }
+      if (opts.demo !== undefined && opts.undo)
+        refuseInit('Error: --demo does not combine with --undo.')
+      if (opts.at !== undefined && opts.demo === undefined) {
+        refuseInit('Error: --at applies only with --demo.')
       }
       if (opts.undo && opts.client === undefined) refuseInit('Error: --undo requires --client.')
       if (opts.undo && opts.client !== undefined) {
@@ -2247,6 +2312,17 @@ program
         return initClientUndoCommand(opts.client)
       }
       if (opts.client !== undefined) return initClientCommand(opts.client, opts.output, opts.force)
+      if (opts.demo !== undefined) {
+        if (command.getOptionValueSource('output') === 'cli') {
+          refuseInit(
+            'Error: --output does not apply to --demo; pass the directory as --demo <dir>.',
+          )
+        }
+        return demoCommand(opts.demo === true ? DEMO_DEFAULT_DIR : opts.demo, {
+          force: opts.force,
+          ...(opts.at === undefined ? {} : { at: opts.at }),
+        }).catch(exitOnStartupError)
+      }
       if (opts.sandbox === undefined) return initCommand(opts.output, opts.force)
       if (command.getOptionValueSource('output') === 'cli') {
         console.error(
