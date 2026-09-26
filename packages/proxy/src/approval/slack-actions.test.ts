@@ -374,3 +374,56 @@ describe('Slack action handler', () => {
     expect(updateSpy).toHaveBeenCalledOnce()
   })
 })
+
+// ---------------------------------------------------------------------------
+// A frozen router (issue #402): the Slack button names the kill switch
+// ---------------------------------------------------------------------------
+
+describe('Slack action handler while the kill switch freezes the router (issue #402)', () => {
+  let router: ApprovalRouter | null = null
+
+  afterEach(() => {
+    vi.clearAllMocks()
+    if (router) {
+      router.close()
+      router = null
+    }
+  })
+
+  const FROZEN_SENTENCE =
+    'Helio is halted by its kill switch; this approval keeps its remaining time and can be ' +
+    'decided after the resume'
+
+  it('resolves nothing while frozen and updates the message with the kill-switch sentence', async () => {
+    const ctx = setup()
+    router = ctx.router
+    const ticketId = ctx.submitTicket()
+    ctx.router.freeze()
+
+    const res = await ctx.postAction(buildActionBody(`helio_approve:${ticketId}`))
+    expect(res.status).toBe(200)
+    expect(ctx.queue.get(ticketId)?.status).toBe('pending')
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
+    const update = mockUpdate.mock.calls[0]?.[0] as { text: string; blocks: unknown[] }
+    expect(update.text).toContain('kill switch')
+    expect(JSON.stringify(update.blocks)).toContain(FROZEN_SENTENCE)
+    expect(JSON.stringify(update.blocks)).not.toContain('already been resolved')
+  })
+
+  it('a deny while frozen is the same sentence, and the same action resolves after the thaw', async () => {
+    const ctx = setup()
+    router = ctx.router
+    const ticketId = ctx.submitTicket()
+    ctx.router.freeze()
+
+    await ctx.postAction(buildActionBody(`helio_deny:${ticketId}`))
+    expect(ctx.queue.get(ticketId)?.status).toBe('pending')
+    expect(JSON.stringify(mockUpdate.mock.calls[0]?.[0])).toContain(FROZEN_SENTENCE)
+
+    ctx.router.thaw()
+    const res = await ctx.postAction(buildActionBody(`helio_deny:${ticketId}`))
+    expect(res.status).toBe(200)
+    expect(ctx.queue.get(ticketId)?.status).toBe('denied')
+    expect(JSON.stringify(mockUpdate.mock.calls[1]?.[0])).toContain('Denied by alice')
+  })
+})

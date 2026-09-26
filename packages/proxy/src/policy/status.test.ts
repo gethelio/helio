@@ -586,3 +586,91 @@ describe('renderPolicyStatusText', () => {
     expect(empty).toContain('Readiness: not yet')
   })
 })
+
+// ---------------------------------------------------------------------------
+// The kill switch on the report (issue #402): a nullable field, one line first
+// ---------------------------------------------------------------------------
+
+describe('kill switch on the policy status report (issue #402)', () => {
+  const surface = classifySurface({ doors: surfaceDoors, policy: twoRules, environment: undefined })
+  const base = {
+    surface,
+    policy: twoRules,
+    persisted: persisted(),
+    window: DEFAULT_STATUS_WINDOW,
+    now: NOW,
+  }
+
+  it('reports inactive with the cleared shape when no snapshot is given', () => {
+    const report = buildPolicyStatus(base)
+    expect(report.kill_switch).toEqual({
+      active: false,
+      since: null,
+      surface: null,
+      durable: false,
+    })
+    expect(report.schema_version).toBe(1)
+  })
+
+  it('carries the snapshot when killed', () => {
+    const report = buildPolicyStatus({
+      ...base,
+      killSwitch: {
+        killed: true,
+        durable: true,
+        surface: 'file',
+        since: '2026-09-26T12:27:03.000Z',
+      },
+    })
+    expect(report.kill_switch).toEqual({
+      active: true,
+      since: '2026-09-26T12:27:03.000Z',
+      surface: 'file',
+      durable: true,
+    })
+  })
+
+  it('prints the kill line first, and only while active', () => {
+    const killed = renderPolicyStatusText(
+      buildPolicyStatus({
+        ...base,
+        killSwitch: {
+          killed: true,
+          durable: true,
+          surface: 'file',
+          since: '2026-09-26T12:27:03.000Z',
+        },
+      }),
+    )
+    const lines = killed.split('\n')
+    expect(lines[0]).toBe('Kill switch: ACTIVE since 2026-09-26 12:27 UTC (file, durable)')
+    expect(lines[1]).toBe('')
+    expect(lines[2]).toBe('Authority surface')
+
+    const memoryOnly = renderPolicyStatusText(
+      buildPolicyStatus({
+        ...base,
+        killSwitch: {
+          killed: true,
+          durable: false,
+          surface: 'env',
+          since: '2026-09-26T12:27:03.000Z',
+        },
+      }),
+    )
+    expect(memoryOnly.split('\n')[0]).toBe(
+      'Kill switch: ACTIVE since 2026-09-26 12:27 UTC (env, memory-only)',
+    )
+
+    const quiet = renderPolicyStatusText(buildPolicyStatus(base))
+    expect(quiet.split('\n')[0]).toBe('Authority surface')
+    expect(quiet).not.toContain('Kill switch')
+  })
+
+  it('renders a report without the field (an older proxy) as not killed', () => {
+    const report = buildPolicyStatus(base)
+    const { kill_switch: _dropped, ...older } = report
+    const text = renderPolicyStatusText(older as unknown as typeof report)
+    expect(text.split('\n')[0]).toBe('Authority surface')
+  })
+})

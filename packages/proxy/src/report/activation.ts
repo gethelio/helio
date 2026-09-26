@@ -228,6 +228,7 @@ const KNOWN_BLOCK_REASONS: Readonly<Record<BlockReason | 'cancelled' | 'install_
   tool_definition_drift: true,
   budget_exceeded: true,
   session_unresolved: true,
+  kill_switch: true,
   cancelled: true,
   install_denied: true,
 }

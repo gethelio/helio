@@ -229,6 +229,8 @@ you from:
   token (which would let them read the audit feed, enumerate evidence
   state, or approve pending tickets).
 
+To halt every governed call from the host, use the dashboard API: `curl -X POST -H "Authorization: Bearer $HELIO_DASHBOARD_SECRET" http://127.0.0.1:3100/api/kill-switch` (and `DELETE` to resume). A host-side `helio kill` does not work here, because the compose file mounts the config as a single file (`./helio.docker.yaml:/config/helio.yaml:ro`) and the marker it would write beside it is invisible inside the container; the halt through the API is memory-only under that read-only mount and ends with the container. Mount the config directory, as the [sidecar guide](../docs/deployment-sidecar.md) does, for a file-based kill. See [docs/kill-switch.md](../docs/kill-switch.md).
+
 The main MCP port (3000) is the "agent edge" — anything that can
 reach it can send tool calls. Browser pages are kept off this edge:
 requests to `/mcp` or `/sse` that carry an `Origin` header are refused

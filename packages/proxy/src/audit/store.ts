@@ -36,11 +36,20 @@ const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
 const NON_TOOL_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'rejected')"
 
 /**
- * record_kind of the proxy's own config reload records (issue #341). Excluded
- * from every decision aggregate (they are not decisions about calls) and
- * kept in the raw total and the per-hour series.
+ * record_kind of the proxy's own config reload records (issue #341), for the
+ * two selects that read reloads alone.
  */
 const POLICY_RELOAD_KIND_SQL = "'policy_reload'"
+
+/**
+ * Every record_kind the proxy writes about itself rather than about a call:
+ * config reloads (issue #341) and kill-switch transitions (issue #402).
+ * Excluded from every decision aggregate (they are not decisions about
+ * calls) and kept in the raw total and the per-hour series. A `record_kind`
+ * list, never a `policy_decision` one: the decision list names decisions on
+ * tool calls that carry no real tool.
+ */
+const NON_TOOL_KINDS_SQL = "('kill_switch', 'policy_reload')"
 
 /**
  * Maximum records a single bulk export may return. Shared by the dashboard
@@ -177,7 +186,9 @@ export const ACTIVATION_WINDOW_SQL = {
  * Every `block_reason` value a shipped record can carry that is NOT a policy
  * block on a tool call (issue #400): the nameless-call and header-mismatch
  * rejections, the refused reload outcomes (an applied reload stores a null
- * `block_reason` and is not listed), and the install-scan denial. Held in
+ * `block_reason` and is not listed), the install-scan denial, and the kill
+ * switch (a kill record and every call refused while killed, issue #402).
+ * Held in
  * byte order (`Buffer.compare` over UTF-8, the order of SQLite's BINARY
  * collation) because the list generates the range seeks of
  * `ACTIVATION_TIMELINE_SQL.any_policy_block`. A future kind that writes a
@@ -189,6 +200,7 @@ export const NON_BLOCK_REASONS: readonly string[] = sortByBytes([
   'missing_tool_name',
   'header_mismatch',
   'install_denied',
+  'kill_switch',
   ...POLICY_RELOAD_OUTCOMES.filter((outcome) => outcome !== 'applied'),
 ])
 
@@ -242,7 +254,9 @@ export function buildAnyPolicyBlockSql(excluded: readonly string[]): string {
  * the first qualifying row: `first_rule_decided_call` (nothing indexes
  * `matched_rule`) and `first_blocked_call` (the `blocked` class's predicate,
  * so a dry-run deny or a rejected row is never the first enforcement
- * decision), each bounded by the rows before its first match and costing
+ * decision, and never a call refused by the kill switch, which is an
+ * operator halt and not a policy decision), each bounded by the rows before
+ * its first match and costing
  * about 2.5 s per million rows when no such row exists. The check exists so
  * the empty face of the second walk is skipped whenever the history holds no
  * reason outside {@link NON_BLOCK_REASONS}.
@@ -261,6 +275,7 @@ export const ACTIVATION_TIMELINE_SQL = {
   first_blocked_call: `SELECT created_at, block_reason, tool_name
     FROM audit_records
     WHERE record_kind = 'tool_call' AND block_reason IS NOT NULL AND dry_run = 0
+      AND block_reason <> 'kill_switch'
       AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
     ORDER BY created_at LIMIT 1`,
   newest_record_hash: `SELECT config_sha256 FROM audit_records ORDER BY created_at DESC LIMIT 1`,
@@ -865,20 +880,21 @@ export class AuditStore {
     const rangeFilters: AuditQueryFilters = { from, to, upstream: filters.upstream }
     const { clause, params } = buildWhereClause(rangeFilters)
 
-    // Policy reload records (issue #341) describe the proxy's own config
-    // reloads, not decisions about calls: an applied reload has a null
-    // block_reason and a refused one carries its outcome there, so without
-    // this guard they would count as allowed calls and as blocks. They stay
-    // in `total` and `per_hour` so "Total Actions" and "Actions Per Hour"
-    // agree with the feed, and out of every decision aggregate.
+    // Policy reload records (issue #341) and kill-switch records (issue
+    // #402) describe the proxy's own reloads and halts, not decisions about
+    // calls: an applied reload or a resume has a null block_reason and a
+    // refused reload or a kill carries its outcome there, so without this
+    // guard they would count as allowed calls and as blocks. They stay in
+    // `total` and `per_hour` so "Total Actions" and "Actions Per Hour" agree
+    // with the feed, and out of every decision aggregate.
     const totals = this.db
       .prepare(
         `SELECT
            COUNT(*) as total,
-           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
-           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as blocked_total,
-           COALESCE(SUM(CASE WHEN dry_run = 1 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as dry_run_total,
-           COALESCE(SUM(CASE WHEN dry_run = 0 AND record_kind <> ${POLICY_RELOAD_KIND_SQL} THEN 1 ELSE 0 END), 0) as applied_total
+           COALESCE(SUM(CASE WHEN block_reason IS NULL AND policy_decision NOT IN ${DRIFT_EVENT_DECISIONS_SQL} AND record_kind NOT IN ${NON_TOOL_KINDS_SQL} THEN 1 ELSE 0 END), 0) as allowed_total,
+           COALESCE(SUM(CASE WHEN block_reason IS NOT NULL AND record_kind NOT IN ${NON_TOOL_KINDS_SQL} THEN 1 ELSE 0 END), 0) as blocked_total,
+           COALESCE(SUM(CASE WHEN dry_run = 1 AND record_kind NOT IN ${NON_TOOL_KINDS_SQL} THEN 1 ELSE 0 END), 0) as dry_run_total,
+           COALESCE(SUM(CASE WHEN dry_run = 0 AND record_kind NOT IN ${NON_TOOL_KINDS_SQL} THEN 1 ELSE 0 END), 0) as applied_total
          FROM audit_records ${clause}`,
       )
       .get(...params) as {
@@ -891,8 +907,8 @@ export class AuditStore {
 
     // By decision
     const decisionClause = clause
-      ? `${clause} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
-      : `WHERE record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      ? `${clause} AND record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
+      : `WHERE record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
     const by_decision = this.db
       .prepare(
         `SELECT policy_decision as decision, COUNT(*) as count
@@ -903,8 +919,8 @@ export class AuditStore {
       .all(...params) as Array<{ decision: string; count: number }>
 
     const blockedClause = clause
-      ? `${clause} AND block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
-      : `WHERE block_reason IS NOT NULL AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      ? `${clause} AND block_reason IS NOT NULL AND record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
+      : `WHERE block_reason IS NOT NULL AND record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
     const by_block_reason = this.db
       .prepare(
         `SELECT block_reason as reason, COUNT(*) as count
@@ -915,11 +931,12 @@ export class AuditStore {
       .all(...params) as Array<{ reason: string; count: number }>
 
     // Top tools (limit 10) — non-tool decisions (drift events and nameless-call
-    // rejections) and policy reload records are excluded: they do not name a
-    // real tool call and would inflate tool-usage rankings.
+    // rejections) and the proxy's own records (reloads, kill-switch
+    // transitions) are excluded: they do not name a real tool call and would
+    // inflate tool-usage rankings.
     const toolsClause = clause
-      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
-      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind <> ${POLICY_RELOAD_KIND_SQL}`
+      ? `${clause} AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
+      : `WHERE policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL} AND record_kind NOT IN ${NON_TOOL_KINDS_SQL}`
     const top_tools = this.db
       .prepare(
         `SELECT tool_name, upstream, COUNT(*) as count

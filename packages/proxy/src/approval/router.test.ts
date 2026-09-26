@@ -1007,3 +1007,209 @@ describe('ApprovalRouter', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// freeze and thaw (issue #402): a kill freezes decisions, not observers
+// ---------------------------------------------------------------------------
+
+describe('freeze and thaw (issue #402)', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('freezes the timeout with the remaining time and re-arms it on thaw', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 10_000 })
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+
+    vi.advanceTimersByTime(5_000)
+    router.freeze()
+    expect(router.frozen).toBe(true)
+    vi.advanceTimersByTime(60_000)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+
+    router.thaw()
+    expect(router.frozen).toBe(false)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+    vi.advanceTimersByTime(4_999)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+    vi.advanceTimersByTime(1)
+    const outcome = await promise
+    expect(outcome.status).toBe('timeout')
+    if (outcome.status === 'timeout') expect(outcome.timeoutMs).toBe(10_000)
+  })
+
+  it('rewrites the ticket deadline to the thaw instant plus the remaining time', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-26T12:00:00.000Z'))
+    const { router, queue } = createRouter({ defaultTimeoutMs: 10_000 })
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+    expect(queue.get(ticketId)?.timeout_at).toBe('2026-09-26T12:00:10.000Z')
+
+    vi.advanceTimersByTime(4_000)
+    router.freeze()
+    vi.advanceTimersByTime(30_000)
+    expect(queue.get(ticketId)?.timeout_at).toBe('2026-09-26T12:00:10.000Z')
+    router.thaw()
+    expect(queue.get(ticketId)?.timeout_at).toBe('2026-09-26T12:00:40.000Z')
+
+    vi.advanceTimersByTime(6_000)
+    expect((await promise).status).toBe('timeout')
+  })
+
+  it('freezes the escalation likewise and re-arms it with its remaining time', async () => {
+    vi.useFakeTimers()
+    const primary = mockChannel('dashboard')
+    const delegate = mockChannel('webhook')
+    const channels = new Map<string, ApprovalChannel>([
+      ['dashboard', primary],
+      ['fallback', delegate],
+    ])
+    const { router } = createRouter({ channels, defaultTimeoutMs: 10_000 })
+    const rule = makeRule({
+      approval: {
+        channel: 'dashboard',
+        timeoutMs: 10_000,
+        delegates: ['fallback'],
+        escalationAfterMs: 3_000,
+      },
+    })
+    const promise = router.submit(submitParams({ matched_rule: rule }))
+
+    vi.advanceTimersByTime(1_000)
+    router.freeze()
+    vi.advanceTimersByTime(60_000)
+    expect(delegate.calls).toHaveLength(0)
+
+    router.thaw()
+    vi.advanceTimersByTime(1_999)
+    expect(delegate.calls).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(delegate.calls).toHaveLength(1)
+
+    vi.advanceTimersByTime(10_000)
+    expect((await promise).status).toBe('timeout')
+  })
+
+  it('does not re-arm an escalation that already fired: one notification', async () => {
+    vi.useFakeTimers()
+    const primary = mockChannel('dashboard')
+    const delegate = mockChannel('webhook')
+    const channels = new Map<string, ApprovalChannel>([
+      ['dashboard', primary],
+      ['fallback', delegate],
+    ])
+    const { router, queue } = createRouter({ channels, defaultTimeoutMs: 10_000 })
+    const rule = makeRule({
+      approval: {
+        channel: 'dashboard',
+        timeoutMs: 10_000,
+        delegates: ['fallback'],
+        escalationAfterMs: 3_000,
+      },
+    })
+    const promise = router.submit(submitParams({ matched_rule: rule }))
+    const ticketId = queue.listPending()[0]?.id as string
+
+    vi.advanceTimersByTime(3_001)
+    expect(delegate.calls).toHaveLength(1)
+    expect(queue.get(ticketId)?.escalated_at).toBeDefined()
+
+    router.freeze()
+    vi.advanceTimersByTime(60_000)
+    router.thaw()
+    vi.advanceTimersByTime(20_000)
+    expect(delegate.calls).toHaveLength(1)
+    expect((await promise).status).toBe('timeout')
+  })
+
+  it('a ticket frozen with 0 ms left settles timeout on the next tick after thaw, never hangs', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 5_000 })
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+
+    // The wall clock reaches the deadline without the timer firing (fake
+    // timers do not run on a system-time move), so the freeze finds 0 ms left.
+    vi.setSystemTime(Date.now() + 5_000)
+    router.freeze()
+    router.thaw()
+    expect(queue.get(ticketId)?.status).toBe('pending')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(queue.get(ticketId)?.status).toBe('timeout')
+    expect((await promise).status).toBe('timeout')
+  })
+
+  it('a ticket submitted while frozen is created frozen with its full time', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 5_000 })
+    router.freeze()
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+    vi.advanceTimersByTime(60_000)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+
+    router.thaw()
+    vi.advanceTimersByTime(4_999)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+    vi.advanceTimersByTime(1)
+    expect((await promise).status).toBe('timeout')
+  })
+
+  it('approve, deny and breakGlass return false while frozen and touch nothing; true after thaw', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 5_000 })
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+
+    router.freeze()
+    expect(router.approve(ticketId, 'admin')).toBe(false)
+    expect(router.deny(ticketId, 'admin', 'no')).toBe(false)
+    expect(router.breakGlass(ticketId, 'admin', 'go')).toBe(false)
+    expect(queue.get(ticketId)?.status).toBe('pending')
+
+    router.thaw()
+    expect(router.approve(ticketId, 'admin')).toBe(true)
+    expect((await promise).status).toBe('approved')
+  })
+
+  it('a real client abort still settles client_disconnected at once while frozen', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 5_000 })
+    const controller = new AbortController()
+    const promise = router.submit(submitParams(), controller.signal)
+    const ticketId = queue.listPending()[0]?.id as string
+
+    router.freeze()
+    controller.abort()
+    expect((await promise).status).toBe('client_disconnected')
+    expect(queue.get(ticketId)?.status).toBe('client_disconnected')
+  })
+
+  it('close() still settles every held ticket shutdown_cancelled while frozen', async () => {
+    vi.useFakeTimers()
+    const { router, queue } = createRouter({ defaultTimeoutMs: 5_000 })
+    const promise = router.submit(submitParams())
+    const ticketId = queue.listPending()[0]?.id as string
+
+    router.freeze()
+    router.close()
+    expect((await promise).status).toBe('shutdown_cancelled')
+    expect(queue.get(ticketId)?.status).toBe('shutdown_cancelled')
+  })
+
+  it('freeze and thaw are idempotent', async () => {
+    vi.useFakeTimers()
+    const { router } = createRouter({ defaultTimeoutMs: 5_000 })
+    const promise = router.submit(submitParams())
+    router.freeze()
+    router.freeze()
+    vi.advanceTimersByTime(60_000)
+    router.thaw()
+    router.thaw()
+    vi.advanceTimersByTime(5_000)
+    expect((await promise).status).toBe('timeout')
+  })
+})

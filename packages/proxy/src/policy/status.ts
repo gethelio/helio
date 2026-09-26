@@ -10,7 +10,8 @@
 
 import type { SurfaceCoverage, SurfaceDoorRef, SurfaceReport } from './surface.js'
 import { conditionalWhenClause } from './surface.js'
-import { formatUtcDay } from '../util/format-time.js'
+import { formatUtcDay, formatUtcMinute } from '../util/format-time.js'
+import type { KillSwitchSnapshot } from '../kill-switch/state.js'
 import type { CompiledPolicy, PolicyAction } from './types.js'
 import type { PersistedSummary } from '../audit/types.js'
 import { durationSchema, parseDuration } from '../config/schema.js'
@@ -85,6 +86,21 @@ export interface PolicyStatusReadiness {
   readonly thresholds: { readonly min_calls: number; readonly min_tool_doors: number }
 }
 
+/**
+ * The kill switch as the answering process sees it (issue #402): additive
+ * on the report (the schema version stays), read defensively by the CLI so
+ * an older proxy's report still renders.
+ */
+export interface KillSwitchStatus {
+  readonly active: boolean
+  /** The instant the halt began, ISO 8601; null when not active. */
+  readonly since: string | null
+  /** `file` when the marker backs the halt, else the memory hold's surface; null when not active. */
+  readonly surface: 'file' | 'env' | 'api' | null
+  /** True when the marker file backs the halt. */
+  readonly durable: boolean
+}
+
 export interface PolicyStatusReport {
   readonly schema_version: number
   readonly generated_at: string
@@ -94,6 +110,7 @@ export interface PolicyStatusReport {
   readonly coverage: SurfaceCoverage
   readonly persisted: PolicyStatusPersisted
   readonly readiness: PolicyStatusReadiness
+  readonly kill_switch: KillSwitchStatus
 }
 
 export interface PolicyStatusInput {
@@ -103,6 +120,19 @@ export interface PolicyStatusInput {
   /** The window as the caller asked for it, echoed as given. */
   readonly window: string
   readonly now: Date
+  /** The kill switch snapshot of the answering process; absent reads as not killed. */
+  readonly killSwitch?: KillSwitchSnapshot
+}
+
+/** Map the process's snapshot onto the report's field. */
+function killSwitchStatus(snapshot: KillSwitchSnapshot | undefined): KillSwitchStatus {
+  if (!snapshot?.killed) return { active: false, since: null, surface: null, durable: false }
+  return {
+    active: true,
+    since: snapshot.since,
+    surface: snapshot.surface,
+    durable: snapshot.durable,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +208,7 @@ export function buildPolicyStatus(input: PolicyStatusInput): PolicyStatusReport 
     schema_version: POLICY_STATUS_SCHEMA_VERSION,
     generated_at: input.now.toISOString(),
     window,
+    kill_switch: killSwitchStatus(input.killSwitch),
     policy: {
       rule_count: policy.rules.length,
       default_action: policy.defaultAction,
@@ -273,10 +304,28 @@ const ACTION_ORDER: readonly PolicyAction[] = [
   'dry_run',
 ]
 
+/** The `kill_switch` field as a report from an older proxy may lack it: absent reads as not killed. */
+function killSwitchField(report: PolicyStatusReport): KillSwitchStatus | undefined {
+  const partial: Partial<PolicyStatusReport> = report
+  return partial.kill_switch
+}
+
 /** The full report as text, for `helio policy status` without `--format json`. */
 export function renderPolicyStatusText(report: PolicyStatusReport): string {
   const { surface, coverage, persisted, readiness, window } = report
   const lines: string[] = []
+
+  // The kill switch (issue #402): one line, first, only while the answering
+  // process is killed. Read defensively: an older proxy's report has no field.
+  const kill = killSwitchField(report)
+  if (kill?.active) {
+    const since = kill.since === null ? 'an unknown instant' : formatUtcMinute(kill.since)
+    const surfaceName = kill.surface ?? 'unknown'
+    lines.push(
+      `Kill switch: ACTIVE since ${since} (${surfaceName}, ${kill.durable ? 'durable' : 'memory-only'})`,
+    )
+    lines.push('')
+  }
 
   // Authority surface
   lines.push('Authority surface')

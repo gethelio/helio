@@ -25,6 +25,7 @@ export type BlockReason =
   | 'tool_definition_drift'
   | 'budget_exceeded'
   | 'session_unresolved'
+  | 'kill_switch'
 
 // ---------------------------------------------------------------------------
 // Feedback types — discriminated union keyed on `reason`.
@@ -187,6 +188,13 @@ export interface SessionUnresolvedFeedback extends SelfRepairFeedbackBase {
   readonly tried: string
 }
 
+/** Feedback for a call refused while an operator's kill switch is active (issue #402). */
+export interface KillSwitchFeedback extends SelfRepairFeedbackBase {
+  readonly reason: 'kill_switch'
+  /** Always `deny`: no rule was evaluated, the operator halted every call. */
+  readonly action: 'deny'
+}
+
 /** Discriminated union of all self-repair feedback types. */
 export type SelfRepairFeedback =
   | PolicyDeniedFeedback
@@ -204,6 +212,7 @@ export type SelfRepairFeedback =
   | BudgetApprovalDeniedFeedback
   | BudgetApprovalTimeoutFeedback
   | SessionUnresolvedFeedback
+  | KillSwitchFeedback
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -479,6 +488,29 @@ export function buildToolDriftFeedback(
       `The definition of "${drift.toolName}" changed upstream (${aspects.join(', ')}) after ` +
       'Helio baselined it. An operator must review the change; restarting the proxy ' +
       're-baselines, or the upstream can revert the change.',
+    retry_allowed: false,
+  }
+}
+
+/** The JSON-RPC error message and the sideband feedback message of a kill refusal. */
+export const KILL_SWITCH_MESSAGE = 'Kill switch active: every governed call is refused'
+
+/**
+ * Build self-repair feedback for a call refused by the kill switch (issue
+ * #402). No rule was evaluated, so the rule fields are null like a drift
+ * block's; `retry_allowed` is false because the agent cannot repair an
+ * operator halt, and an agent loop retrying would write one audit row per
+ * attempt for the whole halt. After a resume a fresh call is an ordinary call.
+ */
+export function buildKillSwitchFeedback(): KillSwitchFeedback {
+  return {
+    blocked: true,
+    reason: 'kill_switch',
+    ...ruleInfo(undefined),
+    action: 'deny',
+    suggestion:
+      'An operator halted Helio with its kill switch. Every governed call is refused until ' +
+      'an operator resumes it; retrying does not help.',
     retry_allowed: false,
   }
 }

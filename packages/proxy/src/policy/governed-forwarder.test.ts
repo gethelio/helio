@@ -17,6 +17,7 @@ import { BudgetEngine } from '../budget/engine.js'
 import type { BudgetLedgerSink } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
+import { KillSwitch } from '../kill-switch/state.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -7703,5 +7704,143 @@ describe('GovernedForwarder.snapshotSurface', () => {
     expect(safe?.annotations).not.toBe(safeAnnotations)
     expect(safe?.drifted).toBe(false)
     expect(surface.tools.find((t) => t.name === 'plain_tool')?.annotations).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The kill switch on the MCP door (issue #402)
+// ---------------------------------------------------------------------------
+
+describe('kill switch on the MCP door (issue #402)', () => {
+  function killed() {
+    const state = new KillSwitch()
+    state.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    return state
+  }
+
+  it('refuses a governed call with the -32001 body, reason kill_switch, and never calls the inner forwarder', async () => {
+    const inner = mockForwarder()
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      auditWriter,
+      killSwitch: killed(),
+      upstreamName: 'crm',
+    })
+
+    const result = await governed.forward(toolsCallWithSession('get_customer', 's1', { id: 7 }))
+    expect(inner.forward).not.toHaveBeenCalled()
+    expect(result.response.status).toBe(200)
+    const error = errorFromResult(result)
+    expect(error.code).toBe(-32001)
+    expect(error.message).toBe('Kill switch active: every governed call is refused')
+    expect(error.data).toEqual({
+      blocked: true,
+      reason: 'kill_switch',
+      rule: null,
+      rule_index: null,
+      action: 'deny',
+      suggestion:
+        'An operator halted Helio with its kill switch. Every governed call is refused until ' +
+        'an operator resumes it; retrying does not help.',
+      retry_allowed: false,
+    })
+
+    expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    expect(auditWriter.push).not.toHaveBeenCalled()
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record).toMatchObject({
+      tool_name: 'get_customer',
+      tool_input: { id: 7 },
+      policy_decision: 'deny',
+      block_reason: 'kill_switch',
+      matched_rule: null,
+      matched_rule_index: null,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      upstream: 'crm',
+      session_id: 's1',
+      session_source: 'header',
+      flagged_destructive: false,
+      approval_status: null,
+      evidence_chain: null,
+      upstream_response: null,
+    })
+  })
+
+  it('refuses under global dry_run too, and the row says dry_run false', async () => {
+    const inner = mockForwarder()
+    const auditWriter = fakeAuditWriter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', dry_run: true, rules: [] }),
+      { auditWriter, killSwitch: killed() },
+    )
+    const result = await governed.forward(toolsCallRequest('get_customer'))
+    expect(inner.forward).not.toHaveBeenCalled()
+    expect(errorFromResult(result).data['reason']).toBe('kill_switch')
+    const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(record['dry_run']).toBe(false)
+    expect(record['block_reason']).toBe('kill_switch')
+  })
+
+  it('refuses before policy: a deny rule never decides, a require_approval rule never holds', async () => {
+    const inner = mockForwarder()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [{ name: 'gate', match: { tool: 'get_*' }, action: 'require_approval' }],
+      }),
+      { killSwitch: killed() },
+    )
+    const result = await governed.forward(toolsCallRequest('get_customer'))
+    expect(errorFromResult(result).data).toMatchObject({ reason: 'kill_switch', rule: null })
+  })
+
+  it('passes tools/list and every other method through while killed', async () => {
+    const inner = mockForwarder(toolsListResult([{ name: 'get_customer' }]))
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      killSwitch: killed(),
+    })
+    const list = await governed.forward(toolsListRequest())
+    expect(inner.forward).toHaveBeenCalledTimes(1)
+    expect((list.response.body as { result: unknown }).result).toEqual({
+      tools: [{ name: 'get_customer' }],
+    })
+    await governed.forward(otherRequest('ping'))
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+  })
+
+  it('still rejects a nameless tools/call as missing_tool_name, not as a kill refusal', async () => {
+    const inner = mockForwarder()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      killSwitch: killed(),
+    })
+    const result = await governed.forward(otherRequest('tools/call', { arguments: {} }))
+    expect(errorFromResult(result).data['reason']).toBe('missing_tool_name')
+  })
+
+  it('forwards again once the hold lifts, with no state carried from the refusal', async () => {
+    const inner = mockForwarder()
+    const state = killed()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      killSwitch: state,
+    })
+    await governed.forward(toolsCallRequest('get_customer'))
+    expect(inner.forward).not.toHaveBeenCalled()
+    state.setFileHold(false, { surface: 'file', actor: null, atBoot: false })
+    const result = await governed.forward(toolsCallRequest('get_customer'))
+    expect(inner.forward).toHaveBeenCalledTimes(1)
+    expect((result.response.body as { result: unknown }).result).toBeDefined()
+  })
+
+  it('a not-killed state is a plain forward (the option costs nothing)', async () => {
+    const inner = mockForwarder()
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      killSwitch: new KillSwitch(),
+    })
+    await governed.forward(toolsCallRequest('get_customer'))
+    expect(inner.forward).toHaveBeenCalledTimes(1)
   })
 })

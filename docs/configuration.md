@@ -1074,6 +1074,16 @@ Refusing to start is fail-closed, and it costs availability: a process that can 
 
 If the proxy loses its watch on the file (the file replaced by one it cannot read, for example), it logs `[helio] Config watch failed (keeping current configuration; retrying every 1s until the file can be read again)`, writes a `policy_reload` record with `outcome: watch_failed`, keeps serving the running policy, and checks once a second whether it can read the file. When it can, it prints the `Watching` line again and reloads the file at once, so a replaced file applies (or is refused with its own record, `rejected_pinned` under the pin), and every later edit reloads as before. The retry starts from the watch error: a single-file Docker bind mount, which delivers no event when the file is renamed over on the host, is unchanged (see the [security model](../docker/README.md#security-model) note in the Docker quickstart). The `config_sha256` on every audit record, compared with `helio config hash`, is the check that does not depend on the watch.
 
+### Starting killed
+
+`HELIO_KILL_SWITCH=1` starts the proxy with its [kill switch](./kill-switch.md) active: every governed call is refused until an operator resumes it. It is a boot input like the pin, read once at start and never on a poll, and it creates no marker file, so the halt is memory-only: `helio resume` cannot lift it, `DELETE /api/kill-switch` or a restart without the variable can. Any other value, the empty string included, is refused before anything is served:
+
+```
+Error: HELIO_KILL_SWITCH is set but is not "1": "yes". Unset it, or set it to 1 to start killed.
+```
+
+The file-based halt needs no variable: a `<config>.kill` marker present at start (written by `helio kill -c <config>`) also starts the proxy killed, durably, until the file is removed.
+
 ### Reload boundary
 
 Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections still require restart.

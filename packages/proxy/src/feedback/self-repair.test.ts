@@ -14,7 +14,9 @@ import {
   buildBudgetExceededFeedback,
   buildBudgetApprovalDeniedFeedback,
   buildBudgetApprovalTimeoutFeedback,
+  buildKillSwitchFeedback,
 } from './self-repair.js'
+import type { SelfRepairFeedback } from './self-repair.js'
 import type { PolicyDecision } from '../policy/engine.js'
 import type { EvidenceCheckResult, DependencyCheckResult } from '../evidence/index.js'
 import type { CompiledPolicyRule } from '../policy/types.js'
@@ -1011,5 +1013,32 @@ describe('budget break-glass feedback builders', () => {
     expect(feedback.timeout_seconds).toBe(120)
     expect(feedback.budgets).toHaveLength(1)
     expect(feedback.retry_allowed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildKillSwitchFeedback (issue #402)
+// ---------------------------------------------------------------------------
+
+describe('buildKillSwitchFeedback', () => {
+  it('builds the kill-switch refusal with no rule and retry_allowed false', () => {
+    const feedback = buildKillSwitchFeedback()
+    expect(feedback).toEqual({
+      blocked: true,
+      reason: 'kill_switch',
+      rule: null,
+      rule_index: null,
+      action: 'deny',
+      suggestion:
+        'An operator halted Helio with its kill switch. Every governed call is refused until ' +
+        'an operator resumes it; retrying does not help.',
+      retry_allowed: false,
+    })
+  })
+
+  it('joins the SelfRepairFeedback union under its reason', () => {
+    const feedback: SelfRepairFeedback = buildKillSwitchFeedback()
+    expect(feedback.reason).toBe('kill_switch')
+    expect(feedback.retry_allowed).toBe(false)
   })
 })

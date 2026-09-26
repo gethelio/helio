@@ -29,11 +29,25 @@ import type { CompiledApproval, CompiledPolicyRule } from '../policy/types.js'
  */
 export const NATIVE_CHANNEL_PREFIX = 'native:'
 
-/** Internal state for a pending approval. */
+/**
+ * Internal state for a pending approval. The deadlines and the re-arm
+ * closures sit beside the timers so a kill switch can freeze each clock and
+ * rebuild it with the time left (issue #402); the timers are undefined while
+ * frozen. Mutable by design: the entry is the clock's own state.
+ */
 interface PendingApproval {
   readonly resolve: (outcome: ApprovalOutcome) => void
-  readonly timer: ReturnType<typeof setTimeout>
-  readonly escalationTimer?: ReturnType<typeof setTimeout>
+  readonly ticket: ApprovalTicket
+  /** Wall-clock deadline of the timeout timer (the timers' own clock). */
+  timeoutAtMs: number
+  timer: ReturnType<typeof setTimeout> | undefined
+  /** Wall-clock instant of the escalation timer; undefined without one. */
+  escalationAtMs: number | undefined
+  escalationTimer: ReturnType<typeof setTimeout> | undefined
+  readonly armTimeout: (delayMs: number) => ReturnType<typeof setTimeout>
+  readonly armEscalation: ((delayMs: number) => ReturnType<typeof setTimeout>) | undefined
+  /** Set while frozen: what each clock had left when the freeze took it. */
+  remaining: { readonly timeoutMs: number; readonly escalationMs: number | undefined } | undefined
 }
 
 /** Options for constructing an ApprovalRouter. */
@@ -118,6 +132,7 @@ export class ApprovalRouter {
   private readonly onNotifyFailure: ((event: ApprovalNotifyFailureEvent) => void) | undefined
   private readonly pending = new Map<string, PendingApproval>()
   private closed = false
+  private frozenState = false
 
   constructor(options: ApprovalRouterOptions) {
     this.defaultTimeoutMs = options.defaultTimeoutMs
@@ -177,42 +192,66 @@ export class ApprovalRouter {
         resolve(finalOutcome)
       }
 
-      // Set the timeout timer
-      const timer = setTimeout(() => {
-        this.finalizePending(ticket.id, { status: 'timeout', ticketId: ticket.id, timeoutMs })
-      }, timeoutMs)
-      timer.unref()
-
-      // Escalation timer — fires before timeout to re-notify via delegates
-      let escalationTimer: ReturnType<typeof setTimeout> | undefined
-      const delegates = approvalConfig?.delegates
-      const escalationAfterMs = approvalConfig?.escalationAfterMs
-
-      if (
-        escalationAfterMs !== undefined &&
-        escalationAfterMs > 0 &&
-        escalationAfterMs < timeoutMs
-      ) {
-        escalationTimer = setTimeout(() => {
-          if (!this.pending.has(ticket.id)) return // Already resolved
-          const targets = delegates?.length ? [...delegates] : [channelName]
-          for (const target of targets) {
-            const ch = this.channels.get(target)
-            if (ch) {
-              void ch.notify(ticket).catch((err: unknown) => {
-                this.reportNotifyFailure(ticket.id, target, 'escalation', err)
-              })
-            } else {
-              this.reportNotifyFailure(ticket.id, target, 'escalation', 'channel not found')
-            }
-          }
-          ticket.escalated_at = new Date(this.now()).toISOString()
-          ticket.escalated_to = [...targets]
-        }, escalationAfterMs)
-        escalationTimer.unref()
+      // Timers run on the wall clock; the deadlines are kept beside them so a
+      // kill switch can freeze each clock and re-arm it with the time left.
+      const armTimeout = (delayMs: number): ReturnType<typeof setTimeout> => {
+        const timer = setTimeout(() => {
+          this.finalizePending(ticket.id, { status: 'timeout', ticketId: ticket.id, timeoutMs })
+        }, delayMs)
+        timer.unref()
+        return timer
       }
 
-      this.pending.set(ticket.id, { resolve: settle, timer, escalationTimer })
+      // Escalation timer — fires before timeout to re-notify via delegates
+      const delegates = approvalConfig?.delegates
+      const escalationAfterMs = approvalConfig?.escalationAfterMs
+      const escalationDelayMs =
+        escalationAfterMs !== undefined && escalationAfterMs > 0 && escalationAfterMs < timeoutMs
+          ? escalationAfterMs
+          : undefined
+      const armEscalation =
+        escalationDelayMs === undefined
+          ? undefined
+          : (delayMs: number): ReturnType<typeof setTimeout> => {
+              const timer = setTimeout(() => {
+                if (!this.pending.has(ticket.id)) return // Already resolved
+                const targets = delegates?.length ? [...delegates] : [channelName]
+                for (const target of targets) {
+                  const ch = this.channels.get(target)
+                  if (ch) {
+                    void ch.notify(ticket).catch((err: unknown) => {
+                      this.reportNotifyFailure(ticket.id, target, 'escalation', err)
+                    })
+                  } else {
+                    this.reportNotifyFailure(ticket.id, target, 'escalation', 'channel not found')
+                  }
+                }
+                ticket.escalated_at = new Date(this.now()).toISOString()
+                ticket.escalated_to = [...targets]
+              }, delayMs)
+              timer.unref()
+              return timer
+            }
+
+      const startedAtMs = Date.now()
+      const entry: PendingApproval = {
+        resolve: settle,
+        ticket,
+        timeoutAtMs: startedAtMs + timeoutMs,
+        timer: armTimeout(timeoutMs),
+        escalationAtMs:
+          escalationDelayMs === undefined ? undefined : startedAtMs + escalationDelayMs,
+        escalationTimer:
+          armEscalation && escalationDelayMs !== undefined
+            ? armEscalation(escalationDelayMs)
+            : undefined,
+        armTimeout,
+        armEscalation,
+        remaining: undefined,
+      }
+      this.pending.set(ticket.id, entry)
+      // A ticket submitted while killed is created frozen: no live clock.
+      if (this.frozenState) this.freezeEntry(entry)
 
       if (abortSignal) {
         if (abortSignal.aborted) {
@@ -325,6 +364,7 @@ export class ApprovalRouter {
    *          already resolved.
    */
   approve(ticketId: string, approvedBy: string): boolean {
+    if (this.frozenState) return false
     return this.finalizePending(ticketId, {
       status: 'approved',
       resolvedBy: approvedBy,
@@ -340,6 +380,7 @@ export class ApprovalRouter {
    *          already resolved.
    */
   deny(ticketId: string, deniedBy: string, reason?: string): boolean {
+    if (this.frozenState) return false
     return this.finalizePending(ticketId, {
       status: 'denied',
       resolvedBy: deniedBy,
@@ -356,6 +397,7 @@ export class ApprovalRouter {
    *          already resolved.
    */
   breakGlass(ticketId: string, resolvedBy: string, reason: string): boolean {
+    if (this.frozenState) return false
     return this.finalizePending(ticketId, {
       status: 'break_glass',
       resolvedBy,
@@ -367,6 +409,77 @@ export class ApprovalRouter {
   /** Look up a ticket by id (delegates to the queue). */
   getTicket(ticketId: string): ApprovalTicket | undefined {
     return this.queue.get(ticketId)
+  }
+
+  // -------------------------------------------------------------------------
+  // The kill switch (issue #402): freeze decisions, not observers
+  // -------------------------------------------------------------------------
+
+  /** True while a kill switch holds every decision clock and every action. */
+  get frozen(): boolean {
+    return this.frozenState
+  }
+
+  /**
+   * Stop every clock that would turn a held ticket into a decision: the
+   * timeout and the escalation timers, with the time each had left stored
+   * on the entry. `approve`, `deny` and `breakGlass` answer false while
+   * frozen. The client abort listener and `close()` are untouched: a real
+   * abort still settles `client_disconnected` at once and a real shutdown
+   * still settles `shutdown_cancelled`.
+   */
+  freeze(): void {
+    if (this.frozenState) return
+    this.frozenState = true
+    for (const entry of this.pending.values()) this.freezeEntry(entry)
+  }
+
+  /**
+   * Re-arm every frozen clock with its remaining time from this instant and
+   * rewrite the ticket's `timeout_at` to the new deadline. An escalation
+   * that already fired is not re-armed (its callback does not clear itself,
+   * so a second arm would notify twice); a timeout with nothing left fires
+   * on the next tick.
+   */
+  thaw(): void {
+    if (!this.frozenState) return
+    this.frozenState = false
+    const nowMs = Date.now()
+    for (const entry of this.pending.values()) {
+      const remaining = entry.remaining
+      if (!remaining) continue
+      entry.remaining = undefined
+      entry.timeoutAtMs = nowMs + remaining.timeoutMs
+      entry.timer = entry.armTimeout(remaining.timeoutMs)
+      entry.ticket.timeout_at = new Date(this.now() + remaining.timeoutMs).toISOString()
+      if (
+        remaining.escalationMs !== undefined &&
+        remaining.escalationMs > 0 &&
+        entry.armEscalation &&
+        !entry.ticket.escalated_at
+      ) {
+        entry.escalationAtMs = nowMs + remaining.escalationMs
+        entry.escalationTimer = entry.armEscalation(remaining.escalationMs)
+      } else {
+        entry.escalationAtMs = undefined
+      }
+    }
+  }
+
+  private freezeEntry(entry: PendingApproval): void {
+    if (entry.remaining) return
+    const nowMs = Date.now()
+    clearTimeout(entry.timer)
+    entry.timer = undefined
+    if (entry.escalationTimer) clearTimeout(entry.escalationTimer)
+    entry.escalationTimer = undefined
+    entry.remaining = {
+      timeoutMs: Math.max(0, entry.timeoutAtMs - nowMs),
+      escalationMs:
+        entry.escalationAtMs !== undefined && !entry.ticket.escalated_at
+          ? Math.max(0, entry.escalationAtMs - nowMs)
+          : undefined,
+    }
   }
 
   /** Clean up all pending timers and resolve all pending promises. */
@@ -384,6 +497,7 @@ export class ApprovalRouter {
     const entry = this.pending.get(ticketId)
     if (!entry) return false
 
+    // Both are undefined while frozen; clearing undefined is a no-op.
     clearTimeout(entry.timer)
     if (entry.escalationTimer) clearTimeout(entry.escalationTimer)
     this.pending.delete(ticketId)

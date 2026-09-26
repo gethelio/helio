@@ -70,7 +70,9 @@ export interface AuditRecord {
    * count as enforcement blocks); and `'policy_reload'` for a config reload
    * attempt the proxy records about itself (issue #341): the outcome is in
    * `block_reason` and under `evidence_chain.policy_reload`, and the decision
-   * column holds the constant `policy_reload` so analytics can exclude the kind.
+   * column holds the constant `policy_reload` so analytics can exclude the kind;
+   * and `'kill_switch'` for an operator kill or resume (issue #402), the same
+   * pattern under `evidence_chain.kill_switch` with the constant `kill_switch`.
    */
   readonly record_kind:
     | 'tool_call'
@@ -78,6 +80,7 @@ export interface AuditRecord {
     | 'install_scan'
     | 'evaluation_expired'
     | 'policy_reload'
+    | 'kill_switch'
   /**
    * Enforcement origin: `'mcp'` for the proxy path, or an adapter-supplied
    * origin string (e.g. `'openclaw'`) for sideband-governed calls. Surfaces

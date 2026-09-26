@@ -726,3 +726,67 @@ describe('Approval REST API', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// A frozen router (issue #402): every decision answers 409 until the resume
+// ---------------------------------------------------------------------------
+
+describe('Approval REST API while the kill switch freezes the router (issue #402)', () => {
+  let router: ApprovalRouter | null = null
+
+  afterEach(() => {
+    if (router) {
+      router.close()
+      router = null
+    }
+  })
+
+  const FROZEN = {
+    error: 'kill_switch_active',
+    suggestion: 'resume Helio first; the ticket keeps its remaining time',
+  }
+
+  it('answers 409 kill_switch_active on approve, deny and break-glass, leaving the ticket pending', async () => {
+    const ctx = setup()
+    router = ctx.router
+    const ticketId = ctx.submitTicket()
+    ctx.router.freeze()
+
+    const approve = await ctx.post(`/${ticketId}/approve`, { approved_by: 'admin' })
+    expect(approve.status).toBe(409)
+    expect(await approve.json()).toEqual(FROZEN)
+
+    const deny = await ctx.post(`/${ticketId}/deny`, { denied_by: 'admin', reason: 'no' })
+    expect(deny.status).toBe(409)
+    expect(await deny.json()).toEqual(FROZEN)
+
+    const breakGlass = await ctx.post(`/${ticketId}/break-glass`, {
+      approved_by: 'admin',
+      reason: 'emergency',
+    })
+    expect(breakGlass.status).toBe(409)
+    expect(await breakGlass.json()).toEqual(FROZEN)
+
+    expect(ctx.queue.get(ticketId)?.status).toBe('pending')
+  })
+
+  it('answers 409 before the ticket lookup: an unknown ticket is also kill_switch_active while frozen', async () => {
+    const ctx = setup()
+    router = ctx.router
+    ctx.router.freeze()
+    const res = await ctx.post('/nope/approve', { approved_by: 'admin' })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual(FROZEN)
+  })
+
+  it('resolves normally after the thaw', async () => {
+    const ctx = setup()
+    router = ctx.router
+    const ticketId = ctx.submitTicket()
+    ctx.router.freeze()
+    ctx.router.thaw()
+    const approve = await ctx.post(`/${ticketId}/approve`, { approved_by: 'admin' })
+    expect(approve.status).toBe(200)
+    expect(ctx.queue.get(ticketId)?.status).toBe('approved')
+  })
+})

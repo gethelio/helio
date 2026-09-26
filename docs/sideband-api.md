@@ -44,7 +44,7 @@ Clients that need a page number compute it as `Math.floor(offset / limit) + 1`.
 
 Endpoints that return a computed view of in-memory state are not "resources" in the REST sense, and wrapping them in `{ data }` adds ceremony without signal. They return their computed view directly, with shapes specific to each endpoint.
 
-Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/policy/status`, `GET /api/limits`, `GET /api/adapters`, `GET /api/budgets`.
+Endpoints in this category: `GET /api/health`, `GET /api/analytics`, `GET /api/policy/status`, `GET /api/limits`, `GET /api/adapters`, `GET /api/budgets`, `POST /api/kill-switch`, `DELETE /api/kill-switch`.
 
 Envelope category does not imply authentication policy: when dashboard auth is enabled, `GET /api/analytics`, `GET /api/policy/status`, `GET /api/limits`, `GET /api/adapters`, and `GET /api/budgets` still require auth. `GET /api/health` remains the only intentionally unauthenticated probe endpoint.
 
@@ -251,6 +251,7 @@ The authority report (issue #396): the tool surface the running proxy primed, th
   "schema_version": 1,
   "generated_at": "2026-09-21T13:08:43.335Z",
   "window": "4h",
+  "kill_switch": { "active": false, "since": null, "surface": null, "durable": false },
   "policy": {
     "rule_count": 1,
     "default_action": "allow",
@@ -346,12 +347,13 @@ The authority report (issue #396): the tool surface the running proxy primed, th
 
 Top level:
 
-| Field            | Description                                                                                                                                                                                                                                                |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schema_version` | `1`. Bumped only for a breaking change to this shape; additive fields do not bump it.                                                                                                                                                                      |
-| `generated_at`   | When the report was assembled (ISO 8601).                                                                                                                                                                                                                  |
-| `window`         | The `window` query parameter as sent, or `4h`.                                                                                                                                                                                                             |
-| `policy`         | `rule_count`, `default_action`, `dry_run`, `flag_destructive` (`log`, `require_approval` or null), `on_tool_drift` (the effective mode, `block` when unset), and `enforces_nothing` (zero rules, default allow, no dry-run: the no-enforcement predicate). |
+| Field            | Description                                                                                                                                                                                                                                                                                        |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema_version` | `1`. Bumped only for a breaking change to this shape; additive fields do not bump it.                                                                                                                                                                                                              |
+| `generated_at`   | When the report was assembled (ISO 8601).                                                                                                                                                                                                                                                          |
+| `window`         | The `window` query parameter as sent, or `4h`.                                                                                                                                                                                                                                                     |
+| `kill_switch`    | The [kill switch](./kill-switch.md) as the answering process sees it: `active`, `since` (ISO 8601, null when inactive), `surface` (`file`, `env`, `api` or null) and `durable` (whether the marker file backs the halt). Additive; `helio policy status` prints it as its first line while active. |
+| `policy`         | `rule_count`, `default_action`, `dry_run`, `flag_destructive` (`log`, `require_approval` or null), `on_tool_drift` (the effective mode, `block` when unset), and `enforces_nothing` (zero rules, default allow, no dry-run: the no-enforcement predicate).                                         |
 
 `surface`, the doors the proxy primed:
 
@@ -795,6 +797,7 @@ Approve a pending ticket.
 - `400` — `{ "error": "Invalid JSON" }` or `{ "error": "Validation error", "details": [...] }`
 - `404` — `{ "error": "Ticket not found" }`
 - `409` — `{ "error": "Ticket already resolved", "status": "<current-status>" }`
+- `409`: `{ "error": "kill_switch_active", "suggestion": "resume Helio first; the ticket keeps its remaining time" }` while the [kill switch](./kill-switch.md) is active, answered before the ticket lookup
 - `409` — `{ "error": "native_ticket", "resolve_in": "<origin>" }` for adapter-owned tickets (`channel_name` of `native:<origin>`): their approval UI lives in the adapter, so the `/api/approvals/*` endpoints refuse to resolve them. See the [adapter governance API](./adapter-api.md).
 
 #### POST /api/approvals/:id/deny
@@ -834,6 +837,61 @@ Emergency force-approval. Both `approved_by` and `reason` are required. The reso
 ```
 
 **Error responses:** same as `/approve`.
+
+---
+
+### Kill switch
+
+See [Kill Switch](./kill-switch.md) for the operator halt: the marker file, `helio kill` and `helio resume`, the frozen approvals and the accepted limits. Both verbs answer raw objects and sit under the `/api/*` authentication above (a cookie session also needs `x-helio-csrf`). In open mode (no secret) both answer `403` before any write or unlink:
+
+```json
+{
+  "error": "kill_switch_requires_secret",
+  "marker": "helio.yaml.kill",
+  "suggestion": "run helio kill -c <config> or helio resume -c <config>, or create and delete the marker file by hand"
+}
+```
+
+A process with no kill switch (a direct embedder) answers `503 { "error": "kill switch is not available in this process" }`.
+
+#### POST /api/kill-switch
+
+Halt every governed call. The endpoint writes the same `<config>.kill` marker `helio kill` writes, where this process can write the config directory; otherwise the halt is memory-only and the response says so.
+
+**Request body (optional):**
+
+```json
+{ "actor": "alice" }
+```
+
+`actor` (1 to 200 characters) is recorded on the audit record; when omitted, the credential's mode (`bearer` or `session`) stands in.
+
+**Response (200):**
+
+```json
+{ "killed": true, "changed": true, "durable": true, "since": "2026-09-26T12:27:03.000Z" }
+```
+
+- `durable: false` carries a `note`: `this process cannot write the marker beside the config (EACCES), so this halt is memory-only and ends with the process; run helio kill -c <config> where the config directory is writable`. The marker path is not in the body.
+- Already killed: `{ "killed": true, "changed": false, "durable": <bool>, "since": "<ISO 8601>" }`.
+
+**Error responses:** `400` invalid JSON or a malformed `actor`; `401` / `403` as for every mutating route.
+
+#### DELETE /api/kill-switch
+
+Resume. The endpoint resumes only by unlinking the marker (or by clearing a memory-only halt that has no file); if the unlink fails the process stays killed.
+
+**Response (200):**
+
+```json
+{ "killed": false, "changed": true }
+```
+
+- Not killed: `{ "killed": false, "changed": false }`.
+
+**Error responses:**
+
+- `409`: `{ "error": "marker_unlink_failed", "killed": true, "code": "EACCES", "suggestion": "run helio resume -c <config> where the config directory is writable, or delete the marker by hand" }`; nothing changed.
 
 ---
 
@@ -923,6 +981,7 @@ Some POST validation errors include a `details` array of `{ path, message }` ent
 ## See also
 
 - [Approval Workflows](./approvals.md) — approval model, channels, timeouts, escalation, break-glass policy
+- [Kill Switch](./kill-switch.md): the operator halt behind `POST` and `DELETE /api/kill-switch`
 - [Audit Trail](./audit.md) — audit record field reference, storage, CLI export, CSV format
 - [Policy Guide](./policies.md) — how policy decisions drive `/api/feed`, `/api/audit`, and `/api/approvals` population
 - [Getting Started → Production Checklist](./getting-started.md#production-checklist) — security-hardening checklist for running the sideband in production

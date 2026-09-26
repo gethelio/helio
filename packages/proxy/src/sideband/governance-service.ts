@@ -29,6 +29,7 @@ import type { ToolDriftChange } from '../policy/annotation-cache.js'
 import { resolvePath, matchMetadata } from '../policy/matchers.js'
 import { canonicalize } from '../util/canonical-json.js'
 import { snapshotValue } from '../util/snapshot.js'
+import { KILL_SWITCH_MESSAGE, buildKillSwitchFeedback } from '../feedback/self-repair.js'
 import type { EvidenceStore } from '../evidence/store.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
@@ -255,8 +256,13 @@ interface PendingEvaluation {
   }
   readonly timestampIso: string
   readonly createdAtMs: number
-  readonly evaluationExpiresAtMs: number
-  readonly ticketTimeoutAtMs: number | undefined
+  /**
+   * Both instants are mutable by one writer: a kill switch's thaw shifts
+   * them by the length of the halt (issue #402), so a held evaluation and
+   * its ticket continue with the time they had left.
+   */
+  evaluationExpiresAtMs: number
+  ticketTimeoutAtMs: number | undefined
   readonly bytes: number
 }
 
@@ -310,6 +316,13 @@ export interface GovernanceServiceOptions {
   readonly maxPendingBytes?: number
   /** Max distinct sender_id limit keys (issue #13). Default 50,000. Overridable for tests. */
   readonly maxSenderKeys?: number
+  /**
+   * The kill switch (issue #402), read per call: while `killed`, `evaluate`
+   * and `installScan` refuse with `decision: deny, reason: kill_switch`
+   * before any cache, registry or budget is touched. A service constructed
+   * under a kill starts frozen, matching the router.
+   */
+  readonly killSwitch?: { readonly killed: boolean }
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +363,9 @@ export class GovernanceService {
   private readonly ticketToEvaluation = new Map<string, string>()
   private pendingBytes = 0
   private sweepTimer: ReturnType<typeof setInterval> | null = null
+  private readonly killSwitch: { readonly killed: boolean } | undefined
+  private frozenState = false
+  private frozenAtMs = 0
   private closed = false
 
   constructor(options: GovernanceServiceOptions) {
@@ -368,6 +384,7 @@ export class GovernanceService {
     this.maxPending = options.maxPending ?? MAX_PENDING_COUNT
     this.maxPendingBytes = options.maxPendingBytes ?? MAX_PENDING_BYTES
     this.maxSenderKeys = options.maxSenderKeys ?? MAX_SENDER_KEYS
+    this.killSwitch = options.killSwitch
     this.assertApprovalRouter(this.policy)
 
     const sweepMs = options.sweepIntervalMs ?? SWEEP_INTERVAL_MS
@@ -377,6 +394,9 @@ export class GovernanceService {
       }, sweepMs)
       this.sweepTimer.unref()
     }
+    // Constructed under a boot kill: frozen from the first instant, with
+    // `frozenAtMs` set so a later thaw never adds `now - undefined`.
+    if (this.killSwitch?.killed) this.freeze()
   }
 
   /** Swap the compiled policy on hot-reload (mirrors GovernedForwarder). */
@@ -404,6 +424,21 @@ export class GovernanceService {
     // pending entry, and the audit row all agree — the same well-formedness
     // the MCP resolver applies before stamping a request.
     const sessionId = isWellFormedSessionId(req.session_id) ? req.session_id : null
+
+    // The kill switch (issue #402): refused after the session normalization
+    // (the row agrees with every other row) and before the byte budgets, the
+    // caches and the adapter registry, so a killed evaluation mutates nothing.
+    if (this.killSwitch?.killed) {
+      return this.refuseKilled({
+        origin: req.origin,
+        agentId: req.agent_id,
+        sessionId,
+        toolName: req.tool.name,
+        toolInput: req.arguments ?? {},
+        metadata: req.metadata,
+        recordKind: 'tool_call',
+      })
+    }
 
     // Memory budgets: tool_input size, origin cardinality, pending pressure.
     const inputBytes = byteLength(req.arguments ?? {})
@@ -1156,11 +1191,24 @@ export class GovernanceService {
     if (reserved) {
       return { status: 400, body: { error: 'reserved_metadata_key', key: reserved } }
     }
+    const toolName = `install:${req.package.source ?? 'pkg'}:${req.package.name}`
+    // The kill switch (issue #402) refuses the second governed entry the same
+    // way, before the adapter touch; the row keeps its install_scan kind.
+    if (this.killSwitch?.killed) {
+      return this.refuseKilled({
+        origin: req.origin,
+        agentId: req.agent_id,
+        sessionId: isWellFormedSessionId(req.session_id) ? req.session_id : null,
+        toolName,
+        toolInput: req.package,
+        metadata: req.metadata,
+        recordKind: 'install_scan',
+      })
+    }
     // Update-only: /install-scan has no origin budget gate, so it must never
     // insert a registry entry (issue #126, see the adapters field note).
     this.touchAdapter(req.origin)
     const evaluationId = randomUUID()
-    const toolName = `install:${req.package.source ?? 'pkg'}:${req.package.name}`
 
     const verdict = this.evaluateInstall(req)
     const denied = verdict.decision === 'deny'
@@ -1324,6 +1372,11 @@ export class GovernanceService {
     if (!this.approvalRouter) {
       return { status: 503, body: { error: 'governance_unavailable' } }
     }
+    // A kill switch freezes every decision (issue #402): answered before the
+    // ticket lookup, so a frozen service never leaks which tickets exist.
+    if (this.frozenState) {
+      return { status: 409, body: { error: 'kill_switch_active' } }
+    }
     const ticket = this.getTicketStatus(ticketId)
     if (!ticket) {
       return { status: 404, body: { error: 'ticket_not_found' } }
@@ -1358,6 +1411,101 @@ export class GovernanceService {
     // the adapter's /audit (or the evaluation's expiry) reads the outcome.
     if (entry) this.snapshotTicketResolution(entry)
     return { status: 200, body: { ok: true } }
+  }
+
+  // -------------------------------------------------------------------------
+  // The kill switch (issue #402)
+  // -------------------------------------------------------------------------
+
+  /** True while a kill switch holds every deadline and every native resolution. */
+  get frozen(): boolean {
+    return this.frozenState
+  }
+
+  /**
+   * Hold every deadline: `enforceDeadlines` is inert while frozen, so no
+   * sweep or access expires an entry or times out its ticket, and
+   * `resolveApproval` answers 409. The sweep interval keeps running:
+   * tombstone and sender-key pruning are not decision clocks.
+   */
+  freeze(): void {
+    if (this.frozenState) return
+    this.frozenState = true
+    this.frozenAtMs = this.now()
+  }
+
+  /**
+   * Shift every pending entry's evaluation TTL, and its ticket deadline
+   * where it has one, by the length of the halt, and rewrite the native
+   * ticket's `timeout_at` so the approvals list shows the true deadline.
+   */
+  thaw(): void {
+    if (!this.frozenState) return
+    this.frozenState = false
+    const haltMs = this.now() - this.frozenAtMs
+    for (const entry of this.pending.values()) {
+      entry.evaluationExpiresAtMs += haltMs
+      if (entry.ticketTimeoutAtMs === undefined) continue
+      entry.ticketTimeoutAtMs += haltMs
+      if (!entry.approvalTicketId) continue
+      const ticket = this.approvalRouter?.getTicket(entry.approvalTicketId)
+      if (ticket && ticket.status === 'pending') {
+        ticket.timeout_at = new Date(entry.ticketTimeoutAtMs).toISOString()
+      }
+    }
+  }
+
+  /**
+   * The refusal both governed entries share while killed: audited at once
+   * under `block_reason: kill_switch`, tombstoned as finalized by evaluate,
+   * no pending entry, no cache or registry touched. The wire decision stays
+   * `deny` (adapters switch on a closed enum); the reason names the halt.
+   */
+  private refuseKilled(args: {
+    origin: string
+    agentId: string | null
+    sessionId: string | null
+    toolName: string
+    toolInput: Record<string, unknown>
+    metadata: Record<string, unknown> | null
+    recordKind: 'tool_call' | 'install_scan'
+  }): ServiceResult {
+    const evaluationId = randomUUID()
+    const auditId = this.writeAudit({
+      timestampIso: new Date(this.now()).toISOString(),
+      origin: args.origin,
+      agentId: args.agentId,
+      sessionId: args.sessionId,
+      toolName: args.toolName,
+      toolInput: args.toolInput,
+      metadata: args.metadata,
+      action: 'deny',
+      wire: 'deny',
+      matchedRuleName: null,
+      matchedRuleIndex: null,
+      flaggedDestructive: false,
+      dryRun: false,
+      recordKind: args.recordKind,
+      killSwitch: true,
+    })
+    this.tombstones.set(evaluationId, {
+      auditRecordId: auditId,
+      payloadHash: null,
+      finalizedBy: 'evaluate',
+      expiresAtMs: this.now() + this.ttlMs,
+    })
+    const feedback = buildKillSwitchFeedback()
+    return {
+      status: 200,
+      body: {
+        evaluation_id: evaluationId,
+        decision: 'deny',
+        reason: 'kill_switch',
+        matched_rule: null,
+        matched_rule_index: null,
+        feedback: { message: KILL_SWITCH_MESSAGE, suggestion: feedback.suggestion },
+      },
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1450,6 +1598,9 @@ export class GovernanceService {
 
   /** Apply crossed deadlines to one pending entry. Returns its post-state. */
   private enforceDeadlines(entry: PendingEvaluation): 'active' | 'expired' {
+    // Every deadline is held while a kill switch freezes the service (issue
+    // #402); the thaw shifts the instants by the halt before this runs again.
+    if (this.frozenState) return 'active'
     const now = this.now()
 
     // Evaluation TTL fires first → finalize expired (and time out a live ticket).
@@ -1950,9 +2101,15 @@ interface WriteAuditArgs {
   /** Merge the evidence_chain session block without reclassifying the
    * block_reason — the grounded-rule no-session deny stays policy_denied. */
   sessionChain?: boolean
+  /** The call was refused by the kill switch (issue #402): the reason is
+   * `kill_switch` on every record kind, never `policy_denied`. */
+  killSwitch?: boolean
 }
 
 function deriveBlockReason(args: WriteAuditArgs): string | null {
+  // An operator halt names itself on every kind, before the install and
+  // dry-run branches: a killed install scan is a kill, not an install denial.
+  if (args.killSwitch) return 'kill_switch'
   if (args.recordKind === 'evaluation_expired') return null // bypass signal, not a block
   // Install-time denials get their own block_reason so #16 can discriminate them
   // and so they count into blocked_total (issue #13).

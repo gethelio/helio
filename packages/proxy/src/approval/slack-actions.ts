@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { KnownBlock } from '@slack/web-api'
 import type { ApprovalRouter } from './router.js'
 import type { ApprovalChannel } from './types.js'
-import { SlackChannel } from './slack.js'
+import { SlackChannel, buildApprovalBlocks } from './slack.js'
 
 // ---------------------------------------------------------------------------
 // Slack action handler — receives interactive button callbacks from Slack.
@@ -188,6 +188,11 @@ function parseActionPayload(rawBody: string): SlackActionPayload | null {
 // Message update blocks
 // ---------------------------------------------------------------------------
 
+/** The notice rendered under a frozen ticket's buttons (issue #402). */
+const KILL_SWITCH_FROZEN_TEXT =
+  'Helio is halted by its kill switch; this approval keeps its remaining time and can be ' +
+  'decided after the resume'
+
 function buildResolvedBlocks(action: string, username: string, ticketId: string): KnownBlock[] {
   const emoji = action === 'helio_approve' ? '\u2705' : '\u274c'
   const verb = action === 'helio_approve' ? 'Approved' : 'Denied'
@@ -312,6 +317,30 @@ export function createSlackActionApp(options: SlackActionAppOptions): Hono {
     }
 
     const username = payload.user.username || payload.user.id
+
+    // A kill switch freezes every decision (issue #402): nothing about the
+    // ticket changes, the message says so and keeps its buttons for the
+    // resume, instead of the false "already resolved" the refused approve
+    // would otherwise render.
+    if (router.frozen) {
+      const frozenChannel = slackChannels[0]
+      if (frozenChannel && payload.channel.id && payload.message.ts) {
+        const ticket = router.getTicket(ticketId)
+        void frozenChannel.updateMessage(
+          payload.channel.id,
+          payload.message.ts,
+          'Helio is halted by its kill switch',
+          [
+            ...(ticket ? buildApprovalBlocks(ticket) : []),
+            {
+              type: 'section',
+              text: { type: 'mrkdwn', text: KILL_SWITCH_FROZEN_TEXT },
+            },
+          ],
+        )
+      }
+      return c.json({ ok: true })
+    }
 
     // 7. Resolve the ticket
     let resolved: boolean

@@ -7333,3 +7333,598 @@ describe('helio init --demo (issue #397)', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// The kill switch (issue #402): helio kill, helio resume, the marker, the
+// variable, the wire lines and the status line
+// ---------------------------------------------------------------------------
+
+describe('kill switch (issue #402)', () => {
+  const TOOLS = [
+    { name: 'get_customer', annotations: { readOnlyHint: true, destructiveHint: false } },
+  ]
+
+  function startUpstream(): Promise<MockMcpServer> {
+    return startMockMcpServer((payload) => {
+      const id = payload['id'] ?? null
+      if (payload['method'] === 'tools/list')
+        return { jsonrpc: '2.0', id, result: { tools: TOOLS } }
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+    })
+  }
+
+  /** A config against `upstreamUrl` with the dashboard secret-gated (the status line needs it). */
+  function writeKillConfig(upstreamUrl: string): {
+    dir: string
+    configPath: string
+    markerPath: string
+    auditPath: string
+    listenPort: number
+    dashboardPort: number
+    secret: string
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-'))
+    const configPath = join(dir, 'helio.yaml')
+    const auditPath = join(dir, 'audit.db')
+    const listenPort = randomChildPort()
+    const dashboardPort = listenPort + 1
+    const secret = `kill-secret-${String(listenPort)}`
+    writeFileSync(
+      configPath,
+      `
+version: "1"
+upstream:
+  url: "${upstreamUrl}"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+policies:
+  default: allow
+  rules: []
+dashboard:
+  enabled: true
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "${secret}"
+audit:
+  path: "${auditPath}"
+`,
+    )
+    return {
+      dir,
+      configPath,
+      markerPath: `${configPath}.kill`,
+      auditPath,
+      listenPort,
+      dashboardPort,
+      secret,
+    }
+  }
+
+  async function bootKillable(
+    configPath: string,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{
+    child: ReturnType<typeof spawn>
+    stderr: () => string
+    waitFor: (predicate: () => boolean, label: string) => Promise<void>
+  }> {
+    const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      ...(env ? { env } : {}),
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8')
+    })
+    const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+      const started = Date.now()
+      while (Date.now() - started < 10_000) {
+        if (predicate()) return
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      throw new Error(`Timed out waiting for ${label}. stderr:\n${stderr}`)
+    }
+    await waitFor(() => stderr.includes('Dashboard API listening'), 'the dashboard to listen')
+    return { child, stderr: () => stderr, waitFor }
+  }
+
+  async function stopKillable(child: ReturnType<typeof spawn>): Promise<void> {
+    child.kill('SIGTERM')
+    await waitForChildExit(child, 5_000).catch(() => undefined)
+  }
+
+  /** One governed call; returns the JSON-RPC body. */
+  async function governedCall(listenPort: number, id: number): Promise<Record<string, unknown>> {
+    const res = await fetch(`http://127.0.0.1:${String(listenPort)}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'x-helio-session-id': 'kill-1',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name: 'get_customer', arguments: { id } },
+      }),
+    })
+    expect(res.status).toBe(200)
+    return (await res.json()) as Record<string, unknown>
+  }
+
+  function reasonOf(body: Record<string, unknown>): string | undefined {
+    const error = body['error'] as { data?: { reason?: string } } | undefined
+    return error?.data?.reason
+  }
+
+  /** Poll a governed call until its face matches, within 3 s (the poll is about a second). */
+  async function waitForCallFace(
+    listenPort: number,
+    want: 'refused' | 'forwarded',
+  ): Promise<Record<string, unknown>> {
+    const started = Date.now()
+    let id = 100
+    let body = await governedCall(listenPort, id)
+    while (Date.now() - started < 3_000) {
+      const refused = reasonOf(body) === 'kill_switch'
+      if ((want === 'refused') === refused) return body
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      body = await governedCall(listenPort, ++id)
+    }
+    throw new Error(`the call never read ${want}: ${JSON.stringify(body)}`)
+  }
+
+  function readRecords(auditPath: string): readonly AuditRecord[] {
+    const store = new AuditStore({
+      path: auditPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    try {
+      return store.list({}, { limit: 200 }).records
+    } finally {
+      store.close()
+    }
+  }
+
+  describe('helio kill and helio resume', () => {
+    it('kill writes the marker without parsing the config, prints the ON line and is idempotent', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-verb-'))
+      try {
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, 'this: [is not: valid yaml\n')
+        const marker = `${configPath}.kill`
+
+        const first = await runCli(['kill', '-c', configPath])
+        expect(first.code).toBe(0)
+        expect(first.stdout).toBe('')
+        expect(first.stderr).toContain(
+          `Kill switch ON: wrote ${marker}. Every Helio process polling it refuses every governed call within about a second. Resume with: helio resume -c ${configPath}`,
+        )
+        expect(existsSync(marker)).toBe(true)
+        expect(readFileSync(marker, 'utf-8')).toMatch(
+          /^killed at \d{4}-\d{2}-\d{2}T[0-9:.]+Z by \S+\n$/,
+        )
+        expect(readdirSync(dir).sort()).toEqual(['helio.yaml', 'helio.yaml.kill'])
+
+        const again = await runCli(['kill', '-c', configPath])
+        expect(again.code).toBe(0)
+        expect(again.stderr).toMatch(
+          new RegExp(
+            `Kill switch already ON: ${marker.replaceAll('.', '\\.')} exists \\(since \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2} UTC\\)`,
+          ),
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('resolves a relative -c against the working directory, so the marker lands beside the config', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-rel-'))
+      try {
+        mkdirSync(join(dir, 'etc'))
+        writeFileSync(join(dir, 'etc', 'helio.yaml'), 'version: "1"\n')
+        const { code, stderr } = await runCli(['kill', '-c', 'etc/helio.yaml'], undefined, dir)
+        expect(code).toBe(0)
+        expect(existsSync(join(dir, 'etc', 'helio.yaml.kill'))).toBe(true)
+        expect(stderr).toContain(`wrote ${realpathSync(dir)}/etc/helio.yaml.kill`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses a config path that is not a file, so a typo leaves no stray marker', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-missing-'))
+      try {
+        const missing = join(dir, 'nope.yaml')
+        const { code, stdout, stderr } = await runCli(['kill', '-c', missing])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr).toContain(
+          `Error: no config file at ${missing}; pass -c <path> to the helio.yaml the proxy runs`,
+        )
+        expect(readdirSync(dir)).toEqual([])
+
+        const asDir = await runCli(['kill', '-c', dir])
+        expect(asDir.code).toBe(1)
+        expect(asDir.stderr).toContain(`Error: no config file at ${dir}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('names EACCES and where to run it when the config directory is not writable', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-eacces-'))
+      try {
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, 'version: "1"\n')
+        chmodSync(dir, 0o555)
+        const { code, stderr } = await runCli(['kill', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain(
+          `Error: cannot write ${configPath}.kill (EACCES). Run this where the config directory is writable (on the separate-user tier, as root)`,
+        )
+        chmodSync(dir, 0o755)
+        expect(readdirSync(dir)).toEqual(['helio.yaml'])
+      } finally {
+        chmodSync(dir, 0o755)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('resume removes the marker and says what a memory-only halt still needs; absent is exit 0', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-resume-'))
+      try {
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, 'version: "1"\n')
+        const marker = `${configPath}.kill`
+        writeFileSync(marker, 'killed at 2026-09-26T12:00:00.000Z by someone\n')
+
+        const removed = await runCli(['resume', '-c', configPath])
+        expect(removed.code).toBe(0)
+        expect(removed.stdout).toBe('')
+        expect(removed.stderr).toContain(
+          `Removed ${marker}. A Helio process killed by that file resumes within about a second and continues held approvals with their remaining time; a process also started with HELIO_KILL_SWITCH=1, or halted through the API because it could not write the marker, stays killed until DELETE /api/kill-switch or a restart without the variable. The proxy's own "Kill switch OFF" line is the proof it resumed`,
+        )
+        expect(existsSync(marker)).toBe(false)
+
+        const absent = await runCli(['resume', '-c', configPath])
+        expect(absent.code).toBe(0)
+        expect(absent.stderr).toContain(
+          `No kill marker at ${marker}. A halt set through the API that could not write the marker, or by HELIO_KILL_SWITCH=1, ends with DELETE /api/kill-switch or a restart without the variable`,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('resume names EACCES when the marker cannot be removed', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-resume-eacces-'))
+      try {
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, 'version: "1"\n')
+        writeFileSync(`${configPath}.kill`, 'x\n')
+        chmodSync(dir, 0o555)
+        const { code, stderr } = await runCli(['resume', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stderr).toContain(
+          `Error: cannot remove ${configPath}.kill (EACCES). Run this where the config directory is writable`,
+        )
+        chmodSync(dir, 0o755)
+        expect(existsSync(`${configPath}.kill`)).toBe(true)
+      } finally {
+        chmodSync(dir, 0o755)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('neither verb opens the network', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-kill-net-'))
+      try {
+        const configPath = join(dir, 'helio.yaml')
+        writeFileSync(configPath, 'version: "1"\n')
+        const env = { ...process.env, NODE_DEBUG: 'net' }
+        const kill = await runCli(['kill', '-c', configPath], env)
+        expect(kill.code).toBe(0)
+        expect(kill.stderr).not.toMatch(/connect: attempting to connect|listen2/)
+        const resume = await runCli(['resume', '-c', configPath], env)
+        expect(resume.code).toBe(0)
+        expect(resume.stderr).not.toMatch(/connect: attempting to connect|listen2/)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('helio start', () => {
+    it('refuses HELIO_KILL_SWITCH that is not exactly 1 before anything is served', async () => {
+      const upstream = await startUpstream()
+      const fixture = writeKillConfig(upstream.url)
+      try {
+        for (const raw of ['abc', '', '0', 'true']) {
+          const child = spawn('node', [CLI_PATH, 'start', '-c', fixture.configPath], {
+            stdio: ['ignore', 'ignore', 'pipe'],
+            env: { ...process.env, HELIO_KILL_SWITCH: raw },
+          })
+          let stderr = ''
+          child.stderr.on('data', (chunk: Buffer) => {
+            stderr += chunk.toString('utf-8')
+          })
+          const { code } = await waitForChildExit(child, 10_000)
+          expect(code, JSON.stringify(raw)).toBe(1)
+          expect(stderr).toContain(
+            `Error: HELIO_KILL_SWITCH is set but is not "1": "${raw}". Unset it, or set it to 1 to start killed.`,
+          )
+          expect(stderr).not.toContain('Helio proxy listening')
+          expect(stderr).not.toContain('Kill switch')
+        }
+        expect(existsSync(fixture.markerPath)).toBe(false)
+      } finally {
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    })
+
+    it('boots killed under a present marker, resumes on its removal, kills on its return, and records every edge', async () => {
+      const upstream = await startUpstream()
+      const fixture = writeKillConfig(upstream.url)
+      writeFileSync(fixture.markerPath, 'killed at 2026-09-26T12:00:00.000Z by oli\n')
+      const proxy = await bootKillable(fixture.configPath)
+      try {
+        const onLine = `[helio] Kill switch ON (file): every governed call is refused; resume with helio resume -c ${fixture.configPath} or DELETE /api/kill-switch`
+        const offLine =
+          '[helio] Kill switch OFF (file): governed calls resume; held approvals continue with their remaining time'
+        expect(proxy.stderr()).toContain(onLine)
+        expect(proxy.stderr().indexOf(onLine)).toBeLessThan(
+          proxy.stderr().indexOf('Helio proxy listening'),
+        )
+
+        const refused = await governedCall(fixture.listenPort, 1)
+        expect(reasonOf(refused)).toBe('kill_switch')
+        expect((refused['error'] as { code: number }).code).toBe(-32001)
+        expect(upstream.calls.filter((c) => c.method === 'tools/call')).toHaveLength(0)
+
+        const status = await runCli(['policy', 'status', '-c', fixture.configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: fixture.secret,
+        })
+        expect(status.code).toBe(0)
+        expect(status.stdout.split('\n')[0]).toMatch(
+          /^Kill switch: ACTIVE since \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC \(file, durable\)$/,
+        )
+
+        // The hand deletion is a resume.
+        unlinkSync(fixture.markerPath)
+        await proxy.waitFor(() => proxy.stderr().includes(offLine), 'the OFF line')
+        const forwarded = await waitForCallFace(fixture.listenPort, 'forwarded')
+        expect(forwarded['result']).toBeDefined()
+        const quiet = await runCli(['policy', 'status', '-c', fixture.configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: fixture.secret,
+        })
+        expect(quiet.stdout.split('\n')[0]).toBe('Authority surface')
+        expect(quiet.stdout).not.toContain('Kill switch')
+
+        // The marker written while running is a kill within about a second.
+        const kill = await runCli(['kill', '-c', fixture.configPath])
+        expect(kill.code).toBe(0)
+        await proxy.waitFor(() => proxy.stderr().split(onLine).length === 3, 'the second ON line')
+        await waitForCallFace(fixture.listenPort, 'refused')
+
+        // helio resume is the deliberate resume.
+        const resume = await runCli(['resume', '-c', fixture.configPath])
+        expect(resume.code).toBe(0)
+        await proxy.waitFor(() => proxy.stderr().split(offLine).length === 3, 'the second OFF line')
+        await waitForCallFace(fixture.listenPort, 'forwarded')
+      } finally {
+        await stopKillable(proxy.child)
+        await upstream.close()
+      }
+      try {
+        const records = readRecords(fixture.auditPath)
+        const events = records
+          .filter((r) => r.record_kind === 'kill_switch')
+          .sort((a, b) => a.created_at.localeCompare(b.created_at))
+          .map((r) => ({
+            decision: r.policy_decision,
+            block_reason: r.block_reason,
+            tool_name: r.tool_name,
+            origin: r.origin,
+            evidence: (r.evidence_chain as { kill_switch: Record<string, unknown> }).kill_switch,
+          }))
+        expect(events).toEqual([
+          {
+            decision: 'kill_switch',
+            block_reason: 'kill_switch',
+            tool_name: '<kill_switch>',
+            origin: 'operator',
+            evidence: {
+              action: 'kill',
+              surface: 'file',
+              actor: null,
+              durable: true,
+              at_boot: true,
+              pending_approvals: 0,
+            },
+          },
+          {
+            decision: 'kill_switch',
+            block_reason: null,
+            tool_name: '<kill_switch>',
+            origin: 'operator',
+            evidence: {
+              action: 'resume',
+              surface: 'file',
+              actor: null,
+              durable: true,
+              at_boot: false,
+              pending_approvals: 0,
+            },
+          },
+          {
+            decision: 'kill_switch',
+            block_reason: 'kill_switch',
+            tool_name: '<kill_switch>',
+            origin: 'operator',
+            evidence: {
+              action: 'kill',
+              surface: 'file',
+              actor: null,
+              durable: true,
+              at_boot: false,
+              pending_approvals: 0,
+            },
+          },
+          {
+            decision: 'kill_switch',
+            block_reason: null,
+            tool_name: '<kill_switch>',
+            origin: 'operator',
+            evidence: {
+              action: 'resume',
+              surface: 'file',
+              actor: null,
+              durable: true,
+              at_boot: false,
+              pending_approvals: 0,
+            },
+          },
+        ])
+        const refusedRows = records.filter(
+          (r) => r.block_reason === 'kill_switch' && r.record_kind === 'tool_call',
+        )
+        expect(refusedRows.length).toBeGreaterThanOrEqual(2)
+        for (const row of refusedRows) {
+          expect(row.policy_decision).toBe('deny')
+          expect(row.tool_name).toBe('get_customer')
+          expect(row.dry_run).toBe(false)
+          expect(row.origin).toBe('mcp')
+        }
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    it('boots killed under HELIO_KILL_SWITCH=1 with no marker; helio resume cannot lift it and the status line says env, memory-only; DELETE /api/kill-switch can', async () => {
+      const upstream = await startUpstream()
+      const fixture = writeKillConfig(upstream.url)
+      writeFileSync(fixture.markerPath, 'x\n')
+      const proxy = await bootKillable(fixture.configPath, {
+        ...process.env,
+        HELIO_KILL_SWITCH: '1',
+      })
+      try {
+        // The marker read first: the boot edge names the file.
+        expect(proxy.stderr()).toContain('[helio] Kill switch ON (file)')
+        expect(reasonOf(await governedCall(fixture.listenPort, 1))).toBe('kill_switch')
+
+        const resume = await runCli(['resume', '-c', fixture.configPath])
+        expect(resume.code).toBe(0)
+        expect(existsSync(fixture.markerPath)).toBe(false)
+        // Still killed by the variable: no OFF line, the call stays refused.
+        await new Promise((resolve) => setTimeout(resolve, 2_000))
+        expect(proxy.stderr()).not.toContain('Kill switch OFF')
+        expect(reasonOf(await governedCall(fixture.listenPort, 2))).toBe('kill_switch')
+
+        const status = await runCli(['policy', 'status', '-c', fixture.configPath], {
+          ...process.env,
+          HELIO_DASHBOARD_SECRET: fixture.secret,
+        })
+        expect(status.code).toBe(0)
+        expect(status.stdout.split('\n')[0]).toMatch(
+          /^Kill switch: ACTIVE since \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC \(env, memory-only\)$/,
+        )
+        const json = await runCli(
+          ['policy', 'status', '-c', fixture.configPath, '--format', 'json'],
+          { ...process.env, HELIO_DASHBOARD_SECRET: fixture.secret },
+        )
+        const report = JSON.parse(json.stdout) as { kill_switch: Record<string, unknown> }
+        expect(report.kill_switch).toMatchObject({ active: true, surface: 'env', durable: false })
+        expect(typeof report.kill_switch['since']).toBe('string')
+
+        // The endpoint resume clears the memory hold; the marker stays absent.
+        const del = await fetch(
+          `http://127.0.0.1:${String(fixture.dashboardPort)}/api/kill-switch`,
+          { method: 'DELETE', headers: { authorization: `Bearer ${fixture.secret}` } },
+        )
+        expect(del.status).toBe(200)
+        expect(await del.json()).toEqual({ killed: false, changed: true })
+        await proxy.waitFor(
+          () => proxy.stderr().includes('[helio] Kill switch OFF (api)'),
+          'the OFF line',
+        )
+        expect((await governedCall(fixture.listenPort, 3))['result']).toBeDefined()
+        expect(existsSync(fixture.markerPath)).toBe(false)
+
+        // The endpoint kill writes the marker: durable, and helio resume lifts it.
+        const post = await fetch(
+          `http://127.0.0.1:${String(fixture.dashboardPort)}/api/kill-switch`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${fixture.secret}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({ actor: 'alice' }),
+          },
+        )
+        expect(post.status).toBe(200)
+        expect(await post.json()).toMatchObject({ killed: true, changed: true, durable: true })
+        expect(readFileSync(fixture.markerPath, 'utf-8')).toContain(' by alice\n')
+        expect(proxy.stderr()).toContain('[helio] Kill switch ON (api)')
+        expect(reasonOf(await governedCall(fixture.listenPort, 4))).toBe('kill_switch')
+        expect((await runCli(['resume', '-c', fixture.configPath])).code).toBe(0)
+        await waitForCallFace(fixture.listenPort, 'forwarded')
+      } finally {
+        await stopKillable(proxy.child)
+        await upstream.close()
+      }
+      try {
+        const events = readRecords(fixture.auditPath)
+          .filter((r) => r.record_kind === 'kill_switch')
+          .sort((a, b) => a.created_at.localeCompare(b.created_at))
+          .map((r) => (r.evidence_chain as { kill_switch: Record<string, unknown> }).kill_switch)
+        expect(events).toEqual([
+          {
+            action: 'kill',
+            surface: 'file',
+            actor: null,
+            durable: true,
+            at_boot: true,
+            pending_approvals: 0,
+          },
+          {
+            action: 'resume',
+            surface: 'api',
+            actor: 'bearer',
+            durable: false,
+            at_boot: false,
+            pending_approvals: 0,
+          },
+          {
+            action: 'kill',
+            surface: 'api',
+            actor: 'alice',
+            durable: true,
+            at_boot: false,
+            pending_approvals: 0,
+          },
+          {
+            action: 'resume',
+            surface: 'file',
+            actor: null,
+            durable: true,
+            at_boot: false,
+            pending_approvals: 0,
+          },
+        ])
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+  })
+})

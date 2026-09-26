@@ -210,6 +210,8 @@ recorded in an audit database the agent cannot touch.
 
 ## 6. Change policy safely
 
+To halt every governed call without editing policy, run `sudo helio kill -c /etc/helio/helio.yaml` and later `sudo helio resume -c /etc/helio/helio.yaml`: the marker lives beside the config, which only root writes on this tier, and the proxy's user needs only to read it. The dashboard's `POST /api/kill-switch` cannot write that directory here, so a halt through it is memory-only. See [Kill Switch](./kill-switch.md).
+
 ```bash
 sudoedit /etc/helio/helio.yaml
 ```

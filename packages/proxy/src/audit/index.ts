@@ -10,6 +10,13 @@ export {
   POLICY_RELOAD_DECISION,
 } from './policy-reload.js'
 export type { PolicyReloadEvidence } from './policy-reload.js'
+export {
+  KILL_SWITCH_DECISION,
+  KILL_SWITCH_TOOL_NAME,
+  buildKillSwitchRecord,
+  readKillSwitchEvidence,
+} from './kill-switch.js'
+export type { KillSwitchEvidence } from './kill-switch.js'
 export type {
   AuditRecord,
   AuditQueryFilters,

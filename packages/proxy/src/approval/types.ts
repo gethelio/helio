@@ -78,7 +78,11 @@ export interface ApprovalTicket {
    */
   readonly upstream?: string
   readonly requested_at: string
-  readonly timeout_at: string
+  /**
+   * Mutable by one writer: the router rewrites it when a kill switch thaws
+   * the ticket's clock (issue #402), so the list shows the true deadline.
+   */
+  timeout_at: string
   readonly timeout_ms: number
   /**
    * Every budget the call breached, when this is a break-glass (budget) or
