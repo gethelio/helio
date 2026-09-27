@@ -636,7 +636,8 @@ describe('renderActivationText', () => {
     'Helio activation report\n' +
     '  Written by Helio 0.15.0 on 2026-09-23 (UTC). Names: excluded (--include-names restores tool, door and rule names).\n' +
     '  Counts cover the last 7d; dates are within the audit retention of 90d.\n' +
-    '  Sources: the audit database (read; this config file is the one that last wrote policy to it). The running proxy answered on the configured dashboard port (snapshot below); this command does not verify that it wrote this database.'
+    '  Sources: the audit database (read; this config file is the one that last wrote policy to it). The running proxy answered on the configured dashboard port (snapshot below); this command does not verify that it wrote this database.\n' +
+    '  Kill switch: not active, from the proxy.'
   const CAVEAT =
     '                                 Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.'
 
@@ -744,6 +745,12 @@ describe('renderActivationText', () => {
         buildActivationReport(input({ snapshot: { ok: false, code } })),
       )
       expect(text, code).toContain(`${sentence}, so the snapshot section is absent.`)
+      // The kill switch line: one fixed sentence on every code, right under Sources (issue #441).
+      expect(text, code).toContain(
+        `${sentence}, so the snapshot section is absent.\n` +
+          '  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.\n' +
+          '\n',
+      )
       expect(text, code).not.toContain('127.0.0.1')
       expect(text, code).not.toContain('helio.yaml')
     }
@@ -888,5 +895,164 @@ describe('kill_switch in the activation report (issue #402)', () => {
       }),
     )
     expect(report.timeline.first_enforcement_decision.block_reason).toBe('kill_switch')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The kill switch line (issue #441): one source, the running proxy's field
+// ---------------------------------------------------------------------------
+
+describe('the kill switch line (issue #441)', () => {
+  const SINCE = '2026-09-27T16:42:45.126Z'
+  const UNKNOWN_LINE =
+    '  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.'
+  const ABSENT_CODES: readonly SnapshotAbsentReason[] = [
+    'no_proxy_answered',
+    'dashboard_disabled',
+    'secret_is_digest',
+    'secret_refused',
+    'status_unavailable',
+    'api_error',
+  ]
+
+  /** The fixture's status report with the kill switch field replaced. */
+  function withKillSwitch(kill: PolicyStatusReport['kill_switch']): ActivationReportInput {
+    return input({ snapshot: { ok: true, report: { ...statusFixture(), kill_switch: kill } } })
+  }
+
+  it('copies the four values of the status field by name when the proxy is halted', () => {
+    const file = buildActivationReport(
+      withKillSwitch({ active: true, since: SINCE, surface: 'file', durable: true }),
+    )
+    expect(file.kill_switch).toEqual({
+      state: 'active',
+      since: SINCE,
+      surface: 'file',
+      durable: true,
+    })
+    const api = buildActivationReport(
+      withKillSwitch({ active: true, since: SINCE, surface: 'api', durable: false }),
+    )
+    expect(api.kill_switch).toEqual({
+      state: 'active',
+      since: SINCE,
+      surface: 'api',
+      durable: false,
+    })
+    const env = buildActivationReport(
+      withKillSwitch({ active: true, since: SINCE, surface: 'env', durable: false }),
+    )
+    expect(env.kill_switch).toEqual({
+      state: 'active',
+      since: SINCE,
+      surface: 'env',
+      durable: false,
+    })
+    expect(Object.keys(env.kill_switch)).toEqual(['state', 'since', 'surface', 'durable'])
+  })
+
+  it('reads inactive from a proxy that answered and is not halted, with the three values null', () => {
+    const report = buildActivationReport(input())
+    expect(report.kill_switch).toEqual({
+      state: 'inactive',
+      since: null,
+      surface: null,
+      durable: null,
+    })
+  })
+
+  it('reads unknown on every absent-snapshot code, with the three values null', () => {
+    for (const code of ABSENT_CODES) {
+      const report = buildActivationReport(input({ snapshot: { ok: false, code } }))
+      expect(report.kill_switch, code).toEqual({
+        state: 'unknown',
+        since: null,
+        surface: null,
+        durable: null,
+      })
+    }
+  })
+
+  it('carries the field at top level right after sources, never inside the snapshot, at schema version 1', () => {
+    const report = buildActivationReport(input())
+    const keys = Object.keys(JSON.parse(json(report)) as Record<string, unknown>)
+    expect(keys.indexOf('kill_switch')).toBe(keys.indexOf('sources') + 1)
+    expect(report.snapshot).not.toHaveProperty('kill_switch')
+    expect(report.schema_version).toBe(1)
+  })
+
+  it('reads inactive from a status report without the field (a proxy older than the switch)', () => {
+    const older = Object.fromEntries(
+      Object.entries(statusFixture()).filter(([key]) => key !== 'kill_switch'),
+    ) as PolicyStatusReport
+    expect(older).not.toHaveProperty('kill_switch')
+    const report = buildActivationReport(input({ snapshot: { ok: true, report: older } }))
+    expect(report.kill_switch).toEqual({
+      state: 'inactive',
+      since: null,
+      surface: null,
+      durable: null,
+    })
+  })
+
+  it('prints the active face in the status line vocabulary under Sources, with no instruction', () => {
+    const file = renderActivationText(
+      buildActivationReport(
+        withKillSwitch({ active: true, since: SINCE, surface: 'file', durable: true }),
+      ),
+    ).split('\n')
+    expect(file[3]).toContain('  Sources: ')
+    expect(file[4]).toBe(
+      '  Kill switch: ACTIVE since 2026-09-27 16:42 UTC (file, durable), from the proxy.',
+    )
+    expect(file[5]).toBe('')
+    expect(file[6]).toBe('Timeline (dates within retention)')
+    expect(file.join('\n')).not.toContain('resume')
+    const env = renderActivationText(
+      buildActivationReport(
+        withKillSwitch({ active: true, since: SINCE, surface: 'env', durable: false }),
+      ),
+    ).split('\n')
+    expect(env[4]).toBe(
+      '  Kill switch: ACTIVE since 2026-09-27 16:42 UTC (env, memory-only), from the proxy.',
+    )
+    const api = renderActivationText(
+      buildActivationReport(
+        withKillSwitch({ active: true, since: SINCE, surface: 'api', durable: false }),
+      ),
+    ).split('\n')
+    expect(api[4]).toBe(
+      '  Kill switch: ACTIVE since 2026-09-27 16:42 UTC (api, memory-only), from the proxy.',
+    )
+  })
+
+  it('renders a null since or surface on an active field as the status line does', () => {
+    const lines = renderActivationText(
+      buildActivationReport(
+        withKillSwitch({ active: true, since: null, surface: null, durable: false }),
+      ),
+    ).split('\n')
+    expect(lines[4]).toBe(
+      '  Kill switch: ACTIVE since an unknown instant (unknown, memory-only), from the proxy.',
+    )
+  })
+
+  it('prints the inactive face under Sources when the proxy answered and is not halted', () => {
+    const lines = renderActivationText(buildActivationReport(input())).split('\n')
+    expect(lines[4]).toBe('  Kill switch: not active, from the proxy.')
+    expect(lines[5]).toBe('')
+  })
+
+  it('prints one fixed unknown sentence under Sources on every absent code, naming no code, host, port or path', () => {
+    for (const code of ABSENT_CODES) {
+      const lines = renderActivationText(
+        buildActivationReport(input({ snapshot: { ok: false, code } })),
+      ).split('\n')
+      expect(lines[4], code).toBe(UNKNOWN_LINE)
+      expect(lines[5], code).toBe('')
+      expect(lines[4], code).not.toContain(code)
+      expect(lines[4], code).not.toContain('127.0.0.1')
+      expect(lines[4], code).not.toContain('helio.yaml')
+    }
   })
 })

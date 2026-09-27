@@ -6464,7 +6464,8 @@ ${dashboard}audit:
           '  Counts cover the last 7d; dates are within the audit retention of 90d.\n',
         )
         expect(stdout).toContain(
-          '  Sources: the audit database (read; this config file is NOT the one that last wrote policy to it). No proxy answered on the configured dashboard port, so the snapshot section is absent.\n',
+          '  Sources: the audit database (read; this config file is NOT the one that last wrote policy to it). No proxy answered on the configured dashboard port, so the snapshot section is absent.\n' +
+            '  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.\n',
         )
         expect(stdout).toContain(
           `  First call observed            ${dayOf(base)}   earliest persisted tool call\n`,
@@ -6507,11 +6508,18 @@ ${dashboard}audit:
           window: string
           retention: string
           sources: Record<string, unknown>
+          kill_switch: unknown
           timeline: { first_rule: { source: string; rule_name?: string } }
           persisted: { calls_in_window: number; decisions: Record<string, number> }
           snapshot: unknown
         }
         expect(report.schema_version).toBe(1)
+        expect(report.kill_switch).toEqual({
+          state: 'unknown',
+          since: null,
+          surface: null,
+          durable: null,
+        })
         expect(report.names_included).toBe(false)
         expect(report.window).toBe('7d')
         expect(report.retention).toBe('90d')
@@ -6875,13 +6883,17 @@ ${dashboard}audit:
     }
 
     /** Boot `helio start` and resolve once the dashboard API is listening (the #396 poll loop). */
-    async function bootProxy(configPath: string): Promise<{
+    async function bootProxy(
+      configPath: string,
+      env: NodeJS.ProcessEnv = process.env,
+    ): Promise<{
       child: ReturnType<typeof spawn>
       stderr: () => string
       waitFor: (predicate: () => boolean) => Promise<void>
     }> {
       const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
         stdio: ['ignore', 'ignore', 'pipe'],
+        env,
       })
       let stderr = ''
       child.stderr.on('data', (chunk: Buffer) => {
@@ -6932,6 +6944,7 @@ ${dashboard}audit:
 
         type Report = {
           sources: { proxy_snapshot: string; config_file_vs_last_policy_write: string }
+          kill_switch: unknown
           snapshot: {
             surface: { pairs: number; annotation_free_door_count: number; doors: unknown[] }
             coverage: { matched: number; pairs?: unknown[] }
@@ -6961,6 +6974,12 @@ ${dashboard}audit:
         expect(report.snapshot?.coverage.matched).toBe(4)
         expect(report.snapshot?.coverage.pairs).toBeUndefined()
         expect(report.persisted.calls_in_window).toBe(22)
+        expect(report.kill_switch).toEqual({
+          state: 'inactive',
+          since: null,
+          surface: null,
+          durable: null,
+        })
         const strings = stringsOf(report)
         for (const planted of neverInDefault(fixture)) {
           for (const s of strings) expect(s, `${planted} in ${s}`).not.toContain(planted)
@@ -6974,6 +6993,7 @@ ${dashboard}audit:
             '  Effective action: allow 1, deny 3\n',
         )
         expect(text.stdout).toContain('(from the proxy)')
+        expect(text.stdout).toContain('  Kill switch: not active, from the proxy.\n')
         expect(text.stdout).toContain(
           '  Doors: 1 upstream primed, 0 not primed, 0 without annotations, 0 adapter origins',
         )
@@ -7076,6 +7096,190 @@ ${dashboard}audit:
           (JSON.parse(namedJson.stdout) as { snapshot: { surface: { unavailable: unknown[] } } })
             .snapshot.surface.unavailable,
         ).toEqual([{ name: upstream.url, reason: failure }])
+      } finally {
+        await stopProxy(proxy.child)
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    // The kill switch line (issue #441): read from the running proxy's status
+    // field and never from the rows. Every wait is a condition on the child's
+    // stderr or its exit; each report run is one separate process.
+
+    type KillRow = { action: string; surface: string; durable: boolean; at_boot: boolean }
+
+    /** The kill_switch rows newest first, read through the store (the tiebreak is the store's). */
+    function killSwitchRows(auditPath: string): readonly KillRow[] {
+      const store = new AuditStore({
+        path: auditPath,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        return store.list({ record_kind: 'kill_switch' }, { limit: 50 }).records.map((r) => {
+          const evidence = (r.evidence_chain as { kill_switch: KillRow }).kill_switch
+          return {
+            action: evidence.action,
+            surface: evidence.surface,
+            durable: evidence.durable,
+            at_boot: evidence.at_boot,
+          }
+        })
+      } finally {
+        store.close()
+      }
+    }
+
+    function offLines(stderr: string): number {
+      return stderr.split('Kill switch OFF').length - 1
+    }
+
+    /** `2026-09-27 16:42 UTC` from the status field's ISO instant. */
+    function minuteOf(iso: string): string {
+      return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`
+    }
+
+    type KillReport = {
+      sources: { proxy_snapshot: string }
+      kill_switch: {
+        state: string
+        since: string | null
+        surface: string | null
+        durable: boolean | null
+      }
+    }
+    const INACTIVE = { state: 'inactive', since: null, surface: null, durable: null }
+    const UNKNOWN = { state: 'unknown', since: null, surface: null, durable: null }
+    const UNKNOWN_LINE =
+      '  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.\n'
+
+    async function statusKill(
+      configPath: string,
+      env: NodeJS.ProcessEnv,
+    ): Promise<{ active: boolean; since: string; surface: string; durable: boolean }> {
+      const status = await runCli(['policy', 'status', '-c', configPath, '--format', 'json'], {
+        ...process.env,
+        ...env,
+      })
+      expect(status.code).toBe(0)
+      return (JSON.parse(status.stdout) as { kill_switch: Awaited<ReturnType<typeof statusKill>> })
+        .kill_switch
+    }
+
+    it('reads the kill switch from the running proxy, never from the rows: a file halt, a clean stop, helio resume while down, a restart', async () => {
+      const upstream = await startToolsUpstream(ANNOTATED_TOOLS)
+      const secret = `report-secret-${String(randomChildPort())}`
+      const fixture = writeReportConfig({ upstreamUrl: upstream.url, dashboardSecret: secret })
+      const env = { HELIO_DASHBOARD_SECRET: secret }
+      const marker = `${fixture.configPath}.kill`
+      const port = `127.0.0.1:${String(fixture.dashboardPort)}`
+      let proxy = await bootProxy(fixture.configPath)
+      try {
+        // A file kill while running: the field and the line copy the status field.
+        expect((await runCli(['kill', '-c', fixture.configPath])).code).toBe(0)
+        await proxy.waitFor(() => proxy.stderr().includes('[helio] Kill switch ON (file)'))
+        const status = await statusKill(fixture.configPath, env)
+        expect(status).toMatchObject({ active: true, surface: 'file', durable: true })
+        const killed = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(killed.code).toBe(0)
+        expect(killed.connects).toEqual([port])
+        const killedReport = JSON.parse(killed.stdout) as KillReport
+        expect(killedReport.sources.proxy_snapshot).toBe('present')
+        expect(killedReport.kill_switch).toEqual({
+          state: 'active',
+          since: status.since,
+          surface: 'file',
+          durable: true,
+        })
+        const killedText = await runReport(['-c', fixture.configPath], env)
+        expect(killedText.stdout).toContain(
+          `  Kill switch: ACTIVE since ${minuteOf(status.since)} (file, durable), from the proxy.\n`,
+        )
+        for (const planted of neverInDefault(fixture)) {
+          expect(killedText.stdout, planted).not.toContain(planted)
+        }
+
+        // A clean stop while killed: no OFF line, no resume row, the marker stays.
+        await stopProxy(proxy.child)
+        expect(offLines(proxy.stderr())).toBe(0)
+        expect(existsSync(marker)).toBe(true)
+        const killRow = { action: 'kill', surface: 'file', durable: true, at_boot: false }
+        expect(killSwitchRows(fixture.auditPath)).toEqual([killRow])
+
+        // helio resume while no proxy runs: the halt is over and nothing records it.
+        expect((await runCli(['resume', '-c', fixture.configPath])).code).toBe(0)
+        expect(existsSync(marker)).toBe(false)
+        expect(killSwitchRows(fixture.auditPath)).toEqual([killRow])
+        const down = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(down.code).toBe(0)
+        expect(down.connects).toEqual([port])
+        const downReport = JSON.parse(down.stdout) as KillReport
+        expect(downReport.sources.proxy_snapshot).toBe('absent')
+        expect(downReport.kill_switch).toEqual(UNKNOWN)
+        const downText = await runReport(['-c', fixture.configPath], env)
+        expect(downText.stdout).toContain(UNKNOWN_LINE)
+
+        // The restart is not killed: not active, while the rows still end in a kill.
+        proxy = await bootProxy(fixture.configPath)
+        expect(proxy.stderr()).not.toContain('Kill switch ON')
+        const up = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(up.code).toBe(0)
+        expect(up.connects).toEqual([port])
+        expect((JSON.parse(up.stdout) as KillReport).kill_switch).toEqual(INACTIVE)
+        const upText = await runReport(['-c', fixture.configPath], env)
+        expect(upText.stdout).toContain('  Kill switch: not active, from the proxy.\n')
+        expect(killSwitchRows(fixture.auditPath)).toEqual([killRow])
+      } finally {
+        await stopProxy(proxy.child)
+        await upstream.close()
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 40_000)
+
+    it('reads a HELIO_KILL_SWITCH=1 halt as env, memory-only, and not active after its process ends and a restart without the variable', async () => {
+      const upstream = await startToolsUpstream(ANNOTATED_TOOLS)
+      const secret = `report-secret-${String(randomChildPort())}`
+      const fixture = writeReportConfig({ upstreamUrl: upstream.url, dashboardSecret: secret })
+      const env = { HELIO_DASHBOARD_SECRET: secret }
+      const port = `127.0.0.1:${String(fixture.dashboardPort)}`
+      let proxy = await bootProxy(fixture.configPath, { ...process.env, HELIO_KILL_SWITCH: '1' })
+      try {
+        await proxy.waitFor(() => proxy.stderr().includes('[helio] Kill switch ON (env)'))
+        const status = await statusKill(fixture.configPath, env)
+        expect(status).toMatchObject({ active: true, surface: 'env', durable: false })
+        const killed = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(killed.code).toBe(0)
+        expect(killed.connects).toEqual([port])
+        expect((JSON.parse(killed.stdout) as KillReport).kill_switch).toEqual({
+          state: 'active',
+          since: status.since,
+          surface: 'env',
+          durable: false,
+        })
+        const killedText = await runReport(['-c', fixture.configPath], env)
+        expect(killedText.stdout).toContain(
+          `  Kill switch: ACTIVE since ${minuteOf(status.since)} (env, memory-only), from the proxy.\n`,
+        )
+        expect(existsSync(`${fixture.configPath}.kill`)).toBe(false)
+
+        // The halt ends with its process: no OFF line, no resume row.
+        await stopProxy(proxy.child)
+        expect(offLines(proxy.stderr())).toBe(0)
+        const bootRow = { action: 'kill', surface: 'env', durable: false, at_boot: true }
+        expect(killSwitchRows(fixture.auditPath)).toEqual([bootRow])
+
+        // The restart without the variable is not killed, while the one row is a kill.
+        proxy = await bootProxy(fixture.configPath)
+        expect(proxy.stderr()).not.toContain('Kill switch ON')
+        const up = await runReport(['-c', fixture.configPath, '--format', 'json'], env)
+        expect(up.code).toBe(0)
+        expect(up.connects).toEqual([port])
+        expect((JSON.parse(up.stdout) as KillReport).kill_switch).toEqual(INACTIVE)
+        const upText = await runReport(['-c', fixture.configPath], env)
+        expect(upText.stdout).toContain('  Kill switch: not active, from the proxy.\n')
+        expect(killSwitchRows(fixture.auditPath)).toEqual([bootRow])
       } finally {
         await stopProxy(proxy.child)
         await upstream.close()

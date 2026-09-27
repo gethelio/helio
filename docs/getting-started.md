@@ -429,27 +429,28 @@ It reads the audit database on disk for a timeline and the last seven days of co
 
 ```
 Helio activation report
-  Written by Helio 0.0.0 (unreleased build) on 2026-09-24 (UTC). Names: excluded (--include-names restores tool, door and rule names).
+  Written by Helio 0.0.0 (unreleased build) on 2026-09-27 (UTC). Names: excluded (--include-names restores tool, door and rule names).
   Counts cover the last 7d; dates are within the audit retention of 90d.
   Sources: the audit database (read; this config file is the one that last wrote policy to it). The running proxy answered on the configured dashboard port (snapshot below); this command does not verify that it wrote this database.
+  Kill switch: not active, from the proxy.
 
 Timeline (dates within retention)
-  First call observed            2026-09-24   earliest persisted tool call
-  First rule                     2026-09-24   first call a rule decided
+  First call observed            2026-09-27   earliest persisted tool call
+  First rule                     2026-09-27   first call a rule decided
                                  Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.
   First generation               not available in this version
   First simulation               not available in this version
   First apply                    not available in this version
-  First enforcement decision     2026-09-24   first blocked call (policy_denied)
+  First enforcement decision     2026-09-27   first blocked call (policy_denied)
 
 Persisted (last 7d)
   2 calls across 2 tool-door pairs, no session ids recorded (denied and dry-run calls included)
   Decisions: 1 permitted, 1 blocked (policy_denied 1), 0 dry-run, 0 approvals requested
   Config versions seen: 2
   Config reloads: 1 (1 applied)
-  audit rows since 2026-09-24
+  audit rows since 2026-09-27
 
-Snapshot (running proxy, 2026-09-24 08:24 UTC, window 7d)
+Snapshot (running proxy, 2026-09-27 17:59 UTC, window 7d)
   Authority surface: 7 tool-door pairs across 1 upstream; 1 annotated destructive; 0 destructive by MCP default
   Policy: 3 rules, default allow, on_tool_drift block
   Policy coverage: 3 of 7 have a rule that can match them; 4 fall through to the default: allow

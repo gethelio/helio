@@ -164,25 +164,26 @@ Right after seeding, on a 7-day window:
 
 ```text
 Helio activation report
-  Written by Helio 0.0.0 (unreleased build) on 2026-09-24 (UTC). Names: excluded (--include-names restores tool, door and rule names).
+  Written by Helio 0.0.0 (unreleased build) on 2026-09-27 (UTC). Names: excluded (--include-names restores tool, door and rule names).
   Counts cover the last 7d; dates are within the audit retention of 90d.
   Sources: the audit database (read; this config file is the one that last wrote policy to it). No proxy answered on the configured dashboard port, so the snapshot section is absent.
+  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.
 
 Timeline (dates within retention)
-  First call observed            2026-08-10   earliest persisted tool call
-  First rule                     2026-09-04   first applied config reload
+  First call observed            2026-08-13   earliest persisted tool call
+  First rule                     2026-09-07   first applied config reload
                                  Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.
   First generation               not available in this version
   First simulation               not available in this version
   First apply                    not available in this version
-  First enforcement decision     2026-09-18   first blocked call (policy_denied)
+  First enforcement decision     2026-09-22   first blocked call (policy_denied)
 
 Persisted (last 7d)
   253 calls across 9 tool-door pairs, 7 sessions, 1 call without a session id (denied and dry-run calls included)
   Decisions: 198 permitted, 51 blocked (budget_exceeded 1, policy_denied 50), 4 dry-run, 0 approvals requested
   Config versions seen: 1
   Config reloads: 2 (1 applied)
-  audit rows since 2026-08-10
+  audit rows since 2026-08-13
 ```
 
 The dates move with the day you seed (the first call is always 45 days

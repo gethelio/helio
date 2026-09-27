@@ -169,9 +169,40 @@ form carries the same facts under `kill_switch`
 (`{ active, since, surface, durable }`). `helio report activation` names
 refused calls under `blocked_by_reason: kill_switch`, never `other`, and its
 first enforcement decision never names a kill refusal, which is an operator
-halt and not a policy decision. The report has no current-state line for the
-switch (#441): the proxy's snapshot inside it carries the `kill_switch` field
-unrendered.
+halt and not a policy decision.
+
+The report also says whether the switch is active, on every face: one line
+under `Sources` in its header, and one top-level JSON field, `kill_switch`
+(`{ state, since, surface, durable }`, where `state` is `active`, `inactive`
+or `unknown` and the other three are null unless active). Both read exactly
+one source, the running proxy's status field, copied by name, and never the
+audit rows:
+
+```text
+  Kill switch: ACTIVE since 2026-09-27 16:42 UTC (file, durable), from the proxy.
+  Kill switch: not active, from the proxy.
+  Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.
+```
+
+The `since` instant is when the answering process's halt began. A restart
+under the marker starts a new clock: the kill record with `at_boot: true`
+dates the restart, while the earlier kill record and the marker's own line
+date the halt. What lifts each surface: `helio resume`, a hand deletion of
+the marker or `DELETE /api/kill-switch` for a `file` halt; for a memory-only
+halt (`env`, or an `api` halt that could not write the marker), that same
+delete call or a restart without the variable.
+
+The limit, stated plainly: the line reads only the running proxy. A
+file-backed halt survives a crash and a clean stop alike, and after the next
+start the line is `ACTIVE` with that process's `since`. A halt that ends
+while no proxy runs leaves no resume record: a `helio resume` or a hand
+removal of the marker while the proxy is stopped, and a memory-only halt,
+which ends when its process exits, by a crash or a clean stop. So the rows
+read as the transitions a proxy saw, never as the current state, and a
+report that reads `unknown` got no status: the word is about the report,
+never about the halt. A status report from a proxy older than the switch
+has no field and reads `not active`, since a process with no switch cannot
+have one active.
 
 ## Held approvals
 

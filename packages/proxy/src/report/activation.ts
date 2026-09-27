@@ -160,6 +160,25 @@ export interface ActivationSnapshot {
   }
 }
 
+/**
+ * The kill switch as the running proxy reported it (issue #441), read from
+ * exactly one source, the `kill_switch` field of the proxy's status report:
+ * `active` copies the halt's start, surface and durability; `inactive` is a
+ * proxy that answered and is not halted (a status report from a proxy older
+ * than the switch reads the same, since a process with no switch cannot have
+ * one active); `unknown` is a report that got no status. The audit rows never
+ * feed it: a halt that ended while no proxy ran left no resume record.
+ */
+export interface ActivationKillSwitch {
+  readonly state: 'active' | 'inactive' | 'unknown'
+  /** ISO 8601, when the answering process's halt began; null unless active. */
+  readonly since: string | null
+  /** The surface that set the halt; null unless active. */
+  readonly surface: 'file' | 'env' | 'api' | null
+  /** Whether the marker file backs the halt; null unless active. */
+  readonly durable: boolean | null
+}
+
 export interface ActivationReport {
   readonly schema_version: number
   readonly generated_at: string
@@ -169,6 +188,7 @@ export interface ActivationReport {
   readonly since: string
   readonly retention: string
   readonly sources: ActivationSources
+  readonly kill_switch: ActivationKillSwitch
   readonly timeline: ActivationReportTimeline
   readonly persisted: ActivationPersisted
   readonly snapshot: ActivationSnapshot | null
@@ -257,6 +277,11 @@ const ABSENT_SNAPSHOT_SENTENCES: Readonly<Record<SnapshotAbsentReason, string>> 
   api_error: 'The proxy answered with an error',
 }
 
+/** The kill switch line when the report got no status: one fixed sentence, never interpolated. */
+const KILL_SWITCH_UNKNOWN_CLAUSE =
+  'unknown; this report got no kill-switch status (see Sources), and the audit rows record ' +
+  'kills and resumes as they happened, not whether a halt is in force now.'
+
 const SAME_FILE_SENTENCES: Readonly<Record<ConfigFileVsLastPolicyWrite, string>> = {
   match: 'this config file is the one that last wrote policy to it',
   mismatch: 'this config file is NOT the one that last wrote policy to it',
@@ -293,6 +318,7 @@ export function buildActivationReport(input: ActivationReportInput): ActivationR
       proxy_snapshot_absent_reason: input.snapshot.ok ? null : input.snapshot.code,
       proxy_snapshot_verified: false,
     },
+    kill_switch: buildKillSwitch(input.snapshot),
     timeline: buildTimeline(input.persisted, input.timeline, names),
     persisted: buildPersisted(input.window, since, input.persisted, input.activationWindow, names),
     snapshot: input.snapshot.ok ? projectSnapshot(input.snapshot.report, names) : null,
@@ -469,6 +495,27 @@ function projectSnapshot(status: PolicyStatusReport, names: boolean): Activation
 }
 
 // ---------------------------------------------------------------------------
+// The kill switch (issue #441): one source, the running proxy's status field
+// ---------------------------------------------------------------------------
+
+/**
+ * Project the proxy's `kill_switch` status field, copied by name, and nothing
+ * else: the audit rows never feed this (a halt that ended while no proxy ran
+ * left no resume row, and a file-backed halt survives a crash). The field is
+ * read through a Partial view, as `helio policy status` reads it: a status
+ * report from a proxy older than the switch has no field and reads inactive.
+ */
+function buildKillSwitch(snapshot: SnapshotInput): ActivationKillSwitch {
+  if (!snapshot.ok) return { state: 'unknown', since: null, surface: null, durable: null }
+  const partial: Partial<PolicyStatusReport> = snapshot.report
+  const kill = partial.kill_switch
+  if (kill === undefined || !kill.active) {
+    return { state: 'inactive', since: null, surface: null, durable: null }
+  }
+  return { state: 'active', since: kill.since, surface: kill.surface, durable: kill.durable }
+}
+
+// ---------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------
 
@@ -489,6 +536,16 @@ function stageLine(label: string, rest: string): string {
 
 function datedStage(label: string, at: string, source: string): string {
   return stageLine(label, `${formatUtcDay(at).padEnd(DAY_COLUMN_WIDTH)}${source}`)
+}
+
+/** The kill switch line's clause, in the status line's vocabulary; no instruction on any face. */
+function killSwitchClause(kill: ActivationKillSwitch): string {
+  if (kill.state === 'unknown') return KILL_SWITCH_UNKNOWN_CLAUSE
+  if (kill.state === 'inactive') return 'not active, from the proxy.'
+  const since = kill.since === null ? 'an unknown instant' : formatUtcMinute(kill.since)
+  const surface = kill.surface ?? 'unknown'
+  const backing = kill.durable === true ? 'durable' : 'memory-only'
+  return `ACTIVE since ${since} (${surface}, ${backing}), from the proxy.`
 }
 
 function versionLabel(version: string): string {
@@ -568,6 +625,7 @@ export function renderActivationText(report: ActivationReport): string {
         'this command does not verify that it wrote this database.'
       : `${ABSENT_SNAPSHOT_SENTENCES[report.sources.proxy_snapshot_absent_reason]}, so the snapshot section is absent.`
   lines.push(`  Sources: the audit database (read; ${sameFile}). ${snapshotClause}`)
+  lines.push(`  Kill switch: ${killSwitchClause(report.kill_switch)}`)
 
   // Timeline
   lines.push('')
