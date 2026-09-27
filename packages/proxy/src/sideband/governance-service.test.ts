@@ -370,6 +370,87 @@ describe('GovernanceService.evaluate', () => {
       )
       expect(other.body['decision']).toBe('allow')
     })
+
+    it('keeps the baseline first seen when the embedder mutates its tool object after evaluate() (issue #380)', () => {
+      // A direct embedder reuses one tool object across calls. The baseline is a
+      // snapshot of the definition first seen, so a later rewrite of that object
+      // neither disarms flag_destructive nor reads as drift.
+      const policy = compile({ default: 'allow', flag_destructive: 'require_approval', rules: [] })
+      const { service, records } = makeService({ policy, withApprovals: true })
+      const pathSchema: Record<string, unknown> = { type: 'string' }
+      const tool = {
+        name: 'rm',
+        annotations: { destructiveHint: true } as Record<string, unknown>,
+        input_schema: { type: 'object', properties: { path: pathSchema } },
+        output_schema: { type: 'object' } as Record<string, unknown>,
+      }
+      const first = service.evaluate(evalInput({ tool }))
+      expect(first.body['decision']).toBe('require_approval')
+      expect(first.body['tool_drift']).toBeUndefined()
+
+      tool.annotations['destructiveHint'] = false
+      pathSchema['type'] = 'number'
+      tool.output_schema['type'] = 'string'
+
+      const second = service.evaluate(evalInput({ tool: { name: 'rm' } }))
+      expect(second.body['decision']).toBe('require_approval')
+      expect(second.body['tool_drift']).toBeUndefined()
+
+      const third = service.evaluate(
+        evalInput({
+          tool: {
+            name: 'rm',
+            annotations: { destructiveHint: true },
+            input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+            output_schema: { type: 'object' },
+          },
+        }),
+      )
+      expect(third.body['decision']).toBe('require_approval')
+      expect(third.body['tool_drift']).toBeUndefined()
+      expect(records.filter((r) => r.record.policy_decision === 'tool_drift')).toHaveLength(0)
+    })
+
+    it('reports drift against the definition first seen, not the embedder-rewritten object (issue #380)', () => {
+      // The drift event's `baseline` is the stored definition's field, so it is
+      // the one public read of the baseline: after the rewrite it must still
+      // carry the original values and must not be the embedder's object.
+      const policy = compile({ default: 'allow', on_tool_drift: 'block', rules: [] })
+      const { service } = makeService({ policy })
+      const tool = {
+        name: 'rm',
+        annotations: { destructiveHint: true } as Record<string, unknown>,
+        input_schema: { type: 'object' } as Record<string, unknown>,
+      }
+      service.evaluate(evalInput({ tool }))
+      tool.annotations['destructiveHint'] = false
+      tool.input_schema['type'] = 'array'
+
+      // A genuinely different definition: drift must name the two aspects and
+      // show the ORIGINAL values as the baseline.
+      const changed = service.evaluate(
+        evalInput({
+          tool: {
+            name: 'rm',
+            annotations: { readOnlyHint: true },
+            input_schema: { type: 'array' },
+          },
+        }),
+      )
+      expect(changed.body['decision']).toBe('deny')
+      const drift = changed.body['tool_drift'] as {
+        changes: Array<{ aspect: string; baseline: unknown; current: unknown }>
+      }
+      const byAspect = new Map(drift.changes.map((c) => [c.aspect, c]))
+      expect([...byAspect.keys()].sort()).toEqual(['annotations', 'inputSchema'])
+      expect(byAspect.get('annotations')?.baseline).toEqual({ destructiveHint: true })
+      expect(byAspect.get('annotations')?.baseline).not.toBe(tool.annotations)
+      expect(byAspect.get('inputSchema')?.baseline).toEqual({ type: 'object' })
+      expect(byAspect.get('inputSchema')?.baseline).not.toBe(tool.input_schema)
+      // The snapshot never touched the embedder's objects.
+      expect(tool.annotations).toEqual({ destructiveHint: false })
+      expect(tool.input_schema).toEqual({ type: 'array' })
+    })
   })
 
   describe('memory budgets', () => {

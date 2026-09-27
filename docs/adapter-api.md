@@ -41,6 +41,8 @@ The governance routes require `Authorization: Bearer <HELIO_ADAPTER_TOKEN>`. Thi
 
 If you embed `GovernanceService` directly (instead of running `helio start`), wire an `ApprovalRouter` whenever the policy can emit `require_approval` (explicit rules, `flag_destructive: require_approval`, or `on_tool_drift: require_approval`), otherwise construction and hot-reload fail closed by throwing `GovernanceConfigError` (exported from `@gethelio/proxy`).
 
+The annotation cache keeps its own copy of each `tool` definition it baselines: a library embedder that mutates the object it passed after `evaluate()` returns does not change the baseline later calls are judged against.
+
 ## `POST /evaluate`
 
 ```jsonc

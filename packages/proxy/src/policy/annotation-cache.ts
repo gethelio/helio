@@ -1,6 +1,7 @@
 import type { ToolAnnotationHints } from './types.js'
 import type { SurfaceTool } from './surface.js'
 import { canonicalize } from '../util/canonical-json.js'
+import { snapshotValue } from '../util/snapshot.js'
 
 /** Aspects of a tool definition reported in drift events. */
 export type ToolDriftAspect =
@@ -202,12 +203,14 @@ export class ToolAnnotationCache {
    * `toolDefinition` must already be in MCP shape (`inputSchema`/`outputSchema`
    * camelCase); the governance service maps the wire `tool` object before
    * calling. Returns the same result shape as `update()` (for one tool).
+   * The cache keeps a snapshot of `toolDefinition`, so a caller that reuses
+   * and rewrites its object cannot move the baseline (issue #380).
    */
   updateSingle(toolDefinition: unknown): ToolCacheUpdateResult {
     if (typeof toolDefinition !== 'object' || toolDefinition === null) {
       return { updated: false, baselined: [], drifted: [], reverted: [] }
     }
-    const t = toolDefinition as Record<string, unknown>
+    const t = snapshotValue(toolDefinition) as Record<string, unknown>
     const name = t['name']
     if (typeof name !== 'string') {
       return { updated: false, baselined: [], drifted: [], reverted: [] }
