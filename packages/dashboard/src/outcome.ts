@@ -65,6 +65,13 @@ export function deriveDisplayOutcome(record: DecisionLike): DisplayOutcome {
       // dedicated chip. Pinned here so a blocked install never falls through to
       // "allow" regardless of policy_decision.
       return 'deny'
+    case 'kill_switch':
+      // A call refused by the kill switch, or the operator's kill record
+      // itself (issue #402). The kill record rides the constant decision
+      // 'kill_switch', so without this pin it would render Allow; the resume
+      // record (a null reason) falls through to Allow beside its chip, the
+      // applied-reload precedent.
+      return 'deny'
     default:
       break
   }

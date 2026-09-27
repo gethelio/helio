@@ -79,6 +79,11 @@ function sanitizeForCodeBlock(value: string): string {
 }
 
 /** Build the Block Kit blocks for an approval message. */
+/**
+ * The approval message's blocks (the summary, any budget context, the two
+ * buttons). The action handler re-renders them under a kill-switch notice
+ * without dropping the buttons (issue #402).
+ */
 function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   const safeName = sanitizeCodeSpanContent(ticket.tool_name)
   const rawInput = truncate(JSON.stringify(ticket.tool_input), MAX_INPUT_LENGTH)

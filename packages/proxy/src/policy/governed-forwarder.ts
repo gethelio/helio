@@ -30,6 +30,8 @@ import {
   buildRateLimitedFeedback,
   buildSpendLimitedFeedback,
   buildToolDriftFeedback,
+  buildKillSwitchFeedback,
+  KILL_SWITCH_MESSAGE,
   buildBudgetExceededFeedback,
   buildBudgetApprovalDeniedFeedback,
   buildBudgetApprovalTimeoutFeedback,
@@ -101,6 +103,12 @@ export interface GovernedForwarderOptions {
    * #294) passes each entry's name.
    */
   upstreamName?: string
+  /**
+   * The kill switch (issue #402), read per call: while `killed`, every
+   * tools/call is refused with the `kill_switch` self-repair body before any
+   * evaluation, under global dry-run too; every other method passes through.
+   */
+  killSwitch?: { readonly killed: boolean }
 }
 
 /**
@@ -226,6 +234,7 @@ export class GovernedForwarder implements McpForwarder {
   private readonly spendLimiter: SpendLimiter | undefined
   private readonly budgetEngine: BudgetEngine | undefined
   private readonly upstreamName: string | undefined
+  private readonly killSwitch: { readonly killed: boolean } | undefined
   private readonly annotationCache = new ToolAnnotationCache()
   private agentKeyWarned = false
   private senderKeyWarned = false
@@ -241,6 +250,7 @@ export class GovernedForwarder implements McpForwarder {
     this.spendLimiter = options?.spendLimiter
     this.budgetEngine = options?.budgetEngine
     this.upstreamName = options?.upstreamName
+    this.killSwitch = options?.killSwitch
     this.session = options?.session ?? DEFAULT_SESSION_IDENTITY
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
@@ -539,6 +549,13 @@ export class GovernedForwarder implements McpForwarder {
       params?.['arguments'] && typeof params['arguments'] === 'object'
         ? (params['arguments'] as Record<string, unknown>)
         : undefined
+
+    // The kill switch (issue #402): refused after the name is known (the row
+    // needs it) and before any evaluation, so no rule, limiter, budget or
+    // approval runs while an operator has halted the proxy.
+    if (this.killSwitch?.killed) {
+      return this.rejectKilledToolsCall(request, toolName, toolArguments, timestamp, startTime)
+    }
 
     const {
       decision,
@@ -1151,6 +1168,59 @@ export class GovernedForwarder implements McpForwarder {
         tool_input: toolInput,
         policy_decision: 'rejected',
         block_reason: 'missing_tool_name',
+        matched_rule: null,
+        matched_rule_index: null,
+        evidence_chain: null,
+        approval_status: null,
+        approved_by: null,
+        upstream_response: null,
+        upstream_error: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        total_duration_ms: performance.now() - startTime,
+        approval_wait_ms: 0,
+        proxy_compute_ms: performance.now() - startTime,
+        flagged_destructive: false,
+        dry_run: false,
+        record_kind: 'tool_call',
+        origin: 'mcp',
+        metadata: null,
+        protocol_version: request.protocolVersion ?? null,
+        upstream: this.upstreamName ?? null,
+      })
+    }
+
+    return result
+  }
+
+  /**
+   * Refuse a governed call while the kill switch is active (issue #402):
+   * the same HTTP 200 JSON-RPC error a policy denial answers, with the
+   * `kill_switch` self-repair body, and a row under the real tool name so
+   * the trail counts every refused call. `dry_run: false` whatever the
+   * policy says: a kill blocks under global dry-run too.
+   */
+  private rejectKilledToolsCall(
+    request: McpRequest,
+    toolName: string,
+    toolArguments: Record<string, unknown> | undefined,
+    timestamp: string,
+    startTime: number,
+  ): ForwardResult {
+    const feedback = buildKillSwitchFeedback()
+    const result = makeErrorResult(request, POLICY_DENIED, KILL_SWITCH_MESSAGE, { ...feedback })
+
+    if (this.auditWriter) {
+      this.auditWriter.pushImmediate({
+        timestamp,
+        session_id: request.session?.id ?? null,
+        session_source: request.session?.source ?? null,
+        agent_id: null,
+        environment: this.environment ?? null,
+        tool_name: toolName,
+        tool_input: toolArguments ?? {},
+        policy_decision: 'deny',
+        block_reason: 'kill_switch',
         matched_rule: null,
         matched_rule_index: null,
         evidence_chain: null,

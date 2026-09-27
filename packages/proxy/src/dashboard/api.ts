@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
@@ -29,6 +29,8 @@ import type { BudgetEventsPage } from '../budget/ledger.js'
 import { budgetEventsToCsv } from '../budget/csv.js'
 import { DEFAULT_STATUS_WINDOW, parseStatusWindow } from '../policy/status.js'
 import type { PolicyStatusReport } from '../policy/status.js'
+import { markerNote, removeMarker, writeMarker } from '../kill-switch/marker.js'
+import type { KillSwitch } from '../kill-switch/state.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,6 +73,12 @@ export interface DashboardAppDeps {
    * the surface lives only in the running proxy.
    */
   readonly policyStatus?: { report(window: string): PolicyStatusReport }
+  /**
+   * The kill switch (issue #402) for `POST` and `DELETE /api/kill-switch`:
+   * the process's state object and the marker path beside its config.
+   * Absent (direct embedders, tests without it), both verbs answer 503.
+   */
+  readonly killSwitch?: { readonly state: KillSwitch; readonly markerPath: string }
 }
 
 /** Options for the dashboard API. */
@@ -107,6 +115,11 @@ interface DashboardAuthState {
   mode: 'bearer' | 'session'
   csrfToken?: string
 }
+
+/** The optional body of `POST /api/kill-switch` (issue #402). */
+const killSwitchBodySchema = z.object({
+  actor: z.string().min(1).max(200).optional(),
+})
 
 const optionalQueryString = z.preprocess(
   (value) => (typeof value === 'string' && value.length > 0 ? value : undefined),
@@ -338,6 +351,7 @@ export function createDashboardAppWithLifecycle(
     adapterLiveness,
     budgets,
     policyStatus,
+    killSwitch,
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
@@ -753,6 +767,107 @@ export function createDashboardAppWithLifecycle(
     const parsed = parseStatusWindow(window)
     if (!parsed.ok) return c.json({ error: parsed.error }, 400)
     return c.json(policyStatus.report(window))
+  })
+
+  // -------------------------------------------------------------------------
+  // Kill switch (issue #402): POST kills, DELETE resumes. Both sit under the
+  // /api/* bearer-or-cookie and CSRF middleware above. Open mode refuses both
+  // before any write or unlink, naming the marker's basename: the operator
+  // is on the box, and the path is not for a body that may be pasted around.
+  // -------------------------------------------------------------------------
+
+  const killSwitchUnavailable = { error: 'kill switch is not available in this process' }
+  const killSwitchRequiresSecret = (markerPath: string) => ({
+    error: 'kill_switch_requires_secret',
+    marker: basename(markerPath),
+    suggestion:
+      'run helio kill -c <config> or helio resume -c <config>, or create and delete the marker file by hand',
+  })
+
+  app.post('/api/kill-switch', async (c) => {
+    if (!killSwitch) return c.json(killSwitchUnavailable, 503)
+    if (!apiSecret) return c.json(killSwitchRequiresSecret(killSwitch.markerPath), 403)
+
+    // The body is optional: `{ actor }` names who pulled the switch; the
+    // credential's mode stands in when the body gives none.
+    let actorFromBody: string | undefined
+    const raw = await c.req.text()
+    if (raw.length > 0) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return c.json({ error: 'Invalid JSON' }, 400)
+      }
+      const result = killSwitchBodySchema.safeParse(parsed)
+      if (!result.success) {
+        return c.json({ error: 'Validation error', details: formatZodErrors(result.error) }, 400)
+      }
+      actorFromBody = result.data.actor
+    }
+    const actor = actorFromBody ?? c.get('auth')?.mode ?? 'api'
+
+    const { state, markerPath } = killSwitch
+    if (state.killed) {
+      const snapshot = state.snapshot()
+      return c.json(
+        { killed: true, changed: false, durable: snapshot.durable, since: snapshot.since },
+        200,
+      )
+    }
+    // The write itself is the test of whether this process can write the
+    // config directory. Written first: a kill that wrote the file is a FILE
+    // hold like any other, so helio resume, a hand deletion and DELETE lift
+    // it identically; only a failed write takes the memory hold.
+    const written = writeMarker(markerPath, markerNote(actor, new Date()))
+    if (written.ok) {
+      state.setFileHold(true, { surface: 'api', actor, atBoot: false })
+      return c.json(
+        { killed: true, changed: true, durable: true, since: state.snapshot().since },
+        200,
+      )
+    }
+    state.setMemoryHold(true, 'api', { actor, atBoot: false })
+    return c.json(
+      {
+        killed: true,
+        changed: true,
+        durable: false,
+        since: state.snapshot().since,
+        note:
+          `this process cannot write the marker beside the config (${written.code}), so this ` +
+          'halt is memory-only and ends with the process; run helio kill -c <config> where the ' +
+          'config directory is writable',
+      },
+      200,
+    )
+  })
+
+  app.delete('/api/kill-switch', (c) => {
+    if (!killSwitch) return c.json(killSwitchUnavailable, 503)
+    if (!apiSecret) return c.json(killSwitchRequiresSecret(killSwitch.markerPath), 403)
+
+    const { state, markerPath } = killSwitch
+    if (!state.killed) return c.json({ killed: false, changed: false }, 200)
+    // The file is the state: the holds clear only once the marker is gone.
+    // A failed unlink changes nothing, or the next poll would halt again.
+    const removed = removeMarker(markerPath)
+    if (!removed.ok) {
+      return c.json(
+        {
+          error: 'marker_unlink_failed',
+          killed: true,
+          code: removed.code,
+          suggestion:
+            'run helio resume -c <config> where the config directory is writable, or delete the marker by hand',
+        },
+        409,
+      )
+    }
+    const actor = c.get('auth')?.mode ?? 'api'
+    state.setFileHold(false, { surface: 'api', actor, atBoot: false })
+    state.setMemoryHold(false, 'api', { actor, atBoot: false })
+    return c.json({ killed: false, changed: true }, 200)
   })
 
   // -------------------------------------------------------------------------

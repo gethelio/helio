@@ -2641,3 +2641,234 @@ describe('AuditStore activation statements (issue #400)', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// kill_switch records and the aggregates (issue #402)
+// ---------------------------------------------------------------------------
+
+describe('kill_switch records and the aggregates (issue #402)', () => {
+  const HOUR = 60 * 60 * 1000
+  const DAY = 24 * HOUR
+  const at = (msAgo: number) => new Date(Date.now() - msAgo).toISOString()
+
+  /** An operator kill or resume record in the store's own shape. */
+  function killSwitchRecord(action: 'kill' | 'resume'): InsertRecord {
+    return makeRecord({
+      tool_name: '<kill_switch>',
+      tool_input: {},
+      policy_decision: 'kill_switch',
+      block_reason: action === 'kill' ? 'kill_switch' : null,
+      record_kind: 'kill_switch',
+      origin: 'operator',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      evidence_chain: {
+        kill_switch: {
+          action,
+          surface: 'file',
+          actor: null,
+          durable: true,
+          at_boot: false,
+          pending_approvals: 0,
+        },
+      },
+    })
+  }
+
+  /** A governed call refused while killed: deny with the kill_switch reason. */
+  function refusedCall(tool = 'get_customer'): InsertRecord {
+    return makeRecord({
+      tool_name: tool,
+      policy_decision: 'deny',
+      block_reason: 'kill_switch',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+    })
+  }
+
+  it('keeps both operator rows out of every decision aggregate and in the raw totals', () => {
+    const s = createStore()
+    try {
+      s.insert(killSwitchRecord('kill'))
+      s.insert(refusedCall())
+      s.insert(killSwitchRecord('resume'))
+      s.insert(makeRecord({ tool_name: 'get_customer', policy_decision: 'allow' }))
+      const stats = s.aggregate()
+      expect(stats.total).toBe(4)
+      expect(stats.allowed_total).toBe(1)
+      expect(stats.blocked_total).toBe(1)
+      expect(stats.dry_run_total).toBe(0)
+      expect(stats.applied_total).toBe(2)
+      expect(stats.by_decision.map((row) => row.decision)).not.toContain('kill_switch')
+      expect(stats.by_decision).toEqual(
+        expect.arrayContaining([
+          { decision: 'allow', count: 1 },
+          { decision: 'deny', count: 1 },
+        ]),
+      )
+      expect(stats.by_block_reason).toEqual([{ reason: 'kill_switch', count: 1 }])
+      expect(stats.top_tools.map((row) => row.tool_name)).not.toContain('<kill_switch>')
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_customer', upstream: null, count: 2 }])
+      expect(stats.per_hour.reduce((sum, bucket) => sum + bucket.count, 0)).toBe(4)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('still keeps reload rows out beside them (the shared kind exclusion)', () => {
+    const s = createStore()
+    try {
+      s.insert(killSwitchRecord('kill'))
+      s.insert(
+        makeRecord({
+          tool_name: 'helio.yaml',
+          tool_input: {},
+          policy_decision: 'policy_reload',
+          block_reason: 'rejected_pinned',
+          record_kind: 'policy_reload',
+          origin: 'config',
+          evidence_chain: { policy_reload: { outcome: 'rejected_pinned' } },
+        }),
+      )
+      const stats = s.aggregate()
+      expect(stats.total).toBe(2)
+      expect(stats.blocked_total).toBe(0)
+      expect(stats.allowed_total).toBe(0)
+      expect(stats.by_decision).toEqual([])
+      expect(stats.by_block_reason).toEqual([])
+      expect(stats.top_tools).toEqual([])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('filters kill_switch rows by kind and reads the facts back from the evidence', () => {
+    const s = createStore()
+    try {
+      const id = s.insert(killSwitchRecord('resume'))
+      s.insert(refusedCall())
+      const rows = s.list({ record_kind: 'kill_switch' })
+      expect(rows.total).toBe(1)
+      expect(rows.records[0]?.id).toBe(id)
+      expect(rows.records[0]?.evidence_chain).toEqual({
+        kill_switch: {
+          action: 'resume',
+          surface: 'file',
+          actor: null,
+          durable: true,
+          at_boot: false,
+          pending_approvals: 0,
+        },
+      })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('counts a refused call as blocked under kill_switch in the activation window, operator rows out', () => {
+    const s = createStore()
+    try {
+      s.insert(killSwitchRecord('kill'))
+      s.insert(refusedCall())
+      s.insert(killSwitchRecord('resume'))
+      const window = s.activationWindow(new Date(Date.now() - 4 * HOUR).toISOString())
+      expect(window.permitted).toBe(0)
+      expect(window.blocked).toBe(1)
+      expect(window.blocked_by_reason).toEqual([{ reason: 'kill_switch', count: 1 }])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('lists kill_switch among the non-block reasons, in byte order', () => {
+    expect(NON_BLOCK_REASONS).toContain('kill_switch')
+    const sorted = [...NON_BLOCK_REASONS].sort((a, b) =>
+      Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')),
+    )
+    expect([...NON_BLOCK_REASONS]).toEqual(sorted)
+    expect(NON_BLOCK_REASONS.indexOf('kill_switch')).toBe(
+      NON_BLOCK_REASONS.indexOf('install_denied') + 1,
+    )
+  })
+
+  it('misses the existence check over kill rows alone and skips the walk', () => {
+    const s = createStore()
+    try {
+      s.insert(killSwitchRecord('kill'), at(3 * DAY))
+      s.insert(refusedCall(), at(2 * DAY))
+      s.insert(killSwitchRecord('resume'), at(1 * DAY))
+      const timeline = s.activationTimeline()
+      expect(timeline.any_policy_block).toBe(false)
+      expect(timeline.first_blocked_call).toBeNull()
+    } finally {
+      s.close()
+    }
+  })
+
+  it('never names a kill refusal as the first enforcement decision when a real block follows', () => {
+    const s = createStore()
+    try {
+      s.insert(killSwitchRecord('kill'), at(5 * DAY))
+      s.insert(refusedCall('early'), at(4 * DAY))
+      s.insert(killSwitchRecord('resume'), at(3 * DAY))
+      s.insert(
+        makeRecord({ tool_name: 'real', policy_decision: 'deny', block_reason: 'policy_denied' }),
+        at(2 * DAY),
+      )
+      const timeline = s.activationTimeline()
+      expect(timeline.any_policy_block).toBe(true)
+      expect(timeline.first_blocked_call?.tool_name).toBe('real')
+      expect(timeline.first_blocked_call?.block_reason).toBe('policy_denied')
+    } finally {
+      s.close()
+    }
+  })
+
+  it('leaves the decision list untouched and keeps the walk on the kind index', () => {
+    expect(PERSISTED_SUMMARY_SQL.totals).toContain(
+      "('tool_drift', 'tool_drift_reverted', 'rejected')",
+    )
+    expect(ACTIVATION_TIMELINE_SQL.first_blocked_call).toContain(
+      "policy_decision NOT IN ('tool_drift', 'tool_drift_reverted', 'rejected')",
+    )
+    expect(ACTIVATION_TIMELINE_SQL.first_blocked_call).toContain("block_reason <> 'kill_switch'")
+    const dir = mkdtempSync(join(tmpdir(), 'helio-audit-kill-plan-'))
+    const dbPath = join(dir, 'audit.db')
+    const fileStore = new AuditStore({
+      path: dbPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    try {
+      seedToolCalls(fileStore, 300, {
+        pairs: [
+          { tool: 'a', upstream: null },
+          { tool: 'b', upstream: 'crm' },
+        ],
+        sessions: 5,
+      })
+      const raw = new Database(dbPath, { readonly: true })
+      try {
+        const plan = (
+          raw
+            .prepare(`EXPLAIN QUERY PLAN ${ACTIVATION_TIMELINE_SQL.first_blocked_call}`)
+            .all() as Array<{
+            detail: string
+          }>
+        )
+          .map((row) => row.detail)
+          .join(' | ')
+        expect(plan).toContain('idx_audit_kind_created_at')
+        expect(plan).not.toContain('SCAN')
+      } finally {
+        raw.close()
+      }
+    } finally {
+      fileStore.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

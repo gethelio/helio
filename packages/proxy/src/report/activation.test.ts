@@ -48,6 +48,7 @@ function statusFixture(): PolicyStatusReport {
   return {
     schema_version: 1,
     generated_at: '2026-09-23T12:27:38.535Z',
+    kill_switch: { active: false, since: null, surface: null, durable: false },
     window: WINDOW,
     policy: {
       rule_count: 4,
@@ -849,5 +850,43 @@ describe('the builder is pure', () => {
     expect(source).not.toContain('fetch(')
     expect(source).not.toContain('Date.now(')
     expect(source).not.toContain('new Date()')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The kill switch reason (issue #402): named, never folded into other
+// ---------------------------------------------------------------------------
+
+describe('kill_switch in the activation report (issue #402)', () => {
+  it('names refused calls under blocked_by_reason: kill_switch, never other', () => {
+    const report = buildActivationReport(
+      input({
+        activationWindow: {
+          ...windowFixture(windowSince(NOW, WINDOW_MS)),
+          blocked_by_reason: [
+            { reason: 'policy_denied', count: 3 },
+            { reason: 'kill_switch', count: 5 },
+          ],
+        },
+      }),
+    )
+    expect(report.persisted.blocked_by_reason).toEqual({ policy_denied: 3, kill_switch: 5 })
+    expect(report.persisted.blocked_by_reason).not.toHaveProperty('other')
+  })
+
+  it('names a kill refusal by its reason if it is ever the first enforcement decision', () => {
+    const report = buildActivationReport(
+      input({
+        timeline: {
+          ...timelineFixture(),
+          first_blocked_call: {
+            created_at: '2026-09-23T10:27:35.885Z',
+            block_reason: 'kill_switch',
+            tool_name: 'get_customer',
+          },
+        },
+      }),
+    )
+    expect(report.timeline.first_enforcement_decision.block_reason).toBe('kill_switch')
   })
 })

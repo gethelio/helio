@@ -34,6 +34,7 @@ describe('closeResources', () => {
       ],
       auditWriter: sync('auditWriter'),
       configWatcher: sync('configWatcher'),
+      killSwitchPoller: sync('killSwitchPoller'),
       sidebandHandle: asyncClose('sidebandHandle'),
       evidenceStore: sync('evidenceStore'),
       approvalRouter: sync('approvalRouter'),
@@ -69,9 +70,15 @@ describe('closeResources', () => {
     expect(position('approvalRouter')).toBeLessThan(position('handle'))
     expect(position('approvalQueue')).toBeLessThan(position('handle'))
 
+    // The kill-switch poller stops after the config watcher and BEFORE the
+    // router settles its tickets, so a marker appearing mid-shutdown cannot
+    // fire a kill edge into the cancel loop (issue #402).
+    expect(position('killSwitchPoller')).toBeGreaterThan(position('configWatcher'))
+    expect(position('killSwitchPoller')).toBeLessThan(position('approvalRouter'))
+
     // Storage closes last so drained requests could still write audit rows.
     expect(position('auditWriter')).toBeGreaterThan(position('budgetEngine'))
-    expect(order).toHaveLength(16)
+    expect(order).toHaveLength(17)
   })
 
   it('handles a minimal resource set (only the MCP handle)', async () => {

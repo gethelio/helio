@@ -36,6 +36,24 @@ describe('outcome helpers', () => {
     expect(deriveDisplayOutcome({ block_reason: 'shutdown_cancelled' })).toBe('shutdown_cancelled')
   })
 
+  it('renders a kill_switch block_reason as deny on every decision, and the resume record as allow (#402)', () => {
+    // A refused call rides policy_decision 'deny'; the operator kill record
+    // rides the constant 'kill_switch'. Neither may render Allow.
+    expect(deriveDisplayOutcome({ block_reason: 'kill_switch', policy_decision: 'deny' })).toBe(
+      'deny',
+    )
+    expect(deriveDisplayOutcome({ block_reason: 'kill_switch', policy_decision: 'allow' })).toBe(
+      'deny',
+    )
+    expect(
+      deriveDisplayOutcome({ block_reason: 'kill_switch', policy_decision: 'kill_switch' }),
+    ).toBe('deny')
+    // The resume record (block_reason null) reads Allow beside its chip.
+    expect(deriveDisplayOutcome({ block_reason: null, policy_decision: 'kill_switch' })).toBe(
+      'allow',
+    )
+  })
+
   it('renders an install_denied block_reason as deny independent of policy_decision', () => {
     // Belt-and-braces: even if policy_decision is not 'deny', a blocked install
     // must never render as "allow".

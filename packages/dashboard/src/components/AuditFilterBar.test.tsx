@@ -289,6 +289,15 @@ describe('AuditFilterBar', () => {
     expect(setFilter).toHaveBeenCalledWith('record_kind', 'policy_reload')
   })
 
+  it('exposes a Kill Switch record-kind option and applies its filter value (#402)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    const option = screen.getByRole('option', { name: 'Kill Switch' })
+    expect(option.getAttribute('value')).toBe('kill_switch')
+    fireEvent.change(screen.getByLabelText('Record Kind'), { target: { value: 'kill_switch' } })
+    expect(setFilter).toHaveBeenCalledWith('record_kind', 'kill_switch')
+  })
+
   it('renders channel and sender free-text inputs, calling setFilter (#16)', () => {
     const setFilter = vi.fn()
     renderBar({ setFilter })

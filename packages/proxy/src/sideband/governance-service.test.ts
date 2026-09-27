@@ -22,6 +22,7 @@ import { compileSessionIdentity } from '../mcp/session-resolver.js'
 import type { CompiledSessionIdentity } from '../mcp/session-resolver.js'
 import { resetSessionGateWarningsForTests } from '../policy/session-gate.js'
 import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
+import { KillSwitch } from '../kill-switch/state.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -4221,5 +4222,259 @@ describe('GovernanceService.snapshotSurfaces', () => {
     expect(send?.annotations).toEqual(sendAnnotations)
     expect(send?.annotations).not.toBe(sendAnnotations)
     expect(openclaw?.tools.find((t) => t.name === 'read')?.annotations).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The kill switch on the sideband (issue #402)
+// ---------------------------------------------------------------------------
+
+describe('kill switch on the sideband (issue #402)', () => {
+  const approvalPolicy = compile({
+    default: 'allow',
+    rules: [
+      {
+        name: 'ap',
+        match: { tool: 'send' },
+        action: 'require_approval',
+        approval: { channel: 'dashboard', timeout: '2s' },
+      },
+    ],
+  })
+
+  /** A harness whose service carries the kill switch and the injected clock. */
+  function killableService(opts?: {
+    policy?: CompiledPolicy
+    ttlMs?: number
+    killedAtBoot?: boolean
+  }) {
+    let time = 1_000_000
+    const now = () => time
+    const advance = (ms: number) => {
+      time += ms
+    }
+    const { writer, records } = fakeWriter()
+    const queue = new ApprovalQueue({ now, cleanupIntervalMs: 0 })
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels: new Map(),
+      queue,
+      now,
+    })
+    const killSwitch = new KillSwitch({ now })
+    if (opts?.killedAtBoot) {
+      killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: true })
+    }
+    const service = new GovernanceService({
+      policy: opts?.policy ?? compile({ default: 'allow', rules: [] }),
+      auditWriter: writer,
+      approvalRouter,
+      ttlMs: opts?.ttlMs ?? 600_000,
+      now,
+      sweepIntervalMs: 0,
+      killSwitch,
+    })
+    return { service, records, advance, queue, approvalRouter, killSwitch }
+  }
+
+  it('refuses evaluate with decision deny and reason kill_switch, no rule, a feedback block', () => {
+    const { service, records, killSwitch } = killableService()
+    killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    const res = service.evaluate(evalInput({ tool: { name: 'send' }, arguments: { to: 'x' } }))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      decision: 'deny',
+      reason: 'kill_switch',
+      matched_rule: null,
+      matched_rule_index: null,
+      feedback: {
+        message: 'Kill switch active: every governed call is refused',
+        suggestion:
+          'An operator halted Helio with its kill switch. Every governed call is refused until ' +
+          'an operator resumes it; retrying does not help.',
+      },
+    })
+    expect(typeof res.body['evaluation_id']).toBe('string')
+
+    expect(records).toHaveLength(1)
+    expect(records[0]?.record).toMatchObject({
+      tool_name: 'send',
+      tool_input: { to: 'x' },
+      policy_decision: 'deny',
+      block_reason: 'kill_switch',
+      matched_rule: null,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'openclaw',
+      agent_id: 'main',
+    })
+
+    // Terminal at evaluate: a later /audit answers already_finalized.
+    const audited = service.audit(auditInput(res.body['evaluation_id'] as string), 'h')
+    expect(audited.status).toBe(200)
+    expect(audited.body).toMatchObject({ already_finalized: true, finalized_by: 'evaluate' })
+    expect(records).toHaveLength(1)
+  })
+
+  it('refuses before the policy and before the caches: the origin is not registered by a refused call', () => {
+    const { service, killSwitch } = killableService({ policy: approvalPolicy })
+    killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    const res = service.evaluate(evalInput({ origin: 'fresh', tool: { name: 'send' } }))
+    expect(res.body['decision']).toBe('deny')
+    expect(res.body).not.toHaveProperty('approval')
+    expect(service.listAdapters().map((a) => a.origin)).not.toContain('fresh')
+    expect(service.snapshotSurfaces().map((s) => s.origin)).not.toContain('fresh')
+  })
+
+  it('refuses a dry-run evaluate too, without the dry_run block', () => {
+    const { service, records, killSwitch } = killableService({
+      policy: compile({ default: 'allow', dry_run: true, rules: [] }),
+    })
+    killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    const res = service.evaluate(evalInput())
+    expect(res.body['decision']).toBe('deny')
+    expect(res.body['reason']).toBe('kill_switch')
+    expect(res.body).not.toHaveProperty('dry_run')
+    expect(records[0]?.record.dry_run).toBe(false)
+    expect(records[0]?.record.block_reason).toBe('kill_switch')
+  })
+
+  it('refuses installScan the same way and keeps its record kind', () => {
+    const { service, records, killSwitch } = killableService()
+    killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    const res = service.installScan({
+      origin: 'openclaw',
+      agent_id: null,
+      session_id: null,
+      package: { name: 'left-pad', source: 'npm' },
+      metadata: null,
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ decision: 'deny', reason: 'kill_switch', matched_rule: null })
+    expect(records[0]?.record).toMatchObject({
+      record_kind: 'install_scan',
+      policy_decision: 'deny',
+      block_reason: 'kill_switch',
+      tool_name: 'install:npm:left-pad',
+    })
+  })
+
+  it('evaluates by policy again once the hold lifts', () => {
+    const { service, killSwitch } = killableService({ policy: approvalPolicy })
+    killSwitch.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    expect(service.evaluate(evalInput({ tool: { name: 'send' } })).body['decision']).toBe('deny')
+    killSwitch.setFileHold(false, { surface: 'file', actor: null, atBoot: false })
+    expect(service.evaluate(evalInput({ tool: { name: 'send' } })).body['decision']).toBe(
+      'require_approval',
+    )
+  })
+
+  it('answers 409 kill_switch_active on resolveApproval while frozen, before the ticket lookup', () => {
+    const { service } = killableService({ policy: approvalPolicy })
+    const ev = service.evaluate(evalInput({ tool: { name: 'send' } }))
+    const approval = ev.body['approval'] as { id: string }
+    service.freeze()
+    expect(service.frozen).toBe(true)
+    const frozen = service.resolveApproval(approval.id, {
+      resolution: 'approved',
+      resolved_by: 'x',
+    })
+    expect(frozen.status).toBe(409)
+    expect(frozen.body).toEqual({ error: 'kill_switch_active' })
+    const unknown = service.resolveApproval('nope', { resolution: 'approved', resolved_by: 'x' })
+    expect(unknown.status).toBe(409)
+    expect(unknown.body).toEqual({ error: 'kill_switch_active' })
+    service.thaw()
+    expect(service.frozen).toBe(false)
+    expect(
+      service.resolveApproval(approval.id, { resolution: 'approved', resolved_by: 'x' }).status,
+    ).toBe(200)
+  })
+
+  it('holds every deadline while frozen: no sweep or access expires an entry or times out its ticket', () => {
+    const { service, advance, queue } = killableService({ policy: approvalPolicy, ttlMs: 10_000 })
+    const ev = service.evaluate(evalInput({ tool: { name: 'send' } }))
+    const id = ev.body['evaluation_id'] as string
+    const approval = ev.body['approval'] as { id: string }
+    advance(500)
+    service.freeze()
+    advance(60_000)
+    service.sweep()
+    expect(queue.get(approval.id)?.status).toBe('pending')
+    expect(service.audit(auditInput(id), 'h').status).toBe(409)
+    expect(queue.get(approval.id)?.status).toBe('pending')
+  })
+
+  it('shifts the evaluation TTL and the ticket deadline by the halt on thaw, rewriting timeout_at', () => {
+    const { service, advance, queue } = killableService({ policy: approvalPolicy, ttlMs: 10_000 })
+    const ev = service.evaluate(evalInput({ tool: { name: 'send' } }))
+    const id = ev.body['evaluation_id'] as string
+    const approval = ev.body['approval'] as { id: string }
+    expect(queue.get(approval.id)?.timeout_at).toBe(new Date(1_000_000 + 2_000).toISOString())
+
+    advance(500)
+    service.freeze()
+    advance(60_000)
+    service.thaw()
+    // 1 500 ms of the ticket and 9 500 ms of the TTL remain from the thaw instant.
+    expect(queue.get(approval.id)?.timeout_at).toBe(new Date(1_060_500 + 1_500).toISOString())
+    advance(1_499)
+    service.sweep()
+    expect(queue.get(approval.id)?.status).toBe('pending')
+    advance(1)
+    service.sweep()
+    expect(queue.get(approval.id)?.status).toBe('timeout')
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
+  })
+
+  it('shifts the TTL of an entry with no ticket without producing NaN, so it still expires', () => {
+    const { service, advance } = killableService({ ttlMs: 10_000 })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    advance(500)
+    service.freeze()
+    advance(60_000)
+    service.thaw()
+    advance(9_499)
+    service.sweep()
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
+    const second = service.evaluate(evalInput())
+    const id2 = second.body['evaluation_id'] as string
+    service.freeze()
+    advance(1_000)
+    service.thaw()
+    advance(10_000)
+    service.sweep()
+    expect(service.audit(auditInput(id2), 'h').status).toBe(404)
+  })
+
+  it('a service constructed under a boot kill starts frozen and thaws cleanly', () => {
+    const { service, advance } = killableService({ killedAtBoot: true, ttlMs: 10_000 })
+    expect(service.frozen).toBe(true)
+    expect(service.resolveApproval('nope', { resolution: 'approved', resolved_by: 'x' })).toEqual({
+      status: 409,
+      body: { error: 'kill_switch_active' },
+    })
+    advance(5_000)
+    service.thaw()
+    expect(service.frozen).toBe(false)
+    expect(
+      service.resolveApproval('nope', { resolution: 'approved', resolved_by: 'x' }).status,
+    ).toBe(404)
+  })
+
+  it('freeze and thaw are idempotent', () => {
+    const { service, advance } = killableService({ ttlMs: 10_000 })
+    const ev = service.evaluate(evalInput())
+    const id = ev.body['evaluation_id'] as string
+    service.freeze()
+    service.freeze()
+    advance(5_000)
+    service.thaw()
+    service.thaw()
+    advance(9_999)
+    service.sweep()
+    expect(service.audit(auditInput(id), 'h').status).toBe(201)
   })
 })

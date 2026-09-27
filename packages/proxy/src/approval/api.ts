@@ -87,6 +87,12 @@ export interface ApprovalAppOptions {
  * - Dashboard UI
  * - Programmatic/CLI access (through the dashboard sideband port)
  */
+/** The answer of every decision route while a kill switch holds the router (issue #402). */
+const KILL_SWITCH_ACTIVE = {
+  error: 'kill_switch_active',
+  suggestion: 'resume Helio first; the ticket keeps its remaining time',
+} as const
+
 export function createApprovalApp(
   router: ApprovalRouter,
   queue: ApprovalQueue,
@@ -159,6 +165,10 @@ export function createApprovalApp(
       return c.json({ error: 'Validation error', details: formatZodErrors(result.error) }, 400)
     }
 
+    // A kill switch freezes every decision (issue #402): answered before the
+    // ticket lookup, so a frozen router never leaks which tickets exist.
+    if (router.frozen) return c.json(KILL_SWITCH_ACTIVE, 409)
+
     // Check if ticket exists first (for proper 404 vs 409)
     const ticket = queue.get(ticketId)
     if (!ticket) {
@@ -204,6 +214,10 @@ export function createApprovalApp(
       return c.json({ error: 'Validation error', details: formatZodErrors(result.error) }, 400)
     }
 
+    // A kill switch freezes every decision (issue #402): answered before the
+    // ticket lookup, so a frozen router never leaks which tickets exist.
+    if (router.frozen) return c.json(KILL_SWITCH_ACTIVE, 409)
+
     // Check if ticket exists first (for proper 404 vs 409)
     const ticket = queue.get(ticketId)
     if (!ticket) {
@@ -248,6 +262,10 @@ export function createApprovalApp(
     if (!result.success) {
       return c.json({ error: 'Validation error', details: formatZodErrors(result.error) }, 400)
     }
+
+    // A kill switch freezes every decision (issue #402): answered before the
+    // ticket lookup, so a frozen router never leaks which tickets exist.
+    if (router.frozen) return c.json(KILL_SWITCH_ACTIVE, 409)
 
     // Check if ticket exists first (for proper 404 vs 409)
     const ticket = queue.get(ticketId)

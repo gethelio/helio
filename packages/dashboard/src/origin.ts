@@ -20,6 +20,7 @@ const RECORD_KIND_LABELS: Record<string, string> = {
   drift_event: 'Drift',
   evaluation_expired: 'Expired',
   policy_reload: 'Reload',
+  kill_switch: 'Kill Switch',
 }
 
 export function formatRecordKind(kind: string): string | null {

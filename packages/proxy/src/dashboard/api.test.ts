@@ -4,7 +4,15 @@ import { HTTPException } from 'hono/http-exception'
 import { SSEStreamingApi } from 'hono/streaming'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { createHmac } from 'node:crypto'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
@@ -26,6 +34,8 @@ import { secretDigest } from '../auth/bearer.js'
 import { classifySurface } from '../policy/surface.js'
 import { buildPolicyStatus, DEFAULT_STATUS_WINDOW } from '../policy/status.js'
 import { compilePolicies } from '../policy/parser.js'
+import { KillSwitch } from '../kill-switch/state.js'
+import type { KillSwitchChange } from '../kill-switch/state.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -3023,5 +3033,260 @@ describe('GET /api/policy/status', () => {
     const res = await get('/api/policy/status')
     expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ error: 'policy status is not available in this process' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// POST and DELETE /api/kill-switch (issue #402)
+// ---------------------------------------------------------------------------
+
+describe('POST and DELETE /api/kill-switch (issue #402)', () => {
+  const dirs: string[] = []
+
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) {
+      chmodSync(dir, 0o755)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  function killSetup(options?: { apiSecret?: string; mode?: number; withoutKillSwitch?: boolean }) {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-dashboard-kill-'))
+    dirs.push(dir)
+    const markerPath = join(dir, 'helio.yaml.kill')
+    const state = new KillSwitch()
+    const changes: KillSwitchChange[] = []
+    state.onChange((change) => changes.push(change))
+    if (options?.mode !== undefined) chmodSync(dir, options.mode)
+
+    const auditStore = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const approvalQueue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels: new Map([['dashboard', new QueueChannel()]]),
+      queue: approvalQueue,
+    })
+    const app = createDashboardApp(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter: new RateLimiter({ cleanupIntervalMs: 0 }),
+        spendLimiter: new SpendLimiter({ cleanupIntervalMs: 0 }),
+        evidenceStore: new EvidenceStore({ cleanupIntervalMs: 0 }),
+        eventBus: new DashboardEventBus(),
+        ...(options?.withoutKillSwitch ? {} : { killSwitch: { state, markerPath } }),
+      },
+      { apiSecret: options?.apiSecret },
+    )
+    const request = (method: 'POST' | 'DELETE', body?: unknown, headers?: Record<string, string>) =>
+      app.request('/api/kill-switch', {
+        method,
+        headers: {
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...headers,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      })
+    return { app, dir, markerPath, state, changes, request }
+  }
+
+  const BEARER = { authorization: 'Bearer top-secret' }
+
+  it('requires credentials on both verbs when a secret is set', async () => {
+    const { request, state, markerPath } = killSetup({ apiSecret: 'top-secret' })
+    expect((await request('POST')).status).toBe(401)
+    expect((await request('DELETE')).status).toBe(401)
+    expect(state.killed).toBe(false)
+    expect(existsSync(markerPath)).toBe(false)
+  })
+
+  it('requires the CSRF header on a cookie session', async () => {
+    const { app, request, state } = killSetup({ apiSecret: 'top-secret' })
+    const login = await app.request('/api/auth/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: 'top-secret' }),
+    })
+    const cookie = login.headers.get('set-cookie') ?? ''
+    const loginBody = (await login.json()) as { csrf_token: string }
+    const refused = await request('POST', undefined, { cookie })
+    expect(refused.status).toBe(403)
+    expect(await refused.json()).toEqual({ error: 'Invalid CSRF token' })
+    expect(state.killed).toBe(false)
+    const accepted = await request('POST', undefined, {
+      cookie,
+      'x-helio-csrf': loginBody.csrf_token,
+    })
+    expect(accepted.status).toBe(200)
+    expect(state.killed).toBe(true)
+  })
+
+  it('refuses both verbs 403 in open mode, naming the marker basename, before any write or unlink', async () => {
+    const { request, state, markerPath, dir } = killSetup()
+    const refusal = {
+      error: 'kill_switch_requires_secret',
+      marker: 'helio.yaml.kill',
+      suggestion:
+        'run helio kill -c <config> or helio resume -c <config>, or create and delete the marker file by hand',
+    }
+    const post = await request('POST', { actor: 'alice' })
+    expect(post.status).toBe(403)
+    expect(await post.json()).toEqual(refusal)
+    expect(state.killed).toBe(false)
+    expect(readdirSync(dir)).toEqual([])
+
+    writeFileSync(markerPath, 'x\n')
+    state.setFileHold(true, { surface: 'file', actor: null, atBoot: false })
+    const del = await request('DELETE')
+    expect(del.status).toBe(403)
+    expect(await del.json()).toEqual(refusal)
+    expect(state.killed).toBe(true)
+    expect(existsSync(markerPath)).toBe(true)
+  })
+
+  it('a durable kill writes the marker and sets the FILE hold under the api trigger', async () => {
+    const { request, state, changes, markerPath, dir } = killSetup({ apiSecret: 'top-secret' })
+    const res = await request('POST', { actor: 'alice' }, BEARER)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ killed: true, changed: true, durable: true })
+    expect(typeof body['since']).toBe('string')
+    expect(Object.keys(body).sort()).toEqual(['changed', 'durable', 'killed', 'since'])
+    expect(JSON.stringify(body)).not.toContain(dir)
+    expect(readFileSync(markerPath, 'utf-8')).toMatch(
+      /^killed at \d{4}-\d{2}-\d{2}T[0-9:.]+Z by alice\n$/,
+    )
+    expect(state.fileHold).toBe(true)
+    expect(state.memoryHold).toBe(false)
+    expect(state.snapshot()).toMatchObject({ killed: true, durable: true, surface: 'file' })
+    expect(changes).toEqual([
+      { killed: true, durable: true, trigger: { surface: 'api', actor: 'alice', at_boot: false } },
+    ])
+  })
+
+  it('names the credential as the actor when the body gives none, and accepts an empty body', async () => {
+    const { request, changes, markerPath } = killSetup({ apiSecret: 'top-secret' })
+    const res = await request('POST', undefined, BEARER)
+    expect(res.status).toBe(200)
+    expect(changes[0]?.trigger.actor).toBe('bearer')
+    expect(readFileSync(markerPath, 'utf-8')).toContain(' by bearer\n')
+  })
+
+  it('refuses a malformed actor with 400 and writes nothing', async () => {
+    const { request, state, markerPath } = killSetup({ apiSecret: 'top-secret' })
+    const empty = await request('POST', { actor: '' }, BEARER)
+    expect(empty.status).toBe(400)
+    const long = await request('POST', { actor: 'x'.repeat(201) }, BEARER)
+    expect(long.status).toBe(400)
+    const wrongType = await request('POST', { actor: 7 }, BEARER)
+    expect(wrongType.status).toBe(400)
+    expect(state.killed).toBe(false)
+    expect(existsSync(markerPath)).toBe(false)
+  })
+
+  it('a kill while killed changes nothing and says so', async () => {
+    const { request, changes } = killSetup({ apiSecret: 'top-secret' })
+    const first = (await (await request('POST', undefined, BEARER)).json()) as { since: string }
+    const res = await request('POST', { actor: 'bob' }, BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      killed: true,
+      changed: false,
+      durable: true,
+      since: first.since,
+    })
+    expect(changes).toHaveLength(1)
+  })
+
+  it('falls back to a memory-only halt when the marker cannot be written, and says so', async () => {
+    const { request, state, changes, dir } = killSetup({ apiSecret: 'top-secret', mode: 0o555 })
+    const res = await request('POST', { actor: 'alice' }, BEARER)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ killed: true, changed: true, durable: false })
+    expect(body['note']).toBe(
+      'this process cannot write the marker beside the config (EACCES), so this halt is ' +
+        'memory-only and ends with the process; run helio kill -c <config> where the config ' +
+        'directory is writable',
+    )
+    expect(JSON.stringify(body)).not.toContain(dir)
+    expect(state.memoryHold).toBe(true)
+    expect(state.fileHold).toBe(false)
+    expect(state.snapshot()).toMatchObject({ killed: true, durable: false, surface: 'api' })
+    expect(changes[0]?.trigger).toEqual({ surface: 'api', actor: 'alice', at_boot: false })
+    chmodSync(dir, 0o755)
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('a resume unlinks the marker and clears both holds at once', async () => {
+    const { request, state, changes, markerPath } = killSetup({ apiSecret: 'top-secret' })
+    await request('POST', { actor: 'alice' }, BEARER)
+    state.setMemoryHold(true, 'env', { actor: null, atBoot: true })
+    const res = await request('DELETE', undefined, BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ killed: false, changed: true })
+    expect(existsSync(markerPath)).toBe(false)
+    expect(state.killed).toBe(false)
+    expect(state.snapshot()).toEqual({ killed: false, durable: false, surface: null, since: null })
+    // The file hold cleared first, so the halt lifted by the last setter was
+    // the env memory hold: memory-only at that instant.
+    expect(changes.at(-1)).toEqual({
+      killed: false,
+      durable: false,
+      trigger: { surface: 'api', actor: 'bearer', at_boot: false },
+    })
+  })
+
+  it('a resume of a memory-only halt has no file to remove and is the whole resume', async () => {
+    const { request, state, dir } = killSetup({ apiSecret: 'top-secret', mode: 0o555 })
+    await request('POST', undefined, BEARER)
+    expect(state.memoryHold).toBe(true)
+    chmodSync(dir, 0o755)
+    const res = await request('DELETE', undefined, BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ killed: false, changed: true })
+    expect(state.killed).toBe(false)
+  })
+
+  it('a resume while not killed changes nothing', async () => {
+    const { request, changes } = killSetup({ apiSecret: 'top-secret' })
+    const res = await request('DELETE', undefined, BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ killed: false, changed: false })
+    expect(changes).toEqual([])
+  })
+
+  it('a resume whose unlink fails answers 409 and the process stays killed', async () => {
+    const { request, state, markerPath, dir } = killSetup({ apiSecret: 'top-secret' })
+    await request('POST', undefined, BEARER)
+    chmodSync(dir, 0o555)
+    const res = await request('DELETE', undefined, BEARER)
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({
+      error: 'marker_unlink_failed',
+      killed: true,
+      code: 'EACCES',
+      suggestion:
+        'run helio resume -c <config> where the config directory is writable, or delete the marker by hand',
+    })
+    expect(state.killed).toBe(true)
+    expect(state.fileHold).toBe(true)
+    chmodSync(dir, 0o755)
+    expect(existsSync(markerPath)).toBe(true)
+  })
+
+  it('answers 503 on both verbs when the process has no kill switch', async () => {
+    const { request } = killSetup({ apiSecret: 'top-secret', withoutKillSwitch: true })
+    const post = await request('POST', undefined, BEARER)
+    expect(post.status).toBe(503)
+    expect(await post.json()).toEqual({ error: 'kill switch is not available in this process' })
+    expect((await request('DELETE', undefined, BEARER)).status).toBe(503)
   })
 })

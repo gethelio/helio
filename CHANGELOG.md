@@ -21,6 +21,19 @@ Maintainer notes:
 
 ### Added
 
+- **`helio kill` halts every governed call without editing policy, and
+  the `helio resume` verb lifts it.** One marker file, `<config>.kill`, is
+  the state: the kill verb writes it without parsing the config, the proxy
+  polls it once a second, a restart under the marker starts killed, and
+  the resume verb, the authenticated `POST`/`DELETE /api/kill-switch` and
+  deleting the file are the same resume. Setting `HELIO_KILL_SWITCH=1`
+  starts a process killed without a marker. Refused calls answer the
+  self-repair body (`-32001`, `reason: kill_switch`) on the MCP door and
+  a `decision: deny, reason: kill_switch` body on the sideband; pending
+  approvals freeze with their remaining time and continue on resume; kill
+  and resume land as `kill_switch` audit records; the report, the
+  aggregates, `helio policy status` and the dashboard name them. The
+  accepted limits are in `docs/kill-switch.md`.
 - **`helio init --demo` writes a directory of sample traffic to try every
   surface before the first real call.** It writes a `helio-demo.yaml` with
   two named upstreams, two rules and one budget, an audit database of about

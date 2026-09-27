@@ -266,6 +266,8 @@ As with the timeout example, the `data` object also carries `blocked`, `rule`, `
 
 This shutdown path is intentionally fail-closed and does not use `default_on_timeout`.
 
+An operator's [kill switch](./kill-switch.md) freezes every pending ticket instead of resolving it: the timeout and escalation timers stop with the time they have left, `approve`, `deny` and `break-glass` answer `409 kill_switch_active` (a Slack button press updates the message to say so and keeps its buttons), and on resume every clock continues with its remaining time. A kill never turns a pending ticket into a timeout denial, and it never produces `client_disconnected` or `shutdown_cancelled` itself: a real client abort still settles at once while killed, and a real shutdown still cancels. The approvals list shows the pre-kill `timeout_at` while killed and the shifted deadline after the resume.
+
 ## Escalation
 
 If an approval hasn't been resolved within a specified time, Helio can escalate by re-notifying the channel or notifying additional channels:
@@ -407,6 +409,7 @@ Both `approved_by` and `reason` are required.
 - `404` — Ticket not found.
 - `409` — Ticket already resolved (returns current status).
 - `409` — Adapter-owned ticket: `{ "error": "native_ticket", "resolve_in": "<origin>" }`.
+- `409`: the [kill switch](./kill-switch.md) is active, `{ "error": "kill_switch_active", "suggestion": "resume Helio first; the ticket keeps its remaining time" }`, answered before the ticket lookup.
 
 Tickets created by a host adapter through the [sideband](./sideband-api.md) governance flow appear in the same listings with a `native:<origin>` channel name. The `/api/approvals/*` endpoints cannot resolve them — the decision belongs to the adapter's own approval UI, which reports it back through the sideband — so `approve` / `deny` / `break-glass` return the `native_ticket` error above, and a dismissed adapter dialog resolves the ticket as `cancelled`.
 

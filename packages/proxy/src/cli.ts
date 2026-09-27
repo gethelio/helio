@@ -4,7 +4,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import type { Stats } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
@@ -87,8 +87,18 @@ import {
   AuditWriter,
   EXPORT_MAX_RECORDS,
   buildHeaderMismatchAuditRecord,
+  buildKillSwitchRecord,
   buildPolicyReloadRecord,
 } from './audit/index.js'
+import { KILL_SWITCH_ENV, KillSwitch, readKillSwitchEnv } from './kill-switch/state.js'
+import {
+  MarkerPoller,
+  markerNote,
+  markerPathFor,
+  removeMarker,
+  writeMarker,
+} from './kill-switch/marker.js'
+import { formatUtcMinute } from './util/format-time.js'
 import { EvidenceStore, createSidebandApp } from './evidence/index.js'
 import { GovernanceService } from './sideband/governance-service.js'
 import {
@@ -518,6 +528,17 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   }
   const pinnedSha256 = configPin.status === 'set' ? configPin.sha256 : undefined
 
+  // The kill switch's boot input (issue #402), read like the pin: unset,
+  // exactly "1", or refused before any side effect. It creates no marker.
+  const killSwitchEnv = readKillSwitchEnv()
+  if (killSwitchEnv.status === 'invalid') {
+    console.error(
+      `Error: ${KILL_SWITCH_ENV} is set but is not "1": "${killSwitchEnv.raw.slice(0, 80)}". ` +
+        'Unset it, or set it to 1 to start killed.',
+    )
+    process.exit(1)
+  }
+
   // Compile BEFORE any environment check or side effect (issue #195): a
   // file that does not compile is refused the way validate refuses it,
   // with no upstream connected, no stdio child spawned, no audit DB.
@@ -682,6 +703,52 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   // restart-required at the reload boundary (issue #218).
   const session = compileSessionIdentity(config.session)
 
+  // The kill switch (issue #402): the state, its listener, the marker poller
+  // (whose constructor read is the boot read) and the boot variable, all
+  // BEFORE the forwarders copy their options and the doors bind, so a
+  // marker present at start refuses the first call. The service is built
+  // later; the listener reads it through this hoisted binding, which must
+  // be declared before the boot edge can fire (a later `let` would be in
+  // its temporal dead zone).
+  let governanceService: GovernanceService | undefined
+  const killSwitch = new KillSwitch()
+  const markerPath = markerPathFor(configPath)
+  killSwitch.onChange((change) => {
+    // A kill freezes decisions, not observers: the router's clocks and the
+    // sideband's deadlines hold, the abort and shutdown paths are untouched.
+    if (change.killed) {
+      approvalRouter.freeze()
+      governanceService?.freeze()
+    } else {
+      approvalRouter.thaw()
+      governanceService?.thaw()
+    }
+    auditWriter.pushImmediate(
+      buildKillSwitchRecord(
+        {
+          action: change.killed ? 'kill' : 'resume',
+          surface: change.trigger.surface,
+          actor: change.trigger.actor,
+          durable: change.durable,
+          at_boot: change.trigger.at_boot,
+          pending_approvals: approvalQueue.list({ status: 'pending' }).length,
+        },
+        config.environment ?? null,
+      ),
+    )
+    console.error(
+      change.killed
+        ? `[helio] Kill switch ON (${change.trigger.surface}): every governed call is refused; ` +
+            `resume with helio resume -c ${configPath} or DELETE /api/kill-switch`
+        : `[helio] Kill switch OFF (${change.trigger.surface}): governed calls resume; ` +
+            'held approvals continue with their remaining time',
+    )
+  })
+  const killSwitchPoller = new MarkerPoller(markerPath, killSwitch)
+  if (killSwitchEnv.status === 'set') {
+    killSwitch.setMemoryHold(true, 'env', { actor: null, atBoot: true })
+  }
+
   // Phase 2 of per-upstream assembly: wrap every connected forwarder with
   // governance and start its annotation prime loop. Sequential in config
   // order; each door waits its prime loop's startup window, so a slow
@@ -696,6 +763,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     spendLimiter,
     budgetEngine,
     session,
+    killSwitch,
   }
   const stacks: Array<{ name: string | undefined } & UpstreamStack> = []
   for (const door of doors) {
@@ -794,7 +862,6 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   let sidebandTokenSource: 'generated' | 'env' | undefined
   let adapterToken: string | undefined
   let adapterTokenSource: 'generated' | 'env' | undefined
-  let governanceService: GovernanceService | undefined
   if (config.sdk.enabled) {
     sidebandToken = process.env['HELIO_SDK_TOKEN']
     if (!sidebandToken || sidebandToken.length === 0) {
@@ -833,6 +900,8 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       auditWriter,
       approvalTimeoutMs: parseDuration(config.approval.timeout),
       ttlMs: parseDuration(config.sdk.evaluation_ttl),
+      // A service built under a boot kill starts frozen, matching the router.
+      killSwitch,
     })
 
     const sidebandApp = createSidebandApp(evidenceStore, {
@@ -895,6 +964,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
       persisted: auditStore.persistedSummary(new Date(Date.now() - parsed.ms).toISOString()),
       window,
       now: new Date(),
+      killSwitch: killSwitch.snapshot(),
     })
   }
 
@@ -924,6 +994,9 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         // The authority report for GET /api/policy/status (issue #396): the
         // primed surface lives only in this process, so the CLI reads it here.
         policyStatus: { report: policyStatusReport },
+        // POST and DELETE /api/kill-switch (issue #402): the state and the
+        // marker path beside this config.
+        killSwitch: { state: killSwitch, markerPath },
       },
       {
         apiSecret: config.dashboard.api_secret,
@@ -1155,6 +1228,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     doors.flatMap((door) => (door.close ? [door.close] : [])),
     auditWriter,
     configWatcher,
+    killSwitchPoller,
     sidebandHandle,
     evidenceStore,
     approvalRouter,
@@ -1935,6 +2009,7 @@ function registerShutdown(
   closeForwarders?: ReadonlyArray<() => Promise<void>>,
   auditWriter?: AuditWriter,
   configWatcher?: ConfigWatcher,
+  killSwitchPoller?: MarkerPoller,
   sidebandHandle?: ServerHandle,
   evidenceStore?: EvidenceStore,
   approvalRouter?: ApprovalRouter,
@@ -1964,6 +2039,7 @@ function registerShutdown(
       closeForwarders,
       auditWriter,
       configWatcher,
+      killSwitchPoller,
       sidebandHandle,
       evidenceStore,
       approvalRouter,
@@ -2228,6 +2304,83 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
  * verbatim and exit 1, no stack, no rejection wrapper (#233, #388).
  * Anything else rethrows into the unhandledRejection crash path.
  */
+// ---------------------------------------------------------------------------
+// helio kill / helio resume (issue #402)
+// ---------------------------------------------------------------------------
+
+/** The user for the marker's informational line; never read by the proxy. */
+function currentUserName(): string {
+  try {
+    return userInfo().username
+  } catch {
+    return process.env['USER'] ?? 'unknown'
+  }
+}
+
+/**
+ * `helio kill`: write the marker beside the config. Never loads, parses or
+ * validates the config, and opens no network or audit store, so the
+ * incident command cannot fail on YAML. The config path must be a file, so
+ * a typo cannot leave a stray marker nobody polls.
+ */
+function killCommand(configPath: string): void {
+  const config = statSync(configPath, { throwIfNoEntry: false })
+  if (config === undefined || !config.isFile()) {
+    throw new StartupError(
+      `Error: no config file at ${configPath}; pass -c <path> to the helio.yaml the proxy runs`,
+    )
+  }
+  const marker = markerPathFor(configPath)
+  const existing = statSync(marker, { throwIfNoEntry: false })
+  if (existing?.isFile()) {
+    console.error(
+      `Kill switch already ON: ${marker} exists (since ${formatUtcMinute(existing.mtime.toISOString())})`,
+    )
+    return
+  }
+  const written = writeMarker(marker, markerNote(currentUserName(), new Date()))
+  if (!written.ok) {
+    throw new StartupError(
+      `Error: cannot write ${marker} (${written.code}). Run this where the config directory ` +
+        'is writable (on the separate-user tier, as root)',
+    )
+  }
+  console.error(
+    `Kill switch ON: wrote ${marker}. Every Helio process polling it refuses every governed ` +
+      `call within about a second. Resume with: helio resume -c ${configPath}`,
+  )
+}
+
+/**
+ * `helio resume`: remove the marker. An absent marker is not a failure (an
+ * idempotent resume is what an incident wants); the lines say what a
+ * memory-only halt still needs, because this command cannot lift one.
+ */
+function resumeCommand(configPath: string): void {
+  const marker = markerPathFor(configPath)
+  const removed = removeMarker(marker)
+  if (!removed.ok) {
+    throw new StartupError(
+      `Error: cannot remove ${marker} (${removed.code}). Run this where the config directory is writable`,
+    )
+  }
+  if (!removed.removed) {
+    console.error(
+      `No kill marker at ${marker}. A halt set through the API that could not write the ` +
+        'marker, or by HELIO_KILL_SWITCH=1, ends with DELETE /api/kill-switch or a restart ' +
+        'without the variable',
+    )
+    return
+  }
+  console.error(
+    `Removed ${marker}. A Helio process killed by that file resumes within about a second ` +
+      'and continues held approvals with their remaining time; a process also started with ' +
+      'HELIO_KILL_SWITCH=1, or halted through the API because it could not write the marker, ' +
+      'stays killed until DELETE /api/kill-switch or a restart without the variable. The ' +
+      'proxy\'s own "Kill switch OFF" line is the proof it resumed',
+  )
+}
+
 function exitOnStartupError(err: unknown): never {
   if (err instanceof StartupError) {
     console.error(err.message)
@@ -2382,6 +2535,32 @@ policyCommand
   .option('--format <format>', 'Output format: text or json', 'text')
   .option('--window <duration>', 'Persisted window, 1m to 30d', DEFAULT_STATUS_WINDOW)
   .action((opts: PolicyStatusOptions) => policyStatusCommand(opts).catch(exitOnStartupError))
+
+program
+  .command('kill')
+  .description(
+    'Halt every governed call of the proxy running this config by writing its kill marker; helio resume lifts it',
+  )
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .action((opts: { config: string }) => {
+    try {
+      killCommand(opts.config)
+    } catch (err) {
+      exitOnStartupError(err)
+    }
+  })
+
+program
+  .command('resume')
+  .description('Lift the halt by removing the kill marker beside this config')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .action((opts: { config: string }) => {
+    try {
+      resumeCommand(opts.config)
+    } catch (err) {
+      exitOnStartupError(err)
+    }
+  })
 
 const reportCommand = program
   .command('report')

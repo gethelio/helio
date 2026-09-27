@@ -14,6 +14,8 @@ export interface CloseableResources {
   closeForwarders?: ReadonlyArray<() => Promise<void>>
   auditWriter?: { close(): void }
   configWatcher?: { close(): void }
+  /** The kill-switch marker poller (issue #402). */
+  killSwitchPoller?: { close(): void }
   sidebandHandle?: { close(): Promise<void> }
   evidenceStore?: { close(): void }
   approvalRouter?: { close(): void }
@@ -32,6 +34,9 @@ export async function closeResources(resources: CloseableResources): Promise<voi
   // Background loops first: nothing may schedule new work mid-shutdown.
   for (const prime of resources.annotationPrimes ?? []) prime.stop()
   resources.configWatcher?.close()
+  // The marker poller stops before the router settles its tickets, so a
+  // marker appearing mid-shutdown cannot fire a kill edge into the cancel loop.
+  resources.killSwitchPoller?.close()
 
   // Resolve pending approvals BEFORE draining the doors: requests parked on
   // a ticket unblock as shutdown-cancelled (fail closed) instead of hanging
