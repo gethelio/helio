@@ -51,6 +51,17 @@ Maintainer notes:
   share a demo report with `--include-names`. Two runs with one `--at`
   instant write byte-identical audit rows and reports; rerun with `--force`
   after an upgrade to regenerate the file against the current schema.
+- **`helio report activation` says whether the kill switch is active.**
+  One header line and one JSON field (`kill_switch`, four values: state,
+  since, surface and durable) read from the running proxy's status report
+  and print `ACTIVE since <instant> (<surface>, durable|memory-only)`, or
+  else `not active`, or `unknown` when the report got no status. The line
+  never reads the audit rows: a file-backed halt stays in force across a
+  crash and the line reads `ACTIVE` after the next start, while a halt that
+  ended with no proxy to record it (a resume or a hand removal of the
+  marker while stopped, a memory-only halt that ended with its process) is
+  never reported as current; the rows stay the record of the kills and
+  resumes a proxy saw.
 - **`helio report activation` writes a redacted activation report a user
   can hand over.** It reads the audit database on disk for a timeline
   (first call observed, first rule, first enforcement decision, with
