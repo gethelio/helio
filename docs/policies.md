@@ -1031,8 +1031,10 @@ client, and the [scheduled revalidation](#proactive-revalidation) Helio runs
 on its own clock. Against a modern upstream, the `tools/list` requests Helio sends to baseline and re-check these definitions conform to the `2026-07-28` wire shape (headers and `_meta`), and relayed traffic takes the same shape — the relay leg is version-tagged by the detected (or pinned) upstream era. The fingerprint covers the entire tool definition object, including non-standard fields. If a later `tools/list` reports a different definition
 for the same tool — for example a tool that was `readOnlyHint: true` when you
 wrote your policy turning destructive, or a description gaining injected
-instructions — Helio marks the tool as **drifted**, writes an audit record
-(`policy_decision: tool_drift`), and gates subsequent calls to it:
+instructions, Helio marks the tool as **drifted**, writes an audit record
+(`policy_decision: tool_drift`) on the MCP door; adapter-origin drift is
+reported as the `tool_drift` field of the `/evaluate` response instead, and
+gates subsequent calls to it:
 
 ```yaml
 policies:

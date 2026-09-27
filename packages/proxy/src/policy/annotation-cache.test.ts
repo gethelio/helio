@@ -494,6 +494,40 @@ describe('updateSingle', () => {
     expect(cache.isDrifted('send')).toBe(true)
   })
 
+  it('stores a snapshot of the definition, so the caller cannot rewrite the baseline (issue #380)', () => {
+    const cache = new ToolAnnotationCache()
+    const pathSchema: Record<string, unknown> = { type: 'string' }
+    const def = {
+      name: 'rm',
+      annotations: { destructiveHint: true } as Record<string, unknown>,
+      inputSchema: { type: 'object', properties: { path: pathSchema } },
+    }
+    expect(cache.updateSingle(def).baselined).toEqual(['rm'])
+    expect(cache.get('rm')).toEqual({ destructiveHint: true })
+    expect(cache.get('rm')).not.toBe(def.annotations)
+
+    def.annotations['destructiveHint'] = false
+    pathSchema['type'] = 'number'
+    expect(cache.get('rm')).toEqual({ destructiveHint: true })
+
+    // The original definition resent is not drift; the rewritten one is, and
+    // the event's baseline carries the original values.
+    const original = {
+      name: 'rm',
+      annotations: { destructiveHint: true },
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+    }
+    expect(cache.updateSingle(original).drifted).toHaveLength(0)
+    const drifted = cache.updateSingle(def).drifted
+    expect(drifted.map((d) => d.changes.map((c) => c.aspect))).toEqual([
+      ['annotations', 'inputSchema'],
+    ])
+    expect(drifted[0]?.changes[0]?.baseline).toEqual({ destructiveHint: true })
+    expect(drifted[0]?.changes[0]?.baseline).not.toBe(def.annotations)
+    // The caller's object is untouched by the snapshot.
+    expect(def.annotations).toEqual({ destructiveHint: false })
+  })
+
   it('ignores malformed input', () => {
     const cache = new ToolAnnotationCache()
     expect(cache.updateSingle(null).updated).toBe(false)

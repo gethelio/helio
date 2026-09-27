@@ -186,6 +186,23 @@ Maintainer notes:
 
 ### Fixed
 
+- **The drift baseline no longer aliases the caller's tool
+  definition.** A library embedder of `GovernanceService` that reused
+  one `tool` object across `evaluate()` calls could rewrite the
+  baseline by mutating that object after the call returned:
+  `tool.annotations.destructiveHint = false` disarmed
+  `flag_destructive: require_approval` for every later call on the
+  tool, and the drift guard stayed silent on those calls because its
+  fingerprint was computed before the rewrite (only a resend of the
+  rewritten object itself read as drift). The per-tool merge the
+  sideband uses, `ToolAnnotationCache.updateSingle`, now snapshots the
+  definition it stores, with the helper the audit records and the
+  evidence store already use; the snapshot tolerates values that
+  cannot be cloned by falling back to their JSON form, never mutates
+  the caller's objects, and never throws. The whole-list `update()`
+  the MCP door feeds is unchanged: its `tools/list` body is the
+  proxy's own, and the HTTP `/evaluate` route parses a fresh body per
+  request, so neither door was reachable. (#380)
 - **The evidence store no longer aliases the caller's `evidence_data`
   and context values.** A library embedder of `GovernanceService` or
   `EvidenceStore` could mutate the object it had passed to `audit()`,
