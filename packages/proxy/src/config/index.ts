@@ -11,6 +11,7 @@ export {
   readConfigSource,
   parseConfigSource,
   ConfigError,
+  EnvVarUnsetError,
 } from './loader.js'
 export type { LoadedConfig, ConfigSource } from './loader.js'
 export { POLICY_RELOAD_OUTCOMES } from './reload-outcomes.js'

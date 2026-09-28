@@ -2273,6 +2273,7 @@ dashboard:
         const { code, stderr } = await runCli(['validate', '-c', configPath], env)
         expect(code).toBe(1)
         expect(stderr).toContain('Environment variable "HELIO_DASHBOARD_SECRET" is not set')
+        expect(stderr).toContain('  dashboard.api_secret: reads ${HELIO_DASHBOARD_SECRET}')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -2606,6 +2607,27 @@ dashboard:
           env: { ...process.env, HELIO_DASHBOARD_SECRET: 'from-the-environment' },
         })
         expect(stderr).not.toContain('stored as plaintext')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('exits 1 with the loader line and the field that reads the variable when the secret placeholder is unset', async () => {
+      const { dir, configPath } = writeStartConfig()
+      try {
+        const original = readFileSync(configPath, 'utf-8')
+        writeFileSync(
+          configPath,
+          original.replace(/api_secret: ".*"/, 'api_secret: "${HELIO_DASHBOARD_SECRET}"'),
+        )
+        const env = { ...process.env }
+        delete env['HELIO_DASHBOARD_SECRET']
+        const { code, stdout, stderr } = await runCli(['start', '-c', configPath], env)
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr).toContain('Error: Environment variable "HELIO_DASHBOARD_SECRET" is not set')
+        expect(stderr).toContain('  dashboard.api_secret: reads ${HELIO_DASHBOARD_SECRET}')
+        expect(stderr).not.toContain('Unhandled')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -3608,6 +3630,23 @@ audit:
           config_sha256: hashOf(appliedText),
         })
 
+        // 2b. rejected_invalid, an unset ${VAR}: the loader line names the variable, the
+        //     detail line under it names the field that reads it, and the running policy
+        //     is kept (issue #415).
+        writeFileSync(configPath, `${appliedText}environment: "\${UNSET_ON_RELOAD}"\n`)
+        const unsetLine =
+          '[helio] Config reload failed (keeping current configuration): Environment variable "UNSET_ON_RELOAD" is not set'
+        const unsetDetail = '[helio]   environment: reads ${UNSET_ON_RELOAD}'
+        await waitFor(() => stderr.includes(unsetDetail), 8_000)
+        expect(stderr).toContain(unsetLine)
+        expect(stderr.indexOf(unsetDetail)).toBeGreaterThan(stderr.indexOf(unsetLine))
+        await waitFor(() => reloadRows().length >= 3, 5_000)
+        expect(reloadRows()[2]).toEqual({
+          outcome: 'rejected_invalid',
+          block_reason: 'rejected_invalid',
+          config_sha256: hashOf(appliedText),
+        })
+
         // 3. rejected_unroutable: the channel and the rule that needs it arrive in the same edit,
         //    so validation passes and only the running surface refuses it.
         writeFileSync(
@@ -3618,13 +3657,13 @@ audit:
           () => stderr.includes('approval routing is not available in the running process'),
           8_000,
         )
-        await waitFor(() => reloadRows().length >= 3, 5_000)
-        expect(reloadRows()[2]).toEqual({
+        await waitFor(() => reloadRows().length >= 4, 5_000)
+        expect(reloadRows()[3]).toEqual({
           outcome: 'rejected_unroutable',
           block_reason: 'rejected_unroutable',
           config_sha256: hashOf(appliedText),
         })
-        expect(reloadRows()).toHaveLength(3)
+        expect(reloadRows()).toHaveLength(4)
       } finally {
         child.kill('SIGTERM')
         await waitForChildExit(child, 5_000).catch(() => undefined)
@@ -5307,6 +5346,40 @@ budget:
       }
     })
 
+    it('names the variable, the field and the action on one line when a ${VAR} placeholder is unset (issue #415)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-export-unset-'))
+      const configPath = join(dir, 'helio.yaml')
+      const auditPath = join(dir, 'audit.db')
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://localhost:8080/mcp"
+dashboard:
+  enabled: true
+  api_secret: "\${HELIO_DASHBOARD_SECRET}"
+audit:
+  path: "${auditPath}"
+`,
+      )
+      const env = { ...process.env }
+      delete env['HELIO_DASHBOARD_SECRET']
+      try {
+        const { code, stdout, stderr } = await runCli(['export', '-c', configPath], env)
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(
+          `Error: HELIO_DASHBOARD_SECRET is not set and ${configPath} reads dashboard.api_secret from it. ` +
+            'helio export loads the whole file before it reads anything; export HELIO_DASHBOARD_SECRET and rerun.',
+        )
+        // Refused before the store open: export would otherwise create the file.
+        expect(existsSync(auditPath)).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     // --- helio export --budgets ---
 
     describe('--budgets', () => {
@@ -5935,6 +6008,68 @@ ${dashboard}audit:
             resolve()
           })
         })
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('names the action on one line when the secret placeholder is unset, before any socket (issue #415)', async () => {
+      const { dir, configPath } = writeConfig({
+        upstreamUrl: 'http://127.0.0.1:1/mcp',
+        dashboardSecret: '${HELIO_DASHBOARD_SECRET}',
+      })
+      const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
+      delete env['HELIO_DASHBOARD_SECRET']
+      try {
+        const { code, stdout, stderr } = await runCli(['policy', 'status', '-c', configPath], env)
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr).toContain(
+          `Error: HELIO_DASHBOARD_SECRET is not set and ${configPath} reads dashboard.api_secret from it. ` +
+            'Export it to the secret helio init printed (or the value you exported before helio start) and rerun helio policy status.',
+        )
+        expect(stderr).not.toContain('Environment variable')
+        expect(stderr).not.toContain(': reads ${')
+        expect(stderr).not.toMatch(/connect: attempting to connect/)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('names a variable the command never sends on the generic line, with the field that reads it (issue #415)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-policy-status-unset-'))
+      const configPath = join(dir, 'helio.yaml')
+      // A set variable in the same string is substituted before the unset one throws;
+      // its value must reach no line.
+      const canary = 'canary-value-9f3a'
+      writeFileSync(
+        configPath,
+        `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  headers:
+    authorization: "Bearer \${TOKEN_PREFIX}-\${GITHUB_TOKEN}"
+dashboard:
+  enabled: true
+  port: ${String(randomChildPort())}
+  host: 127.0.0.1
+  api_secret: "plain"
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+      )
+      const env: NodeJS.ProcessEnv = { ...process.env, TOKEN_PREFIX: canary }
+      delete env['GITHUB_TOKEN']
+      try {
+        const { code, stdout, stderr } = await runCli(['policy', 'status', '-c', configPath], env)
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(
+          `Error: GITHUB_TOKEN is not set and ${configPath} reads upstream.headers.authorization from it. ` +
+            'helio policy status loads the whole file before it reads anything; export GITHUB_TOKEN and rerun.',
+        )
+        expect(stderr).not.toContain(canary)
+      } finally {
         rmSync(dir, { recursive: true, force: true })
       }
     }, 15_000)
@@ -6810,16 +6945,21 @@ ${dashboard}audit:
       }
     }, 20_000)
 
-    it('exits 1 with the loader line when the secret placeholder is unset, as export and policy status do', async () => {
+    it('names the action on one line when the secret placeholder is unset, before any open or socket (issue #415)', async () => {
       const fixture = writeReportConfig({ dashboardSecret: '${HELIO_DASHBOARD_SECRET}' })
       const env = { ...process.env }
       delete env['HELIO_DASHBOARD_SECRET']
       try {
         seedActivationHistory(fixture.auditPath, new Date(Date.now() - HOUR))
-        const { code, stdout, stderr } = await runReport(['-c', fixture.configPath], env)
+        const { code, stdout, stderr, connects } = await runReport(['-c', fixture.configPath], env)
         expect(code).toBe(1)
         expect(stdout).toBe('')
-        expect(stderr).toContain('Error: Environment variable "HELIO_DASHBOARD_SECRET" is not set')
+        expect(connects).toEqual([])
+        expect(stderr).toContain(
+          `Error: HELIO_DASHBOARD_SECRET is not set and ${fixture.configPath} reads dashboard.api_secret from it. ` +
+            'Export it to the secret helio init printed (or the value you exported before helio start) and rerun helio report activation.',
+        )
+        expect(stderr).not.toContain('Environment variable')
       } finally {
         rmSync(fixture.dir, { recursive: true, force: true })
       }

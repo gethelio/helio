@@ -136,6 +136,18 @@ Maintainer notes:
 
 ### Changed
 
+- **`helio export`, `helio policy status` and `helio report activation`
+  name the action when a `${VAR}` placeholder in the config is unset.**
+  Each prints one line naming the variable, the field that reads it and
+  what to do, before any open or socket, in place of the loader's
+  `Environment variable "<VAR>" is not set`; on the dashboard secret, the
+  two commands that present it to the running proxy say to export the
+  secret `helio init` printed (or the value exported before `helio start`)
+  and rerun. `helio start`, `helio validate` and the hot reload keep the
+  loader's line and now name the field under it
+  (`  dashboard.api_secret: reads ${HELIO_DASHBOARD_SECRET}`), as every
+  other config failure already names its path. The first unset variable
+  in file order is the one named.
 - **The dashboard shows every time in UTC and says so.** Audit rows, the
   detail panel, every approval ticket time and the budgets ledger print
   `2026-09-23 14:23:45 UTC`; the analytics hour axis is UTC under the

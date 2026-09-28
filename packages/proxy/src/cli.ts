@@ -14,6 +14,7 @@ import {
   parseConfigSource,
   readConfigSource,
   ConfigError,
+  EnvVarUnsetError,
   ConfigWatcher,
   PolicyReloadRejectedError,
   readConfigPin,
@@ -320,6 +321,62 @@ function compileFailureLine(err: unknown): string | undefined {
   if (err instanceof PolicyParseError) return `Invalid policy: ${err.message}`
   if (err instanceof BudgetParseError) return `Invalid budget: ${err.message}`
   return undefined
+}
+
+/**
+ * A command that loads the config only to reach something else: its name as
+ * the operator typed it, and whether it presents `dashboard.api_secret` to
+ * the running proxy (so an unset secret placeholder can say which secret to
+ * export).
+ */
+interface ConfigReader {
+  readonly command: string
+  readonly presentsSecret: boolean
+}
+
+/**
+ * Load the config for a command that reads it only to reach something else
+ * (the audit database, the running proxy). An unset `${VAR}` placeholder is
+ * one line naming the variable, the field that reads it and the action; any
+ * other ConfigError prints as start does. Either way the process exits 1
+ * before the command opens or connects to anything (issue #415).
+ */
+async function loadConfigForReader(configPath: string, reader: ConfigReader): Promise<HelioConfig> {
+  try {
+    return await loadConfig(configPath)
+  } catch (err) {
+    if (err instanceof EnvVarUnsetError) {
+      console.error(envVarUnsetLine(err, configPath, reader))
+      process.exit(1)
+    }
+    if (err instanceof ConfigError) {
+      console.error(`Error: ${err.message}`)
+      printConfigErrorDetails(err)
+      process.exit(1)
+    }
+    throw err
+  }
+}
+
+/**
+ * The one line a reader command prints for an unset placeholder. The two
+ * commands that present the dashboard secret say which value to export when
+ * that is the field; every other field, on every reader, gets the line that
+ * says why a variable the command never uses still blocks it, and claims
+ * nothing about the value.
+ */
+function envVarUnsetLine(err: EnvVarUnsetError, configPath: string, reader: ConfigReader): string {
+  const lead = `Error: ${err.variable} is not set and ${configPath} reads ${err.path} from it.`
+  if (reader.presentsSecret && err.path === 'dashboard.api_secret') {
+    return (
+      `${lead} Export it to the secret helio init printed (or the value you exported ` +
+      `before helio start) and rerun ${reader.command}.`
+    )
+  }
+  return (
+    `${lead} ${reader.command} loads the whole file before it reads anything; ` +
+    `export ${err.variable} and rerun.`
+  )
 }
 
 /**
@@ -1919,17 +1976,10 @@ async function exportCommand(opts: ExportOptions): Promise<void> {
     }
   }
 
-  let config
-  try {
-    config = await loadConfig(opts.config)
-  } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error(`Error: ${err.message}`)
-      printConfigErrorDetails(err)
-      process.exit(1)
-    }
-    throw err
-  }
+  const config = await loadConfigForReader(opts.config, {
+    command: 'helio export',
+    presentsSecret: false,
+  })
 
   const auditProblem = auditPathProblem(config.audit.path)
   if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
@@ -2090,17 +2140,10 @@ async function policyStatusCommand(opts: PolicyStatusOptions): Promise<void> {
   const window = parseStatusWindow(opts.window)
   if (!window.ok) throw new StartupError(`Error: --${window.error}`)
 
-  let config: HelioConfig
-  try {
-    config = await loadConfig(opts.config)
-  } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error(`Error: ${err.message}`)
-      printConfigErrorDetails(err)
-      process.exit(1)
-    }
-    throw err
-  }
+  const config = await loadConfigForReader(opts.config, {
+    command: 'helio policy status',
+    presentsSecret: true,
+  })
 
   const result = await fetchPolicyStatus(config, opts.config, opts.window)
   if (!result.ok) {
@@ -2209,17 +2252,10 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
     throw new StartupError(`Error: ${opts.out} already exists. Pass --force to overwrite it.`)
   }
 
-  let config: HelioConfig
-  try {
-    config = await loadConfig(opts.config)
-  } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error(`Error: ${err.message}`)
-      printConfigErrorDetails(err)
-      process.exit(1)
-    }
-    throw err
-  }
+  const config = await loadConfigForReader(opts.config, {
+    command: 'helio report activation',
+    presentsSecret: true,
+  })
   const source = await readConfigSource(opts.config)
 
   const auditProblem = auditPathProblem(config.audit.path)
