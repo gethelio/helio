@@ -20,6 +20,26 @@ export class ConfigError extends Error {
   }
 }
 
+/**
+ * A `${VAR}` placeholder whose variable is not set: the variable and the
+ * config field that reads it. The message is the loader's unchanged line;
+ * the one detail names the field, the way every other config failure names
+ * its path, so a CLI surface can act on the variable without parsing text
+ * (issue #415). Only the first unset variable in file order is reported.
+ */
+export class EnvVarUnsetError extends ConfigError {
+  constructor(
+    public readonly variable: string,
+    /** Dotted config path of the string that reads the variable; `(top level)` for a bare string. */
+    public readonly path: string,
+  ) {
+    super(`Environment variable "${variable}" is not set`, [
+      { path, message: `reads \${${variable}}` },
+    ])
+    this.name = 'EnvVarUnsetError'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Environment variable interpolation
 // ---------------------------------------------------------------------------
@@ -57,7 +77,7 @@ function interpolateTracked(
     const result = value.replace(ENV_VAR_PATTERN, (_match, varName: string) => {
       const envValue = env[varName]
       if (envValue === undefined) {
-        throw new ConfigError(`Environment variable "${varName}" is not set`)
+        throw new EnvVarUnsetError(varName, path.length === 0 ? '(top level)' : path.join('.'))
       }
       substitutions += 1
       return envValue

@@ -887,11 +887,14 @@ approval:
       channel: '${HELIO_SLACK_CHANNEL}'
 ```
 
-If a referenced variable is not set, the proxy exits with an error:
+If a referenced variable is not set, the proxy exits with an error, and `helio validate` prints the same two lines under `Invalid config:`:
 
 ```
 Error: Environment variable "HELIO_SLACK_BOT_TOKEN" is not set
+  approval.channels.0.bot_token: reads ${HELIO_SLACK_BOT_TOKEN}
 ```
+
+The second line names the field that reads the variable, and the first unset variable in file order is the one named. `helio export`, `helio policy status` and `helio report activation`, which load the file only to reach the audit database or the running proxy, print one line naming the action instead: `Error: HELIO_SLACK_BOT_TOKEN is not set and helio.yaml reads approval.channels.0.bot_token from it. helio export loads the whole file before it reads anything; export HELIO_SLACK_BOT_TOKEN and rerun.`
 
 > **Note:** Variable names must match `[A-Za-z_][A-Za-z0-9_]*`. Only the `${VAR}` syntax is supported — `$VAR` without braces is not interpolated.
 

@@ -9,6 +9,7 @@ import {
   readConfigSource,
   parseConfigSource,
   ConfigError,
+  EnvVarUnsetError,
   interpolateEnvVars,
 } from './loader.js'
 import { isSingularConfig } from './schema.js'
@@ -55,6 +56,17 @@ describe('interpolateEnvVars', () => {
     )
   })
 
+  it('names the (top level) path on a bare string whose variable is unset', () => {
+    let caught: unknown
+    try {
+      interpolateEnvVars('${MISSING_VAR}', env)
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(ConfigError)
+    expect((caught as { path?: unknown }).path).toBe('(top level)')
+  })
+
   it('returns strings without variables unchanged', () => {
     expect(interpolateEnvVars('no variables here', env)).toBe('no variables here')
   })
@@ -96,6 +108,36 @@ dashboard:
     expect(config.upstream.transport).toBe('streamable-http')
     expect(config.listen.port).toBe(3000)
     expect(config.policies.default).toBe('allow')
+  })
+
+  it('rejects an unset ${VAR} with EnvVarUnsetError naming the variable and the field that reads it', async () => {
+    const yaml = `
+version: "1"
+upstreams:
+  - name: backend
+    url: "http://localhost:8080"
+    headers:
+      authorization: "Bearer \${MISSING}"
+dashboard:
+  enabled: false
+`
+    const filePath = await writeTempYaml('helio.yaml', yaml)
+    let caught: unknown
+    try {
+      await loadConfig(filePath, {})
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(EnvVarUnsetError)
+    expect(caught).toBeInstanceOf(ConfigError)
+    const error = caught as EnvVarUnsetError
+    expect(error.name).toBe('EnvVarUnsetError')
+    expect(error.variable).toBe('MISSING')
+    expect(error.path).toBe('upstreams.0.headers.authorization')
+    expect(error.message).toBe('Environment variable "MISSING" is not set')
+    expect(error.details).toEqual([
+      { path: 'upstreams.0.headers.authorization', message: 'reads ${MISSING}' },
+    ])
   })
 
   it('loads a config with env var interpolation', async () => {

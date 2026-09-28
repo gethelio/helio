@@ -1,6 +1,12 @@
 export { VERSION } from './version.js'
 
-export { loadConfig, ConfigError, isSingularConfig, isNamedConfig } from './config/index.js'
+export {
+  loadConfig,
+  ConfigError,
+  EnvVarUnsetError,
+  isSingularConfig,
+  isNamedConfig,
+} from './config/index.js'
 export type { HelioConfig, SingularHelioConfig, NamedHelioConfig } from './config/index.js'
 export { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
 export type { ServerHandle, CreateAppOptions, CreateMultiAppOptions } from './server.js'
