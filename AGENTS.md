@@ -183,6 +183,7 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 - `packages/proxy/src/transport/` Streamable HTTP, SSE, stdio wrapper adapters; upstream header allowlist (forward-headers.ts); JSON-RPC response normalizer.
 - `packages/proxy/src/config/` YAML loader, Zod schema, chokidar watcher, reload-boundary diff (which config paths need a restart).
 - `packages/proxy/src/kill-switch/` The kill switch (issue #402): the two-hold state object the doors read per call, and the `<config>.kill` marker's atomic write, removal and one-second poller. `helio kill` and `helio resume` live in `cli.ts`; the record builder in `audit/kill-switch.ts`.
+- `packages/proxy/src/baseline/` Persisted tool definition baselines (issue #60): the SQLite store (`store.ts`), the `baseline_accepted` record builder (`record.ts`) and the CLI's client for the running proxy's baseline routes (`client.ts`). `helio baseline accept` and `helio baseline list` live in `cli.ts`; the drift cache itself in `policy/annotation-cache.ts`.
 - `packages/proxy/src/upstream/` MCP request forwarder, response capture + summarization.
 - `packages/proxy/src/auth/` Constant-time `Bearer <secret>` verification shared by the sideband/dashboard/approvals APIs.
 - `packages/proxy/src/dashboard/` `createDashboardApp()` REST + SSE API, auth session store (secret login, CSRF), typed event bus. (The React UI lives in `packages/dashboard/`, bundled into the proxy's `dist/`.)

@@ -1138,6 +1138,27 @@ when), drops the drift state, writes a
 and lifts the block at once, no restart. A tool the upstream lists more than
 once is never accepted (`ambiguous_definition`): fix the upstream first.
 
+To see what a door holds, run `helio baseline list` (add `--upstream <name>`
+to narrow a config with named upstreams to one door; without it every door
+prints). It reads the running proxy through the same dashboard API
+(`GET /api/baselines`), which serves in open mode, and prints one table per
+door under a header such as `Baselines of mail (persisted, 5; primed)`. The
+`STATE` column reads `ok` (present and unchanged), `drifted` (present and
+changed) or `absent` (not in the door's latest list: a restored row the
+upstream has not listed since the restart, or a tool the upstream removed),
+followed by the markers `d` when an absent tool is still drifted (the upstream
+must list it again before `accept` can clear it) and `r` when the baseline was
+restored from disk and not since accepted; a door that has not primed yet
+reads `restored` on every row. `FINGERPRINT` is the first eight hex characters
+of the definition's SHA-256, instants print as `2026-09-28 12:50 UTC`, and
+`ACCEPTED` shows the minute and the actor of an acceptance. `--format json`
+prints the route body verbatim. Under `persist_baselines: false` the header
+reads `(memory only, persist_baselines: false; ...)` and the instant columns
+are `-`. The accept body and the `baseline_accepted` record carry the
+canonical JSON of the definition under `fingerprint`; the list's
+`fingerprint_sha256` is the hex SHA-256 of that string, and the accept command
+prints its first eight characters.
+
 Set `policies.persist_baselines: false` to keep baselines in memory only, as
 before: no table is created, a restart re-baselines every tool, and the primed
 line reads as it did (`baselines are per-process; a restart re-baselines`).

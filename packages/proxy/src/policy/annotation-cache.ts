@@ -70,6 +70,25 @@ interface BaselineEntry {
   readonly pending: boolean
 }
 
+/**
+ * One baseline as {@link ToolAnnotationCache.snapshotBaselines} reports it
+ * (issue #60, `helio baseline list`): the flags the cache holds beside the
+ * canonical JSON of the definition. Fresh objects; nothing aliases the cache.
+ */
+export interface BaselineSnapshot {
+  readonly name: string
+  /** The canonical JSON of the baseline definition. */
+  readonly fingerprint: string
+  /** Reloaded from disk and not since accepted. */
+  readonly restored: boolean
+  /** Restored and not yet named by a live list. */
+  readonly pending: boolean
+  /** Named by the most recent tools/list. */
+  readonly present: boolean
+  /** The current definition differs from the baseline. */
+  readonly drifted: boolean
+}
+
 /** Why {@link ToolAnnotationCache.accept} refused. */
 export type BaselineAcceptRefusal = 'unknown_tool' | 'not_drifted' | 'ambiguous_definition'
 
@@ -506,6 +525,29 @@ export class ToolAnnotationCache {
       })
     }
     return tools
+  }
+
+  /**
+   * Every baseline the cache holds, sorted by name, with its flags (issue
+   * #60, `helio baseline list`). Unlike {@link snapshotTools}, which walks
+   * the most recent list, this walks the baselines: a restored entry no
+   * live list has named yet, a tool the upstream removed, and a drifted
+   * tool a later list omitted all appear. Each entry is a fresh object.
+   */
+  snapshotBaselines(): readonly BaselineSnapshot[] {
+    const names = [...this.baselines.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    return names.map((name) => {
+      // The map holds every sorted key; the guard keeps the type honest.
+      const entry = this.baselines.get(name)
+      return {
+        name,
+        fingerprint: entry?.definitionKey ?? '',
+        restored: entry?.restored ?? false,
+        pending: entry?.pending ?? false,
+        present: this.present.has(name),
+        drifted: this.driftedTools.has(name),
+      }
+    })
   }
 }
 

@@ -16,7 +16,7 @@ import {
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
-import type { DashboardAppDeps, BaselineAcceptOutcome } from './api.js'
+import type { DashboardAppDeps, BaselineAcceptOutcome, BaselineListOutcome } from './api.js'
 import { DashboardEventBus, dashboardEventCallbacks } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
 import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
@@ -3317,6 +3317,7 @@ describe('POST /api/baselines/accept (issue #60)', () => {
         calls.push(input)
         return options?.outcome ?? ACCEPTED
       },
+      list: () => ({ ok: true, persist_baselines: true, doors: [] }) as const,
     }
     const auditStore = new AuditStore({
       path: ':memory:',
@@ -3464,5 +3465,163 @@ describe('POST /api/baselines/accept (issue #60)', () => {
     const res = await request({ tool: 'send_email' }, BEARER)
     expect(res.status).toBe(status)
     expect(await res.json()).toEqual({ error: reason, suggestion })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// GET /api/baselines (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/baselines (issue #60)', () => {
+  const DOORS: BaselineListOutcome = {
+    ok: true,
+    persist_baselines: true,
+    doors: [
+      {
+        upstream: 'mail',
+        primed: true,
+        baselines: [
+          {
+            tool: 'alpha',
+            upstream: 'mail',
+            fingerprint_sha256: '9f2c1a3b'.padEnd(64, '0'),
+            first_seen: '2026-09-28T12:50:11.039Z',
+            last_confirmed: '2026-09-28T12:50:11.041Z',
+            accepted_at: null,
+            accepted_by: null,
+            restored: true,
+            present: true,
+            drifted: false,
+          },
+        ],
+      },
+    ],
+  }
+
+  function listSetup(options?: {
+    apiSecret?: string
+    outcome?: BaselineListOutcome
+    withoutBaselines?: boolean
+  }) {
+    const calls: Array<{ upstream?: string }> = []
+    const baselines = {
+      accept: () => ({ ok: false, reason: 'unknown_upstream' }) as const,
+      list: (input: { upstream?: string }) => {
+        calls.push(input)
+        return options?.outcome ?? DOORS
+      },
+    }
+    const auditStore = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const approvalQueue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels: new Map([['dashboard', new QueueChannel()]]),
+      queue: approvalQueue,
+    })
+    const app = createDashboardApp(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter: new RateLimiter({ cleanupIntervalMs: 0 }),
+        spendLimiter: new SpendLimiter({ cleanupIntervalMs: 0 }),
+        evidenceStore: new EvidenceStore({ cleanupIntervalMs: 0 }),
+        eventBus: new DashboardEventBus(),
+        ...(options?.withoutBaselines ? {} : { baselines }),
+      },
+      { apiSecret: options?.apiSecret },
+    )
+    const request = (query = '', headers?: Record<string, string>) =>
+      app.request(`/api/baselines${query}`, { method: 'GET', headers: headers ?? {} })
+    return { app, request, calls }
+  }
+
+  const BEARER = { authorization: 'Bearer top-secret' }
+
+  it('answers 503 when the dependency is absent', async () => {
+    const { request } = listSetup({ apiSecret: 'top-secret', withoutBaselines: true })
+    const res = await request('', BEARER)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'baselines are not available in this process' })
+  })
+
+  it('serves in open mode: a read, like the policy status route', async () => {
+    const { request, calls } = listSetup()
+    const res = await request()
+    expect(res.status).toBe(200)
+    expect(calls).toEqual([{}])
+  })
+
+  it('answers 401 without the bearer under a secret', async () => {
+    const { request } = listSetup({ apiSecret: 'top-secret' })
+    expect((await request()).status).toBe(401)
+  })
+
+  it('serves a cookie-session GET with no CSRF header, unlike the accept route', async () => {
+    const { app, request } = listSetup({ apiSecret: 'top-secret' })
+    const login = await app.request('/api/auth/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: 'top-secret' }),
+    })
+    const cookie = login.headers.get('set-cookie') ?? ''
+    expect(cookie).toBeTruthy()
+    expect((await request('', { cookie })).status).toBe(200)
+    const accept = await app.request('/api/baselines/accept', {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ tool: 'alpha' }),
+    })
+    expect(accept.status).toBe(403)
+  })
+
+  it('answers 400 on an empty upstream', async () => {
+    const { request, calls } = listSetup({ apiSecret: 'top-secret' })
+    const res = await request('?upstream=', BEARER)
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBe('Validation error')
+    expect(calls).toEqual([])
+  })
+
+  it('passes the upstream through and answers 404 unknown_upstream with the accept suggestion', async () => {
+    const { request, calls } = listSetup({
+      apiSecret: 'top-secret',
+      outcome: { ok: false, reason: 'unknown_upstream' },
+    })
+    const res = await request('?upstream=nope', BEARER)
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({
+      error: 'unknown_upstream',
+      suggestion:
+        'no upstream matches: pass --upstream <name> on a named-upstreams config, drop it on a single-upstream config',
+    })
+    expect(calls).toEqual([{ upstream: 'nope' }])
+  })
+
+  it('answers the doors with persist_baselines and each door named', async () => {
+    const { request } = listSetup({ apiSecret: 'top-secret' })
+    const res = await request('?upstream=mail', BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ persist_baselines: true, doors: DOORS.doors })
+  })
+
+  it('reports persist_baselines false with an empty door under memory-only baselines', async () => {
+    const { request } = listSetup({
+      outcome: {
+        ok: true,
+        persist_baselines: false,
+        doors: [{ upstream: null, primed: false, baselines: [] }],
+      },
+    })
+    expect(await (await request()).json()).toEqual({
+      persist_baselines: false,
+      doors: [{ upstream: null, primed: false, baselines: [] }],
+    })
   })
 })

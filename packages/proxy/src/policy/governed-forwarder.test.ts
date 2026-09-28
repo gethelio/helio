@@ -24,6 +24,7 @@ import type {
   ToolBaselineReplacement,
   ToolBaselineRow,
 } from '../baseline/store.js'
+import { createHash } from 'node:crypto'
 import { canonicalize } from '../util/canonical-json.js'
 
 // ---------------------------------------------------------------------------
@@ -8467,6 +8468,146 @@ describe('persisted tool baselines (issue #60)', () => {
     const inner = mockForwarder(toolsListResult([sendEmail]))
     const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
     expect(await governed.primeAnnotationCache()).toEqual({ success: true, toolsCached: 1 })
+  })
+
+  describe('listBaselines', () => {
+    const alpha = { name: 'alpha', description: 'a1' }
+    const beta = { name: 'beta', description: 'b1' }
+    const gamma = { name: 'gamma', description: 'g1' }
+    const zeta = { name: 'zeta', description: 'z1' }
+    const delta = { name: 'delta', description: 'd1' }
+    const betaChanged = { name: 'beta', description: 'b2' }
+    const zetaChanged = { name: 'zeta', description: 'z2' }
+    const digest = (definition: unknown) =>
+      createHash('sha256').update(canonicalize(definition)).digest('hex')
+
+    it('joins the store rows to the cache flags on a persisted door through the six states', async () => {
+      const store = new FakeBaselineStore()
+      const boot1 = mockForwarder()
+      boot1.forward.mockResolvedValueOnce(toolsListResult([alpha, beta, gamma, zeta]))
+      const first = new GovernedForwarder(boot1, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        upstreamName: 'mail',
+      })
+      first.restoreBaselines()
+      await first.primeAnnotationCache()
+      const seenAt = store.rows.get('mail\u0000alpha')?.first_seen
+      expect(seenAt).toBeDefined()
+
+      const boot2 = mockForwarder()
+      boot2.forward
+        .mockResolvedValueOnce(toolsListResult([alpha, betaChanged, delta, zetaChanged]))
+        .mockResolvedValueOnce(toolsListResult([alpha, betaChanged, delta]))
+      const governed = new GovernedForwarder(boot2, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        upstreamName: 'mail',
+      })
+      expect(governed.restoreBaselines()).toBe(4)
+
+      const before = governed.listBaselines()
+      expect(before.primed).toBe(false)
+      expect(before.persisted).toBe(true)
+      expect(before.baselines.map((b) => b.tool)).toEqual(['alpha', 'beta', 'gamma', 'zeta'])
+      for (const entry of before.baselines) {
+        expect(entry).toMatchObject({
+          upstream: 'mail',
+          restored: true,
+          present: false,
+          drifted: false,
+          first_seen: seenAt,
+          accepted_at: null,
+          accepted_by: null,
+        })
+      }
+
+      await governed.primeAnnotationCache()
+      await governed.forward(toolsListRequest(2))
+      const listed = governed.listBaselines()
+      expect(listed.primed).toBe(true)
+      const byTool = new Map(listed.baselines.map((b) => [b.tool, b]))
+      expect([...byTool.keys()]).toEqual(['alpha', 'beta', 'delta', 'gamma', 'zeta'])
+      expect(byTool.get('alpha')).toEqual({
+        tool: 'alpha',
+        upstream: 'mail',
+        fingerprint_sha256: digest(alpha),
+        first_seen: seenAt,
+        last_confirmed: store.rows.get('mail\u0000alpha')?.last_confirmed,
+        accepted_at: null,
+        accepted_by: null,
+        restored: true,
+        present: true,
+        drifted: false,
+      })
+      expect(byTool.get('beta')).toMatchObject({
+        fingerprint_sha256: digest(beta),
+        restored: true,
+        present: true,
+        drifted: true,
+      })
+      expect(byTool.get('delta')).toMatchObject({
+        fingerprint_sha256: digest(delta),
+        restored: false,
+        present: true,
+        drifted: false,
+        accepted_at: null,
+      })
+      // Inserted on boot 2: an instant of its own, which may share boot 1's millisecond.
+      expect(typeof byTool.get('delta')?.first_seen).toBe('string')
+      expect(byTool.get('gamma')).toMatchObject({ restored: true, present: false, drifted: false })
+      expect(byTool.get('zeta')).toMatchObject({ restored: true, present: false, drifted: true })
+
+      expect(governed.acceptBaseline('beta', 'oli').ok).toBe(true)
+      const accepted = governed.listBaselines().baselines.find((b) => b.tool === 'beta')
+      expect(accepted).toMatchObject({
+        fingerprint_sha256: digest(betaChanged),
+        restored: false,
+        present: true,
+        drifted: false,
+        accepted_by: 'oli',
+      })
+      expect(accepted?.accepted_at).not.toBeNull()
+    })
+
+    it('lists the cache alone with null instants without a store', async () => {
+      const inner = mockForwarder()
+      inner.forward
+        .mockResolvedValueOnce(toolsListResult([alpha, beta]))
+        .mockResolvedValueOnce(toolsListResult([alpha, betaChanged]))
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+      expect(governed.listBaselines()).toEqual({ primed: false, persisted: false, baselines: [] })
+
+      await governed.primeAnnotationCache()
+      await governed.forward(toolsListRequest(2))
+      const listed = governed.listBaselines()
+      expect(listed.primed).toBe(true)
+      expect(listed.persisted).toBe(false)
+      expect(listed.baselines).toEqual([
+        {
+          tool: 'alpha',
+          upstream: null,
+          fingerprint_sha256: digest(alpha),
+          first_seen: null,
+          last_confirmed: null,
+          accepted_at: null,
+          accepted_by: null,
+          restored: false,
+          present: true,
+          drifted: false,
+        },
+        {
+          tool: 'beta',
+          upstream: null,
+          fingerprint_sha256: digest(beta),
+          first_seen: null,
+          last_confirmed: null,
+          accepted_at: null,
+          accepted_by: null,
+          restored: false,
+          present: true,
+          drifted: true,
+        },
+      ])
+    })
   })
 
   describe('acceptBaseline', () => {
