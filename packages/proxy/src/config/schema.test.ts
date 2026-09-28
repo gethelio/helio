@@ -2557,6 +2557,33 @@ describe('helioConfigSchema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Policies: persist_baselines (issue #60)
+  // -------------------------------------------------------------------------
+
+  describe('policies.persist_baselines', () => {
+    it.each([true, false])('accepts %s', (value) => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { persist_baselines: value } }),
+      )
+      expect(result.success).toBe(true)
+      if (result.success) expect(result.data.policies.persist_baselines).toBe(value)
+    })
+
+    it('is optional and stays undefined when absent (the CLI reads undefined as true)', () => {
+      const result = helioConfigSchema.safeParse(minimalConfig())
+      expect(result.success).toBe(true)
+      if (result.success) expect(result.data.policies.persist_baselines).toBeUndefined()
+    })
+
+    it('rejects a string', () => {
+      const result = helioConfigSchema.safeParse(
+        minimalConfig({ policies: { persist_baselines: 'false' } }),
+      )
+      expect(result.success).toBe(false)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Policies — tool_revalidation (issue #221)
   // -------------------------------------------------------------------------
 

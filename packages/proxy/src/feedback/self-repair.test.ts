@@ -730,6 +730,16 @@ describe('buildToolDriftFeedback', () => {
     const feedback = buildToolDriftFeedback(drift, 'require_approval')
     expect(feedback.action).toBe('require_approval')
   })
+
+  it('tells the operator to accept the change with helio baseline accept, not to restart', () => {
+    const feedback = buildToolDriftFeedback(drift, 'deny')
+    expect(feedback.suggestion).toBe(
+      'The definition of "send_email" changed upstream (annotations) after Helio baselined it. ' +
+        'An operator must review the change and accept it with "helio baseline accept send_email" ' +
+        '(add --upstream <name> on a named upstream), or the upstream can revert the change.',
+    )
+    expect(feedback.suggestion).not.toMatch(/restart/)
+  })
 })
 
 // ---------------------------------------------------------------------------

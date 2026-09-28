@@ -45,6 +45,12 @@ export interface ToolCacheUpdateResult {
   readonly drifted: readonly ToolDriftEvent[]
   /** Previously drifted tools whose definition returned to baseline. */
   readonly reverted: readonly string[]
+  /**
+   * Present, unique tools whose definition equals the baseline in this
+   * update (issue #60): the persistence hook confirms these without a
+   * second pass over the list.
+   */
+  readonly confirmed: readonly string[]
 }
 
 interface BaselineEntry {
@@ -54,7 +60,28 @@ interface BaselineEntry {
   readonly definitionKey: string
   /** Annotations extracted from the baseline definition. */
   readonly annotations: ToolAnnotationHints | undefined
+  /** True when the entry came from a persisted baseline, not a live list. */
+  readonly restored: boolean
+  /**
+   * True until a live list names the tool. A pending entry is inert: it is
+   * only a compare set, so `get()` answers undefined and the pipeline keeps
+   * judging the tool on MCP defaults, exactly as on a door that never primed.
+   */
+  readonly pending: boolean
 }
+
+/** Why {@link ToolAnnotationCache.accept} refused. */
+export type BaselineAcceptRefusal = 'unknown_tool' | 'not_drifted' | 'ambiguous_definition'
+
+/** The outcome of {@link ToolAnnotationCache.accept}. */
+export type BaselineAcceptResult =
+  | { readonly ok: false; readonly reason: BaselineAcceptRefusal }
+  | {
+      readonly ok: true
+      readonly previousFingerprint: string
+      readonly fingerprint: string
+      readonly changes: readonly ToolDriftChange[]
+    }
 
 /**
  * Baseline-and-diff cache for tool definitions from MCP tools/list responses.
@@ -64,13 +91,16 @@ interface BaselineEntry {
  * marked as drifted; policy evaluation sees the baseline annotations (the
  * ones the operator reviewed), and the GovernedForwarder gates calls to
  * drifted tools per policies.on_tool_drift. Baselines survive tool removal so
- * a remove/re-add cycle cannot reset them; they reset only on process restart
- * (re-prime).
+ * a remove/re-add cycle cannot reset them, and they persist across restarts
+ * when a baseline store is attached (issue #60): {@link restore} reloads them
+ * at boot, and a restored entry is inert until a live list names it. An
+ * operator replaces a drifted baseline through {@link accept}.
  */
 export class ToolAnnotationCache {
   private baselines = new Map<string, BaselineEntry>()
   private present = new Set<string>()
   private currentAnnotations = new Map<string, ToolAnnotationHints | undefined>()
+  private currentDefinitions = new Map<string, Record<string, unknown>>()
   private driftedTools = new Map<string, ToolDriftEvent>()
 
   /** Number of tools present in the most recent tools/list. */
@@ -81,13 +111,15 @@ export class ToolAnnotationCache {
   /** Diff a tools/list JSON-RPC response body against the baselines. */
   update(responseBody: unknown): ToolCacheUpdateResult {
     const tools = extractTools(responseBody)
-    if (!tools) return { updated: false, baselined: [], drifted: [], reverted: [] }
+    if (!tools) return EMPTY_UPDATE
 
     const baselined: string[] = []
     const drifted: ToolDriftEvent[] = []
     const reverted: string[] = []
+    const confirmed: string[] = []
     const present = new Set<string>()
     const currentAnnotations = new Map<string, ToolAnnotationHints | undefined>()
+    const currentDefinitions = new Map<string, Record<string, unknown>>()
 
     // First pass: collect valid (name, definition) entries and count names so
     // duplicates can be handled per-NAME, not per-occurrence. Last-write-wins
@@ -131,6 +163,7 @@ export class ToolAnnotationCache {
         const isNewDrift = !existing || canonicalize(existing.changes) !== canonicalize(changes)
         this.driftedTools.set(name, event)
         if (isNewDrift) drifted.push(event)
+        this.settlePending(name)
         continue
       }
 
@@ -138,11 +171,18 @@ export class ToolAnnotationCache {
 
       const annotations = extractAnnotations(t)
       currentAnnotations.set(name, annotations)
+      currentDefinitions.set(name, t)
       const definitionKey = canonicalize(t)
 
       const baseline = this.baselines.get(name)
       if (!baseline) {
-        this.baselines.set(name, { definition: t, definitionKey, annotations })
+        this.baselines.set(name, {
+          definition: t,
+          definitionKey,
+          annotations,
+          restored: false,
+          pending: false,
+        })
         baselined.push(name)
         // A tool first seen via duplicates (drifted, never baselined) that now
         // arrives unique must not stay drifted forever — clear and report it.
@@ -158,6 +198,8 @@ export class ToolAnnotationCache {
           this.driftedTools.delete(name)
           reverted.push(name)
         }
+        confirmed.push(name)
+        this.settlePending(name)
         continue
       }
 
@@ -169,7 +211,7 @@ export class ToolAnnotationCache {
           changes.push({ aspect: field, baseline: baselineValue, current: currentValue })
         }
       }
-      // The fingerprint changed but no known field did — report the whole
+      // The fingerprint changed but no known field did: report the whole
       // definitions so the audit trail still captures what moved.
       if (changes.length === 0) {
         changes.push({ aspect: 'other', baseline: baseline.definition, current: t })
@@ -180,11 +222,13 @@ export class ToolAnnotationCache {
       const isNewDrift = !existing || canonicalize(existing.changes) !== canonicalize(changes)
       this.driftedTools.set(name, event)
       if (isNewDrift) drifted.push(event)
+      this.settlePending(name)
     }
 
     this.present = present
     this.currentAnnotations = currentAnnotations
-    return { updated: true, baselined, drifted, reverted }
+    this.currentDefinitions = currentDefinitions
+    return { updated: true, baselined, drifted, reverted, confirmed }
   }
 
   /**
@@ -208,32 +252,40 @@ export class ToolAnnotationCache {
    */
   updateSingle(toolDefinition: unknown): ToolCacheUpdateResult {
     if (typeof toolDefinition !== 'object' || toolDefinition === null) {
-      return { updated: false, baselined: [], drifted: [], reverted: [] }
+      return EMPTY_UPDATE
     }
     const t = snapshotValue(toolDefinition) as Record<string, unknown>
     const name = t['name']
     if (typeof name !== 'string') {
-      return { updated: false, baselined: [], drifted: [], reverted: [] }
+      return EMPTY_UPDATE
     }
 
     const baselined: string[] = []
     const drifted: ToolDriftEvent[] = []
     const reverted: string[] = []
+    const confirmed: string[] = []
 
     this.present.add(name)
     const annotations = extractAnnotations(t)
     this.currentAnnotations.set(name, annotations)
+    this.currentDefinitions.set(name, t)
     const definitionKey = canonicalize(t)
 
     const baseline = this.baselines.get(name)
     if (!baseline) {
-      this.baselines.set(name, { definition: t, definitionKey, annotations })
+      this.baselines.set(name, {
+        definition: t,
+        definitionKey,
+        annotations,
+        restored: false,
+        pending: false,
+      })
       baselined.push(name)
       if (this.driftedTools.has(name)) {
         this.driftedTools.delete(name)
         reverted.push(name)
       }
-      return { updated: true, baselined, drifted, reverted }
+      return { updated: true, baselined, drifted, reverted, confirmed }
     }
 
     if (definitionKey === baseline.definitionKey) {
@@ -241,7 +293,9 @@ export class ToolAnnotationCache {
         this.driftedTools.delete(name)
         reverted.push(name)
       }
-      return { updated: true, baselined, drifted, reverted }
+      confirmed.push(name)
+      this.settlePending(name)
+      return { updated: true, baselined, drifted, reverted, confirmed }
     }
 
     const changes: ToolDriftChange[] = []
@@ -261,17 +315,150 @@ export class ToolAnnotationCache {
     const isNewDrift = !existing || canonicalize(existing.changes) !== canonicalize(changes)
     this.driftedTools.set(name, event)
     if (isNewDrift) drifted.push(event)
+    this.settlePending(name)
 
-    return { updated: true, baselined, drifted, reverted }
+    return { updated: true, baselined, drifted, reverted, confirmed }
   }
 
   /**
-   * Get the **baseline** annotations for a tool — the definition first seen,
-   * not the latest upstream claim. Returns `undefined` if the tool has no
-   * annotations or was never seen.
+   * Add persisted baselines for tools not already baselined (issue #60).
+   * Fills `baselines` only: `present`, the current annotations and the
+   * drift state describe live lists and stay untouched, so nothing restored
+   * prints as listed and drift is recomputed by the first live list through
+   * the normal compare. Each entry is pending, and inert, until a list names
+   * it. A live baseline is never overwritten. Returns the number added.
+   */
+  restore(
+    entries: readonly { readonly name: string; readonly definition: Record<string, unknown> }[],
+  ): number {
+    let added = 0
+    for (const { name, definition } of entries) {
+      if (this.baselines.has(name)) continue
+      this.baselines.set(name, {
+        definition,
+        definitionKey: canonicalize(definition),
+        annotations: extractAnnotations(definition),
+        restored: true,
+        pending: true,
+      })
+      added += 1
+    }
+    return added
+  }
+
+  /** Whether the tool's baseline came from the persisted store rather than a live list. */
+  isRestored(toolName: string): boolean {
+    return this.baselines.get(toolName)?.restored === true
+  }
+
+  /**
+   * Replace a drifted tool's baseline with its current definition (issue
+   * #60, `helio baseline accept`). Refuses a tool absent from the latest
+   * list, one that is not drifted, and one the list names more than once
+   * (an ambiguous definition is never accepted). On success the drift state
+   * is dropped, the promoted definition is a snapshot, and the returned
+   * `changes` are the drift event's, for the audit record.
+   */
+  accept(toolName: string): BaselineAcceptResult {
+    const check = this.peekAccept(toolName)
+    if (!check.ok) return check
+    const drift = this.driftedTools.get(toolName)
+    const previous = this.baselines.get(toolName)
+    // peekAccept answered ok, so both exist; the guard keeps the types
+    // honest without a cast.
+    if (drift === undefined || previous === undefined) {
+      return { ok: false, reason: 'unknown_tool' }
+    }
+    const definition = snapshotValue(check.current)
+    const definitionKey = canonicalize(definition)
+    this.baselines.set(toolName, {
+      definition,
+      definitionKey,
+      annotations: extractAnnotations(definition),
+      restored: false,
+      pending: false,
+    })
+    this.driftedTools.delete(toolName)
+    return {
+      ok: true,
+      previousFingerprint: previous.definitionKey,
+      fingerprint: definitionKey,
+      changes: drift.changes,
+    }
+  }
+
+  /**
+   * The checks of {@link accept} without its effects, plus the current
+   * definition that an acceptance would promote: the persistence layer
+   * writes it before the cache moves.
+   */
+  peekAccept(
+    toolName: string,
+  ):
+    | { readonly ok: false; readonly reason: BaselineAcceptRefusal }
+    | { readonly ok: true; readonly current: Record<string, unknown> } {
+    if (!this.present.has(toolName)) return { ok: false, reason: 'unknown_tool' }
+    const drift = this.driftedTools.get(toolName)
+    if (!drift) return { ok: false, reason: 'not_drifted' }
+    if (drift.changes.some((change) => change.aspect === 'duplicate')) {
+      return { ok: false, reason: 'ambiguous_definition' }
+    }
+    const current = this.currentDefinitions.get(toolName)
+    if (current === undefined) return { ok: false, reason: 'unknown_tool' }
+    return { ok: true, current }
+  }
+
+  /**
+   * The baseline definition and fingerprint of each named tool that has one,
+   * in the order given, as the persistence layer inserts them (issue #60).
+   * Unknown names are skipped.
+   */
+  baselineRows(names: readonly string[]): readonly {
+    readonly tool: string
+    readonly definition: Record<string, unknown>
+    readonly fingerprint: string
+  }[] {
+    const rows: { tool: string; definition: Record<string, unknown>; fingerprint: string }[] = []
+    for (const name of names) {
+      const entry = this.baselines.get(name)
+      if (entry)
+        rows.push({ tool: name, definition: entry.definition, fingerprint: entry.definitionKey })
+    }
+    return rows
+  }
+
+  /**
+   * Drop baselines that could not be persisted (issue #60), so the next
+   * list baselines them again and the persistence write is retried. The
+   * names leave `present` and the current maps too, so the door stays
+   * fail-closed on them until the write succeeds. Called only with the
+   * names a failed first-sight insert covered; those carry no drift state.
+   */
+  forgetBaselines(names: readonly string[]): void {
+    for (const name of names) {
+      this.baselines.delete(name)
+      this.present.delete(name)
+      this.currentAnnotations.delete(name)
+      this.currentDefinitions.delete(name)
+    }
+  }
+
+  /** A live list named the tool: its baseline is no longer pending. */
+  private settlePending(name: string): void {
+    const entry = this.baselines.get(name)
+    if (entry?.pending) this.baselines.set(name, { ...entry, pending: false })
+  }
+
+  /**
+   * Get the **baseline** annotations for a tool: the definition first seen
+   * (or restored and since named by a live list), not the latest upstream
+   * claim. Returns `undefined` if the tool has no annotations, was never
+   * seen, or was restored and no live list has named it yet.
    */
   get(toolName: string): ToolAnnotationHints | undefined {
-    return this.baselines.get(toolName)?.annotations
+    const entry = this.baselines.get(toolName)
+    if (entry === undefined || entry.pending) return undefined
+    return entry.annotations
   }
 
   /**
@@ -324,6 +511,15 @@ export class ToolAnnotationCache {
 
 /** The four MCP hint keys `matchAnnotations` reads. */
 const HINT_KEYS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const
+
+/** The result of an update whose body was not a tools/list response. */
+const EMPTY_UPDATE: ToolCacheUpdateResult = {
+  updated: false,
+  baselined: [],
+  drifted: [],
+  reverted: [],
+  confirmed: [],
+}
 
 /**
  * Pick the four hints onto a fresh object. A present key is copied whatever

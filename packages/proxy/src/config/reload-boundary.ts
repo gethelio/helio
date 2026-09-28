@@ -75,6 +75,15 @@ export function diffReloadBoundary(previous: HelioConfig, next: HelioConfig): Re
     restartRequiredPaths.push('policies.hot_reload')
   }
 
+  // `policies.persist_baselines` shapes startup the same way (issue #60):
+  // whether the baseline store exists and whether a restore ran. A live flip
+  // would either stop persisting mid-process or need a mid-flight restore.
+  const previousPersist = previous.policies.persist_baselines ?? true
+  const nextPersist = next.policies.persist_baselines ?? true
+  if (previousPersist !== nextPersist) {
+    restartRequiredPaths.push('policies.persist_baselines')
+  }
+
   return { restartRequiredPaths }
 }
 

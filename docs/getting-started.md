@@ -214,7 +214,7 @@ You should see output like:
 
 ```
 [helio] Upstream MCP era detected: legacy (initialize handshake)
-[helio] Annotation cache primed: 7 tool definitions baselined for drift detection ...
+[helio] Annotation cache primed: 7 tool definitions baselined for drift detection (0 restored, 7 new)
 Helio proxy listening on http://127.0.0.1:3000
 Policies: 2 rules loaded (default: allow)
 Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive

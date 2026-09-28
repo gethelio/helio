@@ -486,8 +486,9 @@ export function buildToolDriftFeedback(
     drifted_aspects: aspects,
     suggestion:
       `The definition of "${drift.toolName}" changed upstream (${aspects.join(', ')}) after ` +
-      'Helio baselined it. An operator must review the change; restarting the proxy ' +
-      're-baselines, or the upstream can revert the change.',
+      'Helio baselined it. An operator must review the change and accept it with ' +
+      `"helio baseline accept ${drift.toolName}" (add --upstream <name> on a named upstream), ` +
+      'or the upstream can revert the change.',
     retry_allowed: false,
   }
 }

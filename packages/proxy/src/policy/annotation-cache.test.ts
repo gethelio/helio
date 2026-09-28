@@ -3,6 +3,7 @@ import { ToolAnnotationCache } from './annotation-cache.js'
 import { classifySurface } from './surface.js'
 import { matchRule } from './matchers.js'
 import { compilePolicies } from './parser.js'
+import { canonicalize } from '../util/canonical-json.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -655,5 +656,273 @@ describe('ToolAnnotationCache.snapshotTools', () => {
     })
     expect(report.coverage.pairs[0]?.status).toBe(raw ? 'matched' : 'uncovered')
     expect(raw).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Restored baselines (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('ToolAnnotationCache.restore', () => {
+  const getStatus = {
+    name: 'get_status',
+    description: 'Report the current server status',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }
+  const deleteRecord = {
+    name: 'delete_record',
+    description: 'Delete a record',
+    annotations: { destructiveHint: true },
+  }
+
+  it('fills baselines only: a restored entry is inert until a live list names it', () => {
+    const cache = new ToolAnnotationCache()
+    const added = cache.restore([
+      { name: 'get_status', definition: getStatus },
+      { name: 'delete_record', definition: deleteRecord },
+    ])
+    expect(added).toBe(2)
+    expect(cache.size).toBe(0)
+    expect(cache.snapshotTools()).toEqual([])
+    expect(cache.has('get_status')).toBe(false)
+    expect(cache.isDrifted('get_status')).toBe(false)
+    expect(cache.getDrift('get_status')).toBeUndefined()
+    expect(cache.getCurrent('get_status')).toBeUndefined()
+    // The pipeline must keep judging on MCP defaults before the first list.
+    expect(cache.get('get_status')).toBeUndefined()
+    expect(cache.get('delete_record')).toBeUndefined()
+  })
+
+  it('compares the first live list against the restored baseline and only then clears pending', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([
+      { name: 'get_status', definition: getStatus },
+      { name: 'delete_record', definition: deleteRecord },
+    ])
+    const changed = { ...getStatus, description: 'changed while Helio was down' }
+    const result = cache.update(toolsListResponse([changed, deleteRecord]))
+
+    // Not a first sight: the restored names never enter `baselined`.
+    expect(result.baselined).toEqual([])
+    expect(result.confirmed).toEqual(['delete_record'])
+    expect(result.drifted).toEqual([
+      {
+        toolName: 'get_status',
+        changes: [
+          {
+            aspect: 'description',
+            baseline: 'Report the current server status',
+            current: 'changed while Helio was down',
+          },
+        ],
+      },
+    ])
+    expect(cache.isDrifted('get_status')).toBe(true)
+    // Named by a live list: the restored annotations are now the baseline.
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: false })
+    expect(cache.get('delete_record')).toEqual({ destructiveHint: true })
+    expect(cache.size).toBe(2)
+  })
+
+  it('leaves a restored entry pending when the live list does not name it', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([
+      { name: 'get_status', definition: getStatus },
+      { name: 'delete_record', definition: deleteRecord },
+    ])
+    cache.update(toolsListResponse([getStatus]))
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: false })
+    expect(cache.get('delete_record')).toBeUndefined()
+    expect(cache.has('delete_record')).toBe(false)
+  })
+
+  it('never overwrites a live baseline and skips names already restored', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    const stale = { ...getStatus, description: 'an older reviewed definition' }
+    expect(cache.restore([{ name: 'get_status', definition: stale }])).toBe(0)
+    expect(cache.restore([{ name: 'delete_record', definition: deleteRecord }])).toBe(1)
+    expect(cache.restore([{ name: 'delete_record', definition: deleteRecord }])).toBe(0)
+    const result = cache.update(toolsListResponse([getStatus]))
+    expect(result.drifted).toEqual([])
+    expect(result.confirmed).toEqual(['get_status'])
+  })
+
+  it('reports restored entries through the drift event as restored', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([{ name: 'get_status', definition: getStatus }])
+    expect(cache.isRestored('get_status')).toBe(true)
+    cache.update(toolsListResponse([deleteRecord]))
+    expect(cache.isRestored('delete_record')).toBe(false)
+    expect(cache.isRestored('missing')).toBe(false)
+  })
+
+  it('updateSingle also compares against a restored baseline and clears pending', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([{ name: 'get_status', definition: getStatus }])
+    expect(cache.get('get_status')).toBeUndefined()
+    const result = cache.updateSingle({ ...getStatus, description: 'changed' })
+    expect(result.baselined).toEqual([])
+    expect(result.confirmed).toEqual([])
+    expect(result.drifted.map((d) => d.toolName)).toEqual(['get_status'])
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: false })
+    const again = cache.updateSingle(getStatus)
+    expect(again.confirmed).toEqual(['get_status'])
+    expect(again.reverted).toEqual(['get_status'])
+  })
+})
+
+describe('ToolCacheUpdateResult.confirmed', () => {
+  it('lists present unique tools whose fingerprint equals the baseline', () => {
+    const cache = new ToolAnnotationCache()
+    const a = { name: 'a', description: 'one' }
+    const b = { name: 'b', description: 'two' }
+    const first = cache.update(toolsListResponse([a, b]))
+    expect(first.baselined).toEqual(['a', 'b'])
+    expect(first.confirmed).toEqual([])
+
+    const second = cache.update(toolsListResponse([a, { ...b, description: 'changed' }]))
+    expect(second.confirmed).toEqual(['a'])
+    expect(second.drifted.map((d) => d.toolName)).toEqual(['b'])
+
+    // A duplicated name is never confirmed, even when one copy matches.
+    const third = cache.update(toolsListResponse([a, a, b]))
+    expect(third.confirmed).toEqual(['b'])
+    expect(third.drifted.map((d) => d.toolName)).toEqual(['a'])
+  })
+
+  it('is empty on an invalid body', () => {
+    const cache = new ToolAnnotationCache()
+    expect(cache.update({ nope: true }).confirmed).toEqual([])
+    expect(cache.updateSingle(42).confirmed).toEqual([])
+  })
+})
+
+describe('ToolAnnotationCache.accept', () => {
+  const getStatus = {
+    name: 'get_status',
+    description: 'Report the current server status',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }
+  const changed = {
+    ...getStatus,
+    description: 'Report the current server status, verbosely',
+    annotations: { readOnlyHint: true, destructiveHint: true },
+  }
+
+  it('refuses a name absent from the current list', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    expect(cache.accept('missing')).toEqual({ ok: false, reason: 'unknown_tool' })
+  })
+
+  it('refuses a present tool that is not drifted', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    expect(cache.accept('get_status')).toEqual({ ok: false, reason: 'not_drifted' })
+  })
+
+  it('refuses a tool listed more than once', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    cache.update(toolsListResponse([getStatus, changed]))
+    expect(cache.isDrifted('get_status')).toBe(true)
+    expect(cache.accept('get_status')).toEqual({ ok: false, reason: 'ambiguous_definition' })
+    expect(cache.isDrifted('get_status')).toBe(true)
+  })
+
+  it('promotes the current definition to the baseline and clears the drift', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    const [drift] = cache.update(toolsListResponse([changed])).drifted
+    const outcome = cache.accept('get_status')
+    expect(outcome).toEqual({
+      ok: true,
+      previousFingerprint: canonicalize(getStatus),
+      fingerprint: canonicalize(changed),
+      changes: drift?.changes,
+    })
+    expect(cache.isDrifted('get_status')).toBe(false)
+    expect(cache.getDrift('get_status')).toBeUndefined()
+    // The accepted annotations are now what policy sees.
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: true })
+    expect(cache.isRestored('get_status')).toBe(false)
+
+    // The same list again is not drift; a revert to the OLD definition now is.
+    const same = cache.update(toolsListResponse([changed]))
+    expect(same.drifted).toEqual([])
+    expect(same.confirmed).toEqual(['get_status'])
+    const revert = cache.update(toolsListResponse([getStatus]))
+    expect(revert.drifted.map((d) => d.toolName)).toEqual(['get_status'])
+    expect(revert.drifted[0]?.changes.map((c) => c.aspect)).toEqual(['annotations', 'description'])
+  })
+
+  it('accepts a restored baseline that the first live list found drifted', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([{ name: 'get_status', definition: getStatus }])
+    cache.update(toolsListResponse([changed]))
+    const outcome = cache.accept('get_status')
+    expect(outcome.ok).toBe(true)
+    expect(cache.isRestored('get_status')).toBe(false)
+    expect(cache.update(toolsListResponse([changed])).confirmed).toEqual(['get_status'])
+  })
+
+  it('promotes a snapshot, not the caller-owned object', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    const mutable = { ...changed, annotations: { ...changed.annotations } }
+    cache.update(toolsListResponse([mutable]))
+    cache.accept('get_status')
+    mutable.annotations.destructiveHint = false
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: true })
+  })
+})
+
+describe('ToolAnnotationCache.forgetBaselines', () => {
+  it('drops the named baselines so the next list re-baselines them', () => {
+    const cache = new ToolAnnotationCache()
+    const a = { name: 'a', description: 'one', annotations: { readOnlyHint: true } }
+    const b = { name: 'b', description: 'two' }
+    cache.update(toolsListResponse([a, b]))
+    cache.forgetBaselines(['a'])
+    expect(cache.get('a')).toBeUndefined()
+    expect(cache.has('a')).toBe(false)
+    expect(cache.getCurrent('a')).toBeUndefined()
+    expect(cache.size).toBe(1)
+    expect(cache.has('b')).toBe(true)
+    const next = cache.update(toolsListResponse([a, b]))
+    expect(next.baselined).toEqual(['a'])
+    expect(next.confirmed).toEqual(['b'])
+  })
+})
+
+describe('ToolAnnotationCache.peekAccept and baselineRows', () => {
+  const getStatus = {
+    name: 'get_status',
+    description: 'Report the current server status',
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  }
+  const changed = { ...getStatus, description: 'changed' }
+
+  it('peekAccept answers the same refusals as accept without changing anything', () => {
+    const cache = new ToolAnnotationCache()
+    expect(cache.peekAccept('get_status')).toEqual({ ok: false, reason: 'unknown_tool' })
+    cache.update(toolsListResponse([getStatus]))
+    expect(cache.peekAccept('get_status')).toEqual({ ok: false, reason: 'not_drifted' })
+    cache.update(toolsListResponse([changed]))
+    expect(cache.peekAccept('get_status')).toEqual({ ok: true, current: changed })
+    expect(cache.isDrifted('get_status')).toBe(true)
+    expect(cache.get('get_status')).toEqual({ readOnlyHint: true, destructiveHint: false })
+    cache.update(toolsListResponse([getStatus, changed]))
+    expect(cache.peekAccept('get_status')).toEqual({ ok: false, reason: 'ambiguous_definition' })
+  })
+
+  it('baselineRows returns the baseline definition and fingerprint of known names only', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([getStatus]))
+    cache.update(toolsListResponse([changed]))
+    expect(cache.baselineRows(['get_status', 'missing'])).toEqual([
+      { tool: 'get_status', definition: getStatus, fingerprint: canonicalize(getStatus) },
+    ])
   })
 })

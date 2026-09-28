@@ -13,7 +13,16 @@ import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
 import type { SurfaceTool } from './surface.js'
-import type { ToolDriftEvent, ToolCacheUpdateResult } from './annotation-cache.js'
+import type {
+  ToolDriftEvent,
+  ToolCacheUpdateResult,
+  BaselineAcceptRefusal,
+} from './annotation-cache.js'
+import type { BaselinePersistence } from '../baseline/store.js'
+import { buildBaselineAcceptedRecord } from '../baseline/record.js'
+import { canonicalize } from '../util/canonical-json.js'
+import { formatUtcDay } from '../util/format-time.js'
+import { helioLogTag } from '../util/log-label.js'
 import type { AuditWriter } from '../audit/writer.js'
 import type { AuditRecordInput } from '../audit/types.js'
 import type { EvidenceStore } from '../evidence/store.js'
@@ -109,6 +118,14 @@ export interface GovernedForwarderOptions {
    * evaluation, under global dry-run too; every other method passes through.
    */
   killSwitch?: { readonly killed: boolean }
+  /**
+   * The persisted baseline store (issue #60). When set, `restoreBaselines()`
+   * reloads this door's rows at boot, every applied list persists first-sight
+   * baselines and confirms unchanged ones, and `acceptBaseline()` replaces a
+   * row. Unset under `policies.persist_baselines: false`: baselines then live
+   * in memory only, as before.
+   */
+  baselineStore?: BaselinePersistence
 }
 
 /**
@@ -212,6 +229,36 @@ export interface AnnotationCachePrimeResult {
   readonly toolsCached: number
   /** Failure reason when success is false. */
   readonly reason?: string
+  /**
+   * The persistence counts (issue #60), set only when a baseline store is
+   * attached: the primed line prints them. A result without them prints the
+   * memory-only line.
+   */
+  readonly persisted?: boolean
+  /** Present tools whose baseline was restored from the store. */
+  readonly restored?: number
+  /** Tools baselined for the first time by this prime. */
+  readonly baselinedNow?: number
+  /** Present tools currently drifted from their baseline. */
+  readonly drifted?: number
+}
+
+/** The outcome of {@link GovernedForwarder.acceptBaseline}. */
+export type AcceptBaselineOutcome =
+  | { readonly ok: false; readonly reason: 'door_not_primed' | BaselineAcceptRefusal }
+  | {
+      readonly ok: true
+      readonly tool: string
+      readonly upstream: string | null
+      readonly previous_fingerprint: string
+      readonly fingerprint: string
+      readonly persisted: boolean
+      readonly audit_record_id: string | null
+    }
+
+/** An applied list plus, when persistence failed, why. */
+type AppliedToolDefinitionUpdate = ToolCacheUpdateResult & {
+  readonly persistenceError?: string
 }
 
 /**
@@ -235,7 +282,12 @@ export class GovernedForwarder implements McpForwarder {
   private readonly budgetEngine: BudgetEngine | undefined
   private readonly upstreamName: string | undefined
   private readonly killSwitch: { readonly killed: boolean } | undefined
+  private readonly baselineStore: BaselinePersistence | undefined
   private readonly annotationCache = new ToolAnnotationCache()
+  /** When each baseline was first seen, from the store's rows or this process's inserts. */
+  private readonly baselineFirstSeen = new Map<string, string>()
+  /** True once a live tools/list has been applied to this door. */
+  private livePrimed = false
   private agentKeyWarned = false
   private senderKeyWarned = false
 
@@ -251,6 +303,7 @@ export class GovernedForwarder implements McpForwarder {
     this.budgetEngine = options?.budgetEngine
     this.upstreamName = options?.upstreamName
     this.killSwitch = options?.killSwitch
+    this.baselineStore = options?.baselineStore
     this.session = options?.session ?? DEFAULT_SESSION_IDENTITY
     if (this.evidenceStore) {
       this.evidenceStore.setAllowedEvidenceKeys(collectAllowedEvidenceKeys(policy))
@@ -355,14 +408,28 @@ export class GovernedForwarder implements McpForwarder {
       }
       const update = this.applyToolDefinitionUpdate(result.response.body, undefined)
       if (!update.updated) {
-        internal.resetInternalSession?.()
+        if (update.persistenceError === undefined) internal.resetInternalSession?.()
         return {
           success: false,
           toolsCached: this.annotationCache.size,
-          reason: classifyPrimeFailure(result.response),
+          reason:
+            update.persistenceError === undefined
+              ? classifyPrimeFailure(result.response)
+              : `baseline persistence failed: ${update.persistenceError}`,
         }
       }
-      return { success: true, toolsCached: this.annotationCache.size }
+      if (!this.baselineStore) {
+        return { success: true, toolsCached: this.annotationCache.size }
+      }
+      const tools = this.annotationCache.snapshotTools()
+      return {
+        success: true,
+        toolsCached: this.annotationCache.size,
+        persisted: true,
+        restored: tools.filter((tool) => this.annotationCache.isRestored(tool.name)).length,
+        baselinedNow: update.baselined.length,
+        drifted: tools.filter((tool) => tool.drifted).length,
+      }
     } catch (error) {
       // A prime that throws (timeout, network error, expired-session retry
       // exhausted) leaves the inner forwarder's internal session in an
@@ -389,6 +456,84 @@ export class GovernedForwarder implements McpForwarder {
     readonly tools: readonly SurfaceTool[]
   } {
     return { upstream: this.upstreamName, tools: this.annotationCache.snapshotTools() }
+  }
+
+  /**
+   * Reload this door's persisted baselines into the cache (issue #60), before
+   * the prime loop starts. Restored entries are inert until a live list names
+   * them; the first list then compares against them and reports a definition
+   * that changed while Helio was down as drift. Returns the number restored;
+   * zero without a store.
+   */
+  restoreBaselines(): number {
+    if (!this.baselineStore) return 0
+    const rows = this.baselineStore.load(this.upstreamName)
+    for (const row of rows) this.baselineFirstSeen.set(row.tool, row.first_seen)
+    return this.annotationCache.restore(
+      rows.map((row) => ({ name: row.tool, definition: row.definition })),
+    )
+  }
+
+  /**
+   * Accept a drifted tool's current definition as its baseline (issue #60,
+   * `helio baseline accept`). No `await` sits between the steps: the checks,
+   * the store's replace (a throw leaves memory untouched), the cache's
+   * promotion and one immediate `baseline_accepted` audit record. Two
+   * operators therefore serialize, and no list can land between memory and
+   * disk. Refused on a door that has never applied a live list.
+   */
+  acceptBaseline(tool: string, actor: string): AcceptBaselineOutcome {
+    if (!this.livePrimed) return { ok: false, reason: 'door_not_primed' }
+    const check = this.annotationCache.peekAccept(tool)
+    if (!check.ok) return check
+    const definition = check.current
+    const fingerprint = canonicalize(definition)
+    const at = new Date().toISOString()
+    if (this.baselineStore) {
+      this.baselineStore.replace(this.upstreamName, tool, {
+        definition,
+        fingerprint,
+        acceptedBy: actor,
+        at,
+      })
+    }
+    const accepted = this.annotationCache.accept(tool)
+    // peekAccept already answered ok on the same tick; the guard keeps the
+    // discriminated union honest without a cast.
+    if (!accepted.ok) return accepted
+    const persisted = this.baselineStore !== undefined
+    const firstSeen = persisted ? (this.baselineFirstSeen.get(tool) ?? at) : null
+    if (persisted) this.baselineFirstSeen.set(tool, firstSeen ?? at)
+    const upstream = this.upstreamName ?? null
+    let auditRecordId: string | null = null
+    if (this.auditWriter) {
+      auditRecordId = randomUUID()
+      this.auditWriter.pushImmediate(
+        buildBaselineAcceptedRecord({
+          tool,
+          upstream,
+          environment: this.environment ?? null,
+          changes: accepted.changes,
+          accepted: {
+            by: actor,
+            previous_fingerprint: accepted.previousFingerprint,
+            fingerprint: accepted.fingerprint,
+            first_seen: firstSeen,
+            persisted,
+          },
+        }),
+        auditRecordId,
+      )
+    }
+    return {
+      ok: true,
+      tool,
+      upstream,
+      previous_fingerprint: accepted.previousFingerprint,
+      fingerprint: accepted.fingerprint,
+      persisted,
+      audit_record_id: auditRecordId,
+    }
   }
 
   async forward(request: McpRequest): Promise<ForwardResult> {
@@ -443,24 +588,77 @@ export class GovernedForwarder implements McpForwarder {
   private applyToolDefinitionUpdate(
     responseBody: unknown,
     session: McpRequest['session'],
-  ): ToolCacheUpdateResult {
+  ): AppliedToolDefinitionUpdate {
     const update = this.annotationCache.update(responseBody)
     if (!update.updated) return update
+    this.livePrimed = true
 
+    const tag = helioLogTag(this.upstreamName)
+    const acceptCommand = `helio baseline accept "%s"${this.upstreamName ? ` --upstream ${this.upstreamName}` : ''}`
     for (const drift of update.drifted) {
       const aspects = drift.changes.map((change) => change.aspect).join(', ')
+      const firstSeen = this.baselineFirstSeen.get(drift.toolName)
+      const since =
+        this.annotationCache.isRestored(drift.toolName) && firstSeen !== undefined
+          ? `since its persisted baseline (first seen ${formatUtcDay(firstSeen)})`
+          : 'since its baseline'
       // eslint-disable-next-line no-console -- Intentional operational warning
       console.error(
-        `[helio] Tool definition drift detected: "${drift.toolName}" changed (${aspects}) after baseline — calls governed by policies.on_tool_drift (${this.policy.onToolDrift ?? 'block'})`,
+        `${tag} Tool definition drift detected: "${drift.toolName}" changed (${aspects}) ${since}, ` +
+          `calls governed by policies.on_tool_drift (${this.policy.onToolDrift ?? 'block'}); ` +
+          `accept the change with: ${acceptCommand.replace('%s', drift.toolName)}`,
       )
       this.writeDriftAuditRecord(drift, session, 'tool_drift')
     }
     for (const toolName of update.reverted) {
       // eslint-disable-next-line no-console -- Intentional operational warning
       console.error(
-        `[helio] Tool definition drift cleared: "${toolName}" returned to its baseline definition`,
+        `${tag} Tool definition drift cleared: "${toolName}" returned to its baseline definition`,
       )
       this.writeDriftAuditRecord({ toolName, changes: [] }, session, 'tool_drift_reverted')
+    }
+    return this.persistToolDefinitionUpdate(update)
+  }
+
+  /**
+   * Persist an applied list (issue #60): insert the first-sight baselines in
+   * one transaction, then confirm the unchanged ones. A failed insert is not
+   * fail-open like an audit write, because a baseline is the control every
+   * later call is judged against: the new names are rolled out of the cache
+   * so the door stays fail-closed on them, and the update reports failure so
+   * the prime loop retries. A failed confirmation only lags `last_confirmed`.
+   */
+  private persistToolDefinitionUpdate(update: ToolCacheUpdateResult): AppliedToolDefinitionUpdate {
+    const store = this.baselineStore
+    if (!store) return update
+    const door = this.upstreamName ?? 'the upstream'
+    const tag = helioLogTag(this.upstreamName)
+    const at = new Date().toISOString()
+    if (update.baselined.length > 0) {
+      try {
+        store.insertNew(this.upstreamName, this.annotationCache.baselineRows(update.baselined), at)
+        for (const tool of update.baselined) {
+          if (!this.baselineFirstSeen.has(tool)) this.baselineFirstSeen.set(tool, at)
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.annotationCache.forgetBaselines(update.baselined)
+        // eslint-disable-next-line no-console -- Intentional operational warning
+        console.error(
+          `${tag} Tool baseline persistence failed for ${door}: ${message}; the new definitions ` +
+            'were not baselined and the door stays fail-closed until the write succeeds',
+        )
+        return { ...update, updated: false, persistenceError: message }
+      }
+    }
+    if (update.confirmed.length > 0) {
+      try {
+        store.confirm(this.upstreamName, update.confirmed, at)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // eslint-disable-next-line no-console -- Intentional operational warning
+        console.error(`${tag} Tool baseline confirmation failed for ${door}: ${message}`)
+      }
     }
     return update
   }
