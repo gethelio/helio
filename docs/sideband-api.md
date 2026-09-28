@@ -221,7 +221,7 @@ Aggregated statistics for the dashboard charts. Computed from the audit store fo
 ```
 
 - `total` — total number of audit records in the window.
-- `allowed_total` — records that resolved without a block (`block_reason IS NULL`), excluding drift events (`tool_drift` / `tool_drift_reverted` decisions) and policy reload records (`record_kind: policy_reload`). When drift events or reload records fall inside the window, `allowed_total + blocked_total` adds up to less than `total`.
+- `allowed_total`: records that resolved without a block (`block_reason IS NULL`), excluding drift events (`tool_drift`, `tool_drift_reverted` and `baseline_accepted` decisions) and policy reload records (`record_kind: policy_reload`). When drift events or reload records fall inside the window, `allowed_total + blocked_total` adds up to less than `total`.
 - `blocked_total` — records that resolved with a block (`block_reason IS NOT NULL`), excluding policy reload records (a refused reload carries its outcome in `block_reason` but is not a blocked call).
 - `dry_run_total` — records produced in dry-run mode (`dry_run = true`). Policy reload records are excluded.
 - `applied_total` — records produced in applied mode (`dry_run = false`). Policy reload records are excluded.
@@ -892,6 +892,58 @@ Resume. The endpoint resumes only by unlinking the marker (or by clearing a memo
 **Error responses:**
 
 - `409`: `{ "error": "marker_unlink_failed", "killed": true, "code": "EACCES", "suggestion": "run helio resume -c <config> where the config directory is writable, or delete the marker by hand" }`; nothing changed.
+
+---
+
+### Tool baselines
+
+See [Baselines across restarts](./policies.md#baselines-across-restarts) for the persisted drift baselines this endpoint replaces. It sits under the `/api/*` authentication above (a cookie session also needs `x-helio-csrf`). In open mode (no secret) it answers `403` before anything else:
+
+```json
+{
+  "error": "baseline_accept_requires_secret",
+  "suggestion": "set dashboard.api_secret and restart, then run helio baseline accept <tool> -c <config>"
+}
+```
+
+A process without the dependency (a direct embedder) answers `503 { "error": "baselines are not available in this process" }`.
+
+#### POST /api/baselines/accept
+
+Accept a drifted tool's current definition as its baseline on one upstream door: the stored row is replaced, the drift state is dropped, a `baseline_accepted` [audit record](./audit.md#tool-definition-drift-records) is written and the block lifts at once. `helio baseline accept <tool> [--upstream <name>]` is this request.
+
+**Request body:**
+
+```json
+{ "tool": "get_weather", "upstream": "mail", "actor": "alice" }
+```
+
+`tool` is required. `upstream` names the door on a config with named upstreams and must be omitted on a single-upstream config. `actor` (1 to 200 characters) is recorded as `approved_by`; when omitted, the credential's mode (`bearer` or `session`) stands in.
+
+**Response (200):**
+
+```json
+{
+  "accepted": true,
+  "tool": "get_weather",
+  "upstream": "mail",
+  "previous_fingerprint": "{\"annotations\":…}",
+  "fingerprint": "{\"annotations\":…}",
+  "persisted": true,
+  "audit_record_id": "6a1f…"
+}
+```
+
+`upstream` is null on a single-upstream config; `persisted` is false under `policies.persist_baselines: false` (the acceptance lives in memory only until the next restart).
+
+**Error responses**, each `{ "error": "<code>", "suggestion": "<one sentence>" }`:
+
+- `400` invalid JSON or a malformed body; `401` / `403` as for every mutating route.
+- `404 unknown_upstream`: no door matches (a name that is not configured, or any name on a single-upstream config).
+- `404 unknown_tool`: the tool is not in the door's current `tools/list`.
+- `409 door_not_primed`: the door has not applied a live `tools/list` yet.
+- `409 not_drifted`: the tool is not drifted; nothing to accept.
+- `409 ambiguous_definition`: the upstream lists the tool more than once; fix the upstream.
 
 ---
 

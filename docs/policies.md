@@ -1042,8 +1042,8 @@ policies:
 ```
 
 - `block` (default): calls to a drifted tool are denied with
-  `tool_definition_drift` feedback until the proxy is restarted (which
-  re-baselines) or the upstream reverts the change.
+  `tool_definition_drift` feedback until an operator accepts the change with
+  `helio baseline accept <tool>` or the upstream reverts it.
 - `require_approval`: each call to a drifted tool is escalated through the
   approval channel.
 - `log`: drift is audited and calls proceed, but policy rules are evaluated
@@ -1079,7 +1079,7 @@ With `block` (the default), a call to a drifted tool is denied with structured s
       "rule_index": null,
       "action": "deny",
       "drifted_aspects": ["description"],
-      "suggestion": "The definition of \"get_weather\" changed upstream (description) after Helio baselined it. An operator must review the change; restarting the proxy re-baselines, or the upstream can revert the change.",
+      "suggestion": "The definition of \"get_weather\" changed upstream (description) after Helio baselined it. An operator must review the change and accept it with \"helio baseline accept get_weather\" (add --upstream <name> on a named upstream), or the upstream can revert the change.",
       "retry_allowed": false
     }
   }
@@ -1107,9 +1107,46 @@ bind to the malicious duplicate.
 This closes the MCP "rug-pull" class of attack, where a tool definition
 changes _after_ review so a one-time approval gives no lasting protection.
 
-**Limitation:** baselines are per-process. A restart re-baselines from
-whatever the upstream currently reports, so review drift audit records before
-restarting.
+### Baselines across restarts
+
+Baselines persist in the audit database, in a `tool_baselines` table keyed by
+upstream name and tool name (the [Tool Baselines Table](./audit.md#tool-baselines-table)),
+so a restart does not re-baseline. At startup each MCP upstream door reloads
+its rows before its first `tools/list` and prints `[helio] Tool baselines
+restored: <n> for <door> from <audit file>`. A restored baseline is inert until
+a live list names the tool: before that first list, calls are judged on MCP
+defaults exactly as on a door that has not primed. The first list is then
+compared against the restored definitions, so a tool whose definition changed
+while Helio was down is reported as drift at boot (a `tool_drift` record and
+the detection line, which names the baseline's first-seen day) and governed by
+`on_tool_drift` like drift seen live. The primed line says what happened:
+
+```
+[helio] Annotation cache primed: 7 tool definitions baselined for drift detection (5 restored, 2 new; 1 drifted since its baseline)
+```
+
+To accept a reviewed change, run `helio baseline accept <tool>` (add
+`--upstream <name>` on a config with named upstreams). The command reads the
+running proxy through the dashboard API, so it needs `dashboard.enabled: true`
+and a `dashboard.api_secret`; in open mode the API refuses (`403
+baseline_accept_requires_secret`), and a `block`-only deployment that runs
+with the dashboard off enables it, one restart, before the command can clear a
+block. An acceptance replaces the stored baseline with the tool's current
+definition (keeping its first-seen instant, recording who accepted it and
+when), drops the drift state, writes a
+[`baseline_accepted` audit record](./audit.md#tool-definition-drift-records)
+and lifts the block at once, no restart. A tool the upstream lists more than
+once is never accepted (`ambiguous_definition`): fix the upstream first.
+
+Set `policies.persist_baselines: false` to keep baselines in memory only, as
+before: no table is created, a restart re-baselines every tool, and the primed
+line reads as it did (`baselines are per-process; a restart re-baselines`).
+The field is restart-required. Under `false`, `helio baseline accept` still
+clears the drift in the running process and writes its record, but the next
+restart re-baselines the tool. Baselines are keyed by the configured upstream
+name, so renaming an upstream starts its baselines fresh. Two proxies sharing
+one audit database and one upstream name are not supported. Adapter-origin
+([sideband](./adapter-api.md)) baselines stay per-process for now.
 
 ### Proactive revalidation
 

@@ -603,8 +603,9 @@ const policiesSchema = z
      * How to treat calls to a tool whose definition (annotations, schemas,
      * description) has drifted from the baseline Helio captured on first
      * sight.
-     * - "block": deny the call until the proxy is restarted (re-baselines)
-     *   or the upstream reverts. Conservative default when omitted.
+     * - "block": deny the call until an operator accepts the change
+     *   (helio baseline accept) or the upstream reverts. Conservative
+     *   default when omitted.
      * - "require_approval": escalate the call through the approval channel.
      * - "log": audit the drift; rules evaluate against both baseline and
      *   current annotations and the stricter decision wins.
@@ -612,6 +613,15 @@ const policiesSchema = z
      * don't need the field; undefined is treated as "block".
      */
     on_tool_drift: z.enum(['block', 'require_approval', 'log']).optional(),
+    /**
+     * Whether tool definition baselines persist in the audit database across
+     * restarts (issue #60). Defaults to `true` when omitted; the CLI treats
+     * `undefined` as `true`. `false` keeps baselines in memory only, so a
+     * restart re-baselines every tool as before. Startup-bound like
+     * `hot_reload`: it decides whether the store exists and a restore runs,
+     * so a change needs a restart (see the reload boundary).
+     */
+    persist_baselines: z.boolean().optional(),
     /**
      * Proxy-scheduled `tools/list` revalidation and `ttlMs` clamping (issue
      * #221). Optional; absent ⇒ compiled defaults (enabled: true, interval:

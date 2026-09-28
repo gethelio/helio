@@ -1475,6 +1475,36 @@ CREATE TABLE IF NOT EXISTS audit_records (
       s.close()
     })
 
+    it('excludes baseline_accepted records from allowed_total and top_tools', () => {
+      const s = createStore()
+      s.insert(
+        makeRecord({ tool_name: 'get_weather', policy_decision: 'allow', block_reason: null }),
+      )
+      s.insert(
+        makeRecord({
+          tool_name: 'send_email',
+          policy_decision: 'baseline_accepted',
+          block_reason: null,
+          tool_input: {},
+          record_kind: 'drift_event',
+          approved_by: 'oli',
+        }),
+      )
+
+      const stats = s.aggregate()
+      expect(stats.total).toBe(2)
+      expect(stats.allowed_total).toBe(1)
+      expect(stats.blocked_total).toBe(0)
+      expect(stats.top_tools).toEqual([{ tool_name: 'get_weather', upstream: null, count: 1 }])
+      expect(stats.by_decision).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ decision: 'baseline_accepted', count: 1 }),
+        ]),
+      )
+
+      s.close()
+    })
+
     it('excludes rejected records from top_tools but keeps them in totals and by_decision', () => {
       const s = createStore()
       s.insert(
@@ -2828,10 +2858,10 @@ describe('kill_switch records and the aggregates (issue #402)', () => {
 
   it('leaves the decision list untouched and keeps the walk on the kind index', () => {
     expect(PERSISTED_SUMMARY_SQL.totals).toContain(
-      "('tool_drift', 'tool_drift_reverted', 'rejected')",
+      "('tool_drift', 'tool_drift_reverted', 'baseline_accepted', 'rejected')",
     )
     expect(ACTIVATION_TIMELINE_SQL.first_blocked_call).toContain(
-      "policy_decision NOT IN ('tool_drift', 'tool_drift_reverted', 'rejected')",
+      "policy_decision NOT IN ('tool_drift', 'tool_drift_reverted', 'baseline_accepted', 'rejected')",
     )
     expect(ACTIVATION_TIMELINE_SQL.first_blocked_call).toContain("block_reason <> 'kill_switch'")
     const dir = mkdtempSync(join(tmpdir(), 'helio-audit-kill-plan-'))

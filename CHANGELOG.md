@@ -21,6 +21,13 @@ Maintainer notes:
 
 ### Added
 
+- **`helio baseline accept <tool> [--upstream <name>]` accepts a drifted
+  tool definition as its new baseline on the running proxy**, through the
+  authenticated `POST /api/baselines/accept`; the acceptance replaces the
+  persisted row, lifts the block at once and lands as a `baseline_accepted`
+  drift record, which the dashboard renders with a Baseline Accepted chip.
+  Set `policies.persist_baselines` to `false` (restart-required) to keep
+  baselines in memory only.
 - **`helio kill` halts every governed call without editing policy, and
   the `helio resume` verb lifts it.** One marker file, `<config>.kill`, is
   the state: the kill verb writes it without parsing the config, the proxy
@@ -136,6 +143,22 @@ Maintainer notes:
 
 ### Changed
 
+- **A tool whose definition drifted stays blocked across a restart on
+  every MCP upstream door.** Tool definition baselines now persist in the
+  audit database (`tool_baselines`, keyed by upstream and tool), so a
+  definition that changes while Helio is down is reported as drift at the
+  next start and governed by `policies.on_tool_drift` like drift seen live;
+  a restart no longer re-baselines. Accept a reviewed change with
+  `helio baseline accept <tool> [--upstream <name>]`, which replaces the
+  baseline, writes a `baseline_accepted` drift record and lifts the block
+  without a restart; the command reads the running proxy through the
+  dashboard API, so it needs `dashboard.enabled: true` and a secret (open
+  mode is refused, as for `POST /api/kill-switch`), and a `block`-only
+  deployment running with the dashboard off turns it on, one restart,
+  before the command can clear a block. Adapter-origin (sideband) baselines
+  stay per-process for now. The primed line no longer says baselines are
+  per-process. Set `policies.persist_baselines: false` (restart-required)
+  for the previous behavior.
 - **`helio export`, `helio policy status` and `helio report activation`
   name the action when a `${VAR}` placeholder in the config is unset.**
   Each prints one line naming the variable, the field that reads it and

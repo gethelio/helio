@@ -24,8 +24,13 @@ import type {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** policy_decision values that describe upstream definition changes, not tool calls. */
-const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
+/**
+ * policy_decision values that describe upstream definition changes, not tool
+ * calls: drift seen, drift reverted, and an operator's acceptance of a drifted
+ * definition (issue #60). Load-bearing: `NON_TOOL_KINDS_SQL` names no drift
+ * kind, so the allowed-call total excludes drift by decision alone.
+ */
+const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'baseline_accepted')"
 
 /**
  * policy_decision values excluded from top-tools rankings: they do not name a
@@ -33,7 +38,8 @@ const DRIFT_EVENT_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted')"
  * a nameless tools/call under the `<nameless>` sentinel (issue #132). Both
  * would otherwise pollute tool-usage rankings.
  */
-const NON_TOOL_DECISIONS_SQL = "('tool_drift', 'tool_drift_reverted', 'rejected')"
+const NON_TOOL_DECISIONS_SQL =
+  "('tool_drift', 'tool_drift_reverted', 'baseline_accepted', 'rejected')"
 
 /**
  * record_kind of the proxy's own config reload records (issue #341), for the

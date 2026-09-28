@@ -126,6 +126,9 @@ export function deriveOutcomeContext(record: DecisionLike): string | null {
 
   if (record.policy_decision === 'rate_limit') return 'Rate Limit Rule'
   if (record.policy_decision === 'spend_limit') return 'Spend Limit Rule'
+  // An operator's acceptance of a drifted definition (issue #60) is a
+  // drift_event whose null block_reason reads Allow; the chip says what it is.
+  if (record.policy_decision === 'baseline_accepted') return 'Baseline Accepted'
   if (
     record.policy_decision === 'require_approval' ||
     record.approval_status === 'approved' ||

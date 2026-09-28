@@ -18,6 +18,13 @@ import type { BudgetLedgerSink } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
 import { KillSwitch } from '../kill-switch/state.js'
+import type {
+  BaselinePersistence,
+  NewToolBaseline,
+  ToolBaselineReplacement,
+  ToolBaselineRow,
+} from '../baseline/store.js'
+import { canonicalize } from '../util/canonical-json.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -7844,3 +7851,496 @@ describe('kill switch on the MCP door (issue #402)', () => {
     expect(inner.forward).toHaveBeenCalledTimes(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Persisted tool baselines (issue #60)
+// ---------------------------------------------------------------------------
+
+/** An in-memory BaselinePersistence: the store's contract without SQLite. */
+class FakeBaselineStore implements BaselinePersistence {
+  readonly rows = new Map<string, ToolBaselineRow>()
+  readonly calls: string[] = []
+  failInsert: Error | undefined
+  failConfirm: Error | undefined
+  failReplace: Error | undefined
+
+  private key(upstream: string | undefined, tool: string): string {
+    return `${upstream ?? ''}\u0000${tool}`
+  }
+
+  load(upstream: string | undefined): readonly ToolBaselineRow[] {
+    this.calls.push(`load:${upstream ?? '<singular>'}`)
+    return [...this.rows.values()]
+      .filter((row) => row.upstream === (upstream ?? null))
+      .sort((a, b) => a.tool.localeCompare(b.tool))
+  }
+
+  insertNew(upstream: string | undefined, rows: readonly NewToolBaseline[], at: string): number {
+    this.calls.push(`insertNew:${rows.map((r) => r.tool).join(',')}`)
+    if (this.failInsert) throw this.failInsert
+    let inserted = 0
+    for (const row of rows) {
+      const key = this.key(upstream, row.tool)
+      if (this.rows.has(key)) continue
+      this.rows.set(key, {
+        upstream: upstream ?? null,
+        tool: row.tool,
+        definition: row.definition,
+        fingerprint: row.fingerprint,
+        first_seen: at,
+        last_confirmed: at,
+        accepted_at: null,
+        accepted_by: null,
+      })
+      inserted += 1
+    }
+    return inserted
+  }
+
+  confirm(upstream: string | undefined, tools: readonly string[], at: string): void {
+    this.calls.push(`confirm:${tools.join(',')}`)
+    if (this.failConfirm) throw this.failConfirm
+    for (const tool of tools) {
+      const row = this.rows.get(this.key(upstream, tool))
+      if (row) this.rows.set(this.key(upstream, tool), { ...row, last_confirmed: at })
+    }
+  }
+
+  replace(
+    upstream: string | undefined,
+    tool: string,
+    replacement: ToolBaselineReplacement,
+  ): string | undefined {
+    this.calls.push(`replace:${tool}`)
+    if (this.failReplace) throw this.failReplace
+    const key = this.key(upstream, tool)
+    const previous = this.rows.get(key)
+    this.rows.set(key, {
+      upstream: upstream ?? null,
+      tool,
+      definition: replacement.definition,
+      fingerprint: replacement.fingerprint,
+      first_seen: previous?.first_seen ?? replacement.at,
+      last_confirmed: replacement.at,
+      accepted_at: replacement.at,
+      accepted_by: replacement.acceptedBy,
+    })
+    return previous?.fingerprint
+  }
+}
+
+describe('persisted tool baselines (issue #60)', () => {
+  const sendEmail = { name: 'send_email', annotations: { destructiveHint: false } }
+  const listInbox = { name: 'list_inbox', annotations: { readOnlyHint: true } }
+  const sendEmailChanged = {
+    name: 'send_email',
+    annotations: { destructiveHint: false },
+    description: 'now exfiltrates',
+  }
+
+  function okResult(id = 2): ForwardResult {
+    return successResult({
+      jsonrpc: '2.0',
+      id,
+      result: { content: [{ type: 'text', text: 'ok' }] },
+    })
+  }
+
+  it('a prime inserts the new baselines and a later list confirms the unchanged ones', async () => {
+    const store = new FakeBaselineStore()
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([sendEmail, listInbox]))
+      .mockResolvedValueOnce(toolsListResult([sendEmail, listInbox]))
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+      baselineStore: store,
+    })
+
+    expect(governed.restoreBaselines()).toBe(0)
+    const prime = await governed.primeAnnotationCache()
+    expect(prime).toEqual({
+      success: true,
+      toolsCached: 2,
+      persisted: true,
+      restored: 0,
+      baselinedNow: 2,
+      drifted: 0,
+    })
+    // An empty batch is never written: no confirm call on a first prime.
+    expect(store.calls).toEqual(['load:<singular>', 'insertNew:send_email,list_inbox'])
+    const row = store.rows.get('\u0000send_email')
+    expect(row?.definition).toEqual(sendEmail)
+    expect(row?.fingerprint).toBe(canonicalize(sendEmail))
+
+    await governed.forward(toolsListRequest())
+    expect(store.calls.at(-1)).toBe('confirm:send_email,list_inbox')
+  })
+
+  it('a restored baseline blocks a definition that changed while Helio was down', async () => {
+    const store = new FakeBaselineStore()
+    store.insertNew(undefined, [rowOf(sendEmail), rowOf(listInbox)], '2026-09-20T08:00:00.000Z')
+    const inner = mockForwarder()
+    inner.forward.mockResolvedValueOnce(toolsListResult([sendEmailChanged, listInbox]))
+    const auditWriter = fakeAuditWriter()
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        auditWriter,
+      })
+      expect(governed.restoreBaselines()).toBe(2)
+      // Restored only: nothing is listed yet.
+      expect(governed.snapshotSurface().tools).toEqual([])
+
+      const prime = await governed.primeAnnotationCache()
+      expect(prime).toEqual({
+        success: true,
+        toolsCached: 2,
+        persisted: true,
+        restored: 2,
+        baselinedNow: 0,
+        drifted: 1,
+      })
+      // Nothing new to insert, one confirmation; an empty batch is never written.
+      expect(store.calls.slice(2)).toEqual(['confirm:list_inbox'])
+      expect(errors).toHaveBeenCalledWith(
+        '[helio] Tool definition drift detected: "send_email" changed (description) since its ' +
+          'persisted baseline (first seen 2026-09-20), calls governed by policies.on_tool_drift ' +
+          '(block); accept the change with: helio baseline accept "send_email"',
+      )
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['policy_decision']).toBe('tool_drift')
+
+      inner.forward.mockResolvedValue(okResult())
+      const result = await governed.forward(toolsCallRequest('send_email'))
+      const error = errorFromResult(result)
+      expect(error.data['reason']).toBe('tool_definition_drift')
+      expect(error.data['suggestion']).toBe(
+        'The definition of "send_email" changed upstream (description) after Helio baselined it. ' +
+          'An operator must review the change and accept it with "helio baseline accept send_email" ' +
+          '(add --upstream <name> on a named upstream), or the upstream can revert the change.',
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('names the upstream in the detection line and the accept command on a named door', async () => {
+    const store = new FakeBaselineStore()
+    store.insertNew('mail', [rowOf(sendEmail)], '2026-09-20T08:00:00.000Z')
+    const inner = mockForwarder()
+    inner.forward.mockResolvedValueOnce(toolsListResult([sendEmailChanged]))
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        upstreamName: 'mail',
+      })
+      expect(governed.restoreBaselines()).toBe(1)
+      await governed.primeAnnotationCache()
+      expect(errors).toHaveBeenCalledWith(
+        '[helio][mail] Tool definition drift detected: "send_email" changed (description) since its ' +
+          'persisted baseline (first seen 2026-09-20), calls governed by policies.on_tool_drift ' +
+          '(block); accept the change with: helio baseline accept "send_email" --upstream mail',
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('a drift seen live keeps the plain baseline wording', async () => {
+    const store = new FakeBaselineStore()
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([sendEmail]))
+      .mockResolvedValueOnce(toolsListResult([sendEmailChanged]))
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+      })
+      await governed.primeAnnotationCache()
+      await governed.primeAnnotationCache()
+      expect(errors).toHaveBeenCalledWith(
+        '[helio] Tool definition drift detected: "send_email" changed (description) since its ' +
+          'baseline, calls governed by policies.on_tool_drift (block); accept the change with: ' +
+          'helio baseline accept "send_email"',
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('a restored entry is inert until a live list names it', async () => {
+    const store = new FakeBaselineStore()
+    store.insertNew(undefined, [rowOf(sendEmail)], '2026-09-20T08:00:00.000Z')
+    const inner = mockForwarder(okResult())
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(
+        inner,
+        compile({ default: 'allow', rules: [], flag_destructive: 'log' }),
+        { baselineStore: store },
+      )
+      governed.restoreBaselines()
+
+      // Before the first list the MCP default (destructive) applies, exactly
+      // as on a door that never primed: the restored `destructiveHint: false`
+      // is not trusted yet.
+      await governed.forward(toolsCallRequest('send_email'))
+      expect(errors).toHaveBeenCalledWith(
+        '[helio] Destructive tool detected: send_email (no matching rule)',
+      )
+      errors.mockClear()
+
+      inner.forward.mockResolvedValueOnce(toolsListResult([sendEmail]))
+      await governed.forward(toolsListRequest())
+      await governed.forward(toolsCallRequest('send_email'))
+      expect(errors).not.toHaveBeenCalled()
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('a throwing insertNew fails the prime and rolls the new names out of the cache', async () => {
+    const store = new FakeBaselineStore()
+    store.failInsert = new Error('disk I/O error')
+    const inner = mockForwarder()
+    inner.forward.mockResolvedValue(toolsListResult([sendEmail, listInbox]))
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+      })
+      const prime = await governed.primeAnnotationCache()
+      expect(prime).toEqual({
+        success: false,
+        toolsCached: 0,
+        reason: 'baseline persistence failed: disk I/O error',
+      })
+      expect(governed.snapshotSurface().tools).toEqual([])
+      expect(errors).toHaveBeenCalledWith(
+        '[helio] Tool baseline persistence failed for the upstream: disk I/O error; the new ' +
+          'definitions were not baselined and the door stays fail-closed until the write succeeds',
+      )
+
+      // The retry re-baselines them once the write succeeds.
+      store.failInsert = undefined
+      const retry = await governed.primeAnnotationCache()
+      expect(retry.success).toBe(true)
+      expect(retry.baselinedNow).toBe(2)
+      expect(store.rows.size).toBe(2)
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('a pass-through client list still relays when the insert fails, and rolls the names out', async () => {
+    const store = new FakeBaselineStore()
+    store.failInsert = new Error('disk I/O error')
+    const listBody = toolsListResult([sendEmail])
+    const inner = mockForwarder(listBody)
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        upstreamName: 'mail',
+      })
+      const result = await governed.forward(toolsListRequest())
+      expect(result.response.body).toEqual(listBody.response.body)
+      expect(governed.snapshotSurface().tools).toEqual([])
+      expect(errors).toHaveBeenCalledWith(
+        '[helio][mail] Tool baseline persistence failed for mail: disk I/O error; the new ' +
+          'definitions were not baselined and the door stays fail-closed until the write succeeds',
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('a throwing confirm only warns', async () => {
+    const store = new FakeBaselineStore()
+    const inner = mockForwarder()
+    inner.forward.mockResolvedValue(toolsListResult([sendEmail]))
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+      })
+      await governed.primeAnnotationCache()
+      store.failConfirm = new Error('database is locked')
+      const prime = await governed.primeAnnotationCache()
+      expect(prime.success).toBe(true)
+      expect(governed.snapshotSurface().tools.map((t) => t.name)).toEqual(['send_email'])
+      expect(errors).toHaveBeenCalledWith(
+        '[helio] Tool baseline confirmation failed for the upstream: database is locked',
+      )
+    } finally {
+      errors.mockRestore()
+    }
+  })
+
+  it('prime results carry no counts when no store is attached', async () => {
+    const inner = mockForwarder(toolsListResult([sendEmail]))
+    const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }))
+    expect(await governed.primeAnnotationCache()).toEqual({ success: true, toolsCached: 1 })
+  })
+
+  describe('acceptBaseline', () => {
+    async function driftedDoor(store: BaselinePersistence | undefined, upstreamName?: string) {
+      const inner = mockForwarder()
+      inner.forward
+        .mockResolvedValueOnce(toolsListResult([sendEmail]))
+        .mockResolvedValueOnce(toolsListResult([sendEmailChanged]))
+      const auditWriter = fakeAuditWriter()
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+        auditWriter,
+        upstreamName,
+      })
+      await governed.primeAnnotationCache()
+      await governed.primeAnnotationCache()
+      auditWriter.pushImmediate.mockClear()
+      inner.forward.mockResolvedValue(okResult())
+      return { inner, governed, auditWriter }
+    }
+
+    it('replaces the row, promotes the baseline, audits the acceptance and lifts the block', async () => {
+      const store = new FakeBaselineStore()
+      const { inner, governed, auditWriter } = await driftedDoor(store)
+      expect(
+        errorFromResult(await governed.forward(toolsCallRequest('send_email'))).data['reason'],
+      ).toBe('tool_definition_drift')
+      // The blocked call wrote its own immediate deny record.
+      auditWriter.pushImmediate.mockClear()
+
+      const outcome = governed.acceptBaseline('send_email', 'oli')
+      expect(outcome).toEqual({
+        ok: true,
+        tool: 'send_email',
+        upstream: null,
+        previous_fingerprint: canonicalize(sendEmail),
+        fingerprint: canonicalize(sendEmailChanged),
+        persisted: true,
+        audit_record_id: expect.any(String) as unknown as string,
+      })
+      const row = store.rows.get('\u0000send_email')
+      expect(row?.definition).toEqual(sendEmailChanged)
+      expect(row?.accepted_by).toBe('oli')
+
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+      const [record, id] = auditWriter.pushImmediate.mock.calls[0] as [
+        Record<string, unknown>,
+        string,
+      ]
+      expect(id).toBe((outcome as { audit_record_id: string }).audit_record_id)
+      expect(record).toMatchObject({
+        record_kind: 'drift_event',
+        policy_decision: 'baseline_accepted',
+        tool_name: 'send_email',
+        tool_input: {},
+        block_reason: null,
+        approved_by: 'oli',
+        upstream: null,
+        origin: 'mcp',
+        protocol_version: null,
+        evidence_chain: {
+          tool_drift: {
+            changes: [{ aspect: 'description', baseline: undefined, current: 'now exfiltrates' }],
+          },
+          baseline_accepted: {
+            by: 'oli',
+            previous_fingerprint: canonicalize(sendEmail),
+            fingerprint: canonicalize(sendEmailChanged),
+            first_seen: row?.first_seen,
+            persisted: true,
+          },
+        },
+      })
+
+      inner.forward.mockClear()
+      const allowed = await governed.forward(toolsCallRequest('send_email'))
+      expect(inner.forward).toHaveBeenCalledTimes(1)
+      expect((allowed.response.body as Record<string, unknown>)['error']).toBeUndefined()
+      expect(governed.snapshotSurface().tools[0]?.drifted).toBe(false)
+    })
+
+    it('carries the upstream name on a named door', async () => {
+      const store = new FakeBaselineStore()
+      const { governed, auditWriter } = await driftedDoor(store, 'mail')
+      const outcome = governed.acceptBaseline('send_email', 'api')
+      expect(outcome).toMatchObject({ ok: true, upstream: 'mail' })
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['upstream']).toBe('mail')
+      expect(store.rows.get('mail\u0000send_email')?.accepted_by).toBe('api')
+    })
+
+    it('accepts in memory only when no store is attached', async () => {
+      const { governed, auditWriter } = await driftedDoor(undefined)
+      const outcome = governed.acceptBaseline('send_email', 'oli')
+      expect(outcome).toMatchObject({ ok: true, persisted: false })
+      const record = auditWriter.pushImmediate.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(record['evidence_chain']).toMatchObject({
+        baseline_accepted: { persisted: false, first_seen: null },
+      })
+      expect(governed.snapshotSurface().tools[0]?.drifted).toBe(false)
+    })
+
+    it('refuses before any live list was applied', () => {
+      const governed = new GovernedForwarder(
+        mockForwarder(),
+        compile({ default: 'allow', rules: [] }),
+        {
+          baselineStore: new FakeBaselineStore(),
+        },
+      )
+      expect(governed.acceptBaseline('send_email', 'oli')).toEqual({
+        ok: false,
+        reason: 'door_not_primed',
+      })
+    })
+
+    it('passes the cache refusals through', async () => {
+      const { governed, auditWriter } = await driftedDoor(new FakeBaselineStore())
+      expect(governed.acceptBaseline('nope', 'oli')).toEqual({ ok: false, reason: 'unknown_tool' })
+      governed.acceptBaseline('send_email', 'oli')
+      expect(governed.acceptBaseline('send_email', 'oli')).toEqual({
+        ok: false,
+        reason: 'not_drifted',
+      })
+      expect(auditWriter.pushImmediate).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses an ambiguous definition', async () => {
+      const store = new FakeBaselineStore()
+      const inner = mockForwarder()
+      inner.forward
+        .mockResolvedValueOnce(toolsListResult([sendEmail]))
+        .mockResolvedValueOnce(toolsListResult([sendEmail, sendEmailChanged]))
+      const governed = new GovernedForwarder(inner, compile({ default: 'allow', rules: [] }), {
+        baselineStore: store,
+      })
+      await governed.primeAnnotationCache()
+      await governed.primeAnnotationCache()
+      expect(governed.acceptBaseline('send_email', 'oli')).toEqual({
+        ok: false,
+        reason: 'ambiguous_definition',
+      })
+      expect(store.calls.filter((c) => c.startsWith('replace'))).toEqual([])
+    })
+
+    it('a throwing replace leaves memory untouched and surfaces the error', async () => {
+      const store = new FakeBaselineStore()
+      const { governed, auditWriter } = await driftedDoor(store)
+      store.failReplace = new Error('database is locked')
+      expect(() => governed.acceptBaseline('send_email', 'oli')).toThrow('database is locked')
+      expect(governed.snapshotSurface().tools[0]?.drifted).toBe(true)
+      expect(auditWriter.pushImmediate).not.toHaveBeenCalled()
+    })
+  })
+})
+
+function rowOf(definition: Record<string, unknown>): NewToolBaseline {
+  return { tool: definition['name'] as string, definition, fingerprint: canonicalize(definition) }
+}

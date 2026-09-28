@@ -180,6 +180,25 @@ export async function startAnnotationPrimeLoop(
         phase === 'initial'
           ? `${tag} Annotation cache primed`
           : `${tag} Annotation cache primed after retry ${String(retryAttempt)}`
+      // One printer rule (issue #60): a result carrying the persistence
+      // counts prints them; a result without them (no baseline store, so
+      // `policies.persist_baselines: false`) prints the memory-only line
+      // exactly as before. There is no third wording.
+      if (
+        result.persisted !== undefined &&
+        result.restored !== undefined &&
+        result.baselinedNow !== undefined &&
+        result.drifted !== undefined
+      ) {
+        const driftClause =
+          result.drifted > 0 ? `; ${String(result.drifted)} drifted since its baseline` : ''
+        console.error(
+          `${prefix}: ${String(result.toolsCached)} tool definitions baselined for drift detection ` +
+            `(${String(result.restored)} restored, ${String(result.baselinedNow)} new${driftClause})`,
+        )
+        scheduleRevalidation()
+        return
+      }
       console.error(
         `${prefix}: ${String(result.toolsCached)} tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)`,
       )

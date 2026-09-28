@@ -31,6 +31,7 @@ import { DEFAULT_STATUS_WINDOW, parseStatusWindow } from '../policy/status.js'
 import type { PolicyStatusReport } from '../policy/status.js'
 import { markerNote, removeMarker, writeMarker } from '../kill-switch/marker.js'
 import type { KillSwitch } from '../kill-switch/state.js'
+import type { AcceptBaselineOutcome } from '../policy/governed-forwarder.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,7 +80,29 @@ export interface DashboardAppDeps {
    * Absent (direct embedders, tests without it), both verbs answer 503.
    */
   readonly killSwitch?: { readonly state: KillSwitch; readonly markerPath: string }
+  /**
+   * Tool baseline acceptance (issue #60) for `POST /api/baselines/accept`:
+   * `helio start` resolves the door by upstream name and calls its
+   * forwarder's `acceptBaseline`. Absent (direct embedders, tests without
+   * it), the route answers 503.
+   */
+  readonly baselines?: {
+    accept(input: {
+      readonly tool: string
+      readonly upstream?: string
+      readonly actor: string
+    }): BaselineAcceptOutcome
+  }
 }
+
+/**
+ * What the `baselines` dependency answers: the door's outcome, or
+ * `unknown_upstream` when no door matches the request (a name that is not
+ * configured, or any name on a single-upstream config).
+ */
+export type BaselineAcceptOutcome =
+  | AcceptBaselineOutcome
+  | { readonly ok: false; readonly reason: 'unknown_upstream' }
 
 /** Options for the dashboard API. */
 export interface DashboardAppOptions {
@@ -120,6 +143,41 @@ interface DashboardAuthState {
 const killSwitchBodySchema = z.object({
   actor: z.string().min(1).max(200).optional(),
 })
+
+/** The body of `POST /api/baselines/accept` (issue #60). */
+const baselineAcceptBodySchema = z
+  .object({
+    tool: z.string().min(1),
+    upstream: z.string().min(1).optional(),
+    actor: z.string().min(1).max(200).optional(),
+  })
+  .strict()
+
+/** The HTTP status and the one-sentence suggestion of each refusal. */
+const BASELINE_ACCEPT_REFUSALS: Record<
+  Exclude<BaselineAcceptOutcome, { ok: true }>['reason'],
+  { readonly status: 404 | 409; readonly suggestion: string }
+> = {
+  unknown_upstream: {
+    status: 404,
+    suggestion:
+      'no upstream matches: pass --upstream <name> on a named-upstreams config, drop it on a single-upstream config',
+  },
+  unknown_tool: {
+    status: 404,
+    suggestion: 'the tool is not in the current tools/list of that upstream',
+  },
+  door_not_primed: {
+    status: 409,
+    suggestion: 'the upstream has not primed yet; retry once "Annotation cache primed" has printed',
+  },
+  not_drifted: { status: 409, suggestion: 'the tool is not drifted; nothing to accept' },
+  ambiguous_definition: {
+    status: 409,
+    suggestion:
+      'the upstream lists the tool more than once; Helio cannot accept an ambiguous definition, fix the upstream',
+  },
+}
 
 const optionalQueryString = z.preprocess(
   (value) => (typeof value === 'string' && value.length > 0 ? value : undefined),
@@ -352,6 +410,7 @@ export function createDashboardAppWithLifecycle(
     budgets,
     policyStatus,
     killSwitch,
+    baselines,
   } = deps
   const apiSecret = options?.apiSecret
   const sessionStore = apiSecret
@@ -868,6 +927,58 @@ export function createDashboardAppWithLifecycle(
     state.setFileHold(false, { surface: 'api', actor, atBoot: false })
     state.setMemoryHold(false, 'api', { actor, atBoot: false })
     return c.json({ killed: false, changed: true }, 200)
+  })
+
+  // -------------------------------------------------------------------------
+  // Tool baselines (issue #60)
+  // -------------------------------------------------------------------------
+
+  app.post('/api/baselines/accept', async (c) => {
+    if (!baselines) return c.json({ error: 'baselines are not available in this process' }, 503)
+    // Open mode is refused before anything else, as for the kill switch: an
+    // acceptance replaces the control every later call is judged against.
+    if (!apiSecret) {
+      return c.json(
+        {
+          error: 'baseline_accept_requires_secret',
+          suggestion:
+            'set dashboard.api_secret and restart, then run helio baseline accept <tool> -c <config>',
+        },
+        403,
+      )
+    }
+    let parsed: unknown
+    try {
+      parsed = await c.req.json()
+    } catch {
+      return c.json({ error: 'Invalid JSON' }, 400)
+    }
+    const body = baselineAcceptBodySchema.safeParse(parsed)
+    if (!body.success) {
+      return c.json({ error: 'Validation error', details: formatZodErrors(body.error) }, 400)
+    }
+    const actor = body.data.actor ?? c.get('auth')?.mode ?? 'api'
+    const outcome = baselines.accept({
+      tool: body.data.tool,
+      ...(body.data.upstream === undefined ? {} : { upstream: body.data.upstream }),
+      actor,
+    })
+    if (!outcome.ok) {
+      const refusal = BASELINE_ACCEPT_REFUSALS[outcome.reason]
+      return c.json({ error: outcome.reason, suggestion: refusal.suggestion }, refusal.status)
+    }
+    return c.json(
+      {
+        accepted: true,
+        tool: outcome.tool,
+        upstream: outcome.upstream,
+        previous_fingerprint: outcome.previous_fingerprint,
+        fingerprint: outcome.fingerprint,
+        persisted: outcome.persisted,
+        audit_record_id: outcome.audit_record_id,
+      },
+      200,
+    )
   })
 
   // -------------------------------------------------------------------------

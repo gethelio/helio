@@ -16,7 +16,7 @@ import {
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createDashboardApp, createDashboardAppWithLifecycle } from './api.js'
-import type { DashboardAppDeps } from './api.js'
+import type { DashboardAppDeps, BaselineAcceptOutcome } from './api.js'
 import { DashboardEventBus, dashboardEventCallbacks } from './event-bus.js'
 import { AuditStore } from '../audit/store.js'
 import type { AuditRecord, AuditRecordInput } from '../audit/types.js'
@@ -3288,5 +3288,181 @@ describe('POST and DELETE /api/kill-switch (issue #402)', () => {
     expect(post.status).toBe(503)
     expect(await post.json()).toEqual({ error: 'kill switch is not available in this process' })
     expect((await request('DELETE', undefined, BEARER)).status).toBe(503)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/baselines/accept (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/baselines/accept (issue #60)', () => {
+  const ACCEPTED: BaselineAcceptOutcome = {
+    ok: true,
+    tool: 'send_email',
+    upstream: null,
+    previous_fingerprint: 'aaaa',
+    fingerprint: 'bbbb',
+    persisted: true,
+    audit_record_id: 'rec-1',
+  }
+
+  function acceptSetup(options?: {
+    apiSecret?: string
+    outcome?: BaselineAcceptOutcome
+    withoutBaselines?: boolean
+  }) {
+    const calls: Array<{ tool: string; upstream?: string; actor: string }> = []
+    const baselines = {
+      accept: (input: { tool: string; upstream?: string; actor: string }) => {
+        calls.push(input)
+        return options?.outcome ?? ACCEPTED
+      },
+    }
+    const auditStore = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const approvalQueue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels: new Map([['dashboard', new QueueChannel()]]),
+      queue: approvalQueue,
+    })
+    const app = createDashboardApp(
+      {
+        auditStore,
+        approvalRouter,
+        approvalQueue,
+        rateLimiter: new RateLimiter({ cleanupIntervalMs: 0 }),
+        spendLimiter: new SpendLimiter({ cleanupIntervalMs: 0 }),
+        evidenceStore: new EvidenceStore({ cleanupIntervalMs: 0 }),
+        eventBus: new DashboardEventBus(),
+        ...(options?.withoutBaselines ? {} : { baselines }),
+      },
+      { apiSecret: options?.apiSecret },
+    )
+    const request = (body?: unknown, headers?: Record<string, string>) =>
+      app.request('/api/baselines/accept', {
+        method: 'POST',
+        headers: {
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...headers,
+        },
+        ...(body === undefined
+          ? {}
+          : { body: typeof body === 'string' ? body : JSON.stringify(body) }),
+      })
+    return { app, request, calls }
+  }
+
+  const BEARER = { authorization: 'Bearer top-secret' }
+
+  it('answers 503 when the dependency is absent', async () => {
+    const { request } = acceptSetup({ apiSecret: 'top-secret', withoutBaselines: true })
+    const res = await request({ tool: 'send_email' }, BEARER)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'baselines are not available in this process' })
+  })
+
+  it('refuses 403 in open mode before anything else', async () => {
+    const { request, calls } = acceptSetup()
+    const res = await request({ tool: 'send_email' })
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({
+      error: 'baseline_accept_requires_secret',
+      suggestion:
+        'set dashboard.api_secret and restart, then run helio baseline accept <tool> -c <config>',
+    })
+    expect(calls).toEqual([])
+  })
+
+  it('requires credentials when a secret is set', async () => {
+    const { request, calls } = acceptSetup({ apiSecret: 'top-secret' })
+    expect((await request({ tool: 'send_email' })).status).toBe(401)
+    expect(calls).toEqual([])
+  })
+
+  it('requires the CSRF header on a cookie session', async () => {
+    const { app, request, calls } = acceptSetup({ apiSecret: 'top-secret' })
+    const login = await app.request('/api/auth/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secret: 'top-secret' }),
+    })
+    const cookie = login.headers.get('set-cookie') ?? ''
+    const loginBody = (await login.json()) as { csrf_token: string }
+    const refused = await request({ tool: 'send_email' }, { cookie })
+    expect(refused.status).toBe(403)
+    expect(calls).toEqual([])
+    const accepted = await request(
+      { tool: 'send_email' },
+      { cookie, 'x-helio-csrf': loginBody.csrf_token },
+    )
+    expect(accepted.status).toBe(200)
+    expect(calls).toEqual([{ tool: 'send_email', actor: 'session' }])
+  })
+
+  it('validates the body', async () => {
+    const { request, calls } = acceptSetup({ apiSecret: 'top-secret' })
+    expect((await request(undefined, BEARER)).status).toBe(400)
+    expect((await request('{not json', BEARER)).status).toBe(400)
+    expect((await request({}, BEARER)).status).toBe(400)
+    expect((await request({ tool: '' }, BEARER)).status).toBe(400)
+    expect((await request({ tool: 'send_email', upstream: '' }, BEARER)).status).toBe(400)
+    expect((await request({ tool: 'send_email', extra: 1 }, BEARER)).status).toBe(400)
+    expect(calls).toEqual([])
+  })
+
+  it('passes tool, upstream and the body actor through, else the credential mode', async () => {
+    const { request, calls } = acceptSetup({ apiSecret: 'top-secret' })
+    await request({ tool: 'send_email', upstream: 'mail', actor: 'oli' }, BEARER)
+    await request({ tool: 'send_email' }, BEARER)
+    expect(calls).toEqual([
+      { tool: 'send_email', upstream: 'mail', actor: 'oli' },
+      { tool: 'send_email', actor: 'bearer' },
+    ])
+  })
+
+  it('answers 200 with the acceptance', async () => {
+    const { request } = acceptSetup({ apiSecret: 'top-secret' })
+    const res = await request({ tool: 'send_email' }, BEARER)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      accepted: true,
+      tool: 'send_email',
+      upstream: null,
+      previous_fingerprint: 'aaaa',
+      fingerprint: 'bbbb',
+      persisted: true,
+      audit_record_id: 'rec-1',
+    })
+  })
+
+  it.each([
+    [
+      'unknown_upstream',
+      404,
+      'no upstream matches: pass --upstream <name> on a named-upstreams config, drop it on a single-upstream config',
+    ],
+    ['unknown_tool', 404, 'the tool is not in the current tools/list of that upstream'],
+    [
+      'door_not_primed',
+      409,
+      'the upstream has not primed yet; retry once "Annotation cache primed" has printed',
+    ],
+    ['not_drifted', 409, 'the tool is not drifted; nothing to accept'],
+    [
+      'ambiguous_definition',
+      409,
+      'the upstream lists the tool more than once; Helio cannot accept an ambiguous definition, fix the upstream',
+    ],
+  ] as const)('maps %s to %i', async (reason, status, suggestion) => {
+    const { request } = acceptSetup({ apiSecret: 'top-secret', outcome: { ok: false, reason } })
+    const res = await request({ tool: 'send_email' }, BEARER)
+    expect(res.status).toBe(status)
+    expect(await res.json()).toEqual({ error: reason, suggestion })
   })
 })

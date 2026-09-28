@@ -228,6 +228,8 @@ policies:
   flag_destructive: require_approval # optional: log | require_approval — applies to tools with destructiveHint
   dry_run: false # global: evaluate + audit but never block
   hot_reload: true # watch helio.yaml and reconcile policy on save (also: --no-hot-reload CLI flag)
+  on_tool_drift: block # block | require_approval | log
+  persist_baselines: true # keep drift baselines in the audit database across restarts (restart-required)
   rules:
     - name: 'rule-name'
       match: # all present conditions must match (AND)

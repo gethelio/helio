@@ -506,6 +506,78 @@ describe('startAnnotationPrimeLoop', () => {
 // state the startup surface line reads at print time
 // ---------------------------------------------------------------------------
 
+describe('the primed line under persisted baselines (issue #60)', () => {
+  let logged: string[] = []
+  const messages = (): string[] => logged
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    logged = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(String(args[0]))
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('prints the restored, new and drifted counts when the result carries them', async () => {
+    const forwarder = fakeForwarder([], {
+      success: true,
+      toolsCached: 7,
+      persisted: true,
+      restored: 5,
+      baselinedNow: 2,
+      drifted: 1,
+    })
+    const controller = await startAnnotationPrimeLoop(forwarder, undefined, 'payments')
+    expect(messages()).toContain(
+      '[helio][payments] Annotation cache primed: 7 tool definitions baselined for drift detection (5 restored, 2 new; 1 drifted since its baseline)',
+    )
+    controller.stop()
+  })
+
+  it('omits the drift clause when nothing is drifted', async () => {
+    const forwarder = fakeForwarder([], {
+      success: true,
+      toolsCached: 2,
+      persisted: true,
+      restored: 0,
+      baselinedNow: 2,
+      drifted: 0,
+    })
+    const controller = await startAnnotationPrimeLoop(forwarder, undefined)
+    expect(messages()).toContain(
+      '[helio] Annotation cache primed: 2 tool definitions baselined for drift detection (0 restored, 2 new)',
+    )
+    controller.stop()
+  })
+
+  it('prints the memory-only line byte for byte when the result carries no counts', async () => {
+    const forwarder = fakeForwarder([], ok(2))
+    const controller = await startAnnotationPrimeLoop(forwarder, undefined)
+    expect(messages()).toContain(
+      '[helio] Annotation cache primed: 2 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines \u2014 review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+
+  it('prints the memory-only line after a retry too', async () => {
+    const forwarder = fakeForwarder([fail('down')], ok(3))
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    const startPromise = startAnnotationPrimeLoop(forwarder, undefined)
+    await vi.advanceTimersByTimeAsync(INITIAL_WAIT_MS)
+    const controller = await startPromise
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(messages()).toContain(
+      '[helio] Annotation cache primed after retry 1: 3 tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines \u2014 review tool_drift audit records before restarting)',
+    )
+    controller.stop()
+  })
+})
+
 describe('AnnotationPrimeController.primed and lastFailure', () => {
   let logged: string[] = []
 

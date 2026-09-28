@@ -3,9 +3,9 @@ import { Command } from 'commander'
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import type { Stats } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { homedir, userInfo } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { VERSION } from './version.js'
 import {
@@ -118,6 +118,10 @@ import {
   compileBudgets,
 } from './budget/index.js'
 import type { CompiledBudget } from './budget/index.js'
+import { ToolBaselineStore } from './baseline/store.js'
+import type { BaselinePersistence } from './baseline/store.js'
+import { postBaselineAccept } from './baseline/client.js'
+import { helioLogTag } from './util/log-label.js'
 import { parseDuration } from './config/schema.js'
 import {
   createDashboardAppWithLifecycle,
@@ -531,11 +535,22 @@ async function governUpstream(options: {
   policy: CompiledPolicy
   governance: GovernedForwarderOptions
   upstreamName?: string
+  /** The audit database path, named on the restore line. */
+  auditPath: string
 }): Promise<UpstreamStack> {
   const governedForwarder = new GovernedForwarder(options.forwarder, options.policy, {
     ...options.governance,
     upstreamName: options.upstreamName,
   })
+  // Persisted baselines (issue #60) load before the prime loop starts, so
+  // the first live list is compared against them. Zero without a store.
+  const restored = governedForwarder.restoreBaselines()
+  if (restored > 0) {
+    console.error(
+      `${helioLogTag(options.upstreamName)} Tool baselines restored: ${String(restored)} for ` +
+        `${options.upstreamName ?? 'the upstream'} from ${basename(options.auditPath)}`,
+    )
+  }
   const annotationPrime = await startAnnotationPrimeLoop(
     governedForwarder,
     options.policy.toolRevalidation,
@@ -689,6 +704,14 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   })
   auditStore.runRetentionSweep()
 
+  // Tool baselines (issue #60): the same handle, constructed only under
+  // `policies.persist_baselines` (undefined reads as true), so a `false` run
+  // creates no table and every door keeps memory-only baselines as before.
+  const persistBaselines = config.policies.persist_baselines ?? true
+  const baselineStore: BaselinePersistence | undefined = persistBaselines
+    ? new ToolBaselineStore({ database: auditStore.database })
+    : undefined
+
   const auditWriter = new AuditWriter({
     store: auditStore,
     onPersist: cbs.onPersist,
@@ -821,6 +844,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
     budgetEngine,
     session,
     killSwitch,
+    ...(baselineStore ? { baselineStore } : {}),
   }
   const stacks: Array<{ name: string | undefined } & UpstreamStack> = []
   for (const door of doors) {
@@ -831,6 +855,7 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         policy,
         governance,
         upstreamName: door.name,
+        auditPath: config.audit.path,
       })),
     })
   }
@@ -1054,6 +1079,19 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
         // POST and DELETE /api/kill-switch (issue #402): the state and the
         // marker path beside this config.
         killSwitch: { state: killSwitch, markerPath },
+        // POST /api/baselines/accept (issue #60): resolve the door by name.
+        // A named config needs the name; a singular config refuses any.
+        baselines: {
+          accept: ({ tool, upstream, actor }) => {
+            const stack = isNamedConfig(config)
+              ? stacks.find((entry) => entry.name !== undefined && entry.name === upstream)
+              : upstream === undefined
+                ? stacks[0]
+                : undefined
+            if (stack === undefined) return { ok: false, reason: 'unknown_upstream' }
+            return stack.governedForwarder.acceptBaseline(tool, actor)
+          },
+        },
       },
       {
         apiSecret: config.dashboard.api_secret,
@@ -2341,6 +2379,111 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
  * Anything else rethrows into the unhandledRejection crash path.
  */
 // ---------------------------------------------------------------------------
+// helio baseline accept (issue #60)
+// ---------------------------------------------------------------------------
+
+interface BaselineAcceptOptions {
+  config: string
+  upstream?: string
+}
+
+/** The first eight hex characters of the fingerprint's digest, for the operator line. */
+function shortFingerprint(fingerprint: string): string {
+  return createHash('sha256').update(fingerprint).digest('hex').slice(0, 8)
+}
+
+/**
+ * Accept a drifted tool's current definition on the running proxy: load the
+ * config (an unset secret placeholder names this command), refuse a door
+ * argument the config cannot satisfy before any socket, then one POST to
+ * the dashboard API. Every refusal is one `Error:` line and exit 1.
+ */
+async function baselineAcceptCommand(tool: string, opts: BaselineAcceptOptions): Promise<void> {
+  const config = await loadConfigForReader(opts.config, {
+    command: 'helio baseline accept',
+    presentsSecret: true,
+  })
+  if (isNamedConfig(config)) {
+    if (opts.upstream === undefined) {
+      const names = config.upstreams.map((entry) => entry.name).join(', ')
+      throw new StartupError(
+        `Error: this config names its upstreams; pass --upstream <name> (one of: ${names})`,
+      )
+    }
+  } else if (opts.upstream !== undefined) {
+    throw new StartupError('Error: this config has a single upstream; drop --upstream')
+  }
+  const door = opts.upstream ?? 'the upstream'
+
+  const result = await postBaselineAccept(config, opts.config, {
+    tool,
+    ...(opts.upstream === undefined ? {} : { upstream: opts.upstream }),
+    actor: currentUserName(),
+  })
+  if (!result.ok) {
+    const { base, source, message } = result.detail
+    switch (result.code) {
+      case 'dashboard_disabled':
+        throw new StartupError(
+          `Error: helio baseline accept reads the running proxy through the dashboard API, and ` +
+            `dashboard.enabled is false in ${opts.config}. Enable the dashboard, set ` +
+            'dashboard.api_secret and restart helio start.',
+        )
+      case 'secret_is_digest':
+        throw new StartupError(
+          `Error: the dashboard secret from ${source ?? 'the config'} is a sha256: digest; present the ` +
+            `secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
+        )
+      case 'no_proxy_answered':
+        throw new StartupError(
+          `Error: cannot reach the Helio dashboard API at ${base} (is helio start running with dashboard.enabled: true?)`,
+        )
+      case 'secret_refused':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} refused the secret from ${source ?? 'no source (none was found)'}; ` +
+            `set HELIO_DASHBOARD_SECRET to the secret helio init printed and rerun`,
+        )
+      case 'baseline_accept_requires_secret':
+        throw new StartupError(
+          `Error: the running proxy's dashboard is in open mode (no dashboard.api_secret), and an ` +
+            'acceptance needs a secret; set dashboard.api_secret and restart helio start',
+        )
+      case 'unknown_upstream':
+        throw new StartupError(
+          opts.upstream === undefined
+            ? 'Error: the running proxy is not a single-upstream process, so it serves no door ' +
+                `for this config; ${result.suggestion}`
+            : `Error: no upstream named "${opts.upstream}" is served by the running proxy; ${result.suggestion}`,
+        )
+      case 'unknown_tool':
+        throw new StartupError(`Error: no tool "${tool}" in the current tools/list of ${door}`)
+      case 'door_not_primed':
+        throw new StartupError(
+          `Error: ${door} has not primed yet; retry once "Annotation cache primed" has printed`,
+        )
+      case 'not_drifted':
+        throw new StartupError(`Error: "${tool}" is not drifted on ${door}; nothing to accept`)
+      case 'ambiguous_definition':
+        throw new StartupError(
+          `Error: "${tool}" is listed more than once by ${door}; Helio cannot accept an ambiguous ` +
+            'definition, fix the upstream',
+        )
+      case 'api_error':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} answered: ${message ?? 'HTTP error'}`,
+        )
+    }
+  }
+  const { accepted } = result
+  const posture = accepted.persisted ? 'persisted' : 'memory only, persist_baselines is false'
+  console.error(
+    `Accepted the current definition of "${accepted.tool}" on ${door} as its baseline ` +
+      `(was ${shortFingerprint(accepted.previous_fingerprint)}, now ` +
+      `${shortFingerprint(accepted.fingerprint)}; ${posture})`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // helio kill / helio resume (issue #402)
 // ---------------------------------------------------------------------------
 
@@ -2571,6 +2714,20 @@ policyCommand
   .option('--format <format>', 'Output format: text or json', 'text')
   .option('--window <duration>', 'Persisted window, 1m to 30d', DEFAULT_STATUS_WINDOW)
   .action((opts: PolicyStatusOptions) => policyStatusCommand(opts).catch(exitOnStartupError))
+
+const baselineCommand = program
+  .command('baseline')
+  .description('Inspect and accept tool definition baselines of the running proxy')
+baselineCommand
+  .command('accept <tool>')
+  .description(
+    "Accept a drifted tool's current definition as its baseline on the running proxy, lifting the block",
+  )
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option('--upstream <name>', 'The upstream entry the tool belongs to (named-upstreams configs)')
+  .action((tool: string, opts: BaselineAcceptOptions) =>
+    baselineAcceptCommand(tool, opts).catch(exitOnStartupError),
+  )
 
 program
   .command('kill')

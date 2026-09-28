@@ -92,6 +92,30 @@ describe('diffReloadBoundary', () => {
     expect(diff.restartRequiredPaths).toEqual(['policies.hot_reload'])
   })
 
+  it('treats policies.persist_baselines undefined and true as equivalent', () => {
+    const previous = minimalConfig()
+    const next = minimalConfig({
+      policies: {
+        persist_baselines: true,
+      },
+    })
+
+    const diff = diffReloadBoundary(previous, next)
+    expect(diff.restartRequiredPaths).toEqual([])
+  })
+
+  it('requires restart when policies.persist_baselines effective value changes', () => {
+    const previous = minimalConfig()
+    const next = minimalConfig({
+      policies: {
+        persist_baselines: false,
+      },
+    })
+
+    const diff = diffReloadBoundary(previous, next)
+    expect(diff.restartRequiredPaths).toEqual(['policies.persist_baselines'])
+  })
+
   it('requires restart when environment changes', () => {
     const previous = minimalConfig({
       environment: 'production',

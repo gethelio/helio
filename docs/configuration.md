@@ -231,8 +231,10 @@ At startup, Helio sends a synthetic upstream `tools/list` request to warm the to
 If priming succeeds quickly, startup logs:
 
 ```
-[helio] Annotation cache primed: <n> tool definitions baselined for drift detection (baselines are per-process; a restart re-baselines — review tool_drift audit records before restarting)
+[helio] Annotation cache primed: <n> tool definitions baselined for drift detection (<r> restored, <k> new)
 ```
+
+`restored` counts baselines reloaded from the audit database and confirmed by this list, `new` the tools baselined for the first time; when a restored definition no longer matches, the line ends `; <d> drifted since its baseline` and a drift line above it names the tool (see [Baselines across restarts](./policies.md#baselines-across-restarts)). Under `policies.persist_baselines: false` the parenthetical reads `baselines are per-process; a restart re-baselines` instead. When rows were restored, `[helio] Tool baselines restored: <n> for <door> from <audit file>` prints before the prime.
 
 Once every door is primed (or its initial attempt has failed or timed out), the posture block after the listening line adds two lines describing what was primed and what the loaded rules cover:
 
@@ -500,7 +502,8 @@ Governance rules for tool calls. See [Policy Guide](./policies.md) for full docu
 | ------------------- | ------- | -------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `default`           | string  | No       | `allow`               | Action when no rule matches: `allow` or `deny`.                                                                                                                                                                      |
 | `flag_destructive`  | string  | No       | —                     | Auto-flag unmatched destructive tools: `log` (audit flag only) or `require_approval` (escalate to approval).                                                                                                         |
-| `on_tool_drift`     | string  | No       | `block`               | Response when a tool's definition changes after baseline: `block` (deny until restart), `require_approval` (escalate), or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift).      |
+| `on_tool_drift`     | string  | No       | `block`               | Response when a tool's definition changes after baseline: `block` (deny until accepted or reverted), `require_approval`, or `log` (audit only). See [Tool definition drift](./policies.md#tool-definition-drift).    |
+| `persist_baselines` | boolean | No       | `true`                | Keep drift baselines in the audit database across restarts; `false` keeps them in memory only (a restart re-baselines). Restart-required. See [Baselines across restarts](./policies.md#baselines-across-restarts).  |
 | `tool_revalidation` | object  | No       | enabled-with-defaults | Proxy-scheduled `tools/list` revalidation and downward-only `ttlMs` clamping. Omit to use defaults (enabled, 5m interval, 5m max TTL). See below.                                                                    |
 | `dry_run`           | boolean | No       | `false`               | Enable global dry-run mode. No requests are forwarded to upstream.                                                                                                                                                   |
 | `hot_reload`        | boolean | No       | `true`                | Watch the config file for changes and reconcile policy live. Set to `false` to move config changes to the next restart (see below); to refuse a changed file instead, see [Pinning the config](#pinning-the-config). |
@@ -1102,6 +1105,7 @@ Compiled policy behavior and budgets are hot-reloadable. Startup-bound sections 
 | `policies.dry_run`             | Yes              | Takes effect immediately on the next request.                                                                                          |
 | `policies.install`             | Yes              | Recompiled with the rules; applies to the next `/install-scan` on the SDK sideband.                                                    |
 | `policies.hot_reload`          | No               | Controls watcher startup behavior; changing it on a running process requires restart.                                                  |
+| `policies.persist_baselines`   | No               | Decides at startup whether the baseline store exists and a restore ran; changing it on a running process requires restart.             |
 | `environment`                  | No               | Runtime deployment identity for matching/audit attribution; changing it requires restart.                                              |
 | `session.*`                    | No               | Identity resolution is compiled into the transports at startup; changing it requires restart.                                          |
 | `upstream.*`                   | No               | Upstream transport/client initialized at startup.                                                                                      |
