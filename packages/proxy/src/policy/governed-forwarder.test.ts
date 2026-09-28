@@ -7672,6 +7672,288 @@ describe('tool definition drift — call gating', () => {
 })
 
 // ---------------------------------------------------------------------------
+// drift context on approval tickets (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('drift context on approval tickets (issue #60)', () => {
+  const v1 = { destructiveHint: false }
+  const v2 = { destructiveHint: true }
+  const v3 = { destructiveHint: true, readOnlyHint: false }
+  const seenChange = { aspect: 'annotations', baseline: v1, current: v2 }
+
+  /** A forwarder whose first two tools/list answers drift `tool`. */
+  function driftedInner(tool: string, ...laterLists: Array<Record<string, boolean>>) {
+    const inner = mockForwarder()
+    inner.forward
+      .mockResolvedValueOnce(toolsListResult([{ name: tool, annotations: v1 }]))
+      .mockResolvedValueOnce(toolsListResult([{ name: tool, annotations: v2 }]))
+    for (const annotations of laterLists) {
+      inner.forward.mockResolvedValueOnce(toolsListResult([{ name: tool, annotations }]))
+    }
+    return inner
+  }
+
+  function spyRouter() {
+    const submit = vi.fn().mockResolvedValue({ status: 'approved', resolvedBy: 'tester' })
+    const approvalRouter = { submit, defaultOnTimeout: 'deny' } as unknown as ApprovalRouter
+    return { submit, approvalRouter }
+  }
+
+  function submittedParams(submit: ReturnType<typeof vi.fn>, call = 0) {
+    return submit.mock.calls[call]?.[0] as Record<string, unknown>
+  }
+
+  const smallBudget = {
+    name: 'small',
+    limit: 10,
+    currency: 'USD',
+    window: '24h',
+    key: 'global' as const,
+    on_exceed: 'require_approval' as const,
+    contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+  }
+
+  function realApproval() {
+    const queue = new ApprovalQueue({ cleanupIntervalMs: 0 })
+    const approvalRouter = new ApprovalRouter({
+      defaultTimeoutMs: 300_000,
+      defaultOnTimeout: 'deny',
+      channels: new Map<string, ApprovalChannel>([['dashboard', new QueueChannel()]]),
+      queue,
+    })
+    return { queue, approvalRouter }
+  }
+
+  async function nextPending(queue: ApprovalQueue, notId?: string) {
+    await vi.waitFor(
+      () => {
+        expect(queue.listPending().some((ticket) => ticket.id !== notId)).toBe(true)
+      },
+      { timeout: 5_000 },
+    )
+    return queue.listPending().find((ticket) => ticket.id !== notId) as NonNullable<
+      ReturnType<ApprovalQueue['get']>
+    >
+  }
+
+  it('the drift gate ticket carries the changes with mode require_approval', async () => {
+    const inner = driftedInner('send_email')
+    const { submit, approvalRouter } = spyRouter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsCallRequest('send_email'))
+
+    expect(submittedParams(submit)['tool_drift']).toEqual({
+      changes: [seenChange],
+      mode: 'require_approval',
+    })
+  })
+
+  it('a require_approval rule on a drifted tool under log carries mode log', async () => {
+    const inner = driftedInner('send_email')
+    const { submit, approvalRouter } = spyRouter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          { name: 'approve-email', match: { tool: 'send_email' }, action: 'require_approval' },
+        ],
+        on_tool_drift: 'log',
+      }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsCallRequest('send_email'))
+
+    const params = submittedParams(submit)
+    expect((params['matched_rule'] as { name: string }).name).toBe('approve-email')
+    expect(params['tool_drift']).toEqual({ changes: [seenChange], mode: 'log' })
+  })
+
+  it('a budget break-glass ticket on a drifted tool under log carries mode log', async () => {
+    const inner = driftedInner('stripe_charge')
+    const { submit, approvalRouter } = spyRouter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'log' }),
+      {
+        approvalRouter,
+        budgetEngine: new BudgetEngine({
+          budgets: compileBudgets([smallBudget]),
+          cleanupIntervalMs: 0,
+        }),
+      },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+
+    expect(submit).toHaveBeenCalledTimes(1)
+    const params = submittedParams(submit)
+    expect(params['breached_budgets']).toHaveLength(1)
+    expect(params['tool_drift']).toEqual({ changes: [seenChange], mode: 'log' })
+  })
+
+  it('a flag_destructive escalation on a drifted tool under log carries mode log and no rule', async () => {
+    const inner = driftedInner('t')
+    const { submit, approvalRouter } = spyRouter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [],
+        on_tool_drift: 'log',
+        flag_destructive: 'require_approval',
+      }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+    await governed.forward(toolsCallRequest('t'))
+
+    const params = submittedParams(submit)
+    expect(params['matched_rule']).toBeUndefined()
+    expect(params['tool_drift']).toEqual({ changes: [seenChange], mode: 'log' })
+  })
+
+  it('a non-drifted approval carries no tool_drift key', async () => {
+    const inner = mockForwarder()
+    inner.forward.mockResolvedValueOnce(toolsListResult([{ name: 'send_email', annotations: v1 }]))
+    const { submit, approvalRouter } = spyRouter()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [
+          { name: 'approve-email', match: { tool: 'send_email' }, action: 'require_approval' },
+        ],
+        on_tool_drift: 'require_approval',
+      }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsCallRequest('send_email'))
+
+    expect(submit).toHaveBeenCalledTimes(1)
+    expect('tool_drift' in submittedParams(submit)).toBe(false)
+  })
+
+  it('the budget ticket after a held rule ticket carries the event the decision saw, not a later list', async () => {
+    const inner = driftedInner('stripe_charge', v3)
+    const { queue, approvalRouter } = realApproval()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({
+        default: 'allow',
+        rules: [{ name: 'approve-pay', match: { tool: 'stripe_*' }, action: 'require_approval' }],
+        on_tool_drift: 'log',
+      }),
+      {
+        approvalRouter,
+        budgetEngine: new BudgetEngine({
+          budgets: compileBudgets([smallBudget]),
+          cleanupIntervalMs: 0,
+        }),
+      },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+
+    const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+    const ruleTicket = await nextPending(queue)
+    expect(ruleTicket.matched_rule).toBe('approve-pay')
+    expect(ruleTicket.breached_budgets).toBeUndefined()
+    expect(ruleTicket.tool_drift).toEqual({ changes: [seenChange], mode: 'log' })
+
+    // A third list lands while the rule ticket is held and changes the drift.
+    await governed.forward(toolsListRequest(3))
+    approvalRouter.approve(ruleTicket.id, 'alice')
+
+    const budgetTicket = await nextPending(queue, ruleTicket.id)
+    expect(budgetTicket.matched_rule).toBe('approve-pay')
+    expect(budgetTicket.breached_budgets).toHaveLength(1)
+    expect(budgetTicket.tool_drift).toEqual({ changes: [seenChange], mode: 'log' })
+
+    approvalRouter.approve(budgetTicket.id, 'alice')
+    await pending
+    approvalRouter.close()
+    queue.close()
+  })
+
+  it('the budget ticket after an approved gate ticket carries mode require_approval', async () => {
+    const inner = driftedInner('stripe_charge')
+    const { queue, approvalRouter } = realApproval()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      {
+        approvalRouter,
+        budgetEngine: new BudgetEngine({
+          budgets: compileBudgets([smallBudget]),
+          cleanupIntervalMs: 0,
+        }),
+      },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+
+    const pending = governed.forward(toolsCallRequest('stripe_charge', { amount: 20 }))
+    const gateTicket = await nextPending(queue)
+    expect(gateTicket.matched_rule).toBeNull()
+    expect(gateTicket.breached_budgets).toBeUndefined()
+    expect(gateTicket.tool_drift).toEqual({ changes: [seenChange], mode: 'require_approval' })
+    // Approving the gate forwards nothing yet: the budget gate still holds.
+    approvalRouter.approve(gateTicket.id, 'alice')
+
+    const budgetTicket = await nextPending(queue, gateTicket.id)
+    expect(inner.forward).toHaveBeenCalledTimes(2)
+    expect(budgetTicket.matched_rule).toBeNull()
+    expect(budgetTicket.breached_budgets).toHaveLength(1)
+    expect(budgetTicket.tool_drift).toEqual({ changes: [seenChange], mode: 'require_approval' })
+
+    approvalRouter.approve(budgetTicket.id, 'alice')
+    await pending
+    expect(inner.forward).toHaveBeenCalledTimes(3)
+    approvalRouter.close()
+    queue.close()
+  })
+
+  it('the ticket holds a snapshot: mutating it leaves the next decision unchanged', async () => {
+    const inner = driftedInner('send_email')
+    const { queue, approvalRouter } = realApproval()
+    const governed = new GovernedForwarder(
+      inner,
+      compile({ default: 'allow', rules: [], on_tool_drift: 'require_approval' }),
+      { approvalRouter },
+    )
+    await governed.forward(toolsListRequest())
+    await governed.forward(toolsListRequest(2))
+
+    const first = governed.forward(toolsCallRequest('send_email'))
+    const ticket = await nextPending(queue)
+    const change = ticket.tool_drift?.changes[0] as { current: Record<string, unknown> }
+    change.current['destructiveHint'] = 'rewritten'
+    approvalRouter.approve(ticket.id, 'alice')
+    await first
+
+    const second = governed.forward(toolsCallRequest('send_email', {}, 2))
+    const again = await nextPending(queue, ticket.id)
+    expect(again.tool_drift).toEqual({ changes: [seenChange], mode: 'require_approval' })
+    approvalRouter.approve(again.id, 'alice')
+    await second
+    approvalRouter.close()
+    queue.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // snapshotSurface (issue #396): the door's primed surface as snapshots
 // ---------------------------------------------------------------------------
 

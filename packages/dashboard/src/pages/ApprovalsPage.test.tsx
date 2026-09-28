@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { ApprovalsPage } from './ApprovalsPage'
 import type { ApprovalTicket } from '../types'
@@ -210,6 +210,254 @@ describe('ApprovalsPage', () => {
       expect(document.body.textContent).toContain('USD')
       expect(document.body.textContent).toContain('+5')
     })
+  })
+
+  // -------------------------------------------------------------------------
+  // definition drift context (issue #60)
+  // -------------------------------------------------------------------------
+
+  const driftChanges = [
+    {
+      aspect: 'annotations',
+      baseline: { destructiveHint: false },
+      current: { destructiveHint: true },
+    },
+    { aspect: 'description', baseline: 'Send an email', current: 'Send and delete the draft' },
+  ]
+
+  /** A 30-property schema whose pretty form runs past 4,096 characters. */
+  function bigSchema(extra?: Record<string, unknown>) {
+    const properties: Record<string, unknown> = {}
+    for (let i = 0; i < 30; i += 1) {
+      properties[`field_${String(i).padStart(2, '0')}`] = {
+        type: 'string',
+        description: `Field number ${String(i)} of the schema, described at some length for size.`,
+        minLength: 1,
+        maxLength: 256,
+      }
+    }
+    return { type: 'object', properties: { ...properties, ...extra }, required: ['field_00'] }
+  }
+
+  async function expandPending(ticket: ApprovalTicket) {
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [ticket], total: 1, limit: 1000, offset: 0 }
+          : { data: [], total: 0, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText(ticket.tool_name)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(ticket.tool_name))
+  }
+
+  const preTexts = () => Array.from(document.querySelectorAll('pre')).map((el) => el.textContent)
+
+  it('renders the drift section on a pending drifted ticket (issue #60)', async () => {
+    await expandPending({
+      ...pendingTicket,
+      id: 'ticket-drift',
+      tool_name: 'send_email',
+      matched_rule: null,
+      tool_drift: { changes: driftChanges, mode: 'require_approval' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Definition Drift')).toBeTruthy()
+    })
+    expect(screen.getAllByText('annotations').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('description').length).toBeGreaterThan(0)
+    const text = document.body.textContent
+    expect(text).toContain(`${String('{"destructiveHint":false}'.length)} B`)
+    expect(text).toContain(`${String('"Send and delete the draft"'.length)} B`)
+    expect(preTexts().join('\n')).toContain('"destructiveHint": true')
+    expect(preTexts().join('\n')).toContain('"Send and delete the draft"')
+    expect(text).toContain(
+      "The tool's definition changed after Helio baselined it and this hold is that drift",
+    )
+  })
+
+  it('renders the drift section on a resolved drifted ticket (issue #60)', async () => {
+    const resolvedTicket: ApprovalTicket = {
+      ...pendingTicket,
+      id: 'ticket-drift-resolved',
+      tool_name: 'send_email',
+      status: 'approved',
+      resolved_at: new Date().toISOString(),
+      resolved_by: 'alice',
+      tool_drift: { changes: driftChanges, mode: 'log' },
+    }
+    mockFetchApprovals.mockImplementation((status: unknown) =>
+      Promise.resolve(
+        status === 'pending'
+          ? { data: [], total: 0, limit: 1000, offset: 0 }
+          : { data: [resolvedTicket], total: 1, limit: 1000, offset: 0 },
+      ),
+    )
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText(/Resolved/)).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText(/Resolved/))
+    await waitFor(() => {
+      expect(screen.getByText('send_email')).toBeTruthy()
+    })
+    fireEvent.click(screen.getByText('send_email'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Definition Drift')).toBeTruthy()
+    })
+    expect(preTexts().join('\n')).toContain('"Send an email"')
+    expect(document.body.textContent).toContain(
+      'this hold is the rule on the Matched Rule line, the drift is context',
+    )
+  })
+
+  it('opens both panes at the same character when the difference sits past the cap (issue #60)', async () => {
+    const baseline = bigSchema()
+    const current = bigSchema({ force_delete: { type: 'boolean' } })
+    expect(JSON.stringify(baseline, null, 2).length).toBeGreaterThan(4_096)
+    await expandPending({
+      ...pendingTicket,
+      id: 'ticket-schema',
+      tool_name: 'delete_record',
+      tool_drift: { changes: [{ aspect: 'inputSchema', baseline, current }], mode: 'log' },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Definition Drift')).toBeTruthy()
+    })
+    const text = document.body.textContent
+    expect(text).toMatch(/the first difference is at character \d+/)
+    const panes = preTexts().filter((t) => t.startsWith('\u2026'))
+    expect(panes).toHaveLength(2)
+    expect(panes[0]?.slice(0, 40)).toBe(panes[1]?.slice(0, 40))
+    expect(panes[1]).toContain('force_delete')
+    expect(panes[0]).not.toContain('force_delete')
+  })
+
+  it('renders an absent side as absent and a null side as null without throwing (issue #60)', async () => {
+    // A fetched change with no `current` key and one with an in-memory undefined baseline.
+    const fetched = JSON.parse(
+      JSON.stringify({ aspect: 'description', baseline: 'was' }),
+    ) as Record<string, unknown>
+    await expandPending({
+      ...pendingTicket,
+      id: 'ticket-absent',
+      tool_name: 'delete_record',
+      tool_drift: {
+        changes: [
+          { aspect: 'inputSchema', baseline: undefined, current: { type: 'object' } },
+          fetched as { aspect: string },
+          { aspect: 'title', baseline: null, current: 'now' },
+        ],
+        mode: 'log',
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Definition Drift')).toBeTruthy()
+    })
+    expect(screen.getAllByText(/^(Baseline|Current): absent$/)).toHaveLength(2)
+    expect(preTexts()).toContain('null')
+    expect(preTexts().join('\n')).toContain('"was"')
+  })
+
+  it('captions the hold from the ticket fields on every shape (issue #60)', async () => {
+    const breached = [
+      { name: 'small', limit: 10, spent: 0, attempted_amount: 20, currency: 'USD', window: '24h' },
+    ]
+    const base = {
+      ...pendingTicket,
+      tool_name: 'stripe_charge',
+      matched_rule: null,
+      tool_drift: { changes: driftChanges, mode: 'log' as const },
+    }
+    const shapes: Array<{ ticket: ApprovalTicket; caption: string }> = [
+      {
+        ticket: { ...base, id: 's1', breached_budgets: breached, matched_rule: 'allow-pay' },
+        caption: 'this hold is the overage in Breached Budgets, the drift is context',
+      },
+      {
+        ticket: {
+          ...base,
+          id: 's2',
+          breached_budgets: breached,
+          tool_drift: { changes: driftChanges, mode: 'require_approval' },
+        },
+        caption: 'this hold is the overage in Breached Budgets, the drift is context',
+      },
+      {
+        ticket: { ...base, id: 's3', matched_rule: 'approve-pay' },
+        caption: 'this hold is the rule on the Matched Rule line, the drift is context',
+      },
+      {
+        ticket: {
+          ...base,
+          id: 's4',
+          tool_drift: { changes: driftChanges, mode: 'require_approval' },
+        },
+        caption:
+          "The tool's definition changed after Helio baselined it and this hold is that drift",
+      },
+      {
+        ticket: { ...base, id: 's5' },
+        caption: 'this hold is flag_destructive, the drift is context',
+      },
+      {
+        ticket: {
+          ...base,
+          id: 's6',
+          channel_name: 'native:openclaw',
+          breached_budgets: breached,
+          matched_rule: 'allow-pay',
+        },
+        caption:
+          'this approval covers the overage in Breached Budgets; the Matched Rule line is the rule that matched; the drift is context',
+      },
+      {
+        ticket: {
+          ...base,
+          id: 's7',
+          channel_name: 'native:openclaw',
+          breached_budgets: breached,
+          tool_drift: { changes: driftChanges, mode: 'require_approval' },
+        },
+        caption: 'this approval covers the drift and the overage in Breached Budgets',
+      },
+      {
+        ticket: { ...base, id: 's8', channel_name: 'native:openclaw', breached_budgets: breached },
+        caption: 'this hold is the overage in Breached Budgets; the drift is context',
+      },
+    ]
+    for (const { ticket, caption } of shapes) {
+      await expandPending(ticket)
+      await waitFor(() => {
+        expect(screen.getByText('Definition Drift')).toBeTruthy()
+      })
+      expect(document.body.textContent).toContain(caption)
+      cleanup()
+    }
+    // The drift caption ends at the drift: nothing about what approving does next.
+    const s4 = shapes[3]?.ticket as ApprovalTicket
+    await expandPending(s4)
+    await waitFor(() => {
+      expect(screen.getByText('Definition Drift')).toBeTruthy()
+    })
+    expect(document.body.textContent).toMatch(
+      /and this hold is that drift\s*(annotations|description)/,
+    )
+    cleanup()
+
+    // Absent on a plain ticket.
+    await expandPending({ ...pendingTicket, id: 'plain', tool_name: 'delete_record' })
+    await waitFor(() => {
+      expect(screen.getByText('Input')).toBeTruthy()
+    })
+    expect(screen.queryByText('Definition Drift')).toBeNull()
   })
 
   it('renders breached budget context on a resolved break-glass ticket (issue #14)', async () => {

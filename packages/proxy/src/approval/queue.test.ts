@@ -129,6 +129,47 @@ describe('ApprovalQueue', () => {
       const ticket = queue.add(ticketParams())
       expect('breached_budgets' in mustGet(queue, ticket.id)).toBe(false)
     })
+
+    it('stores the drift context on a drift-escalated ticket (issue #60)', () => {
+      const { queue } = createQueue()
+      const changes = [
+        { aspect: 'description' as const, baseline: 'Send an email', current: 'Send and delete' },
+        {
+          aspect: 'annotations' as const,
+          baseline: { destructiveHint: false },
+          current: { destructiveHint: true },
+        },
+      ]
+      const ticket = queue.add(ticketParams({ tool_drift: { changes, mode: 'require_approval' } }))
+
+      expect(mustGet(queue, ticket.id).tool_drift).toEqual({ changes, mode: 'require_approval' })
+    })
+
+    it('leaves tool_drift absent on plain tickets and on an empty change list', () => {
+      const { queue } = createQueue()
+      const plain = queue.add(ticketParams())
+      expect('tool_drift' in mustGet(queue, plain.id)).toBe(false)
+
+      const empty = queue.add(ticketParams({ tool_drift: { changes: [], mode: 'log' } }))
+      expect('tool_drift' in mustGet(queue, empty.id)).toBe(false)
+    })
+
+    it('stores a snapshot of the changes, not the caller-owned objects', () => {
+      const { queue } = createQueue()
+      const current: Record<string, unknown> = { destructiveHint: true }
+      const changes: Array<{ aspect: 'annotations'; baseline: unknown; current: unknown }> = [
+        { aspect: 'annotations', baseline: { destructiveHint: false }, current },
+      ]
+      const ticket = queue.add(ticketParams({ tool_drift: { changes, mode: 'log' } }))
+
+      current['destructiveHint'] = false
+      changes.push({ aspect: 'annotations', baseline: {}, current: {} })
+
+      const stored = mustGet(queue, ticket.id).tool_drift
+      expect(stored?.changes).toHaveLength(1)
+      expect(stored?.changes[0]?.current).toEqual({ destructiveHint: true })
+      expect(stored?.changes[0]?.current).not.toBe(current)
+    })
   })
 
   // -----------------------------------------------------------------------

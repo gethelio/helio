@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  driftValueViews,
   formatCountdown,
   formatLabel,
   formatLatency,
@@ -96,6 +97,64 @@ describe('truncateForDisplay', () => {
 
   it('truncates a string one character over the custom max', () => {
     expect(truncateForDisplay('abcdef', 5)).toBe('abcde\u2026')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// driftValueViews (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('driftValueViews', () => {
+  it('renders an absent side as the word absent with no length, before any stringify', () => {
+    const views = driftValueViews(undefined, { type: 'object' })
+    expect(views.baseline).toEqual({ absent: true, text: 'absent', truncated: false, bytes: 0 })
+    expect(views.current.absent).toBe(false)
+    expect(views.current.text).toBe('{\n  "type": "object"\n}')
+    expect(views.current.bytes).toBe('{"type":"object"}'.length)
+    expect(views.note).toBeUndefined()
+  })
+
+  it('renders a null side as a present value', () => {
+    const views = driftValueViews(null, 'now')
+    expect(views.baseline).toEqual({ absent: false, text: 'null', truncated: false, bytes: 4 })
+    expect(views.current.text).toBe('"now"')
+  })
+
+  it('shows each side whole when they differ inside the first 4,096 characters', () => {
+    const views = driftValueViews({ a: 1 }, { a: 2 })
+    expect(views.baseline.text).toBe('{\n  "a": 1\n}')
+    expect(views.current.text).toBe('{\n  "a": 2\n}')
+    expect(views.baseline.truncated).toBe(false)
+    expect(views.note).toBeUndefined()
+  })
+
+  it('opens the same window on both sides when the first difference sits past the cap', () => {
+    const shared = 'x'.repeat(5_000)
+    const views = driftValueViews(`${shared}A${'y'.repeat(300)}`, `${shared}B${'y'.repeat(300)}`)
+    // JSON pretty-print wraps the string in quotes: the difference is at 5,001.
+    expect(views.note).toBe('the first difference is at character 5001')
+    const start = 5_001 - 256
+    expect(views.baseline.text.startsWith('\u2026')).toBe(true)
+    expect(views.current.text.startsWith('\u2026')).toBe(true)
+    expect(views.baseline.text.slice(1, 1 + 256)).toBe('x'.repeat(256))
+    expect(views.current.text.slice(1, 1 + 256)).toBe('x'.repeat(256))
+    expect(views.baseline.text.charAt(1 + 256)).toBe('A')
+    expect(views.current.text.charAt(1 + 256)).toBe('B')
+    expect(views.baseline.truncated).toBe(true)
+    // The window ends at the shorter side's end: 300 y's and the closing quote.
+    expect(views.baseline.text.length).toBe(1 + 256 + 1 + 300 + 1)
+    expect(start).toBeGreaterThan(4_096)
+  })
+
+  it('clamps each side to its own end inside the window', () => {
+    const shared = 'x'.repeat(5_000)
+    const views = driftValueViews(shared, `${shared}${'z'.repeat(9_000)}`)
+    // The shorter side ends at its closing quote; the longer side fills the window.
+    expect(views.note).toBe('the first difference is at character 5001')
+    expect(views.baseline.text.endsWith('"')).toBe(true)
+    expect(views.baseline.truncated).toBe(true)
+    expect(views.current.text.endsWith('\u2026')).toBe(true)
+    expect(views.current.text.length).toBe(1 + 4_096 + 1)
   })
 })
 

@@ -30,6 +30,12 @@ export interface SlackChannelOptions {
 
 const MAX_INPUT_LENGTH = 200
 const MAX_INLINE_FIELD_LENGTH = 64
+/**
+ * Per-side cap on a drift value (issue #60). Seven aspects at two values of
+ * this length, with the header, the aspect line and the closing line, fit
+ * one section under {@link MAX_SECTION_TEXT}; at 200 they do not.
+ */
+const MAX_DRIFT_VALUE_LENGTH = 160
 
 /** Truncate a string to `max` characters, adding an ellipsis if truncated. */
 function truncate(str: string, max: number): string {
@@ -64,6 +70,20 @@ function sanitizeCodeSpanContent(value: string): string {
 function sanitizeMrkdwnText(value: string): string {
   const stripped = value.replace(/[`*~<>|!]/g, '').replace(/[\r\n]+/g, ' ')
   return truncate(stripped, MAX_INLINE_FIELD_LENGTH)
+}
+
+/**
+ * Render a drift value (issue #60) for a mrkdwn code span: its JSON form
+ * with every backtick and newline stripped (the code-span rule of
+ * {@link sanitizeCodeSpanContent}, whose 64-character cap is too short
+ * for a value), truncated to `cap`. An absent side never reaches this
+ * helper: the caller prints the word `absent` outside a span.
+ */
+function sanitizeCodeSpanValue(value: unknown, cap: number): string {
+  // Every value came off a JSON body (a tools/list or a sideband request),
+  // so stringify yields a string here; the absent side is guarded above.
+  const json = JSON.stringify(value)
+  return truncate(json.replace(/`/g, '').replace(/[\r\n]+/g, ' '), cap)
 }
 
 /**
@@ -116,6 +136,10 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   // disclosed as a count, never silently dropped (the approval ticket itself
   // always carries the full list).
   const budgetBlocks: KnownBlock[] = buildBudgetBlocks(ticket)
+  // Drift context (issue #60): what changed in the tool's definition, after
+  // the budget section because on the MCP door a budget ticket's hold is the
+  // budget and the drift is context.
+  const driftBlocks: KnownBlock[] = buildDriftBlocks(ticket)
 
   return [
     {
@@ -127,6 +151,7 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
       text: { type: 'mrkdwn', text: detailLines.join('\n') },
     },
     ...budgetBlocks,
+    ...driftBlocks,
     {
       type: 'context',
       elements: [
@@ -219,6 +244,61 @@ function buildBudgetBlocks(ticket: ApprovalTicket): KnownBlock[] {
     })
   }
   return blocks
+}
+
+/**
+ * Which hold the drift section's header names (issue #60), read from the
+ * ticket's own fields. `mode` is the CALL's drift mode, identical on every
+ * ticket the call raises, so it cannot name this ticket's hold alone. On
+ * the MCP door every ticket is one sequential decision, read budget-first:
+ * a budget ticket's rule or gate ticket already resolved. On a native
+ * ticket one approval covers every gate present, so the header lists what
+ * the fields prove; a rule name beside a budget is only the rule that
+ * matched (it may be an allow rule the budget overrode), never a covered
+ * gate. A `flag_destructive` escalation is stored nowhere on the ticket,
+ * so it is what remains when no field claims the hold.
+ */
+function driftHoldHeader(ticket: ApprovalTicket, mode: 'require_approval' | 'log'): string {
+  const budget = Boolean(ticket.breached_budgets?.length)
+  const native = ticket.channel_name.startsWith('native:')
+  if (native && budget && ticket.matched_rule) {
+    return 'this approval covers the overage; the matched rule is the rule that matched; the drift is context'
+  }
+  if (native && budget && mode === 'require_approval') {
+    return 'this approval covers the drift and the overage'
+  }
+  if (budget) return 'this hold is the budget'
+  if (ticket.matched_rule) return 'this hold is the rule'
+  if (mode === 'require_approval') return 'this hold is the drift'
+  return 'this hold is flag_destructive'
+}
+
+/**
+ * Render the definition drift section for a drift-escalated ticket (issue
+ * #60): the hold header, the changed aspects, one line per aspect with both
+ * sides capped at {@link MAX_DRIFT_VALUE_LENGTH}, and the pointer to the
+ * ticket's full values. Always one section: the aspect set is closed at
+ * seven, and seven lines at the cap measure under {@link MAX_SECTION_TEXT}.
+ */
+function buildDriftBlocks(ticket: ApprovalTicket): KnownBlock[] {
+  const drift = ticket.tool_drift
+  if (!drift?.changes.length) return []
+
+  const side = (value: unknown): string =>
+    value === undefined ? 'absent' : `\`${sanitizeCodeSpanValue(value, MAX_DRIFT_VALUE_LENGTH)}\``
+  const aspects = drift.changes.map((change) => `\`${sanitizeCodeSpanContent(change.aspect)}\``)
+  const lines = drift.changes.map(
+    (change) =>
+      `• \`${sanitizeCodeSpanContent(change.aspect)}\`: ${side(change.baseline)} to ${side(change.current)}`,
+  )
+  const text = [
+    `*Definition drift (${driftHoldHeader(ticket, drift.mode)}):*`,
+    `Changed: ${aspects.join(', ')}`,
+    ...lines,
+    'The approval ticket carries the full values (approvals REST API / dashboard).',
+  ].join('\n')
+
+  return [{ type: 'section', text: { type: 'mrkdwn', text } }]
 }
 
 // ---------------------------------------------------------------------------

@@ -878,6 +878,11 @@ export class GovernanceService {
         origin: req.origin,
         timeout_ms: timeoutMs,
         breached_budgets: budgetBreachContexts,
+        // The drift context (issue #60): the response's changes plus the
+        // call's mode. `block` never reaches here, since the gate denies.
+        ...(pipeline.driftEvent && pipeline.driftMode !== 'block'
+          ? { tool_drift: { changes: pipeline.driftEvent.changes, mode: pipeline.driftMode } }
+          : {}),
       })
       approvalTicketId = ticket.id
       ticketTimeoutAtMs = this.now() + timeoutMs

@@ -144,6 +144,36 @@ describe('WebhookChannel', () => {
     expect(body.ticket.breached_budgets).toEqual(breached)
   })
 
+  it('serializes tool_drift verbatim, omitting an absent side and keeping a null one (issue #60)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: true })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const changes = [
+      { aspect: 'description' as const, baseline: 'was', current: undefined },
+      { aspect: 'inputSchema' as const, baseline: undefined, current: { type: 'object' } },
+      { aspect: 'title' as const, baseline: null, current: 'now' },
+    ]
+    const channel = new WebhookChannel({ url: 'https://example.com/hook' })
+    await channel.notify(makeTicket({ tool_drift: { changes, mode: 'log' } }))
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as {
+      ticket: { tool_drift: { mode: string; changes: Array<Record<string, unknown>> } }
+    }
+    expect(body.ticket.tool_drift.mode).toBe('log')
+    expect(body.ticket.tool_drift.changes[0]).toEqual({ aspect: 'description', baseline: 'was' })
+    expect('current' in (body.ticket.tool_drift.changes[0] ?? {})).toBe(false)
+    expect(body.ticket.tool_drift.changes[1]).toEqual({
+      aspect: 'inputSchema',
+      current: { type: 'object' },
+    })
+    expect(body.ticket.tool_drift.changes[2]).toEqual({
+      aspect: 'title',
+      baseline: null,
+      current: 'now',
+    })
+  })
+
   it('includes x-helio-signature header when secret is configured', async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', mockFetch)

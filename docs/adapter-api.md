@@ -73,7 +73,7 @@ The annotation cache keeps its own copy of each `tool` definition it baselines: 
   "approval": { "id": "…", "timeout_ms": 300000, "resolve_path": "/approval/…/resolve" }, // require_approval only
   "limits": { "rate": { } },             // present when a limiter-backed limit rule or a budget matched (rate | spend | budgets)
   "dry_run": { "would_forward": true, "evidence_satisfied": true, "limits_ok": true }, // dry_run only — limits_ok covers the matched rule limit AND budgets
-  "tool_drift": { "changes": [ ] }       // present when the drift gate fired
+  "tool_drift": { "changes": [ ] }       // present when the tool is drifted, in every on_tool_drift mode
 }
 ```
 
@@ -216,7 +216,7 @@ The resolution does **not** write the audit record; the subsequent `/audit` does
 
 When one or more `on_exceed: require_approval` budgets breach (issue #14), the sideband raises **exactly one merged native ticket per call, always in the standard `approval` block** — the response never contains a second approval block, and there is no separate budget-approval wire shape. The one resolution decides everything the call gated:
 
-- **Merged ticket** (a `require_approval` rule AND breached budgets): one ticket carries both contexts — the rule fields plus `breached_budgets` (visible on the dashboard and the approvals REST API; native tickets never notify channels, so no webhook fires. The block is not part of the `/evaluate` response). Its timeout comes from the RULE's approval config. Approving resolves both gates; denying resolves both as denied.
+- **Merged ticket** (a `require_approval` rule AND breached budgets): one ticket carries both contexts, the rule fields plus `breached_budgets` (visible on the dashboard and the approvals REST API; native tickets never notify channels, so no webhook fires. The block is not part of the `/evaluate` response). Its timeout comes from the RULE's approval config. Approving resolves both gates; denying resolves both as denied. A native ticket also carries `tool_drift` (the response's `changes` plus the call's `on_tool_drift` `mode`) whenever the `/evaluate` response did; see [drift-escalated tickets](./approvals.md#drift-escalated-tickets) for how to read the hold on it.
 - **Budget-only ticket** (the rule allowed; only the money gate objected): the ticket's timeout comes from the first breached budget's `approval` config (config order), falling back to the global `approval.timeout`.
 
 This merged single-decision contract is the sideband's deliberate interpretation of the execution order: the one-round-trip `/evaluate` contract cannot sequence the rule gate and the money gate as separate pre-execution phases (the host, not Helio, is the enforcement point and executes after the single resolution), so merging is the only single-round-trip semantics that keeps the budget gate enforced. The MCP door, which can sequence gates in time, keeps two sequential human decisions instead. This asymmetry is intentional and regression-tested. If a future adapter needs separate approvers for the policy gate vs the money gate, that ships as an additive capability-declared extension, never as a change to this default.

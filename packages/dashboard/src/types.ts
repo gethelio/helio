@@ -106,6 +106,27 @@ export interface BudgetBreachContext {
   readonly window: string
 }
 
+/**
+ * One changed aspect of a tool definition on a drift-escalated ticket
+ * (issue #60). A side the tool gained or dropped is missing from the wire
+ * object (never null); a JSON `null` side is a value.
+ */
+export interface ToolDriftChange {
+  readonly aspect: string
+  readonly baseline?: unknown
+  readonly current?: unknown
+}
+
+/**
+ * The drift context on a ticket raised for a drifted tool (issue #60).
+ * `mode` is the CALL's `on_tool_drift` mode, identical on every ticket the
+ * call raises; which gate holds this ticket is read from its other fields.
+ */
+export interface ToolDriftContext {
+  readonly changes: readonly ToolDriftChange[]
+  readonly mode: 'require_approval' | 'log'
+}
+
 export interface ApprovalTicket {
   readonly id: string
   readonly tool_name: string
@@ -123,6 +144,8 @@ export interface ApprovalTicket {
   readonly timeout_ms: number
   /** Present on break-glass (budget) tickets: the overages one approval covers. */
   readonly breached_budgets?: readonly BudgetBreachContext[]
+  /** Present when the tool was drifted at submit time (issue #60). */
+  readonly tool_drift?: ToolDriftContext
   readonly status: ApprovalStatus
   readonly resolved_at?: string
   readonly resolved_by?: string

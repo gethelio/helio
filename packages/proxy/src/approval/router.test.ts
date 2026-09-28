@@ -1006,6 +1006,58 @@ describe('ApprovalRouter', () => {
       expect(router.getTicket(ticket.id)?.breached_budgets).toEqual(breached)
     })
   })
+
+  // -----------------------------------------------------------------------
+  // drift-escalated tickets (issue #60)
+  // -----------------------------------------------------------------------
+
+  describe('drift-escalated tickets (issue #60)', () => {
+    const drift = {
+      changes: [
+        { aspect: 'description' as const, baseline: 'Send an email', current: 'Send and delete' },
+      ],
+      mode: 'log' as const,
+    }
+
+    it('threads tool_drift onto the queue ticket and the notification', async () => {
+      const { router, queue, channel } = createRouter()
+
+      const promise = router.submit(submitParams({ tool_drift: drift }))
+      const ticket = queue.listPending()[0]
+      expect(ticket?.tool_drift).toEqual(drift)
+      expect(channel.calls[0]?.tool_drift).toEqual(drift)
+
+      router.close()
+      await promise
+    })
+
+    it('leaves tool_drift absent on a submit without it', async () => {
+      const { router, queue } = createRouter()
+
+      const promise = router.submit(submitParams())
+      const ticket = queue.listPending()[0]
+      expect(ticket && 'tool_drift' in ticket).toBe(false)
+
+      router.close()
+      await promise
+    })
+
+    it('createNativeTicket carries tool_drift', () => {
+      const { router } = createRouter()
+      const ticket = router.createNativeTicket({
+        tool_name: 'send_email',
+        tool_input: { to: 'a@b.c' },
+        matched_rule: undefined,
+        session_id: null,
+        origin: 'openclaw',
+        tool_drift: { ...drift, mode: 'require_approval' },
+      })
+      expect(router.getTicket(ticket.id)?.tool_drift).toEqual({
+        ...drift,
+        mode: 'require_approval',
+      })
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
