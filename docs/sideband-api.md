@@ -221,7 +221,7 @@ Aggregated statistics for the dashboard charts. Computed from the audit store fo
 ```
 
 - `total` — total number of audit records in the window.
-- `allowed_total` — records that resolved without a block (`block_reason IS NULL`), excluding drift events (`tool_drift` / `tool_drift_reverted` decisions) and policy reload records (`record_kind: policy_reload`). When drift events or reload records fall inside the window, `allowed_total + blocked_total` adds up to less than `total`.
+- `allowed_total`: records that resolved without a block (`block_reason IS NULL`), excluding drift events (`tool_drift`, `tool_drift_reverted` and `baseline_accepted` decisions) and policy reload records (`record_kind: policy_reload`). When drift events or reload records fall inside the window, `allowed_total + blocked_total` adds up to less than `total`.
 - `blocked_total` — records that resolved with a block (`block_reason IS NOT NULL`), excluding policy reload records (a refused reload carries its outcome in `block_reason` but is not a blocked call).
 - `dry_run_total` — records produced in dry-run mode (`dry_run = true`). Policy reload records are excluded.
 - `applied_total` — records produced in applied mode (`dry_run = false`). Policy reload records are excluded.

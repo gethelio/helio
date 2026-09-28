@@ -26,8 +26,8 @@ Maintainer notes:
   authenticated `POST /api/baselines/accept`; the acceptance replaces the
   persisted row, lifts the block at once and lands as a `baseline_accepted`
   drift record, which the dashboard renders with a Baseline Accepted chip.
-  `policies.persist_baselines` (default `true`, restart-required) turns the
-  persistence off.
+  Set `policies.persist_baselines` to `false` (restart-required) to keep
+  baselines in memory only.
 - **`helio kill` halts every governed call without editing policy, and
   the `helio resume` verb lifts it.** One marker file, `<config>.kill`, is
   the state: the kill verb writes it without parsing the config, the proxy

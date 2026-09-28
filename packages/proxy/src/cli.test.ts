@@ -8394,6 +8394,41 @@ ${dashboard}audit:
     }
   }, 15_000)
 
+  it('says the running proxy is not single-upstream when a singular config meets a named proxy', async () => {
+    const { dir, configPath, dashboardPort } = writeAcceptConfig({ dashboardSecret: 'plain' })
+    // A dashboard stand-in answering as the route does when no door matches:
+    // the file names one upstream, the running proxy serves named ones.
+    const sink = createServer((_req, res) => {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          error: 'unknown_upstream',
+          suggestion:
+            'no upstream matches: pass --upstream <name> on a named-upstreams config, drop it on a single-upstream config',
+        }),
+      )
+    })
+    await new Promise<void>((resolve) => {
+      sink.listen(dashboardPort, '127.0.0.1', resolve)
+    })
+    try {
+      const { code, stderr } = await runCli(['baseline', 'accept', 'get_status', '-c', configPath])
+      expect(code).toBe(1)
+      expect(stderr.trim()).toBe(
+        'Error: the running proxy is not a single-upstream process, so it serves no door for this config; ' +
+          'no upstream matches: pass --upstream <name> on a named-upstreams config, drop it on a single-upstream config',
+      )
+      expect(stderr).not.toContain('named ""')
+    } finally {
+      await new Promise<void>((resolve) => {
+        sink.close(() => {
+          resolve()
+        })
+      })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   it('exits 1 with one line when the dashboard is disabled', async () => {
     const { dir, configPath } = writeAcceptConfig({})
     try {

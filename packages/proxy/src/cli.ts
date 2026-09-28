@@ -2450,7 +2450,10 @@ async function baselineAcceptCommand(tool: string, opts: BaselineAcceptOptions):
         )
       case 'unknown_upstream':
         throw new StartupError(
-          `Error: no upstream named "${opts.upstream ?? ''}" is served by the running proxy; ${result.suggestion}`,
+          opts.upstream === undefined
+            ? 'Error: the running proxy is not a single-upstream process, so it serves no door ' +
+                `for this config; ${result.suggestion}`
+            : `Error: no upstream named "${opts.upstream}" is served by the running proxy; ${result.suggestion}`,
         )
       case 'unknown_tool':
         throw new StartupError(`Error: no tool "${tool}" in the current tools/list of ${door}`)
