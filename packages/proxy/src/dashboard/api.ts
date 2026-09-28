@@ -31,7 +31,7 @@ import { DEFAULT_STATUS_WINDOW, parseStatusWindow } from '../policy/status.js'
 import type { PolicyStatusReport } from '../policy/status.js'
 import { markerNote, removeMarker, writeMarker } from '../kill-switch/marker.js'
 import type { KillSwitch } from '../kill-switch/state.js'
-import type { AcceptBaselineOutcome } from '../policy/governed-forwarder.js'
+import type { AcceptBaselineOutcome, BaselineListEntry } from '../policy/governed-forwarder.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,6 +92,11 @@ export interface DashboardAppDeps {
       readonly upstream?: string
       readonly actor: string
     }): BaselineAcceptOutcome
+    /**
+     * `GET /api/baselines` (issue #60, `helio baseline list`): every door,
+     * or the one named; `helio start` answers from each door's forwarder.
+     */
+    list(input: { readonly upstream?: string }): BaselineListOutcome
   }
 }
 
@@ -102,6 +107,28 @@ export interface DashboardAppDeps {
  */
 export type BaselineAcceptOutcome =
   | AcceptBaselineOutcome
+  | { readonly ok: false; readonly reason: 'unknown_upstream' }
+
+/** One door's baselines as `GET /api/baselines` reports them (issue #60). */
+export interface BaselineListDoor {
+  /** The configured upstream name; null on a single-upstream config. */
+  readonly upstream: string | null
+  /** A live list has applied on this door. */
+  readonly primed: boolean
+  readonly baselines: readonly BaselineListEntry[]
+}
+
+/**
+ * What the `baselines.list` dependency answers: every door asked for, with
+ * the process-wide `policies.persist_baselines` value, or `unknown_upstream`
+ * when no door matches the name.
+ */
+export type BaselineListOutcome =
+  | {
+      readonly ok: true
+      readonly persist_baselines: boolean
+      readonly doors: readonly BaselineListDoor[]
+    }
   | { readonly ok: false; readonly reason: 'unknown_upstream' }
 
 /** Options for the dashboard API. */
@@ -276,6 +303,11 @@ const analyticsQuerySchema = z.object({
 /** The window is validated by `parseStatusWindow` so an empty value is refused, not defaulted. */
 const policyStatusQuerySchema = z.object({
   window: z.string().optional(),
+})
+
+/** An empty `upstream` is refused, not read as "every door". */
+const baselineListQuerySchema = z.object({
+  upstream: z.string().trim().min(1).optional(),
 })
 
 const authSessionBodySchema = z.object({
@@ -932,6 +964,26 @@ export function createDashboardAppWithLifecycle(
   // -------------------------------------------------------------------------
   // Tool baselines (issue #60)
   // -------------------------------------------------------------------------
+
+  // A read: it serves in open mode like the policy status route, and under
+  // a secret the `/api/*` middleware admits a bearer or a cookie session
+  // (GET is exempt from the CSRF guard). The query form, not a path
+  // parameter, so a per-upstream status surface can embed a door object.
+  app.get('/api/baselines', (c) => {
+    if (!baselines) return c.json({ error: 'baselines are not available in this process' }, 503)
+    const query = baselineListQuerySchema.safeParse(c.req.query())
+    if (!query.success) {
+      return c.json({ error: 'Validation error', details: formatZodErrors(query.error) }, 400)
+    }
+    const outcome = baselines.list(
+      query.data.upstream === undefined ? {} : { upstream: query.data.upstream },
+    )
+    if (!outcome.ok) {
+      const refusal = BASELINE_ACCEPT_REFUSALS[outcome.reason]
+      return c.json({ error: outcome.reason, suggestion: refusal.suggestion }, refusal.status)
+    }
+    return c.json({ persist_baselines: outcome.persist_baselines, doors: outcome.doors }, 200)
+  })
 
   app.post('/api/baselines/accept', async (c) => {
     if (!baselines) return c.json({ error: 'baselines are not available in this process' }, 503)

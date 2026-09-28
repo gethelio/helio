@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type {
   McpForwarder,
   McpForwarderWithInternal,
@@ -11,6 +11,7 @@ import { isModernProtocolClaim } from '../mcp/protocol-version.js'
 import type { CompiledPolicy } from './types.js'
 import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
+import type { DriftMode } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
 import type { SurfaceTool } from './surface.js'
 import type {
@@ -51,6 +52,7 @@ import type {
   ApprovalAuditContext,
   ApprovalOutcome,
   BudgetBreachContext,
+  ToolDriftContext,
 } from '../approval/types.js'
 import type { RateLimiter, RateLimitResult } from './rate-limiter.js'
 import type { SpendLimiter, SpendLimitResult } from './spend-limiter.js'
@@ -244,6 +246,33 @@ export interface AnnotationCachePrimeResult {
 }
 
 /** The outcome of {@link GovernedForwarder.acceptBaseline}. */
+/** One baseline of a door as {@link GovernedForwarder.listBaselines} reports it (issue #60). */
+export interface BaselineListEntry {
+  readonly tool: string
+  readonly upstream: string | null
+  /** Hex SHA-256 of the canonical JSON the store and the accept body carry as `fingerprint`. */
+  readonly fingerprint_sha256: string
+  readonly first_seen: string | null
+  readonly last_confirmed: string | null
+  readonly accepted_at: string | null
+  readonly accepted_by: string | null
+  /** Reloaded from disk and not since accepted. */
+  readonly restored: boolean
+  /** Named by the most recent tools/list. */
+  readonly present: boolean
+  /** The current definition differs from the baseline. */
+  readonly drifted: boolean
+}
+
+/** The outcome of {@link GovernedForwarder.listBaselines}. */
+export interface BaselineListOutcome {
+  /** A live list has applied on this door. */
+  readonly primed: boolean
+  /** A baseline store is attached (`policies.persist_baselines`). */
+  readonly persisted: boolean
+  readonly baselines: readonly BaselineListEntry[]
+}
+
 export type AcceptBaselineOutcome =
   | { readonly ok: false; readonly reason: 'door_not_primed' | BaselineAcceptRefusal }
   | {
@@ -456,6 +485,34 @@ export class GovernedForwarder implements McpForwarder {
     readonly tools: readonly SurfaceTool[]
   } {
     return { upstream: this.upstreamName, tools: this.annotationCache.snapshotTools() }
+  }
+
+  /**
+   * This door's baselines for `helio baseline list` (issue #60): the cache's
+   * flags joined to the store's rows by tool name. On a persisted door every
+   * row is restored at boot and a failed insert drops its names from the
+   * cache, so no row lacks a cache entry; without a store the cache lists
+   * alone with null instants. `primed` is false until a live list applied.
+   */
+  listBaselines(): BaselineListOutcome {
+    const rows = this.baselineStore?.load(this.upstreamName) ?? []
+    const rowByTool = new Map(rows.map((row) => [row.tool, row]))
+    const baselines = this.annotationCache.snapshotBaselines().map((entry) => {
+      const row = rowByTool.get(entry.name)
+      return {
+        tool: entry.name,
+        upstream: this.upstreamName ?? null,
+        fingerprint_sha256: createHash('sha256').update(entry.fingerprint).digest('hex'),
+        first_seen: row?.first_seen ?? null,
+        last_confirmed: row?.last_confirmed ?? null,
+        accepted_at: row?.accepted_at ?? null,
+        accepted_by: row?.accepted_by ?? null,
+        restored: entry.restored,
+        present: entry.present,
+        drifted: entry.drifted,
+      }
+    })
+    return { primed: this.livePrimed, persisted: this.baselineStore !== undefined, baselines }
   }
 
   /**
@@ -809,7 +866,14 @@ export class GovernedForwarder implements McpForwarder {
         // synchronous so peek → record has no interleaving point.
         const gate =
           decision.action === 'require_approval' && this.approvalRouter
-            ? await this.handleApproval(request, decision, toolName, toolArguments)
+            ? await this.handleApproval(
+                request,
+                decision,
+                toolName,
+                toolArguments,
+                driftEvent,
+                driftMode,
+              )
             : this.resolveActionGate(request, decision, toolName, toolArguments, {
                 sessionBlocked,
                 evidenceBlocked,
@@ -844,6 +908,8 @@ export class GovernedForwarder implements McpForwarder {
               toolName,
               toolArguments,
               budgetGate,
+              driftEvent,
+              driftMode,
             )
             budgetApproval = held.audit
             approvalWaitMs += held.waitMs
@@ -972,6 +1038,8 @@ export class GovernedForwarder implements McpForwarder {
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
     gate: Extract<BudgetGateResult, { kind: 'approval' }>,
+    driftEvent: ToolDriftEvent | undefined,
+    driftMode: DriftMode,
   ): Promise<{
     proceed: boolean
     result?: ForwardResult
@@ -992,6 +1060,7 @@ export class GovernedForwarder implements McpForwarder {
         upstream: this.upstreamName ?? null,
         breached_budgets: gate.breachContexts,
         approval: gate.approval,
+        ...ticketDriftContext(driftEvent, driftMode),
       },
       request.signal,
     )
@@ -1449,6 +1518,8 @@ export class GovernedForwarder implements McpForwarder {
     decision: PolicyDecision,
     toolName: string,
     toolArguments: Record<string, unknown> | undefined,
+    driftEvent: ToolDriftEvent | undefined,
+    driftMode: DriftMode,
   ): Promise<ActionGateResult> {
     // Caller guarantees this.approvalRouter is defined
     const router = this.approvalRouter as ApprovalRouter
@@ -1462,6 +1533,7 @@ export class GovernedForwarder implements McpForwarder {
         session_id: request.session?.id ?? null,
         session_source: request.session?.source ?? null,
         upstream: this.upstreamName ?? null,
+        ...ticketDriftContext(driftEvent, driftMode),
       },
       request.signal,
     )
@@ -2344,6 +2416,25 @@ function makeErrorResult(
 /** The resolver identity of an outcome, when it carries one. */
 function approvedByOf(outcome: ApprovalOutcome | undefined): string | null {
   return outcome && 'resolvedBy' in outcome ? outcome.resolvedBy : null
+}
+
+/** A drift mode that can reach an approval ticket: `block` denies first. */
+function isTicketDriftMode(mode: DriftMode): mode is ToolDriftContext['mode'] {
+  return mode !== 'block'
+}
+
+/**
+ * The drift context a submit site attaches to its ticket (issue #60): the
+ * event the DECISION saw, never a fresh cache read, so the budget ticket
+ * that follows a held rule ticket carries the same changes even when a
+ * tools/list landed in between. Empty when the tool is not drifted.
+ */
+function ticketDriftContext(
+  driftEvent: ToolDriftEvent | undefined,
+  driftMode: DriftMode,
+): { readonly tool_drift?: ToolDriftContext } {
+  if (!driftEvent || !isTicketDriftMode(driftMode)) return {}
+  return { tool_drift: { changes: driftEvent.changes, mode: driftMode } }
 }
 
 /** Check if a ForwardResult contains a JSON-RPC error response. */

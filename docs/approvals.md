@@ -86,7 +86,7 @@ approval:
 }
 ```
 
-Both attribution fields are optional-absent: `session_source` appears whenever a session identity resolved, and `upstream` appears only once named upstreams are configured — an unattributed ticket omits the keys rather than sending null.
+The attribution fields and the context fields are optional-absent: `session_source` appears whenever a session identity resolved, `upstream` appears only once named upstreams are configured, `breached_budgets` only on a budget ticket, and `tool_drift` only when the tool was drifted (see [Drift-Escalated Tickets](#drift-escalated-tickets)). An unattributed ticket omits the keys rather than sending null.
 
 **HMAC signing:** When `secret` is configured, the request includes an `x-helio-signature` header with the format `sha256=<hex_digest>`. The signature is computed as HMAC-SHA256 over the JSON request body using the configured secret.
 
@@ -340,6 +340,23 @@ Semantics that deviate from rule approvals, by design:
 - **Deny wins.** If one call simultaneously breaches an `on_exceed: deny` budget and a `require_approval` budget, the call is denied outright and no ticket is raised.
 
 On approval, the overage is recorded on every breached budget as `kind: approved_overage` (ledger row and the audit record's `evidence_chain.budgets[].kind`) — unbreached budgets the same call matched record plain `spend` in the same atomic batch — and only then does the call forward. The approval is authoritative: nothing is re-checked after the human decides, so a rule-level rate/spend counter peeked before the wait also records unconditionally on approval — it can go past its limit for that one approved call (the counter stays truthful, and the next unapproved call is blocked by the exhausted counter). A denial, timeout, disconnect, or shutdown records nothing on any budget or rule counter — on the MCP door unconditionally, and on the sideband whenever the adapter honors the decision (`not_executed`); a sideband host that executes anyway commits the spend as plain `spend` with the denied/timeout status on the record (the documented TOCTOU caveat). The blocked response reuses the budget feedback shape: `reason: budget_exceeded` with a `budgets` array listing every breach, plus `denied_by`/`denial_reason` or `timeout_seconds`.
+
+## Drift-Escalated Tickets
+
+A ticket raised for a call whose tool definition changed since Helio baselined it (see [tool definition drift](./policies.md#tool-definition-drift)) carries a `tool_drift` field, so the approver sees what changed before saying yes. The field appears on every ticket a drifted call raises, whatever escalated the call:
+
+- the drift gate itself, under `on_tool_drift: require_approval`;
+- a `require_approval` rule matching a drifted tool, under `on_tool_drift: log`;
+- a budget break-glass ticket on a drifted tool, including the second ticket a drifted call raises on the MCP door after the gate's or the rule's ticket resolves;
+- a `flag_destructive: require_approval` escalation on a drifted tool under `log`.
+
+**Shape.** `tool_drift` is `{ "changes": [...], "mode": "require_approval" | "log" }`. Each entry of `changes` names an `aspect` from the closed list `annotations`, `inputSchema`, `description`, `outputSchema`, `title`, `duplicate`, `other`, with the `baseline` value Helio holds and the `current` value the upstream now serves. A side the tool gained or dropped is absent from the entry on the wire (a tool that gained an `inputSchema` has no `baseline` key on that entry); a JSON `null` side is present. The changes are a snapshot taken when the ticket was created: a later `tools/list` never rewrites a held ticket, and a second ticket of the same call carries the changes the decision saw, not those of a list that landed while the first ticket was held. `mode` is the CALL's `on_tool_drift` mode and is identical on every ticket the call raises. A `block` mode never reaches a ticket, since the gate denies the call first.
+
+**Reading the hold.** `mode` alone cannot say which gate holds a given ticket: a drift gate ticket and the budget ticket that follows it both carry `require_approval`, and a `flag_destructive` escalation is stored nowhere on the ticket. Read the ticket's own fields instead. On the MCP door every ticket is one sequential decision, read budget-first: a ticket with `breached_budgets` is the budget's hold (any rule or gate ticket of the call already resolved, even when a `matched_rule` sits beside the budget); otherwise a `matched_rule` is the rule's hold; otherwise `mode: require_approval` is the drift gate's hold; otherwise the hold is `flag_destructive` and the drift is context. On a native (sideband) ticket one approval covers every gate present: with `breached_budgets` and a `matched_rule`, the approval covers the overage and the rule name is the rule that matched (it may be an allow rule the budget alone overrode); with `breached_budgets` and `mode: require_approval`, the approval covers the drift and the overage; without a budget, the rule and drift readings match the MCP door. Under `mode: log` the drift is always context.
+
+**What each channel shows.** The dashboard card renders a "Definition Drift" section with the changed aspects as chips, one collapsible entry per aspect showing both sides with their byte lengths, and a caption stating the hold as read above; when both sides share their first 4,096 characters, the card opens both panes at the first difference and says where it is. Slack messages render one "Definition drift" section with the hold in its header and one line per aspect, each value cut to 160 characters, closing with a pointer to the ticket's full values. The webhook payload and `GET /api/approvals` carry the field verbatim, with no cap: a large schema that changed puts kilobytes of JSON on the ticket.
+
+Approving a drift ticket never accepts the changed definition as the new baseline; only [`helio baseline accept`](./policies.md#baselines-across-restarts) does, so the next call to the tool is drifted again. On the MCP door the tool runs after an approved drift ticket only when no budget ticket follows it; a denied budget ticket blocks the call.
 
 ## REST API Reference
 

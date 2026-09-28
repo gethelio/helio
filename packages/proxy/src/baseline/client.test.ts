@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { postBaselineAccept } from './client.js'
+import { fetchBaselines, postBaselineAccept } from './client.js'
 import { secretDigest } from '../auth/bearer.js'
 
 type FetchArgs = { url: string; method: string; headers: Record<string, string>; body: string }
@@ -188,5 +188,141 @@ describe('postBaselineAccept (issue #60)', () => {
       actor: 'oli',
     })
     expect(gateway).toMatchObject({ ok: false, code: 'api_error', detail: { message: 'HTTP 502' } })
+  })
+})
+
+describe('fetchBaselines (issue #60)', () => {
+  const realFetch = globalThis.fetch
+  const realEnv = process.env['HELIO_DASHBOARD_SECRET']
+  const config = (
+    overrides: Partial<{ enabled: boolean; host: string; api_secret: string }> = {},
+  ) => ({
+    dashboard: { enabled: true, host: '127.0.0.1', port: 47201, ...overrides },
+  })
+  const BODY = {
+    persist_baselines: true,
+    doors: [
+      {
+        upstream: 'mail',
+        primed: true,
+        baselines: [
+          {
+            tool: 'alpha',
+            upstream: 'mail',
+            fingerprint_sha256: 'ab'.repeat(32),
+            first_seen: '2026-09-28T12:50:11.039Z',
+            last_confirmed: '2026-09-28T12:50:11.041Z',
+            accepted_at: null,
+            accepted_by: null,
+            restored: true,
+            present: true,
+            drifted: false,
+          },
+        ],
+      },
+    ],
+  }
+
+  afterEach(() => {
+    globalThis.fetch = realFetch
+    if (realEnv === undefined) delete process.env['HELIO_DASHBOARD_SECRET']
+    else process.env['HELIO_DASHBOARD_SECRET'] = realEnv
+  })
+
+  it('GETs with the bearer and the encoded upstream query and returns the body', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    const calls = stubFetch(() => jsonResponse(200, BODY))
+    const result = await fetchBaselines(
+      config({ api_secret: 'plain-secret' }),
+      'helio.yaml',
+      'ma il',
+    )
+    expect(calls).toEqual([
+      {
+        url: 'http://127.0.0.1:47201/api/baselines?upstream=ma%20il',
+        method: 'GET',
+        headers: { authorization: 'Bearer plain-secret' },
+        body: '',
+      },
+    ])
+    expect(result).toEqual({ ok: true, body: BODY })
+  })
+
+  it('omits the query without an upstream and the bearer without a secret', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    const calls = stubFetch(() => jsonResponse(200, BODY))
+    await fetchBaselines(config(), 'helio.yaml')
+    expect(calls[0]?.url).toBe('http://127.0.0.1:47201/api/baselines')
+    expect(calls[0]?.headers).toEqual({})
+  })
+
+  it('refuses without a socket when the dashboard is disabled or the secret is a digest', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    const calls = stubFetch(() => jsonResponse(200, BODY))
+    expect(await fetchBaselines(config({ enabled: false }), '/x/helio.yaml')).toEqual({
+      ok: false,
+      code: 'dashboard_disabled',
+      detail: { base: 'http://127.0.0.1:47201', source: undefined, configPath: '/x/helio.yaml' },
+    })
+    expect(
+      await fetchBaselines(config({ api_secret: secretDigest('plain') }), 'helio.yaml'),
+    ).toMatchObject({ ok: false, code: 'secret_is_digest' })
+    expect(calls).toEqual([])
+  })
+
+  it('reports no_proxy_answered when the socket fails and secret_refused on 401', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    stubFetch(() => {
+      throw new TypeError('fetch failed')
+    })
+    expect(await fetchBaselines(config({ api_secret: 's' }), 'helio.yaml')).toMatchObject({
+      ok: false,
+      code: 'no_proxy_answered',
+    })
+    process.env['HELIO_DASHBOARD_SECRET'] = 'wrong'
+    stubFetch(() => jsonResponse(401, { error: 'unauthorized' }))
+    expect(await fetchBaselines(config(), 'helio.yaml')).toMatchObject({
+      ok: false,
+      code: 'secret_refused',
+      detail: { source: 'HELIO_DASHBOARD_SECRET' },
+    })
+  })
+
+  it('passes the route refusal 404 unknown_upstream through with its suggestion', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    stubFetch(() => jsonResponse(404, { error: 'unknown_upstream', suggestion: 'do the thing' }))
+    expect(await fetchBaselines(config({ api_secret: 's' }), 'helio.yaml', 'nope')).toEqual({
+      ok: false,
+      code: 'unknown_upstream',
+      status: 404,
+      suggestion: 'do the thing',
+      detail: {
+        base: 'http://127.0.0.1:47201',
+        source: 'dashboard.api_secret in helio.yaml',
+        configPath: 'helio.yaml',
+      },
+    })
+  })
+
+  it('reports api_error on any other failure and on a malformed 200 body', async () => {
+    delete process.env['HELIO_DASHBOARD_SECRET']
+    stubFetch(() => jsonResponse(503, { error: 'baselines are not available in this process' }))
+    expect(await fetchBaselines(config({ api_secret: 's' }), 'helio.yaml')).toMatchObject({
+      ok: false,
+      code: 'api_error',
+      detail: { message: 'baselines are not available in this process' },
+    })
+    stubFetch(() => new Response('<html>', { status: 502 }))
+    expect(await fetchBaselines(config({ api_secret: 's' }), 'helio.yaml')).toMatchObject({
+      ok: false,
+      code: 'api_error',
+      detail: { message: 'HTTP 502' },
+    })
+    stubFetch(() => jsonResponse(200, { doors: 'nope' }))
+    expect(await fetchBaselines(config({ api_secret: 's' }), 'helio.yaml')).toMatchObject({
+      ok: false,
+      code: 'api_error',
+      detail: { message: 'unexpected response body from GET /api/baselines' },
+    })
   })
 })

@@ -3,7 +3,7 @@ import { SlackChannel, buildApprovalBlocks, truncate } from './slack.js'
 import { ApprovalRouter } from './router.js'
 import { ApprovalQueue } from './queue.js'
 import { QueueChannel } from './channels.js'
-import type { ApprovalChannel, ApprovalTicket } from './types.js'
+import type { ApprovalChannel, ApprovalTicket, ToolDriftContext } from './types.js'
 
 // ---------------------------------------------------------------------------
 // Mock @slack/web-api
@@ -484,6 +484,214 @@ describe('buildApprovalBlocks — mrkdwn sanitization', () => {
     expect(ruleLine).not.toContain('`code`')
     expect(ruleLine).not.toContain('*bold*')
     expect(ruleLine).not.toContain('<!channel>')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Drift context (issue #60): the definition drift section
+// ---------------------------------------------------------------------------
+
+describe('buildApprovalBlocks: definition drift section (issue #60)', () => {
+  type Change = { aspect: string; baseline?: unknown; current?: unknown }
+  const ALL_ASPECTS = [
+    'annotations',
+    'inputSchema',
+    'description',
+    'outputSchema',
+    'title',
+    'duplicate',
+    'other',
+  ]
+  const sample: Change[] = [
+    {
+      aspect: 'annotations',
+      baseline: { destructiveHint: false },
+      current: { destructiveHint: true },
+    },
+    {
+      aspect: 'description',
+      baseline: 'Send an email',
+      current: 'Send an email and delete the draft',
+    },
+  ]
+  const breached = [
+    { name: 'small', limit: 10, spent: 0, attempted_amount: 20, currency: 'USD', window: '24h' },
+  ]
+
+  function drifted(
+    overrides?: Partial<ApprovalTicket>,
+    changes: Change[] = sample,
+    mode: 'require_approval' | 'log' = 'log',
+  ) {
+    return makeTicket({
+      matched_rule: null,
+      tool_drift: { changes: changes as ToolDriftContext['changes'], mode },
+      ...overrides,
+    })
+  }
+
+  function driftSection(ticket: ApprovalTicket): string {
+    const sections = buildApprovalBlocks(ticket).filter((b) => b.type === 'section') as Array<{
+      text: { text: string }
+    }>
+    const section = sections.find((s) => s.text.text.startsWith('*Definition drift'))
+    expect(section).toBeDefined()
+    return section?.text.text ?? ''
+  }
+
+  it('names every changed aspect and both sides of each change', () => {
+    const text = driftSection(drifted())
+    expect(text).toContain('`annotations`')
+    expect(text).toContain('`description`')
+    expect(text).toContain(
+      '• `annotations`: `{"destructiveHint":false}` to `{"destructiveHint":true}`',
+    )
+    expect(text).toContain(
+      '• `description`: `"Send an email"` to `"Send an email and delete the draft"`',
+    )
+    expect(text).toContain(
+      'The approval ticket carries the full values (approvals REST API / dashboard).',
+    )
+  })
+
+  it('truncates a 5 KB value to the cap and keeps one section', () => {
+    const big = 'x'.repeat(5_000)
+    const text = driftSection(
+      drifted(undefined, [{ aspect: 'description', baseline: 'a', current: big }]),
+    )
+    expect(text).not.toContain('x'.repeat(200))
+    expect(text).toMatch(/`"x{158}\u2026`/)
+    expect(text.length).toBeLessThanOrEqual(2_900)
+  })
+
+  it('renders all seven aspects at maximum length in one section under 2,900 characters', () => {
+    const long = 'y'.repeat(10_000)
+    const changes = ALL_ASPECTS.map((aspect) => ({ aspect, baseline: long, current: long }))
+    const ticket = drifted(
+      { channel_name: 'native:openclaw', matched_rule: 'approve-pay', breached_budgets: breached },
+      changes,
+    )
+    const blocks = buildApprovalBlocks(ticket)
+    const texts = blocks
+      .filter((b) => b.type === 'section')
+      .map((b) => (b as { text: { text: string } }).text.text)
+      .filter((t) => t.startsWith('*Definition drift'))
+    expect(texts).toHaveLength(1)
+    expect(texts[0]?.length).toBeLessThanOrEqual(2_900)
+    for (const aspect of ALL_ASPECTS) expect(texts[0]).toContain(`\`${aspect}\``)
+  })
+
+  it('strips a backtick and a newline from a value so the span cannot close early', () => {
+    const text = driftSection(
+      drifted(undefined, [
+        { aspect: 'description', baseline: 'run `rm -rf` now\nthen', current: 'b' },
+      ]),
+    )
+    const line = text.split('\n').find((l) => l.startsWith('• `description`')) ?? ''
+    // `• `description`: `<value>` to `<value>`` has exactly six backticks.
+    expect(line.match(/`/g)).toHaveLength(6)
+    expect(line).not.toContain('\n')
+    expect(line).toContain('rm -rf')
+  })
+
+  it('renders an absent side as the word absent outside a span and a null side as null', () => {
+    const text = driftSection(
+      drifted(undefined, [
+        { aspect: 'inputSchema', current: { type: 'object' } },
+        { aspect: 'description', baseline: 'was' },
+        { aspect: 'title', baseline: null, current: 'now' },
+      ]),
+    )
+    expect(text).toContain('• `inputSchema`: absent to `{"type":"object"}`')
+    expect(text).toContain('• `description`: `"was"` to absent')
+    expect(text).toContain('• `title`: `null` to `"now"`')
+  })
+
+  describe('the header names the hold from the ticket fields', () => {
+    it('MCP door: a budget ticket reads as the budget, whatever rule name it carries', () => {
+      expect(
+        driftSection(drifted({ breached_budgets: breached }, sample, 'require_approval')),
+      ).toMatch(/^\*Definition drift \(this hold is the budget\):\*/)
+      expect(
+        driftSection(drifted({ breached_budgets: breached, matched_rule: 'allow-pay' })),
+      ).toMatch(/^\*Definition drift \(this hold is the budget\):\*/)
+    })
+
+    it('MCP door: a rule ticket reads as the rule', () => {
+      expect(driftSection(drifted({ matched_rule: 'approve-email' }))).toMatch(
+        /^\*Definition drift \(this hold is the rule\):\*/,
+      )
+    })
+
+    it('MCP door: the gate ticket reads as the drift', () => {
+      expect(driftSection(drifted(undefined, sample, 'require_approval'))).toMatch(
+        /^\*Definition drift \(this hold is the drift\):\*/,
+      )
+    })
+
+    it('MCP door: no rule, no budget, mode log reads as flag_destructive', () => {
+      expect(driftSection(drifted())).toMatch(
+        /^\*Definition drift \(this hold is flag_destructive\):\*/,
+      )
+    })
+
+    it('native: a rule name beside a budget covers the overage, for approve-pay and allow-pay alike', () => {
+      const overage =
+        '*Definition drift (this approval covers the overage; the matched rule is the rule that matched; the drift is context):*'
+      for (const rule of ['approve-pay', 'allow-pay']) {
+        const text = driftSection(
+          drifted({
+            channel_name: 'native:openclaw',
+            matched_rule: rule,
+            breached_budgets: breached,
+          }),
+        )
+        expect(text.startsWith(overage)).toBe(true)
+      }
+    })
+
+    it('native: the gate beside a budget covers the drift and the overage, unlike the rule shape', () => {
+      const text = driftSection(
+        drifted(
+          { channel_name: 'native:openclaw', breached_budgets: breached },
+          sample,
+          'require_approval',
+        ),
+      )
+      expect(text).toMatch(
+        /^\*Definition drift \(this approval covers the drift and the overage\):\*/,
+      )
+      const ruleText = driftSection(
+        drifted({
+          channel_name: 'native:openclaw',
+          matched_rule: 'approve-pay',
+          breached_budgets: breached,
+        }),
+      )
+      expect(text.split('\n')[0]).not.toBe(ruleText.split('\n')[0])
+    })
+
+    it('native: without a budget the drift and rule headers match the MCP door', () => {
+      expect(
+        driftSection(drifted({ channel_name: 'native:openclaw' }, sample, 'require_approval')),
+      ).toMatch(/^\*Definition drift \(this hold is the drift\):\*/)
+      expect(
+        driftSection(drifted({ channel_name: 'native:openclaw', matched_rule: 'approve-send' })),
+      ).toMatch(/^\*Definition drift \(this hold is the rule\):\*/)
+    })
+  })
+
+  it('is absent on plain tickets and adds exactly one block on drifted ones', () => {
+    expect(JSON.stringify(buildApprovalBlocks(makeTicket()))).not.toContain('Definition drift')
+    expect(buildApprovalBlocks(makeTicket())).toHaveLength(4)
+    expect(buildApprovalBlocks(drifted())).toHaveLength(5)
+    expect(buildApprovalBlocks(drifted({ breached_budgets: breached }))).toHaveLength(6)
+    // The drift section follows the budget section.
+    const types = buildApprovalBlocks(drifted({ breached_budgets: breached }))
+      .filter((b) => b.type === 'section')
+      .map((b) => (b as { text: { text: string } }).text.text.split('\n')[0])
+    expect(types[1]).toMatch(/^\*Breached budgets/)
+    expect(types[2]).toMatch(/^\*Definition drift/)
   })
 })
 

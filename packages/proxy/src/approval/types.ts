@@ -7,6 +7,8 @@
 // receives back to decide whether to forward upstream or return feedback.
 // ---------------------------------------------------------------------------
 
+import type { ToolDriftChange } from '../policy/annotation-cache.js'
+
 /** Possible states of an approval ticket. */
 export type ApprovalStatus =
   | 'pending'
@@ -38,6 +40,24 @@ export interface BudgetBreachContext {
   readonly attempted_amount: number
   readonly currency: string
   readonly window: string
+}
+
+/**
+ * The drift context on a ticket raised for a call whose tool definition
+ * changed since Helio baselined it (issue #60).
+ *
+ * DTO: snake_case because it rides {@link ApprovalTicket}. `changes` is a
+ * snapshot of the drift event the decision saw, one entry per changed
+ * aspect; a side the tool gained or dropped is `undefined` in memory and
+ * omitted on the wire, while a JSON `null` side is a value. `mode` is the
+ * CALL's `on_tool_drift` mode: `require_approval` when the drift gate
+ * escalated the call, `log` when something else did (a rule, a budget, or
+ * `flag_destructive`) on a tool that is merely drifted. A `block` mode never
+ * reaches a ticket, since the gate denies the call first.
+ */
+export interface ToolDriftContext {
+  readonly changes: readonly ToolDriftChange[]
+  readonly mode: 'require_approval' | 'log'
 }
 
 /** A failed attempt to deliver an approval notification. */
@@ -92,6 +112,17 @@ export interface ApprovalTicket {
    * resolution grants nothing beyond this call), and timeout fails closed.
    */
   readonly breached_budgets?: readonly BudgetBreachContext[]
+  /**
+   * The drift context (issue #60). OPTIONAL-ABSENT: set only when the tool
+   * was drifted at submit time, whatever escalated the call. `mode` is the
+   * call's mode and is identical on every ticket the call raises (a drift
+   * gate ticket and the budget ticket that follows it both carry
+   * `require_approval`), so which gate holds THIS ticket is read from the
+   * ticket's fields: budget-first on the MCP door (`breached_budgets`, then
+   * `matched_rule`, then the mode). The changes are a snapshot taken when
+   * the ticket was created.
+   */
+  readonly tool_drift?: ToolDriftContext
   status: ApprovalStatus
   resolved_at?: string
   resolved_by?: string

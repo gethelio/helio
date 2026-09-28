@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import type { ApprovalTicket, ApprovalStatus, BudgetBreachContext } from './types.js'
+import type {
+  ApprovalTicket,
+  ApprovalStatus,
+  BudgetBreachContext,
+  ToolDriftContext,
+} from './types.js'
+import { snapshotValue } from '../util/snapshot.js'
 
 // ---------------------------------------------------------------------------
 // ApprovalQueue — in-memory storage for approval tickets.
@@ -66,6 +72,8 @@ export class ApprovalQueue {
     timeout_ms: number
     /** Breached budget context on break-glass / merged tickets (issue #14). */
     breached_budgets?: readonly BudgetBreachContext[]
+    /** Drift context when the tool was drifted at submit time (issue #60). */
+    tool_drift?: ToolDriftContext
     /** Identity-strategy attribution for session_id (issue #251). */
     session_source?: string | null
     /** Upstream attribution (issue #292); absent in singular mode. */
@@ -91,6 +99,18 @@ export class ApprovalQueue {
       // Absent (not empty) on plain rule tickets: presence is the marker a
       // future standing-approval store must exclude (issue #127).
       ...(params.breached_budgets?.length ? { breached_budgets: params.breached_budgets } : {}),
+      // Absent when the tool was not drifted. The changes reference the
+      // annotation cache's definitions and the ticket is a long-lived wire
+      // object, so the one choke point both router paths share snapshots
+      // them (issue #379); a later tools/list cannot rewrite a held ticket.
+      ...(params.tool_drift?.changes.length
+        ? {
+            tool_drift: {
+              changes: snapshotValue(params.tool_drift.changes),
+              mode: params.tool_drift.mode,
+            },
+          }
+        : {}),
       status: 'pending',
       notification_failures: [],
     }

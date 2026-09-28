@@ -451,6 +451,65 @@ describe('GovernanceService.evaluate', () => {
       expect(tool.annotations).toEqual({ destructiveHint: false })
       expect(tool.input_schema).toEqual({ type: 'array' })
     })
+
+    it('the native ticket of a drifted evaluate carries the changes with the call mode (issue #60)', () => {
+      const policy = compile({ default: 'allow', on_tool_drift: 'require_approval', rules: [] })
+      const harness = makeService({ policy, withApprovals: true })
+      harness.service.evaluate(evalInput({ tool: { name: 'send', description: 'v1' } }))
+      const second = harness.service.evaluate(
+        evalInput({ tool: { name: 'send', description: 'v2' } }),
+      )
+      expect(second.body['decision']).toBe('require_approval')
+      const approval = second.body['approval'] as { id: string }
+      const ticket = harness.approvalRouter?.getTicket(approval.id)
+      expect(ticket?.tool_drift).toEqual({
+        changes: [{ aspect: 'description', baseline: 'v1', current: 'v2' }],
+        mode: 'require_approval',
+      })
+      expect(ticket?.tool_drift?.changes).toEqual(
+        (second.body['tool_drift'] as { changes: unknown }).changes,
+      )
+    })
+
+    it('a rule ticket on a drifted tool under log carries mode log (issue #60)', () => {
+      const policy = compile({
+        default: 'allow',
+        on_tool_drift: 'log',
+        rules: [{ name: 'approve-send', match: { tool: 'send' }, action: 'require_approval' }],
+      })
+      const harness = makeService({ policy, withApprovals: true })
+      harness.service.evaluate(evalInput({ tool: { name: 'send', description: 'v1' } }))
+      const second = harness.service.evaluate(
+        evalInput({ tool: { name: 'send', description: 'v2' } }),
+      )
+      const approval = second.body['approval'] as { id: string }
+      const ticket = harness.approvalRouter?.getTicket(approval.id)
+      expect(ticket?.matched_rule).toBe('approve-send')
+      expect(ticket?.tool_drift).toEqual({
+        changes: [{ aspect: 'description', baseline: 'v1', current: 'v2' }],
+        mode: 'log',
+      })
+    })
+
+    it('mutating the ticket changes leaves the cache and the next evaluate unchanged (issue #60)', () => {
+      const policy = compile({ default: 'allow', on_tool_drift: 'require_approval', rules: [] })
+      const harness = makeService({ policy, withApprovals: true })
+      harness.service.evaluate(evalInput({ tool: { name: 'send', description: 'v1' } }))
+      const second = harness.service.evaluate(
+        evalInput({ tool: { name: 'send', description: 'v2' } }),
+      )
+      const approval = second.body['approval'] as { id: string }
+      const ticket = harness.approvalRouter?.getTicket(approval.id)
+      const change = ticket?.tool_drift?.changes[0] as { current: unknown }
+      change.current = 'rewritten'
+
+      const third = harness.service.evaluate(
+        evalInput({ tool: { name: 'send', description: 'v2' } }),
+      )
+      expect(third.body['tool_drift']).toEqual({
+        changes: [{ aspect: 'description', baseline: 'v1', current: 'v2' }],
+      })
+    })
   })
 
   describe('memory budgets', () => {

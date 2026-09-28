@@ -120,7 +120,8 @@ import {
 import type { CompiledBudget } from './budget/index.js'
 import { ToolBaselineStore } from './baseline/store.js'
 import type { BaselinePersistence } from './baseline/store.js'
-import { postBaselineAccept } from './baseline/client.js'
+import { fetchBaselines, postBaselineAccept } from './baseline/client.js'
+import type { BaselineListDoorBody, BaselineListEntryBody } from './baseline/client.js'
 import { helioLogTag } from './util/log-label.js'
 import { parseDuration } from './config/schema.js'
 import {
@@ -1090,6 +1091,29 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
                 : undefined
             if (stack === undefined) return { ok: false, reason: 'unknown_upstream' }
             return stack.governedForwarder.acceptBaseline(tool, actor)
+          },
+          // GET /api/baselines: a read, so a named config lists every door
+          // when no name is given; a singular config still refuses a name.
+          list: ({ upstream }) => {
+            const doors =
+              upstream === undefined
+                ? stacks
+                : isNamedConfig(config)
+                  ? stacks.filter((entry) => entry.name !== undefined && entry.name === upstream)
+                  : []
+            if (doors.length === 0) return { ok: false, reason: 'unknown_upstream' }
+            return {
+              ok: true,
+              persist_baselines: persistBaselines,
+              doors: doors.map((stack) => {
+                const listed = stack.governedForwarder.listBaselines()
+                return {
+                  upstream: stack.name ?? null,
+                  primed: listed.primed,
+                  baselines: listed.baselines,
+                }
+              }),
+            }
           },
         },
       },
@@ -2484,6 +2508,139 @@ async function baselineAcceptCommand(tool: string, opts: BaselineAcceptOptions):
 }
 
 // ---------------------------------------------------------------------------
+// helio baseline list (issue #60)
+// ---------------------------------------------------------------------------
+
+interface BaselineListOptions {
+  config: string
+  upstream?: string
+  format: string
+}
+
+/**
+ * The STATE cell of one baseline row: `drifted`, `ok` or `absent` from the
+ * flags, then the markers `d` (absent and still drifted: `accept` refuses it
+ * as unknown until the upstream lists it again, so neither `drifted` nor a
+ * bare `absent` would tell the truth) and `r` (restored from disk and not
+ * since accepted). On a door no live list has primed every row is a restored
+ * row and reads `restored`, with no marker.
+ */
+function baselineState(entry: BaselineListEntryBody, primed: boolean): string {
+  if (!primed) return 'restored'
+  const word = entry.present ? (entry.drifted ? 'drifted' : 'ok') : 'absent'
+  const markers = `${!entry.present && entry.drifted ? 'd' : ''}${entry.restored ? 'r' : ''}`
+  return markers ? `${word} ${markers}` : word
+}
+
+/** Pad every cell of a column to its widest member, two spaces between columns. */
+function renderColumns(rows: readonly (readonly string[])[]): string[] {
+  const widths: number[] = []
+  for (const row of rows) {
+    row.forEach((cell, i) => {
+      widths[i] = Math.max(widths[i] ?? 0, cell.length)
+    })
+  }
+  return rows.map((row) =>
+    row
+      .map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i] ?? 0)))
+      .join('  ')
+      .trimEnd(),
+  )
+}
+
+/** The text table of one door, under its header line. */
+function renderBaselineDoor(door: BaselineListDoorBody, persisted: boolean): string[] {
+  const name = door.upstream ?? 'the upstream'
+  const posture = persisted ? 'persisted,' : 'memory only, persist_baselines: false;'
+  const primed = door.primed ? 'primed' : 'not primed yet'
+  const lines = [`Baselines of ${name} (${posture} ${String(door.baselines.length)}; ${primed})`]
+  if (door.baselines.length === 0) {
+    lines.push('(no baselines)')
+    return lines
+  }
+  const minute = (iso: string | null) => (iso === null ? '-' : formatUtcMinute(iso))
+  const rows: string[][] = [
+    ['TOOL', 'STATE', 'FINGERPRINT', 'FIRST SEEN', 'LAST CONFIRMED', 'ACCEPTED'],
+    ...door.baselines.map((entry) => [
+      entry.tool,
+      baselineState(entry, door.primed),
+      entry.fingerprint_sha256.slice(0, 8),
+      minute(entry.first_seen),
+      minute(entry.last_confirmed),
+      entry.accepted_at === null
+        ? '-'
+        : `${formatUtcMinute(entry.accepted_at)} by ${entry.accepted_by ?? 'unknown'}`,
+    ]),
+  ]
+  return lines.concat(renderColumns(rows))
+}
+
+/**
+ * List the running proxy's baselines per door: load the config, refuse a
+ * door argument a singular config cannot satisfy before any socket (a named
+ * config lists every door when none is given: this is a read), then one GET
+ * to the dashboard API. JSON prints the route body verbatim.
+ */
+async function baselineListCommand(opts: BaselineListOptions): Promise<void> {
+  if (opts.format !== 'text' && opts.format !== 'json') {
+    throw new StartupError(`Error: --format must be text or json (got "${opts.format}")`)
+  }
+  const config = await loadConfigForReader(opts.config, {
+    command: 'helio baseline list',
+    presentsSecret: true,
+  })
+  if (!isNamedConfig(config) && opts.upstream !== undefined) {
+    throw new StartupError('Error: this config has a single upstream; drop --upstream')
+  }
+
+  const result = await fetchBaselines(config, opts.config, opts.upstream)
+  if (!result.ok) {
+    const { base, source, message } = result.detail
+    switch (result.code) {
+      case 'dashboard_disabled':
+        throw new StartupError(
+          `Error: helio baseline list reads the running proxy through the dashboard API, and ` +
+            `dashboard.enabled is false in ${opts.config}. Enable the dashboard, set ` +
+            'dashboard.api_secret and restart helio start.',
+        )
+      case 'secret_is_digest':
+        throw new StartupError(
+          `Error: the dashboard secret from ${source ?? 'the config'} is a sha256: digest; present the ` +
+            `secret itself (the value helio init printed) in HELIO_DASHBOARD_SECRET and rerun`,
+        )
+      case 'no_proxy_answered':
+        throw new StartupError(
+          `Error: cannot reach the Helio dashboard API at ${base} (is helio start running with dashboard.enabled: true?)`,
+        )
+      case 'secret_refused':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} refused the secret from ${source ?? 'no source (none was found)'}; ` +
+            `set HELIO_DASHBOARD_SECRET to the secret helio init printed and rerun`,
+        )
+      case 'unknown_upstream':
+        throw new StartupError(
+          opts.upstream === undefined
+            ? 'Error: the running proxy is not a single-upstream process, so it serves no door ' +
+                `for this config; ${result.suggestion}`
+            : `Error: no upstream named "${opts.upstream}" is served by the running proxy; ${result.suggestion}`,
+        )
+      case 'api_error':
+        throw new StartupError(
+          `Error: the Helio dashboard API at ${base} answered: ${message ?? 'HTTP error'}`,
+        )
+    }
+  }
+  if (opts.format === 'json') {
+    console.log(JSON.stringify(result.body, null, 2))
+    return
+  }
+  const blocks = result.body.doors.map((door) =>
+    renderBaselineDoor(door, result.body.persist_baselines).join('\n'),
+  )
+  console.log(blocks.join('\n\n'))
+}
+
+// ---------------------------------------------------------------------------
 // helio kill / helio resume (issue #402)
 // ---------------------------------------------------------------------------
 
@@ -2728,6 +2885,16 @@ baselineCommand
   .action((tool: string, opts: BaselineAcceptOptions) =>
     baselineAcceptCommand(tool, opts).catch(exitOnStartupError),
   )
+baselineCommand
+  .command('list')
+  .description('List the tool definition baselines the running proxy holds, per upstream door')
+  .option('-c, --config <path>', 'Path to helio.yaml', DEFAULT_CONFIG_PATH)
+  .option(
+    '--upstream <name>',
+    'One upstream entry to list (named-upstreams configs; default: every door)',
+  )
+  .option('--format <format>', 'Output format: text or json', 'text')
+  .action((opts: BaselineListOptions) => baselineListCommand(opts).catch(exitOnStartupError))
 
 program
   .command('kill')

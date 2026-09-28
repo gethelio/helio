@@ -897,7 +897,49 @@ Resume. The endpoint resumes only by unlinking the marker (or by clearing a memo
 
 ### Tool baselines
 
-See [Baselines across restarts](./policies.md#baselines-across-restarts) for the persisted drift baselines this endpoint replaces. It sits under the `/api/*` authentication above (a cookie session also needs `x-helio-csrf`). In open mode (no secret) it answers `403` before anything else:
+See [Baselines across restarts](./policies.md#baselines-across-restarts) for the persisted drift baselines these endpoints read and replace. Both sit under the `/api/*` authentication above. A process without the dependency (a direct embedder) answers `503 { "error": "baselines are not available in this process" }` on either.
+
+#### GET /api/baselines
+
+List the baselines every upstream door holds right now, joined from the running proxy's memory (present, drifted, restored) and the persisted rows (the instants and the acceptor). `helio baseline list [--upstream <name>]` is this request. A read: it serves in open mode like `GET /api/policy/status`, and a cookie session needs no `x-helio-csrf` header.
+
+**Query:** `upstream` (optional) names one door on a config with named upstreams; omitted, every door is listed. An empty value is a `400`.
+
+**Response (200):**
+
+```json
+{
+  "persist_baselines": true,
+  "doors": [
+    {
+      "upstream": "mail",
+      "primed": true,
+      "baselines": [
+        {
+          "tool": "get_weather",
+          "upstream": "mail",
+          "fingerprint_sha256": "9f2c…",
+          "first_seen": "2026-09-28T12:50:11.039Z",
+          "last_confirmed": "2026-09-28T12:50:11.041Z",
+          "accepted_at": null,
+          "accepted_by": null,
+          "restored": true,
+          "present": true,
+          "drifted": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+`persist_baselines` is the process-wide `policies.persist_baselines` value; under `false` the instants and the acceptor are null, since no row exists, while `present` and `drifted` still come from memory. `primed` is false until the door has applied a live `tools/list`; before that every entry is a restored row the proxy has not yet compared (`present: false`). `restored` means reloaded from disk and not since accepted; `present` means named by the door's most recent list; `drifted` means the current definition differs from the baseline, which stays true for a tool a later list omitted. `upstream` is null on a single-upstream config, on the door and on every entry. The accept body and the `baseline_accepted` record carry the canonical JSON of the definition under `fingerprint`; `fingerprint_sha256` is the hex SHA-256 of that string, and the accept command prints its first eight characters.
+
+**Error responses:** `400` a malformed query; `401` as for every route under a secret; `404 unknown_upstream` with the accept route's suggestion when no door matches (a name that is not configured, or any name on a single-upstream config).
+
+#### POST /api/baselines/accept
+
+Accept a drifted tool's current definition as its baseline on one upstream door: the stored row is replaced, the drift state is dropped, a `baseline_accepted` [audit record](./audit.md#tool-definition-drift-records) is written and the block lifts at once. `helio baseline accept <tool> [--upstream <name>]` is this request. A cookie session also needs `x-helio-csrf`. In open mode (no secret) it answers `403` before anything else:
 
 ```json
 {
@@ -905,12 +947,6 @@ See [Baselines across restarts](./policies.md#baselines-across-restarts) for the
   "suggestion": "set dashboard.api_secret and restart, then run helio baseline accept <tool> -c <config>"
 }
 ```
-
-A process without the dependency (a direct embedder) answers `503 { "error": "baselines are not available in this process" }`.
-
-#### POST /api/baselines/accept
-
-Accept a drifted tool's current definition as its baseline on one upstream door: the stored row is replaced, the drift state is dropped, a `baseline_accepted` [audit record](./audit.md#tool-definition-drift-records) is written and the block lifts at once. `helio baseline accept <tool> [--upstream <name>]` is this request.
 
 **Request body:**
 

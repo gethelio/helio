@@ -14,7 +14,9 @@ import {
   formatTimestamp,
   formatCountdown,
   stringifyForDisplay,
+  driftValueViews,
 } from '../utils'
+import type { DriftValueView } from '../utils'
 import { ApprovalStatusBadge } from '../components/ApprovalStatusBadge'
 import { ApprovalActions } from '../components/ApprovalActions'
 import { DetailSection } from '../components/DetailSection'
@@ -471,6 +473,93 @@ function BreachedBudgets({ ticket }: { ticket: ApprovalTicket }) {
   )
 }
 
+/**
+ * The one-line caption of the drift section (issue #60), read from the
+ * ticket's fields. `mode` is the call's, identical on every ticket the call
+ * raises, so the hold is derived: budget-first on the MCP door (any rule or
+ * gate ticket of the call already resolved), then the rule, then the drift
+ * gate, else `flag_destructive`, which the ticket stores nowhere. A native
+ * ticket's one approval covers every gate present, so the caption lists what
+ * the fields prove; beside a budget a rule name is only the rule that
+ * matched (it may be an allow rule), never a covered gate. The caption names
+ * sections of this card and never says what approving does next: the drift
+ * gate's ticket has the same fields when a budget ticket follows it.
+ */
+function driftCaption(ticket: ApprovalTicket, mode: 'require_approval' | 'log'): string {
+  const changed = "The tool's definition changed after Helio baselined it"
+  const budget = Boolean(ticket.breached_budgets && ticket.breached_budgets.length > 0)
+  const native = ticket.channel_name.startsWith('native:')
+  if (native && budget && ticket.matched_rule) {
+    return `${changed}; this approval covers the overage in Breached Budgets; the Matched Rule line is the rule that matched; the drift is context`
+  }
+  if (native && budget && mode === 'require_approval') {
+    return `${changed}; this approval covers the drift and the overage in Breached Budgets`
+  }
+  if (native && budget) {
+    return `${changed}; this hold is the overage in Breached Budgets; the drift is context`
+  }
+  if (budget) {
+    return `${changed}; this hold is the overage in Breached Budgets, the drift is context`
+  }
+  if (ticket.matched_rule) {
+    return `${changed}; this hold is the rule on the Matched Rule line, the drift is context`
+  }
+  if (mode === 'require_approval') return `${changed} and this hold is that drift`
+  return `${changed}; this hold is flag_destructive, the drift is context`
+}
+
+function DriftSide({ label, view }: { label: string; view: DriftValueView }) {
+  return (
+    <div className="mt-1">
+      <span className="text-[11px] text-gray-500">
+        {label}: {view.absent ? 'absent' : `${String(view.bytes)} B`}
+      </span>
+      {!view.absent && (
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap wrap-break-word rounded bg-gray-50 p-2 text-xs">
+          {view.text}
+        </pre>
+      )}
+      {view.truncated && (
+        <p className="mt-1 text-[11px] text-amber-700">
+          Value preview is truncated for readability.
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The definition drift section of a drift-escalated ticket (issue #60). */
+function DriftContext({ ticket }: { ticket: ApprovalTicket }) {
+  const drift = ticket.tool_drift
+  if (!drift || drift.changes.length === 0) return null
+  return (
+    <DetailSection label="Definition Drift">
+      <p className="mb-1 text-[11px] text-amber-700">{driftCaption(ticket, drift.mode)}</p>
+      <div className="flex flex-wrap gap-1">
+        {drift.changes.map((change) => (
+          <span
+            key={change.aspect}
+            className="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20"
+          >
+            {change.aspect}
+          </span>
+        ))}
+      </div>
+      {drift.changes.map((change) => {
+        const views = driftValueViews(change.baseline, change.current)
+        return (
+          <details key={change.aspect} className="mt-2 text-xs">
+            <summary className="cursor-pointer font-mono">{change.aspect}</summary>
+            {views.note && <p className="mt-1 text-[11px] text-gray-500">{views.note}</p>}
+            <DriftSide label="Baseline" view={views.baseline} />
+            <DriftSide label="Current" view={views.current} />
+          </details>
+        )
+      })}
+    </DetailSection>
+  )
+}
+
 function PendingCard({
   ticket,
   now,
@@ -563,6 +652,8 @@ function PendingCard({
           </DetailSection>
 
           <BreachedBudgets ticket={ticket} />
+
+          <DriftContext ticket={ticket} />
 
           {ticket.upstream && (
             <DetailSection label="Upstream">
@@ -681,6 +772,8 @@ function ResolvedRow({
               </DetailSection>
 
               <BreachedBudgets ticket={ticket} />
+
+              <DriftContext ticket={ticket} />
 
               {/* Upstream attribution (issue #297) — parity with the pending
                   card's expanded detail; same DTO, same field. */}

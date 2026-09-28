@@ -3,6 +3,7 @@ import type {
   ApprovalOutcome,
   ApprovalTicket,
   BudgetBreachContext,
+  ToolDriftContext,
 } from './types.js'
 import type { ApprovalQueue } from './queue.js'
 import type { CompiledApproval, CompiledPolicyRule } from '../policy/types.js'
@@ -93,6 +94,8 @@ export interface ApprovalSubmitParams {
   readonly upstream: string | null
   /** Breached budget context; marks the ticket as break-glass (issue #14). */
   readonly breached_budgets?: readonly BudgetBreachContext[]
+  /** Drift context when the tool was drifted at submit time (issue #60). */
+  readonly tool_drift?: ToolDriftContext
   /**
    * Total approval-config override. When set, channel/timeout/delegates/
    * escalation come from HERE and the matched rule's approval config is
@@ -119,6 +122,8 @@ export interface NativeTicketParams {
   readonly timeout_ms?: number
   /** Breached budget context; marks the ticket as break-glass (issue #14). */
   readonly breached_budgets?: readonly BudgetBreachContext[]
+  /** Drift context when the tool was drifted at submit time (issue #60). */
+  readonly tool_drift?: ToolDriftContext
 }
 
 export class ApprovalRouter {
@@ -176,6 +181,7 @@ export class ApprovalRouter {
       upstream: params.upstream,
       timeout_ms: timeoutMs,
       breached_budgets: params.breached_budgets,
+      tool_drift: params.tool_drift,
     })
 
     this.onSubmit?.(ticket)
@@ -319,6 +325,7 @@ export class ApprovalRouter {
       session_source: params.session_id != null ? 'sideband' : null,
       timeout_ms: timeoutMs,
       breached_budgets: params.breached_budgets,
+      tool_drift: params.tool_drift,
     })
 
     this.onSubmit?.(ticket)

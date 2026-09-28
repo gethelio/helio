@@ -21,6 +21,20 @@ Maintainer notes:
 
 ### Added
 
+- **Drift-escalated approval tickets carry `tool_drift`: what changed in
+  the tool's definition, and the call's `on_tool_drift` mode.** Every
+  ticket a drifted call raises gets the field, whether the drift gate, a
+  rule, a budget or `flag_destructive` escalated it. The dashboard card
+  renders a Definition Drift section with both sides of every changed
+  aspect and a caption naming the hold, Slack messages render a section
+  with each value cut to 160 characters, and the webhook payload and
+  `GET /api/approvals` carry the field verbatim.
+- **`helio baseline list [--upstream <name>]` lists the tool definition
+  baselines the running proxy holds, per upstream door**, through
+  `GET /api/baselines`, a read that serves in open mode: each tool's state
+  (`ok`, `drifted`, `absent`, with markers for restored and still-drifted
+  rows), its fingerprint digest, and the persisted first-seen, last-confirmed
+  and accepted instants. `--format json` prints the route body.
 - **`helio baseline accept <tool> [--upstream <name>]` accepts a drifted
   tool definition as its new baseline on the running proxy**, through the
   authenticated `POST /api/baselines/accept`; the acceptance replaces the

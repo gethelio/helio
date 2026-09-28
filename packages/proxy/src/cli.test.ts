@@ -8277,41 +8277,40 @@ audit:
 // helio baseline accept (issue #60)
 // ---------------------------------------------------------------------------
 
-describe('helio baseline accept (issue #60)', () => {
-  /** A singular or named config with the dashboard on a free port. */
-  function writeAcceptConfig(options: {
-    dashboardSecret?: string
-    dashboardEnabled?: boolean
-    named?: boolean
-  }): { dir: string; configPath: string; dashboardPort: number } {
-    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-baseline-accept-'))
-    const configPath = join(dir, 'helio.yaml')
-    const listenPort = randomChildPort()
-    const dashboardPort = listenPort + 1
-    const upstream = options.named
-      ? `upstreams:
+/** A singular or named config with the dashboard on a free port. */
+function writeBaselineConfig(options: {
+  dashboardSecret?: string
+  dashboardEnabled?: boolean
+  named?: boolean
+}): { dir: string; configPath: string; dashboardPort: number } {
+  const dir = mkdtempSync(join(tmpdir(), 'helio-cli-baseline-'))
+  const configPath = join(dir, 'helio.yaml')
+  const listenPort = randomChildPort()
+  const dashboardPort = listenPort + 1
+  const upstream = options.named
+    ? `upstreams:
   - name: mail
     url: "http://127.0.0.1:1/mcp"
     transport: streamable-http
 `
-      : `upstream:
+    : `upstream:
   url: "http://127.0.0.1:1/mcp"
   transport: streamable-http
 `
-    const dashboard =
-      options.dashboardSecret !== undefined
-        ? `dashboard:
+  const dashboard =
+    options.dashboardSecret !== undefined
+      ? `dashboard:
   enabled: ${String(options.dashboardEnabled ?? true)}
   port: ${String(dashboardPort)}
   host: 127.0.0.1
   api_secret: "${options.dashboardSecret}"
 `
-        : `dashboard:
+      : `dashboard:
   enabled: false
 `
-    writeFileSync(
-      configPath,
-      `
+  writeFileSync(
+    configPath,
+    `
 version: "1"
 ${upstream}listen:
   port: ${String(listenPort)}
@@ -8321,10 +8320,11 @@ policies:
 ${dashboard}audit:
   path: "${join(dir, 'audit.db')}"
 `,
-    )
-    return { dir, configPath, dashboardPort }
-  }
+  )
+  return { dir, configPath, dashboardPort }
+}
 
+describe('helio baseline accept (issue #60)', () => {
   it('registers the group and the verb with --upstream and -c', async () => {
     const group = await runCli(['baseline'])
     expect(group.code).toBe(1)
@@ -8339,7 +8339,7 @@ ${dashboard}audit:
   })
 
   it('refuses --upstream on a single-upstream config before any socket', async () => {
-    const { dir, configPath } = writeAcceptConfig({ dashboardSecret: 'plain' })
+    const { dir, configPath } = writeBaselineConfig({ dashboardSecret: 'plain' })
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
     try {
       const { code, stdout, stderr } = await runCli(
@@ -8356,7 +8356,7 @@ ${dashboard}audit:
   }, 15_000)
 
   it('requires --upstream on a named-upstreams config before any socket', async () => {
-    const { dir, configPath } = writeAcceptConfig({ dashboardSecret: 'plain', named: true })
+    const { dir, configPath } = writeBaselineConfig({ dashboardSecret: 'plain', named: true })
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
     try {
       const { code, stderr } = await runCli(
@@ -8374,7 +8374,9 @@ ${dashboard}audit:
   }, 15_000)
 
   it('names the action on one line when the secret placeholder is unset, before any socket', async () => {
-    const { dir, configPath } = writeAcceptConfig({ dashboardSecret: '${HELIO_DASHBOARD_SECRET}' })
+    const { dir, configPath } = writeBaselineConfig({
+      dashboardSecret: '${HELIO_DASHBOARD_SECRET}',
+    })
     const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
     delete env['HELIO_DASHBOARD_SECRET']
     try {
@@ -8395,7 +8397,7 @@ ${dashboard}audit:
   }, 15_000)
 
   it('says the running proxy is not single-upstream when a singular config meets a named proxy', async () => {
-    const { dir, configPath, dashboardPort } = writeAcceptConfig({ dashboardSecret: 'plain' })
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({ dashboardSecret: 'plain' })
     // A dashboard stand-in answering as the route does when no door matches:
     // the file names one upstream, the running proxy serves named ones.
     const sink = createServer((_req, res) => {
@@ -8430,7 +8432,7 @@ ${dashboard}audit:
   }, 15_000)
 
   it('exits 1 with one line when the dashboard is disabled', async () => {
-    const { dir, configPath } = writeAcceptConfig({})
+    const { dir, configPath } = writeBaselineConfig({})
     try {
       const { code, stderr } = await runCli(['baseline', 'accept', 'get_status', '-c', configPath])
       expect(code).toBe(1)
@@ -8443,9 +8445,255 @@ ${dashboard}audit:
   }, 15_000)
 
   it('exits 1 with one line when the dashboard API is not reachable', async () => {
-    const { dir, configPath, dashboardPort } = writeAcceptConfig({ dashboardSecret: 'plain' })
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({ dashboardSecret: 'plain' })
     try {
       const { code, stderr } = await runCli(['baseline', 'accept', 'get_status', '-c', configPath])
+      expect(code).toBe(1)
+      expect(stderr.trim()).toBe(
+        `Error: cannot reach the Helio dashboard API at http://127.0.0.1:${String(dashboardPort)} (is helio start running with dashboard.enabled: true?)`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+})
+
+// ---------------------------------------------------------------------------
+// helio baseline list (issue #60)
+// ---------------------------------------------------------------------------
+
+describe('helio baseline list (issue #60)', () => {
+  const SEEN_AT = '2026-09-28T12:50:11.039Z'
+  const CONFIRMED_AT = '2026-09-28T12:57:40.500Z'
+  const ACCEPTED_AT = '2026-09-28T13:02:05.000Z'
+  const row = (
+    tool: string,
+    upstream: string | null,
+    flags: { restored: boolean; present: boolean; drifted: boolean },
+    instants: { first?: string | null; last?: string | null; accepted?: [string, string] } = {},
+  ) => ({
+    tool,
+    upstream,
+    fingerprint_sha256: `${tool.slice(0, 2)}${'0'.repeat(62)}`.slice(0, 64),
+    first_seen: instants.first === undefined ? SEEN_AT : instants.first,
+    last_confirmed: instants.last === undefined ? CONFIRMED_AT : instants.last,
+    accepted_at: instants.accepted?.[0] ?? null,
+    accepted_by: instants.accepted?.[1] ?? null,
+    ...flags,
+  })
+  const PERSISTED_BODY = {
+    persist_baselines: true,
+    doors: [
+      {
+        upstream: 'mail',
+        primed: true,
+        baselines: [
+          row('alpha', 'mail', { restored: true, present: true, drifted: false }),
+          row('beta', 'mail', { restored: true, present: true, drifted: true }),
+          row('delta', 'mail', { restored: false, present: true, drifted: false }),
+          row('gamma', 'mail', { restored: true, present: false, drifted: false }),
+          row(
+            'omega',
+            'mail',
+            { restored: false, present: true, drifted: false },
+            {
+              accepted: [ACCEPTED_AT, 'oli'],
+            },
+          ),
+          row('zeta', 'mail', { restored: true, present: false, drifted: true }),
+        ],
+      },
+      {
+        upstream: 'crm',
+        primed: false,
+        baselines: [row('lead', 'crm', { restored: true, present: false, drifted: false })],
+      },
+      { upstream: 'void', primed: true, baselines: [] },
+    ],
+  }
+  const MEMORY_BODY = {
+    persist_baselines: false,
+    doors: [
+      {
+        upstream: null,
+        primed: true,
+        baselines: [
+          row(
+            'alpha',
+            null,
+            { restored: false, present: true, drifted: false },
+            { first: null, last: null },
+          ),
+          row(
+            'phi',
+            null,
+            { restored: false, present: false, drifted: true },
+            { first: null, last: null },
+          ),
+        ],
+      },
+    ],
+  }
+
+  /** A dashboard stand-in answering the list route with `body`, recording every URL. */
+  async function standIn(port: number, body: unknown) {
+    const urls: string[] = []
+    const server = createServer((req, res) => {
+      urls.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(body))
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(port, '127.0.0.1', resolve)
+    })
+    const close = () =>
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve()
+        })
+      })
+    return { urls, close }
+  }
+
+  const squash = (line: string) => line.trim().replace(/ {2,}/g, ' ')
+
+  it('registers the verb with --upstream, --format and -c', async () => {
+    const group = await runCli(['baseline'])
+    expect(`${group.stdout}${group.stderr}`).toContain('list')
+
+    const help = await runCli(['baseline', 'list', '--help'])
+    expect(help.code).toBe(0)
+    expect(help.stdout).toContain('Usage: helio baseline list')
+    expect(help.stdout).toContain('--upstream <name>')
+    expect(help.stdout).toContain('--format <format>')
+    expect(help.stdout).toContain('-c, --config <path>')
+  })
+
+  it('refuses --upstream on a single-upstream config before any socket', async () => {
+    const { dir, configPath } = writeBaselineConfig({ dashboardSecret: 'plain' })
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
+    try {
+      const { code, stdout, stderr } = await runCli(
+        ['baseline', 'list', '-c', configPath, '--upstream', 'mail'],
+        env,
+      )
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).toContain('Error: this config has a single upstream; drop --upstream')
+      expect(stderr).not.toMatch(/connect: attempting to connect/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('refuses a bad --format before any socket', async () => {
+    const { dir, configPath } = writeBaselineConfig({ dashboardSecret: 'plain' })
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_DEBUG: 'net' }
+    try {
+      const { code, stderr } = await runCli(
+        ['baseline', 'list', '-c', configPath, '--format', 'yaml'],
+        env,
+      )
+      expect(code).toBe(1)
+      expect(stderr).toContain('Error: --format must be text or json (got "yaml")')
+      expect(stderr).not.toMatch(/connect: attempting to connect/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('lists every door of a named config without --upstream, with the six states and their markers', async () => {
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({
+      dashboardSecret: 'plain',
+      named: true,
+    })
+    const { urls, close } = await standIn(dashboardPort, PERSISTED_BODY)
+    try {
+      const { code, stdout, stderr } = await runCli(['baseline', 'list', '-c', configPath])
+      expect(stderr).toBe('')
+      expect(code).toBe(0)
+      expect(urls).toEqual(['/api/baselines'])
+      const lines = stdout.split('\n').map(squash)
+      expect(lines).toContain('Baselines of mail (persisted, 6; primed)')
+      expect(lines).toContain('TOOL STATE FINGERPRINT FIRST SEEN LAST CONFIRMED ACCEPTED')
+      expect(lines).toContain('alpha ok r al000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      expect(lines).toContain('beta drifted r be000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      expect(lines).toContain('delta ok de000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      expect(lines).toContain('gamma absent r ga000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      expect(lines).toContain(
+        'omega ok om000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC 2026-09-28 13:02 UTC by oli',
+      )
+      expect(lines).toContain('zeta absent dr ze000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      // An unprimed door: every row reads restored, with no r marker.
+      expect(lines).toContain('Baselines of crm (persisted, 1; not primed yet)')
+      expect(lines).toContain('lead restored le000000 2026-09-28 12:50 UTC 2026-09-28 12:57 UTC -')
+      // An empty door prints its header and the placeholder.
+      expect(lines).toContain('Baselines of void (persisted, 0; primed)')
+      expect(lines).toContain('(no baselines)')
+      // The columns line up: every row of the mail table starts FINGERPRINT at one index.
+      const raw = stdout.split('\n')
+      const header = raw.find((l) => l.startsWith('TOOL')) ?? ''
+      const column = header.indexOf('FINGERPRINT')
+      for (const tool of ['alpha', 'beta', 'delta', 'gamma', 'omega', 'zeta']) {
+        const line = raw.find((l) => l.startsWith(`${tool} `)) ?? ''
+        expect(line.indexOf(`${tool.slice(0, 2)}000000`)).toBe(column)
+      }
+    } finally {
+      await close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('prints the memory-only header with null instants and the d marker under persist_baselines false', async () => {
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({ dashboardSecret: 'plain' })
+    const { urls, close } = await standIn(dashboardPort, MEMORY_BODY)
+    try {
+      const { code, stdout } = await runCli(['baseline', 'list', '-c', configPath])
+      expect(code).toBe(0)
+      expect(urls).toEqual(['/api/baselines'])
+      const lines = stdout.split('\n').map(squash)
+      expect(lines).toContain(
+        'Baselines of the upstream (memory only, persist_baselines: false; 2; primed)',
+      )
+      expect(lines).toContain('alpha ok al000000 - - -')
+      expect(lines).toContain('phi absent d ph000000 - - -')
+    } finally {
+      await close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('prints the route body verbatim with --format json and passes --upstream through', async () => {
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({
+      dashboardSecret: 'plain',
+      named: true,
+    })
+    const { urls, close } = await standIn(dashboardPort, PERSISTED_BODY)
+    try {
+      const { code, stdout } = await runCli([
+        'baseline',
+        'list',
+        '-c',
+        configPath,
+        '--upstream',
+        'mail',
+        '--format',
+        'json',
+      ])
+      expect(code).toBe(0)
+      expect(urls).toEqual(['/api/baselines?upstream=mail'])
+      expect(JSON.parse(stdout)).toEqual(PERSISTED_BODY)
+    } finally {
+      await close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('exits 1 with one line when the dashboard API is not reachable', async () => {
+    const { dir, configPath, dashboardPort } = writeBaselineConfig({ dashboardSecret: 'plain' })
+    try {
+      const { code, stderr } = await runCli(['baseline', 'list', '-c', configPath])
       expect(code).toBe(1)
       expect(stderr.trim()).toBe(
         `Error: cannot reach the Helio dashboard API at http://127.0.0.1:${String(dashboardPort)} (is helio start running with dashboard.enabled: true?)`,

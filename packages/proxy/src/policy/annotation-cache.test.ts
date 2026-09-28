@@ -878,6 +878,102 @@ describe('ToolAnnotationCache.accept', () => {
   })
 })
 
+describe('ToolAnnotationCache.snapshotBaselines', () => {
+  const alpha = { name: 'alpha', description: 'a1' }
+  const beta = { name: 'beta', description: 'b1' }
+  const gamma = { name: 'gamma', description: 'g1' }
+  const zeta = { name: 'zeta', description: 'z1' }
+  const betaChanged = { name: 'beta', description: 'b2' }
+  const zetaChanged = { name: 'zeta', description: 'z2' }
+  const delta = { name: 'delta', description: 'd1' }
+
+  function byName(cache: ToolAnnotationCache) {
+    return new Map(cache.snapshotBaselines().map((entry) => [entry.name, entry]))
+  }
+
+  it('lists every baseline the cache holds, sorted by name, with the six states', () => {
+    const cache = new ToolAnnotationCache()
+    cache.restore([
+      { name: 'zeta', definition: zeta },
+      { name: 'gamma', definition: gamma },
+      { name: 'beta', definition: beta },
+      { name: 'alpha', definition: alpha },
+    ])
+    // Before the first list: every entry restored and pending, none present.
+    for (const entry of cache.snapshotBaselines()) {
+      expect(entry).toMatchObject({ restored: true, pending: true, present: false, drifted: false })
+    }
+    expect(cache.snapshotBaselines().map((e) => e.name)).toEqual(['alpha', 'beta', 'gamma', 'zeta'])
+
+    cache.update(toolsListResponse([alpha, betaChanged, delta, zetaChanged]))
+    cache.update(toolsListResponse([alpha, betaChanged, delta]))
+    const entries = byName(cache)
+    expect([...entries.keys()]).toEqual(['alpha', 'beta', 'delta', 'gamma', 'zeta'])
+    // unchanged and confirmed
+    expect(entries.get('alpha')).toEqual({
+      name: 'alpha',
+      fingerprint: canonicalize(alpha),
+      restored: true,
+      pending: false,
+      present: true,
+      drifted: false,
+    })
+    // drifted
+    expect(entries.get('beta')).toMatchObject({
+      restored: true,
+      pending: false,
+      present: true,
+      drifted: true,
+    })
+    expect(entries.get('beta')?.fingerprint).toBe(canonicalize(beta))
+    // new
+    expect(entries.get('delta')).toMatchObject({
+      restored: false,
+      pending: false,
+      present: true,
+      drifted: false,
+    })
+    // removed upstream: restored and still pending
+    expect(entries.get('gamma')).toMatchObject({
+      restored: true,
+      pending: true,
+      present: false,
+      drifted: false,
+    })
+    // drifted, then omitted by a later list
+    expect(entries.get('zeta')).toMatchObject({
+      restored: true,
+      pending: false,
+      present: false,
+      drifted: true,
+    })
+
+    // accepted: restored flips to false and the fingerprint moves
+    expect(cache.accept('beta').ok).toBe(true)
+    expect(byName(cache).get('beta')).toEqual({
+      name: 'beta',
+      fingerprint: canonicalize(betaChanged),
+      restored: false,
+      pending: false,
+      present: true,
+      drifted: false,
+    })
+  })
+
+  it('returns fresh objects that do not alias the cache', () => {
+    const cache = new ToolAnnotationCache()
+    cache.update(toolsListResponse([alpha]))
+    const first = cache.snapshotBaselines()[0] as { restored: boolean; name: string }
+    first.restored = true
+    first.name = 'rewritten'
+    expect(cache.snapshotBaselines()[0]).toMatchObject({ name: 'alpha', restored: false })
+  })
+
+  it('is empty on a fresh cache', () => {
+    expect(new ToolAnnotationCache().snapshotBaselines()).toEqual([])
+  })
+})
+
 describe('ToolAnnotationCache.forgetBaselines', () => {
   it('drops the named baselines so the next list re-baselines them', () => {
     const cache = new ToolAnnotationCache()
