@@ -100,6 +100,13 @@ describe('outcome helpers', () => {
     ).toBe('Via Approval')
   })
 
+  it('pins a Baseline Accepted chip on an acceptance record, which otherwise reads Allow (#60)', () => {
+    const accepted = { policy_decision: 'baseline_accepted', block_reason: null }
+    expect(deriveDisplayOutcome(accepted)).toBe('allow')
+    expect(deriveOutcomeContext(accepted)).toBe('Baseline Accepted')
+    expect(deriveOutcomeContext({ policy_decision: 'tool_drift', block_reason: null })).toBeNull()
+  })
+
   it('maps outcome filters to audit API params', () => {
     expect(outcomeFilterToAuditParams('allow')).toEqual({ blocked: false, dry_run: false })
     expect(outcomeFilterToAuditParams('deny')).toEqual({ decision: 'deny' })
