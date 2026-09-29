@@ -68,8 +68,13 @@ export class SseUpstreamForwarder implements McpForwarder {
   connect(signal?: AbortSignal): Promise<void> {
     const controller = new AbortController()
     this.abortController = controller
-    const connectSignals = [controller.signal, AbortSignal.timeout(this.connectTimeoutMs)]
+    const timeoutSignal = AbortSignal.timeout(this.connectTimeoutMs)
+    const connectSignals = [controller.signal, timeoutSignal]
     if (signal !== undefined) connectSignals.push(signal)
+    const timeoutError = (): Error =>
+      new Error(
+        `SSE connection timed out after ${String(this.connectTimeoutMs)}ms while waiting for endpoint`,
+      )
 
     // Case-collapse the static names, then re-stamp text/event-stream over
     // a merged accept — the only answer the connect can consume (issue #304).
@@ -97,26 +102,35 @@ export class SseUpstreamForwarder implements McpForwarder {
             return
           }
 
-          this.consumeStream(res.body, (event, data) => {
-            if (event === 'endpoint' && !resolved) {
-              this.postUrl = this.resolveEndpointUrl(data)
-              this.connected = true
+          this.consumeStream(
+            res.body,
+            (event, data) => {
+              if (event === 'endpoint' && !resolved) {
+                this.postUrl = this.resolveEndpointUrl(data)
+                this.connected = true
+                resolved = true
+                resolve()
+              } else if (event === 'message') {
+                this.onMessage(data)
+              }
+            },
+            (ended) => {
+              // The stream closed, or the read was aborted, before the
+              // endpoint event: the connect must not stay pending.
+              if (resolved) return
               resolved = true
-              resolve()
-            } else if (event === 'message') {
-              this.onMessage(data)
-            }
-          })
+              if (timeoutSignal.aborted) reject(timeoutError())
+              else if (ended === 'aborted')
+                reject(new Error('SSE connection aborted before the endpoint event'))
+              else reject(new Error('SSE stream ended before the endpoint event'))
+            },
+          )
         })
         .catch((err: unknown) => {
           if (!resolved) {
             const asError = err instanceof Error ? err : new Error(String(err))
             if (asError.name === 'TimeoutError') {
-              reject(
-                new Error(
-                  `SSE connection timed out after ${String(this.connectTimeoutMs)}ms while waiting for endpoint`,
-                ),
-              )
+              reject(timeoutError())
               return
             }
             reject(describeUnreachableUpstream(err, this.url) ?? asError)
@@ -301,8 +315,16 @@ export class SseUpstreamForwarder implements McpForwarder {
     }
   }
 
-  /** Consume the SSE ReadableStream, parsing events. */
-  private consumeStream(body: ReadableStream<Uint8Array>, onEvent: SseEventHandler): void {
+  /**
+   * Consume the SSE ReadableStream, parsing events. `onEnd` reports how the
+   * stream stopped (the server closed it, the read was aborted, or it
+   * failed), so a caller waiting on an event can stop waiting.
+   */
+  private consumeStream(
+    body: ReadableStream<Uint8Array>,
+    onEvent: SseEventHandler,
+    onEnd: (ended: 'closed' | 'aborted' | 'failed') => void,
+  ): void {
     const reader = body.getReader()
     const decoder = new TextDecoder()
     let state: SseParserState = { event: '', data: '', remainder: '' }
@@ -314,6 +336,7 @@ export class SseUpstreamForwarder implements McpForwarder {
           if (done) {
             this.connected = false
             this.pending.rejectAll(new Error('SSE stream ended'))
+            onEnd('closed')
             return
           }
           state = parseSseChunk(decoder.decode(value, { stream: true }), state, onEvent)
@@ -326,6 +349,7 @@ export class SseUpstreamForwarder implements McpForwarder {
             this.connected = false
             this.pending.rejectAll(err instanceof Error ? err : new Error(String(err)))
           }
+          onEnd(isAbort ? 'aborted' : 'failed')
         })
     }
     read()

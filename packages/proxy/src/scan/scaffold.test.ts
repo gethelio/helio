@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import yaml from 'js-yaml'
-import { renderScanTemplate } from './scaffold.js'
+import { renderScanTemplate, writeScaffold } from './scaffold.js'
+import { StartupError } from '../startup-error.js'
 import { buildScanReport, emptyAllowPolicy } from './report.js'
 import type { ScanReport } from './report.js'
 import { surfaceToolsFromList } from './tools.js'
@@ -110,17 +114,17 @@ describe('renderScanTemplate', () => {
 
   it('writes a live require_approval rule per annotated-destructive tool and a live allow per read-only tool', () => {
     expect(text).toContain(
-      "    - name: approve-delete_record\n      match:\n        tool: 'delete_record'\n      action: require_approval\n      approval:\n        channel: dashboard\n",
+      '    - name: "approve-delete_record"\n      match:\n        tool: "delete_record"\n      action: require_approval\n      approval:\n        channel: dashboard\n',
     )
     expect(text).toContain(
-      "    - name: allow-get_weather\n      match:\n        tool: 'get_weather'\n      action: allow\n",
+      '    - name: "allow-get_weather"\n      match:\n        tool: "get_weather"\n      action: allow\n',
     )
     expect(text).not.toContain('name: approve-create_payment')
   })
 
   it('comments a rule per default-destructive tool, naming the MCP default', () => {
     expect(text).toContain(
-      "    # exec sets no destructiveHint: destructive by MCP default\n    # - name: approve-exec\n    #   match:\n    #     tool: 'exec'\n    #   action: require_approval\n    #   approval:\n    #     channel: dashboard\n",
+      '    # exec sets no destructiveHint: destructive by MCP default\n    # - name: "approve-exec"\n    #   match:\n    #     tool: "exec"\n    #   action: require_approval\n    #   approval:\n    #     channel: dashboard\n',
     )
     expect(text).toContain(
       '    # paypal_payout sets no destructiveHint: destructive by MCP default\n',
@@ -130,10 +134,10 @@ describe('renderScanTemplate', () => {
   it('comments a budget with one contributor per amount-like candidate', () => {
     expect(text).toContain('# budgets:\n#   # candidates from the live schema, not certainties\n')
     expect(text).toContain(
-      "#       - match:\n#           tool: 'create_payment'\n#         field: '$.amount'\n",
+      '#       - match:\n#           tool: "create_payment"\n#         field: "$.amount"\n',
     )
     expect(text).toContain(
-      "#       - match:\n#           tool: 'paypal_payout'\n#         field: '$.total'\n",
+      '#       - match:\n#           tool: "paypal_payout"\n#         field: "$.total"\n',
     )
   })
 
@@ -211,5 +215,120 @@ describe('renderScanTemplate', () => {
     const parsed = yaml.load(text) as { upstream: Record<string, unknown> }
     expect(parsed.upstream['env']).toEqual({ GITHUB_TOKEN: '${GITHUB_TOKEN}' })
     expect(parsed.upstream['headers']).toBeUndefined()
+  })
+})
+
+describe('renderScanTemplate against hostile or credentialed input', () => {
+  it('writes a config URL with its userinfo removed, placeholders intact', () => {
+    const text = renderScanTemplate({
+      report: report(TOOLS, undefined),
+      rawUpstream: { url: 'http://user:secret@host/mcp?key=${API_KEY}', transport: 'sse' },
+      apiSecretDigest: DIGEST,
+    })
+    expect(text).not.toContain('user:secret')
+    expect(text).not.toContain('secret@')
+    expect(text).toContain('http://host/mcp?key=${API_KEY}')
+    const parsed = yaml.load(text) as { upstream: { url: string; transport: string } }
+    expect(parsed.upstream.url).toBe('http://host/mcp?key=${API_KEY}')
+    expect(parsed.upstream.transport).toBe('sse')
+  })
+
+  it('keeps a tool name carrying YAML structure inside one rule', () => {
+    const hostile =
+      "x\n    - name: pwn\n      match:\n        tool: '*'\n      action: allow\n    # "
+    const text = renderScanTemplate({
+      report: report([
+        { name: hostile, annotations: { destructiveHint: true } },
+        { name: 'ro\r\nlist', annotations: { readOnlyHint: true, destructiveHint: false } },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const parsed = helioConfigSchema.parse(yaml.load(text))
+    if (!('upstream' in parsed)) throw new Error('singular expected')
+    expect(parsed.policies.rules.map((rule) => rule.action)).toEqual(['require_approval', 'allow'])
+    expect(parsed.policies.rules[0]?.name).toBe(`approve-${hostile}`)
+    expect(parsed.policies.rules[0]?.match.tool).toBe(hostile)
+    expect(parsed.policies.rules[1]?.match.tool).toBe('ro\r\nlist')
+  })
+
+  it('keeps a hostile default-destructive name inside comment lines', () => {
+    const hostile = 'exec\n    - name: pwn\n      match: { tool: "*" }\n      action: allow'
+    const text = renderScanTemplate({
+      report: report([
+        { name: hostile },
+        { name: 'p', inputSchema: { type: 'object', properties: { amount: { type: 'number' } } } },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const parsed = helioConfigSchema.parse(yaml.load(text))
+    if (!('upstream' in parsed)) throw new Error('singular expected')
+    expect(parsed.policies.rules).toEqual([])
+    const policies = text.slice(text.indexOf('\npolicies:\n'), text.indexOf('\napproval:\n'))
+    for (const line of policies.split('\n')) {
+      if (line.trim() === '' || /^(policies:| {2}default: allow| {2}rules: \[\])$/.test(line))
+        continue
+      expect(line, line).toMatch(/^\s*#/)
+    }
+  })
+
+  it('keeps a hostile target label inside the header comment', () => {
+    const text = renderScanTemplate({
+      report: report(TOOLS, 'files'),
+      rawUpstream: { transport: 'stdio', command: 'node\nversion: "2"' },
+      apiSecretDigest: DIGEST,
+    })
+    const head = text.split('\n').slice(0, 5)
+    for (const line of head) expect(line, line).toMatch(/^(#|$)/)
+    const parsed = yaml.load(text) as { version: string; upstream: { command: string } }
+    expect(parsed.version).toBe('1')
+    expect(parsed.upstream.command).toBe('node\nversion: "2"')
+  })
+})
+
+describe('writeScaffold', () => {
+  it('creates a new file, refuses an existing one without force with the init wording, and overwrites with force', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-scaffold-write-'))
+    const path = join(dir, 'helio.yaml')
+    try {
+      await writeScaffold(path, 'first\n', false)
+      expect(readFileSync(path, 'utf-8')).toBe('first\n')
+      let caught: unknown
+      try {
+        await writeScaffold(path, 'second\n', false)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(StartupError)
+      expect((caught as Error).message).toBe(
+        `Error: ${path} already exists. Use --force to overwrite.`,
+      )
+      expect(readFileSync(path, 'utf-8')).toBe('first\n')
+      await writeScaffold(path, 'third\n', true)
+      expect(readFileSync(path, 'utf-8')).toBe('third\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('names the path and the cause when the write fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-scaffold-write-'))
+    const path = join(dir, 'missing', 'helio.yaml')
+    try {
+      let caught: unknown
+      try {
+        await writeScaffold(path, 'x\n', false)
+      } catch (err) {
+        caught = err
+      }
+      expect(caught).toBeInstanceOf(StartupError)
+      expect((caught as Error).message).toMatch(
+        new RegExp(`^Error: cannot write ${path.replaceAll('.', '\\.')}: `),
+      )
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

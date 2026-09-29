@@ -64,7 +64,7 @@ import { classifyUpstreamArgument, resolveScanTarget, scanNeedsConfig } from './
 import type { ScanConfigInput, ScanTarget } from './scan/target.js'
 import { runScan } from './scan/run.js'
 import type { ScanPolicyInput } from './scan/run.js'
-import { renderScanTemplate } from './scan/scaffold.js'
+import { renderScanTemplate, writeScaffold } from './scan/scaffold.js'
 import type { BuiltForwarder } from './cli-forwarder.js'
 import type { McpForwarder } from './mcp/types.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
@@ -1465,12 +1465,7 @@ async function scanCommand(opts: ScanOptions, configExplicit: boolean): Promise<
               rawUpstream: target.rawUpstream,
               apiSecretDigest: secretDigest(secret),
             })
-            try {
-              await writeFile(writePath, text, 'utf-8')
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err)
-              throw new StartupError(`Error: cannot write ${writePath}: ${message}`)
-            }
+            await writeScaffold(writePath, text, opts.force)
             printMintedSecret(writePath, secret)
           },
         }),

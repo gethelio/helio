@@ -107,6 +107,14 @@ describe('candidatesOf', () => {
     expect(candidatesOf(props({ payment: props({ x: { type: 'number' } }) }))).toEqual([])
   })
 
+  it('admits format uri only on a string-typed property', () => {
+    expect(candidatesOf(props({ id: { type: 'integer', format: 'uri' } }))).toEqual([])
+    expect(candidatesOf(props({ id: { format: 'uri' } }))).toEqual([])
+    expect(candidatesOf(props({ id: { type: ['string', 'null'], format: 'uri' } }))).toEqual([
+      { kind: 'url', path: '$.id', by: 'format' },
+    ])
+  })
+
   it('reads format uri or url as a URL whatever the name, and target is not a path', () => {
     expect(candidatesOf(props({ target: { type: 'string', format: 'uri' } }))).toEqual([
       { kind: 'url', path: '$.target', by: 'format' },

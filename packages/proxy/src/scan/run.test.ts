@@ -202,3 +202,30 @@ describe('runScan', () => {
     expect(off).toHaveBeenCalledWith('SIGTERM', expect.any(Function))
   })
 })
+
+describe('runScan with a signal during the report hook', () => {
+  it('lets onReport finish, prints nothing and returns 130 without exiting from the handler', async () => {
+    const built = toolsListForwarder([{ name: 'a' }])
+    let finishReport: () => void = () => {}
+    let reportStarted = false
+    const onReport = () =>
+      new Promise<void>((resolve) => {
+        reportStarted = true
+        finishReport = resolve
+      })
+    const h = harness({ connect: () => Promise.resolve(built), onReport })
+    const run = runScan(h.options)
+    await vi.waitFor(() => {
+      expect(reportStarted).toBe(true)
+    })
+    h.signals.fire('SIGINT')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(h.exit).not.toHaveBeenCalled()
+    finishReport()
+    const code = await run
+    expect(code).toBe(130)
+    expect(h.stdout).toEqual([])
+    expect(built.close).toHaveBeenCalled()
+    expect(h.exit).not.toHaveBeenCalled()
+  })
+})

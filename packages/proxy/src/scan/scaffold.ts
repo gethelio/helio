@@ -1,6 +1,9 @@
+import { writeFile } from 'node:fs/promises'
 import yaml from 'js-yaml'
 import { formatUtcMinute } from '../util/format-time.js'
+import { StartupError } from '../startup-error.js'
 import type { ScanReport, ScanReportTool } from './report.js'
+import { stripUserinfoTextually } from './target.js'
 
 // ---------------------------------------------------------------------------
 // The --write scaffold (issue #299): a starter helio.yaml generated from the
@@ -20,9 +23,19 @@ export interface ScanScaffoldInput {
   readonly apiSecretDigest: string
 }
 
-/** A YAML single-quoted scalar: the one quoting that needs no escape table. */
+/**
+ * A scalar the upstream chose (a tool name, a dot-path), written as a JSON
+ * string: a valid YAML double-quoted scalar on one line, whatever the value
+ * carries (a newline, a quote, a `#`, YAML structure). Never interpolate an
+ * upstream-controlled string into the template any other way.
+ */
 function quoted(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`
+  return JSON.stringify(value)
+}
+
+/** An upstream-chosen string inside a `#` comment: escaped so it stays on its line. */
+function commentSafe(value: string): string {
+  return JSON.stringify(value).slice(1, -1)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -48,7 +61,10 @@ function upstreamBlock(input: ScanScaffoldInput): string {
     const entry: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(raw)) {
       if (key === 'name' || key === 'headers') continue
-      entry[key] = value
+      // The URL as written, minus its userinfo: a credential belongs in
+      // upstream.headers, never in a file the scaffold writes.
+      entry[key] =
+        key === 'url' && typeof value === 'string' ? stripUserinfoTextually(value) : value
     }
     block = yaml.dump({ upstream: entry }, { lineWidth: -1, noRefs: true })
   }
@@ -57,7 +73,7 @@ function upstreamBlock(input: ScanScaffoldInput): string {
 
 function approvalRule(tool: ScanReportTool, prefix: string): string {
   return (
-    `${prefix}- name: approve-${tool.name}\n` +
+    `${prefix}- name: ${quoted(`approve-${tool.name}`)}\n` +
     `${prefix}  match:\n` +
     `${prefix}    tool: ${quoted(tool.name)}\n` +
     `${prefix}  action: require_approval\n` +
@@ -78,7 +94,7 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
     for (const tool of annotatedDestructive) lines.push(approvalRule(tool, '    '))
     for (const tool of readOnly) {
       lines.push(
-        `    - name: allow-${tool.name}\n` +
+        `    - name: ${quoted(`allow-${tool.name}`)}\n` +
           `      match:\n` +
           `        tool: ${quoted(tool.name)}\n` +
           `      action: allow\n`,
@@ -86,8 +102,10 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
     }
   }
   for (const tool of defaultDestructive) {
-    lines.push(`    # ${tool.name} sets no destructiveHint: destructive by MCP default\n`)
-    lines.push(approvalRule(tool, '    # ').replaceAll('\n    #   ', '\n    #   '))
+    lines.push(
+      `    # ${commentSafe(tool.name)} sets no destructiveHint: destructive by MCP default\n`,
+    )
+    lines.push(approvalRule(tool, '    # '))
   }
   return lines.join('')
 }
@@ -136,7 +154,7 @@ export function renderScanTemplate(input: ScanScaffoldInput): string {
     `${String(summary.destructive)} destructive (${String(summary.destructive_by_default)} by MCP default)`
   return (
     `# Helio MCP Governance Proxy configuration, scaffolded by helio scan\n` +
-    `# from ${report.target.label} (${report.target.transport}) at ${formatUtcMinute(report.generated_at)}:\n` +
+    `# from ${commentSafe(report.target.label)} (${report.target.transport}) at ${formatUtcMinute(report.generated_at)}:\n` +
     `# ${counts}. Every rule below is a starting point; see docs/policies.md.\n` +
     `# Docs: https://github.com/gethelio/helio\n` +
     `\n` +
@@ -199,4 +217,22 @@ export function renderScanTemplate(input: ScanScaffoldInput): string {
     `#   port: 3200\n` +
     `#   host: 127.0.0.1\n`
   )
+}
+
+/**
+ * Write the scaffold. Without `force` the file is created exclusively, so a
+ * file that appeared while the scan ran is refused with the same line as one
+ * that existed before it; any other failure names the path and the cause.
+ */
+export async function writeScaffold(path: string, text: string, force: boolean): Promise<void> {
+  try {
+    await writeFile(path, text, { encoding: 'utf-8', flag: force ? 'w' : 'wx' })
+  } catch (err) {
+    const code = (err as { code?: unknown }).code
+    if (code === 'EEXIST') {
+      throw new StartupError(`Error: ${path} already exists. Use --force to overwrite.`)
+    }
+    const message = err instanceof Error ? err.message : String(err)
+    throw new StartupError(`Error: cannot write ${path}: ${message}`)
+  }
 }

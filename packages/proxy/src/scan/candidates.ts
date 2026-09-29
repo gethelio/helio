@@ -74,7 +74,11 @@ function walk(schema: unknown, prefix: string, depth: number, out: ArgumentCandi
     for (const kind of KINDS) {
       if (NAMES[kind].test(name) && typeQualifies(kind, property)) {
         out.push({ kind, path, by: 'name' })
-      } else if (kind === 'url' && (format === 'uri' || format === 'url')) {
+      } else if (
+        kind === 'url' &&
+        (format === 'uri' || format === 'url') &&
+        typesOf(property).includes('string')
+      ) {
         out.push({ kind, path, by: 'format' })
       } else if (
         kind === 'sql' &&

@@ -9584,6 +9584,7 @@ describe('helio scan end to end (issue #299)', () => {
       const scanRef: { current?: ReturnType<typeof spawnScan> } = {}
       const server = await rawServer((_req, res) => {
         res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.flushHeaders()
         // Accepted; the endpoint event never comes. Signal from the accept.
         signaledAt = performance.now()
         scanRef.current?.child.kill('SIGINT')
@@ -9921,12 +9922,12 @@ describe('helio scan --write (issue #299)', () => {
         const contents = readFileSync(outPath, 'utf-8')
         expectCanonicalOrder(contents)
         expect(contents).toContain(`url: "${upstream.url}"`)
-        expect(contents).toContain('- name: approve-delete_record')
-        expect(contents).toContain('- name: allow-get_weather')
+        expect(contents).toContain('- name: "approve-delete_record"')
+        expect(contents).toContain('- name: "allow-get_weather"')
         expect(contents).toContain(
           '# create_payment sets no destructiveHint: destructive by MCP default',
         )
-        expect(contents).toContain("#         field: '$.amount'")
+        expect(contents).toContain('#         field: "$.amount"')
         expect(contents).toContain(
           '# Production posture is deny; allow keeps the first helio start from blocking anything by surprise.',
         )
@@ -10048,7 +10049,7 @@ describe('helio scan --write (issue #299)', () => {
         expect(filesText).toContain('rm_rf')
         expect(filesText).not.toContain('process.stdin.resume()')
         expect(filesText).not.toMatch(/^\s{2}name:/m)
-        expect(filesText).toContain('- name: approve-rm_rf')
+        expect(filesText).toContain('- name: "approve-rm_rf"')
         const validateFiles = await runCli(['validate', '-c', filesOut], env)
         expect(validateFiles.code, validateFiles.stderr).toBe(0)
 
@@ -10066,6 +10067,44 @@ describe('helio scan --write (issue #299)', () => {
         expect(crmText).toMatch(
           new RegExp(`^  url: "?${upstream.url.replaceAll('.', '\\.')}"?$`, 'm'),
         )
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'writes a config target URL with its userinfo removed and refuses an unwritable path with one line',
+    async () => {
+      const upstream = await startMockMcpServer(twoToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-write-'))
+      const configPath = join(dir, 'helio.yaml')
+      const credentialed = upstream.url.replace('http://', 'http://user:secret@')
+      writeFileSync(
+        configPath,
+        `version: '1'\nupstream:\n  url: ${JSON.stringify(credentialed)}\ndashboard:\n  enabled: false\n`,
+      )
+      try {
+        const outPath = join(dir, 'out.yaml')
+        const written = await runCli(['scan', '-c', configPath, '--write', outPath])
+        expect(written.code, written.stderr).toBe(0)
+        const text = readFileSync(outPath, 'utf-8')
+        expect(text).not.toContain('user:secret')
+        expect(text).not.toContain('secret@')
+        expect(
+          text.includes(`  url: ${upstream.url}\n`) || text.includes(`  url: "${upstream.url}"\n`),
+        ).toBe(true)
+        expect(`${written.stdout}${written.stderr}`).not.toContain('user:secret')
+        expect(`${written.stdout}${written.stderr}`).not.toContain('secret@')
+
+        const unwritable = join(dir, 'missing', 'out.yaml')
+        const failed = await runCli(['scan', '-c', configPath, '--write', unwritable])
+        expect(failed.code).toBe(1)
+        expect(failed.stderr).toContain(`Error: cannot write ${unwritable}: `)
+        expect(failed.stderr).not.toContain('Created')
+        expect(existsSync(unwritable)).toBe(false)
       } finally {
         await upstream.close()
         rmSync(dir, { recursive: true, force: true })

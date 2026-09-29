@@ -59,6 +59,11 @@ export async function runScan(options: RunScanOptions): Promise<number> {
   const controller = new AbortController()
   let built: BuiltForwarder | undefined
   let interrupted: 130 | 143 | undefined
+  // While the report hook runs (the --write file), a signal must not exit
+  // from the handler: the awaited run reads the flag after the hook instead.
+  let reporting = false
+  let closedByHandler = false
+  const handlerClosed = (): boolean => closedByHandler
   // The handler assigns `interrupted` from outside the run's control flow; a
   // call, unlike the variable, is re-read after every await.
   const interruptedCode = (): 130 | 143 | undefined => interrupted
@@ -71,6 +76,8 @@ export async function runScan(options: RunScanOptions): Promise<number> {
       controller.abort()
       return
     }
+    if (reporting) return
+    closedByHandler = true
     void Promise.resolve(built.close?.()).then(
       () => {
         options.exit(code)
@@ -115,7 +122,16 @@ export async function runScan(options: RunScanOptions): Promise<number> {
     })
 
   const finish = async (doc: ScanReport): Promise<number> => {
-    if (options.onReport !== undefined) await options.onReport(doc)
+    if (options.onReport !== undefined) {
+      reporting = true
+      try {
+        await options.onReport(doc)
+      } finally {
+        reporting = false
+      }
+      const code = interruptedCode()
+      if (code !== undefined) return code
+    }
     options.stdout(format === 'json' ? JSON.stringify(doc, null, 2) : renderScanText(doc))
     return doc.surface.unavailable.length === 0 ? 0 : 1
   }
@@ -160,6 +176,6 @@ export async function runScan(options: RunScanOptions): Promise<number> {
   } finally {
     options.signals.off('SIGINT', onSigint)
     options.signals.off('SIGTERM', onSigterm)
-    if (interruptedCode() === undefined) await built?.close?.()
+    if (!handlerClosed()) await built?.close?.()
   }
 }

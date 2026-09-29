@@ -27,8 +27,8 @@ Maintainer notes:
   MCP default, the action an argument-less call gets and the rule that
   decides it, and the arguments a rule could match (amount-like, path,
   URL and SQL candidates read from the `inputSchema`), under a summary
-  line of the shape `7 tools exposed, 1 destructive (0 by MCP default),
-0 governed`. With a config (`helio scan -c helio.yaml`, an entry named
+  line such as `7 tools exposed, 1 destructive (0 by MCP default), 0 governed`.
+  With a config (`helio scan -c helio.yaml`, an entry named
   with `--upstream <name>` on a named list) the coverage column is
   cross-checked against the live surface and a section lists the rules
   and budget contributors whose `match.tool` matches no tool the upstream
