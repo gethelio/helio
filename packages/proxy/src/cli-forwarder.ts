@@ -10,6 +10,15 @@ export interface BuiltForwarder {
   readonly close?: () => Promise<void>
 }
 
+export interface CreateForwarderOptions {
+  /**
+   * Aborts the connect window (issue #299): the SSE endpoint wait and the
+   * stdio spawn. `helio start` passes none; `helio scan` passes the signal
+   * its SIGINT handler fires while the forwarder is still being built.
+   */
+  readonly signal?: AbortSignal
+}
+
 /**
  * Construct the upstream forwarder for the configured transport. Static
  * `upstream.headers` are passed to the HTTP transports (`streamable-http`,
@@ -20,6 +29,7 @@ export interface BuiltForwarder {
 export async function createForwarderFromConfig(
   config: Pick<SingularHelioConfig, 'upstream'>,
   upstreamName?: string,
+  options: CreateForwarderOptions = {},
 ): Promise<BuiltForwarder> {
   switch (config.upstream.transport) {
     case 'streamable-http': {
@@ -52,7 +62,7 @@ export async function createForwarderFromConfig(
         connectTimeoutMs: parseDuration(config.upstream.connect_timeout),
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
       })
-      await sse.connect()
+      await sse.connect(options.signal)
       return { forwarder: sse, close: () => sse.close() }
     }
     case 'stdio': {
@@ -63,7 +73,7 @@ export async function createForwarderFromConfig(
         requestTimeoutMs: parseDuration(config.upstream.request_timeout),
         upstreamName,
       })
-      await stdio.start()
+      await stdio.start(options.signal)
       return { forwarder: stdio, close: () => stdio.close() }
     }
   }

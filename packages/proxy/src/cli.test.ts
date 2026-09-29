@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
@@ -17,6 +18,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -8987,4 +8989,1146 @@ audit:
       rmSync(dir, { recursive: true, force: true })
     }
   }, 40_000)
+})
+
+// ---------------------------------------------------------------------------
+// helio scan (issue #299)
+// ---------------------------------------------------------------------------
+
+describe('helio scan (issue #299)', () => {
+  const SCAN_TIMEOUT_MS = 15_000
+
+  function writeScanConfig(body: string): { dir: string; configPath: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-scan-'))
+    const configPath = join(dir, 'helio.yaml')
+    writeFileSync(configPath, body)
+    return { dir, configPath }
+  }
+
+  const NAMED_CONFIG = [
+    "version: '1'",
+    'upstreams:',
+    '  - name: crm',
+    '    url: http://127.0.0.1:1/crm',
+    '  - name: files',
+    '    url: http://127.0.0.1:1/files',
+    'dashboard:',
+    '  enabled: false',
+    '',
+  ].join('\n')
+
+  const SINGULAR_CONFIG = [
+    "version: '1'",
+    'upstream:',
+    '  url: http://127.0.0.1:1/mcp',
+    'dashboard:',
+    '  enabled: false',
+    '',
+  ].join('\n')
+
+  it(
+    'registers scan between init and validate with its options',
+    async () => {
+      const help = await runCli(['--help'])
+      expect(help.code).toBe(0)
+      const init = help.stdout.indexOf('\n  init ')
+      const scan = help.stdout.indexOf('\n  scan ')
+      const validate = help.stdout.indexOf('\n  validate ')
+      expect(init).toBeGreaterThan(-1)
+      expect(scan).toBeGreaterThan(init)
+      expect(validate).toBeGreaterThan(scan)
+
+      const own = await runCli(['scan', '--help'])
+      expect(own.code).toBe(0)
+      expect(own.stdout).toContain('Usage: helio scan')
+      for (const option of [
+        '--upstream <target>',
+        '--transport <transport>',
+        '-c, --config <path>',
+        '--format <format>',
+        '--write [path]',
+        '--force',
+      ]) {
+        expect(own.stdout).toContain(option)
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses --format other than text or json first',
+    async () => {
+      const { code, stdout, stderr } = await runCli([
+        'scan',
+        '--upstream',
+        'http://127.0.0.1:1/mcp',
+        '--format',
+        'xml',
+      ])
+      expect(code).toBe(1)
+      expect(stderr.trim()).toBe('Error: --format must be text or json (got "xml")')
+      expect(stdout).toBe('')
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses a scheme-less --upstream before reading any config',
+    async () => {
+      // A garbage helio.yaml in the cwd must not be read: the shape refusal comes first.
+      const { dir, configPath } = writeScanConfig('version: [unclosed\n')
+      try {
+        const { code, stderr } = await runCli(
+          ['scan', '--upstream', 'localhost:8080/mcp'],
+          undefined,
+          dir,
+        )
+        expect(code).toBe(1)
+        expect(stderr.trim()).toBe(
+          'Error: "localhost:8080/mcp" is not an http(s) URL or an upstream name. A URL needs a scheme, for example http://localhost:8080/mcp.',
+        )
+        expect(stderr).not.toContain('YAML')
+        expect(existsSync(configPath)).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses --transport stdio with a URL',
+    async () => {
+      const { code, stderr } = await runCli([
+        'scan',
+        '--upstream',
+        'http://127.0.0.1:1/mcp',
+        '--transport',
+        'stdio',
+      ])
+      expect(code).toBe(1)
+      expect(stderr.trim()).toBe(
+        'Error: a stdio upstream needs a config: put command and args under upstream: in helio.yaml and run helio scan -c <config>',
+      )
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses a named config without --upstream, a URL against it and an unknown name',
+    async () => {
+      const { dir, configPath } = writeScanConfig(NAMED_CONFIG)
+      try {
+        const missing = await runCli(['scan', '-c', configPath])
+        expect(missing.code).toBe(1)
+        expect(missing.stderr.trim()).toBe(
+          'Error: this config names its upstreams; pass --upstream <name> (one of: crm, files)',
+        )
+
+        const url = await runCli(['scan', '-c', configPath, '--upstream', 'http://127.0.0.1:1/x'])
+        expect(url.code).toBe(1)
+        expect(url.stderr.trim()).toBe(
+          'Error: "http://127.0.0.1:1/x" is not an entry in this config. Pass --upstream <name> (one of: crm, files).',
+        )
+
+        const unknown = await runCli(['scan', '-c', configPath, '--upstream', 'nope'])
+        expect(unknown.code).toBe(1)
+        expect(unknown.stderr.trim()).toBe(
+          `Error: no upstream named "nope" in ${configPath} (one of: crm, files)`,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses --upstream <name> and --transport on a singular config target',
+    async () => {
+      const { dir, configPath } = writeScanConfig(SINGULAR_CONFIG)
+      try {
+        const named = await runCli(['scan', '-c', configPath, '--upstream', 'crm'])
+        expect(named.code).toBe(1)
+        expect(named.stderr.trim()).toBe(
+          'Error: this config has a single upstream; drop --upstream',
+        )
+
+        const transport = await runCli(['scan', '-c', configPath, '--transport', 'sse'])
+        expect(transport.code).toBe(1)
+        expect(transport.stderr.trim()).toBe(
+          'Error: --transport applies only with --upstream <url>',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// helio scan end to end (issue #299): mocks on port 0, the config written
+// after the bind, every child reaped in the test
+// ---------------------------------------------------------------------------
+
+describe('helio scan end to end (issue #299)', () => {
+  const SCAN_TIMEOUT_MS = 15_000
+
+  /** Seven tools with the hint and schema shapes the report reads. */
+  const SEVEN_TOOLS = [
+    {
+      name: 'get_weather',
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { type: 'object', properties: { city: { type: 'string' } } },
+    },
+    { name: 'send_email', annotations: { readOnlyHint: false, destructiveHint: false } },
+    { name: 'delete_record', annotations: { readOnlyHint: false, destructiveHint: true } },
+    {
+      name: 'create_payment',
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: { type: 'object', properties: { amount: { type: 'number' } } },
+    },
+    {
+      name: 'paypal_payout',
+      inputSchema: { type: 'object', properties: { total: { type: 'number' } } },
+    },
+    { name: 'exec' },
+    {
+      name: 'transfer_funds',
+      inputSchema: { type: 'object', properties: { amount: { type: 'integer' } } },
+    },
+  ]
+
+  function sevenToolsResponder(payload: Record<string, unknown>): Record<string, unknown> {
+    const id = payload['id'] ?? null
+    if (payload['method'] === 'tools/list') {
+      return { jsonrpc: '2.0', id, result: { tools: SEVEN_TOOLS } }
+    }
+    return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+  }
+
+  function tempConfig(body: string): { dir: string; configPath: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-scan-e2e-'))
+    const configPath = join(dir, 'helio.yaml')
+    writeFileSync(configPath, body)
+    return { dir, configPath }
+  }
+
+  /** A raw HTTP stand-in on port 0 with one handler; closed with its sockets. */
+  async function rawServer(
+    handler: (req: IncomingMessage, res: ServerResponse) => void,
+  ): Promise<{ url: (path: string) => string; close: () => Promise<void> }> {
+    const server = createServer(handler)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    return {
+      url: (path) => `http://127.0.0.1:${String(port)}${path}`,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections()
+          server.close(() => {
+            resolve()
+          })
+        }),
+    }
+  }
+
+  /** Spawn the CLI so a test can signal it; resolves with the exit code and both streams. */
+  function spawnScan(
+    args: string[],
+    env?: NodeJS.ProcessEnv,
+  ): {
+    child: ChildProcess
+    done: Promise<{
+      code: number | null
+      signal: NodeJS.Signals | null
+      stdout: string
+      stderr: string
+    }>
+  } {
+    const child = spawn('node', [CLI_PATH, 'scan', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(env ? { env } : {}),
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf-8')
+    })
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8')
+    })
+    const done = new Promise<{
+      code: number | null
+      signal: NodeJS.Signals | null
+      stdout: string
+      stderr: string
+    }>((resolve) => {
+      child.on('close', (code, signal) => {
+        resolve({ code, signal, stdout, stderr })
+      })
+    })
+    return { child, done }
+  }
+
+  /**
+   * A port nothing listens on, so a connect fails with ECONNREFUSED. Port 1
+   * would not do: it sits on the WHATWG fetch bad-ports list and undici
+   * refuses it with a code-less `bad port` before any socket is opened.
+   */
+  async function closedPort(): Promise<string> {
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve()
+      })
+    })
+    return `127.0.0.1:${String(port)}`
+  }
+
+  function waitForFile(path: string, timeoutMs: number): Promise<void> {
+    return vi.waitFor(
+      () => {
+        expect(existsSync(path)).toBe(true)
+      },
+      { timeout: timeoutMs, interval: 20 },
+    )
+  }
+
+  function waitForDeath(pid: number, timeoutMs: number): Promise<void> {
+    return vi.waitFor(
+      () => {
+        expect(() => process.kill(pid, 0)).toThrow(/ESRCH/)
+      },
+      { timeout: timeoutMs, interval: 20 },
+    )
+  }
+
+  function killQuietly(pid: number | undefined): void {
+    if (pid === undefined) return
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
+
+  /** A stdio child that records its pid, then answers tools/list with one tool. */
+  function answeringChild(pidPath: string): string {
+    return (
+      `require('fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); ` +
+      `const rl = require('readline').createInterface({ input: process.stdin }); ` +
+      `rl.on('line', (line) => { const req = JSON.parse(line); if (req.id === undefined) return; ` +
+      `const result = req.method === 'tools/list' ? { tools: [{ name: 'stdio_tool', annotations: { readOnlyHint: true, destructiveHint: false } }] } : {}; ` +
+      `process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + '\\n') })`
+    )
+  }
+
+  /** A stdio child that records its pid and never answers, ignoring stdin EOF. */
+  function silentChild(pidPath: string): string {
+    return (
+      `require('fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); ` +
+      `for (const s of [process.stdin, process.stdout, process.stderr]) s.on('error', () => {}); ` +
+      `process.stdin.resume(); setInterval(() => {}, 1000)`
+    )
+  }
+
+  function stdioConfig(script: string, extra = ''): string {
+    return [
+      "version: '1'",
+      'upstream:',
+      '  transport: stdio',
+      '  command: node',
+      '  args:',
+      '    - "-e"',
+      `    - ${JSON.stringify(script)}`,
+      extra,
+      'dashboard:',
+      '  enabled: false',
+      '',
+    ].join('\n')
+  }
+
+  it(
+    'reports seven tools as JSON from a bare URL with no config and policy: null',
+    async () => {
+      const upstream = await startMockMcpServer(sevenToolsResponder)
+      try {
+        const { code, stdout } = await runCli([
+          'scan',
+          '--upstream',
+          upstream.url,
+          '--format',
+          'json',
+        ])
+        expect(code).toBe(0)
+        const doc = JSON.parse(stdout) as {
+          schema_version: number
+          policy: unknown
+          target: { label: string; transport: string; upstream: unknown; config: unknown }
+          tools: {
+            name: string
+            hints: Record<string, { value: boolean; source: string }>
+            candidates: unknown[]
+          }[]
+          unmatched_rules: unknown[]
+          summary: Record<string, number>
+          coverage: { default_action: string }
+        }
+        expect(doc.schema_version).toBe(1)
+        expect(doc.policy).toBeNull()
+        expect(doc.target).toEqual({
+          label: upstream.url,
+          transport: 'streamable-http',
+          upstream: null,
+          config: null,
+        })
+        expect(doc.tools.map((t) => t.name)).toEqual(SEVEN_TOOLS.map((t) => t.name))
+        expect(doc.tools[0]?.hints).toEqual({
+          destructiveHint: { value: false, source: 'server' },
+          readOnlyHint: { value: true, source: 'server' },
+        })
+        expect(doc.tools[5]?.hints).toEqual({
+          destructiveHint: { value: true, source: 'default' },
+          readOnlyHint: { value: false, source: 'default' },
+        })
+        expect(doc.tools[3]?.candidates).toEqual([{ kind: 'amount', path: '$.amount', by: 'name' }])
+        expect(doc.unmatched_rules).toEqual([])
+        expect(doc.summary).toEqual({
+          tools: 7,
+          destructive: 4,
+          destructive_by_default: 3,
+          governed: 0,
+          conditional: 0,
+        })
+        expect(doc.coverage.default_action).toBe('allow')
+        expect(upstream.calls.some((call) => call.method === 'tools/list')).toBe(true)
+      } finally {
+        await upstream.close()
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'cross-checks coverage against a config, names the rules and the no-match section, and opens no audit database',
+    async () => {
+      const upstream = await startMockMcpServer(sevenToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-e2e-'))
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(
+        configPath,
+        [
+          "version: '1'",
+          'upstream:',
+          `  url: ${upstream.url}`,
+          'policies:',
+          '  default: allow',
+          '  rules:',
+          '    - name: allow-reads',
+          "      match: { tool: 'get_*' }",
+          '      action: allow',
+          '    - name: block-destructive',
+          "      match: { tool: 'delete_*' }",
+          '      action: deny',
+          '    - name: gh',
+          "      match: { tool: 'github_*' }",
+          '      action: deny',
+          'budgets:',
+          '  - name: pot',
+          '    limit: 10',
+          '    currency: USD',
+          "    window: '24h'",
+          '    key: global',
+          '    on_exceed: deny',
+          '    contributors:',
+          "      - match: { tool: 'stripe_*' }",
+          "        field: '$.amount'",
+          'audit:',
+          `  path: ${JSON.stringify(join(dir, 'helio-audit.db'))}`,
+          'dashboard:',
+          '  enabled: false',
+          '',
+        ].join('\n'),
+      )
+      try {
+        const { code, stdout } = await runCli(['scan', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stdout).toContain(`Scan of ${upstream.url} (streamable-http), `)
+        expect(stdout).toContain(
+          'Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive',
+        )
+        expect(stdout).toContain(
+          `Policy coverage: 2 of 7 have a rule that can match them, default allow (${configPath})`,
+        )
+        expect(stdout).toContain('rule "allow-reads"')
+        expect(stdout).toContain('rule "block-destructive"')
+        expect(stdout).toContain('Rules that match no tool on this upstream (2)')
+        expect(stdout).toContain('  rule "gh" (rules[2]): match.tool github_*')
+        expect(stdout).toContain('  budget "pot" contributor 0: match.tool stripe_*')
+        expect(stdout).toContain(
+          'Summary: 7 tools exposed, 4 destructive (3 by MCP default), 2 governed',
+        )
+        expect(existsSync(join(dir, 'helio-audit.db'))).toBe(false)
+        expect(readdirSync(dir)).toEqual(['helio.yaml'])
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'scans one named entry and stamps the door name on the report',
+    async () => {
+      const upstream = await startMockMcpServer(sevenToolsResponder)
+      const { dir, configPath } = tempConfig(
+        [
+          "version: '1'",
+          'upstreams:',
+          '  - name: crm',
+          `    url: ${upstream.url}`,
+          '  - name: files',
+          '    url: http://127.0.0.1:1/files',
+          'dashboard:',
+          '  enabled: false',
+          '',
+        ].join('\n'),
+      )
+      try {
+        const { code, stdout } = await runCli([
+          'scan',
+          '-c',
+          configPath,
+          '--upstream',
+          'crm',
+          '--format',
+          'json',
+        ])
+        expect(code).toBe(0)
+        const doc = JSON.parse(stdout) as {
+          target: { upstream: string; config: string }
+          coverage: { pairs: { door: { name: string } }[] }
+        }
+        expect(doc.target.upstream).toBe('crm')
+        expect(doc.target.config).toBe(configPath)
+        expect(doc.coverage.pairs[0]?.door).toEqual({ kind: 'upstream', name: 'crm' })
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'scans a stdio upstream and leaves no child behind',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-stdio-'))
+      const pidPath = join(dir, 'child.pid')
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(configPath, stdioConfig(answeringChild(pidPath)))
+      let pid: number | undefined
+      try {
+        const { code, stdout } = await runCli(['scan', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stdout).toContain('Scan of node (stdio), ')
+        expect(stdout).toContain(
+          '  stdio_tool  read-only (server)  not destructive (server)  allow  no rule, default allow',
+        )
+        pid = Number(readFileSync(pidPath, 'utf-8'))
+        await waitForDeath(pid, 4_000)
+      } finally {
+        killQuietly(pid)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'reaps an EOF-ignoring stdio child when SIGINT arrives during the list and exits 130',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-sigint-'))
+      const pidPath = join(dir, 'child.pid')
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(configPath, stdioConfig(silentChild(pidPath)))
+      let pid: number | undefined
+      const scan = spawnScan(['-c', configPath])
+      try {
+        await waitForFile(pidPath, 5_000)
+        pid = Number(readFileSync(pidPath, 'utf-8'))
+        scan.child.kill('SIGINT')
+        const result = await scan.done
+        expect(result.code).toBe(130)
+        expect(result.stdout).toBe('')
+        expect(result.stderr).not.toContain('timed out')
+        await waitForDeath(pid, 6_000)
+      } finally {
+        killQuietly(pid)
+        killQuietly(scan.child.pid)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'exits 130 within two seconds of a SIGINT sent while an SSE connect waits for the endpoint event',
+    async () => {
+      let signaledAt: number | undefined
+      const scanRef: { current?: ReturnType<typeof spawnScan> } = {}
+      const server = await rawServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.flushHeaders()
+        // Accepted; the endpoint event never comes. Signal from the accept.
+        signaledAt = performance.now()
+        scanRef.current?.child.kill('SIGINT')
+      })
+      try {
+        scanRef.current = spawnScan(['--upstream', server.url('/sse'), '--transport', 'sse'])
+        const result = await scanRef.current.done
+        const elapsed = performance.now() - (signaledAt ?? performance.now())
+        expect(result.code).toBe(130)
+        expect(elapsed).toBeLessThan(2_000)
+        expect(result.stdout).toBe('')
+        expect(result.stderr).not.toContain('timed out')
+      } finally {
+        killQuietly(scanRef.current?.child.pid)
+        await server.close()
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'prints the failure line and exits 1 on a door answering 400, in text and in JSON',
+    async () => {
+      const server = await rawServer((_req, res) => {
+        res.writeHead(400, { 'content-type': 'text/plain' })
+        res.end('nope')
+      })
+      try {
+        const url = server.url('/mcp')
+        const text = await runCli(['scan', '--upstream', url])
+        expect(text.code).toBe(1)
+        const lines = text.stdout.trimEnd().split('\n')
+        expect(lines[0]).toContain(`Scan of ${url} (streamable-http), `)
+        expect(lines.at(-1)).toBe(
+          `Error: cannot list tools on ${url}: upstream initialize failed: HTTP 400`,
+        )
+
+        const json = await runCli(['scan', '--upstream', url, '--format', 'json'])
+        expect(json.code).toBe(1)
+        const doc = JSON.parse(json.stdout) as {
+          surface: { unavailable: { name: string; reason: string }[] }
+          tools: unknown[]
+          summary: { tools: number }
+        }
+        expect(doc.surface.unavailable).toEqual([
+          {
+            name: url,
+            reason: `Error: cannot list tools on ${url}: upstream initialize failed: HTTP 400`,
+          },
+        ])
+        expect(doc.tools).toEqual([])
+        expect(doc.summary.tools).toBe(0)
+      } finally {
+        await server.close()
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'labels a config URL by its raw file text and keeps every substituted value off both streams',
+    async () => {
+      const closed = await closedPort()
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        API_KEY: 'sekrit',
+        TOKEN: 'a/b',
+        HOST: closed,
+      }
+      const cases: { url: string; label: string; secret: string }[] = [
+        {
+          url: `http://${closed}/mcp?key=\${API_KEY}`,
+          label: `http://${closed}/mcp?key=\${API_KEY}`,
+          secret: 'sekrit',
+        },
+        {
+          url: `http://${closed}/\${TOKEN}/mcp`,
+          label: `http://${closed}/\${TOKEN}/mcp`,
+          secret: 'a/b',
+        },
+        { url: 'http://${HOST}/mcp', label: 'http://${HOST}/mcp', secret: closed },
+        {
+          url: `http://user:sekrit@foo@${closed}/mcp`,
+          label: `http://${closed}/mcp`,
+          secret: 'sekrit',
+        },
+        {
+          url: `http://${closed}/mcp?to=a@b`,
+          label: `http://${closed}/mcp?to=a@b`,
+          secret: 'nothing-to-leak',
+        },
+      ]
+      for (const testCase of cases) {
+        const { dir, configPath } = tempConfig(
+          `version: '1'\nupstream:\n  url: ${JSON.stringify(testCase.url)}\ndashboard:\n  enabled: false\n`,
+        )
+        try {
+          const text = await runCli(['scan', '-c', configPath], env)
+          expect(text.code, testCase.url).toBe(1)
+          const lines = text.stdout.trimEnd().split('\n')
+          expect(lines[0], testCase.url).toContain(`Scan of ${testCase.label} (streamable-http), `)
+          expect(lines.at(-1), testCase.url).toBe(
+            `Error: cannot list tools on ${testCase.label} (ECONNREFUSED)`,
+          )
+          if (testCase.secret !== 'nothing-to-leak') {
+            expect(`${text.stdout}${text.stderr}`, testCase.url).not.toContain(testCase.secret)
+          }
+          const json = await runCli(['scan', '-c', configPath, '--format', 'json'], env)
+          const doc = JSON.parse(json.stdout) as { target: { label: string } }
+          expect(doc.target.label, testCase.url).toBe(testCase.label)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }
+    },
+    SCAN_TIMEOUT_MS * 2,
+  )
+
+  it(
+    'names the token for an SSE endpoint on another origin that echoes the request path',
+    async () => {
+      const echo = await rawServer((req, res) => {
+        res.writeHead(500, { 'content-type': 'text/plain' })
+        res.end(`no such path ${req.url ?? ''}`)
+      })
+      const sse = await rawServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.write(`event: endpoint\ndata: ${echo.url('/sekrit-path/messages')}\n\n`)
+      })
+      const { dir, configPath } = tempConfig(
+        `version: '1'\nupstream:\n  url: ${sse.url('/sse')}\n  transport: sse\ndashboard:\n  enabled: false\n`,
+      )
+      try {
+        const { code, stdout, stderr } = await runCli(['scan', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stdout.trimEnd().split('\n').at(-1)).toBe(
+          `Error: cannot list tools on ${sse.url('/sse')} (HTTP 500)`,
+        )
+        expect(`${stdout}${stderr}`).not.toContain('sekrit-path')
+      } finally {
+        await sse.close()
+        await echo.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'labels a stdio command by its raw text and names ENOENT and EACCES without the resolved path',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-bin-'))
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(
+        configPath,
+        'version: \'1\'\nupstream:\n  transport: stdio\n  command: "${BIN}"\ndashboard:\n  enabled: false\n',
+      )
+      const unexecutable = join(dir, 'sekrit-bin')
+      writeFileSync(unexecutable, '#!/bin/sh\n')
+      chmodSync(unexecutable, 0o644)
+      try {
+        for (const [bin, code] of [
+          ['/nonexistent/sekrit-bin', 'ENOENT'],
+          [unexecutable, 'EACCES'],
+        ] as const) {
+          const env: NodeJS.ProcessEnv = { ...process.env, BIN: bin }
+          const result = await runCli(['scan', '-c', configPath], env)
+          expect(result.code, bin).toBe(1)
+          const lines = result.stdout.trimEnd().split('\n')
+          expect(lines[0], bin).toContain('Scan of ${BIN} (stdio), ')
+          expect(lines.at(-1), bin).toBe(`Error: cannot list tools on \${BIN} (${code})`)
+          expect(`${result.stdout}${result.stderr}`, bin).not.toContain('sekrit-bin')
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'says timeout for a config target whose upstream never answers within request_timeout',
+    async () => {
+      const server = await rawServer(() => {
+        // Accept and never answer.
+      })
+      const { dir, configPath } = tempConfig(
+        `version: '1'\nupstream:\n  url: ${server.url('/mcp')}\n  request_timeout: '1s'\ndashboard:\n  enabled: false\n`,
+      )
+      try {
+        const { code, stdout } = await runCli(['scan', '-c', configPath])
+        expect(code).toBe(1)
+        expect(stdout.trimEnd().split('\n').at(-1)).toBe(
+          `Error: cannot list tools on ${server.url('/mcp')} (timeout)`,
+        )
+      } finally {
+        await server.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'drops a credential from a bare URL before connecting and says where it belongs',
+    async () => {
+      const closed = await closedPort()
+      const { code, stdout, stderr } = await runCli([
+        'scan',
+        '--upstream',
+        `http://user:sekrit@${closed}/mcp`,
+      ])
+      expect(code).toBe(1)
+      expect(stdout).toContain(`Scan of http://${closed}/mcp (streamable-http), `)
+      expect(stdout).toContain('(ECONNREFUSED)')
+      expect(stderr).toContain('upstream.headers')
+      expect(`${stdout}${stderr}`).not.toContain('sekrit')
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'warns about a leftover url on a stdio entry the way start and validate do',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-stdio-url-'))
+      const pidPath = join(dir, 'child.pid')
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(
+        configPath,
+        stdioConfig(answeringChild(pidPath), '  url: http://127.0.0.1:1/ignored'),
+      )
+      let pid: number | undefined
+      try {
+        const { code, stderr } = await runCli(['scan', '-c', configPath])
+        expect(code).toBe(0)
+        expect(stderr).toContain(
+          '[helio] Warning: upstream.url is ignored when transport is "stdio" (the stdio forwarder spawns "command"). Remove the field to silence this warning.',
+        )
+        pid = Number(readFileSync(pidPath, 'utf-8'))
+        await waitForDeath(pid, 4_000)
+      } finally {
+        killQuietly(pid)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// helio scan --write (issue #299)
+// ---------------------------------------------------------------------------
+
+describe('helio scan --write (issue #299)', () => {
+  const SCAN_TIMEOUT_MS = 15_000
+  const CANONICAL_ORDER = [
+    'version',
+    'upstream',
+    'upstreams',
+    'listen',
+    'environment',
+    'session',
+    'policies',
+    'budgets',
+    'approval',
+    'audit',
+    'dashboard',
+    'sdk',
+  ]
+
+  function expectCanonicalOrder(contents: string): void {
+    let cursor = -1
+    for (const key of CANONICAL_ORDER) {
+      const match = new RegExp(`^(?:#\\s*)?${key}:`, 'm').exec(contents)
+      expect(match, `top-level \`${key}:\` stub missing from the scaffold`).not.toBeNull()
+      const index = match?.index ?? -1
+      expect(index, `\`${key}:\` is out of canonical order`).toBeGreaterThan(cursor)
+      cursor = index
+    }
+  }
+
+  function twoToolsResponder(payload: Record<string, unknown>): Record<string, unknown> {
+    const id = payload['id'] ?? null
+    if (payload['method'] === 'tools/list') {
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          tools: [
+            { name: 'get_weather', annotations: { readOnlyHint: true, destructiveHint: false } },
+            { name: 'delete_record', annotations: { readOnlyHint: false, destructiveHint: true } },
+            {
+              name: 'create_payment',
+              inputSchema: { type: 'object', properties: { amount: { type: 'number' } } },
+            },
+          ],
+        },
+      }
+    }
+    return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+  }
+
+  /** A stdio child that answers tools/list with one destructive tool. */
+  const ANSWERING_CHILD =
+    "const rl = require('readline').createInterface({ input: process.stdin }); " +
+    "rl.on('line', (line) => { const req = JSON.parse(line); if (req.id === undefined) return; " +
+    "const result = req.method === 'tools/list' ? { tools: [{ name: 'rm_rf', annotations: { destructiveHint: true } }] } : {}; " +
+    "process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }) + '\\n') })"
+
+  it(
+    'writes a starter config that passes helio validate, in canonical order, and prints the secret once',
+    async () => {
+      const upstream = await startMockMcpServer(twoToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-write-'))
+      const outPath = join(dir, 'starter.yaml')
+      try {
+        const { code, stdout, stderr } = await runCli([
+          'scan',
+          '--upstream',
+          upstream.url,
+          '--write',
+          outPath,
+        ])
+        expect(code).toBe(0)
+        expect(stdout).toContain(
+          'Summary: 3 tools exposed, 2 destructive (1 by MCP default), 0 governed',
+        )
+        expect(stderr).toContain(`Created ${outPath}`)
+        expect(stderr).toContain(
+          'Dashboard secret (shown once; the file stores only its SHA-256 digest):',
+        )
+        const secret = /^ {2}([a-f0-9]{64})$/m.exec(stderr)?.[1]
+        expect(secret).toBeDefined()
+
+        const contents = readFileSync(outPath, 'utf-8')
+        expectCanonicalOrder(contents)
+        expect(contents).toContain(`url: "${upstream.url}"`)
+        expect(contents).toContain('- name: "approve-delete_record"')
+        expect(contents).toContain('- name: "allow-get_weather"')
+        expect(contents).toContain(
+          '# create_payment sets no destructiveHint: destructive by MCP default',
+        )
+        expect(contents).toContain('#         field: "$.amount"')
+        expect(contents).toContain(
+          '# Production posture is deny; allow keeps the first helio start from blocking anything by surprise.',
+        )
+        expect(contents).toContain(`api_secret: "${secretDigest(secret ?? '')}"`)
+        expect(contents).not.toContain(secret ?? 'never')
+
+        const validate = await runCli(['validate', '-c', outPath])
+        expect(validate.code, validate.stderr).toBe(0)
+        expect(validate.stdout + validate.stderr).toContain('Config is valid')
+        expect(readdirSync(dir)).toEqual(['starter.yaml'])
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses an existing file without --force before connecting, refuses --force alone, and writes nothing on a failed list',
+    async () => {
+      const upstream = await startMockMcpServer(twoToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-write-'))
+      const outPath = join(dir, 'helio.yaml')
+      writeFileSync(outPath, 'keep me\n')
+      try {
+        const existing = await runCli(['scan', '--upstream', upstream.url, '--write', outPath])
+        expect(existing.code).toBe(1)
+        expect(existing.stderr.trim()).toBe(
+          `Error: ${outPath} already exists. Use --force to overwrite.`,
+        )
+        expect(readFileSync(outPath, 'utf-8')).toBe('keep me\n')
+        expect(upstream.calls).toEqual([])
+
+        const forced = await runCli([
+          'scan',
+          '--upstream',
+          upstream.url,
+          '--write',
+          outPath,
+          '--force',
+        ])
+        expect(forced.code).toBe(0)
+        expect(readFileSync(outPath, 'utf-8')).toContain('approve-delete_record')
+
+        const forceAlone = await runCli(['scan', '--upstream', upstream.url, '--force'])
+        expect(forceAlone.code).toBe(1)
+        expect(forceAlone.stderr.trim()).toBe('Error: --force applies only with --write')
+
+        const closedPath = join(dir, 'unwritten.yaml')
+        const server = createServer()
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+        const port = (server.address() as AddressInfo).port
+        await new Promise<void>((resolve) => {
+          server.close(() => {
+            resolve()
+          })
+        })
+        const failed = await runCli([
+          'scan',
+          '--upstream',
+          `http://127.0.0.1:${String(port)}/mcp`,
+          '--write',
+          closedPath,
+        ])
+        expect(failed.code).toBe(1)
+        expect(existsSync(closedPath)).toBe(false)
+        expect(failed.stderr).not.toContain('Created')
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'writes a config target from the raw file text: env placeholders intact, headers never copied, the named entry selected',
+    async () => {
+      const upstream = await startMockMcpServer(twoToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-write-'))
+      const configPath = join(dir, 'helio.yaml')
+      writeFileSync(
+        configPath,
+        [
+          "version: '1'",
+          'upstreams:',
+          '  - &base',
+          '    name: a',
+          '    transport: stdio',
+          '    command: node',
+          "    args: ['-e', 'process.stdin.resume()']",
+          '    env:',
+          '      GITHUB_TOKEN: "${GITHUB_TOKEN}"',
+          '  - <<: *base',
+          '    name: files',
+          `    args: ['-e', ${JSON.stringify(ANSWERING_CHILD)}]`,
+          '  - name: crm',
+          `    url: ${upstream.url}`,
+          '    headers:',
+          '      Authorization: "Bearer ${GITHUB_TOKEN}"',
+          'dashboard:',
+          '  enabled: false',
+          '',
+        ].join('\n'),
+      )
+      const env: NodeJS.ProcessEnv = { ...process.env, GITHUB_TOKEN: 'sekrit' }
+      try {
+        const filesOut = join(dir, 'files.yaml')
+        const files = await runCli(
+          ['scan', '-c', configPath, '--upstream', 'files', '--write', filesOut],
+          env,
+        )
+        expect(files.code, files.stderr).toBe(0)
+        const filesText = readFileSync(filesOut, 'utf-8')
+        expect(filesText).not.toContain('sekrit')
+        expect(filesText).toContain('${GITHUB_TOKEN}')
+        expect(filesText).toContain('command: node')
+        expect(filesText).toContain('rm_rf')
+        expect(filesText).not.toContain('process.stdin.resume()')
+        expect(filesText).not.toMatch(/^\s{2}name:/m)
+        expect(filesText).toContain('- name: "approve-rm_rf"')
+        const validateFiles = await runCli(['validate', '-c', filesOut], env)
+        expect(validateFiles.code, validateFiles.stderr).toBe(0)
+
+        const crmOut = join(dir, 'crm.yaml')
+        const crm = await runCli(
+          ['scan', '-c', configPath, '--upstream', 'crm', '--write', crmOut],
+          env,
+        )
+        expect(crm.code, crm.stderr).toBe(0)
+        const crmText = readFileSync(crmOut, 'utf-8')
+        expect(crmText).not.toContain('sekrit')
+        expect(crmText).not.toMatch(/^\s{2}headers:/m)
+        expect(crmText).toContain('#     Authorization: "Bearer ${UPSTREAM_TOKEN}"')
+        // The raw block is re-serialized by js-yaml, which quotes as it sees fit.
+        expect(crmText).toMatch(
+          new RegExp(`^  url: "?${upstream.url.replaceAll('.', '\\.')}"?$`, 'm'),
+        )
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it(
+    'writes a config target URL with its userinfo removed and refuses an unwritable path with one line',
+    async () => {
+      const upstream = await startMockMcpServer(twoToolsResponder)
+      const dir = mkdtempSync(join(tmpdir(), 'helio-scan-write-'))
+      const configPath = join(dir, 'helio.yaml')
+      const credentialed = upstream.url.replace('http://', 'http://user:secret@')
+      writeFileSync(
+        configPath,
+        `version: '1'\nupstream:\n  url: ${JSON.stringify(credentialed)}\ndashboard:\n  enabled: false\n`,
+      )
+      try {
+        const outPath = join(dir, 'out.yaml')
+        const written = await runCli(['scan', '-c', configPath, '--write', outPath])
+        expect(written.code, written.stderr).toBe(0)
+        const text = readFileSync(outPath, 'utf-8')
+        expect(text).not.toContain('user:secret')
+        expect(text).not.toContain('secret@')
+        expect(
+          text.includes(`  url: ${upstream.url}\n`) || text.includes(`  url: "${upstream.url}"\n`),
+        ).toBe(true)
+        expect(`${written.stdout}${written.stderr}`).not.toContain('user:secret')
+        expect(`${written.stdout}${written.stderr}`).not.toContain('secret@')
+
+        const unwritable = join(dir, 'missing', 'out.yaml')
+        const failed = await runCli(['scan', '-c', configPath, '--write', unwritable])
+        expect(failed.code).toBe(1)
+        expect(failed.stderr).toContain(`Error: cannot write ${unwritable}: `)
+        expect(failed.stderr).not.toContain('Created')
+        expect(existsSync(unwritable)).toBe(false)
+      } finally {
+        await upstream.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    },
+    SCAN_TIMEOUT_MS,
+  )
+
+  it('keeps helio init byte-identical to its fixture with the secret line masked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-init-fixture-'))
+    const outPath = join(dir, 'helio.yaml')
+    try {
+      const { code } = await runCli(['init', '-o', outPath])
+      expect(code).toBe(0)
+      const mask = (text: string) =>
+        text.replace(/^( {2}api_secret: "sha256:)[a-f0-9]{64}"$/m, '$1<masked>"')
+      const actual = mask(readFileSync(outPath, 'utf-8'))
+      const fixture = readFileSync(
+        join(import.meta.dirname, '__tests__', 'fixtures', 'init-template.yaml'),
+        'utf-8',
+      )
+      expect(actual).toBe(fixture)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

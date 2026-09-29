@@ -129,6 +129,15 @@ error text is quoted under [upstreams](#upstreams)). Tool sets are never
 merged across upstreams — each named upstream is served at its own
 `/mcp/<name>` door.
 
+`helio scan --upstream <url> [--transport streamable-http|sse]` maps onto
+these fields with the schema defaults below (`request_timeout` 30s,
+`connect_timeout` 10s, `protocol_version: auto`, no headers), and
+`helio scan -c helio.yaml` reads this section as written, a stdio entry
+included. The URL a scan prints and `helio scan --write` stores is the
+normalized form: the scheme and host lowercased, a default port dropped,
+the path percent-encoded, and any username and password removed (see
+[Scanning an upstream](./policies.md#scanning-an-upstream-helio-scan)).
+
 | Field              | Type     | Required    | Default           | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------ | -------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `url`              | string   | Conditional | —                 | URL of the upstream MCP server (e.g. `http://localhost:8080/mcp`). **Required** when `transport` is `streamable-http` or `sse` (the default is `streamable-http`); optional and ignored for `stdio`; a present value draws a warning.                                                                                                                                                                                                                                                       |

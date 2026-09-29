@@ -2,6 +2,9 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import type { ServerType } from '@hono/node-server'
+import { createServer } from 'node:http'
+import type { ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { SseUpstreamForwarder } from './sse-forwarder.js'
 import type { McpRequest } from '../mcp/types.js'
 
@@ -698,4 +701,112 @@ describe('SseUpstreamForwarder', () => {
       globalThis.fetch = originalFetch
     }
   })
+})
+
+// ---------------------------------------------------------------------------
+// connect(signal) (issue #299): a caller-owned abort during the connect window
+// ---------------------------------------------------------------------------
+
+describe('SseUpstreamForwarder.connect(signal)', () => {
+  it('rejects promptly when the signal aborts while the endpoint event has not arrived', async () => {
+    // A stand-in that accepts the GET as an event stream and never writes the endpoint event.
+    const accepted: boolean[] = []
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.flushHeaders()
+      accepted.push(true)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    const forwarder = new SseUpstreamForwarder({
+      url: `http://127.0.0.1:${String(port)}/sse`,
+      connectTimeoutMs: 10_000,
+    })
+    const controller = new AbortController()
+    try {
+      const connect = forwarder.connect(controller.signal)
+      let settled = false
+      void connect.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+      await new Promise<void>((resolve) => {
+        const poll = setInterval(() => {
+          if (accepted.length > 0) {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 5)
+      })
+      expect(settled).toBe(false)
+      const started = performance.now()
+      controller.abort()
+      await expect(connect).rejects.toThrow()
+      expect(performance.now() - started).toBeLessThan(1_000)
+    } finally {
+      await forwarder.close()
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve()
+        })
+      })
+    }
+  }, 5_000)
+})
+
+describe('SseUpstreamForwarder.connect before the endpoint event', () => {
+  async function openStream(
+    onAccept: (res: ServerResponse) => void,
+  ): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.flushHeaders()
+      onAccept(res)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as AddressInfo).port
+    return {
+      url: `http://127.0.0.1:${String(port)}/sse`,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections()
+          server.close(() => {
+            resolve()
+          })
+        }),
+    }
+  }
+
+  it('rejects when the stream ends before the endpoint event', async () => {
+    const stand = await openStream((res) => {
+      res.end()
+    })
+    const forwarder = new SseUpstreamForwarder({ url: stand.url, connectTimeoutMs: 10_000 })
+    try {
+      await expect(forwarder.connect()).rejects.toThrow(/endpoint/)
+    } finally {
+      await forwarder.close()
+      await stand.close()
+    }
+  }, 5_000)
+
+  it('rejects with the timeout message when the endpoint event never comes', async () => {
+    const stand = await openStream(() => {
+      // Headers flushed; nothing else ever written.
+    })
+    const forwarder = new SseUpstreamForwarder({ url: stand.url, connectTimeoutMs: 200 })
+    try {
+      await expect(forwarder.connect()).rejects.toThrow(
+        /timed out after 200ms while waiting for endpoint/,
+      )
+    } finally {
+      await forwarder.close()
+      await stand.close()
+    }
+  }, 5_000)
 })

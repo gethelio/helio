@@ -13,6 +13,7 @@ import type { PolicyDecision } from './engine.js'
 import { decide } from './decision-pipeline.js'
 import type { DriftMode } from './decision-pipeline.js'
 import { ToolAnnotationCache } from './annotation-cache.js'
+import { classifyPrimeFailure, listToolsInternal } from '../upstream/list-tools.js'
 import type { SurfaceTool } from './surface.js'
 import type {
   ToolDriftEvent,
@@ -413,29 +414,20 @@ export class GovernedForwarder implements McpForwarder {
    * than as a sessionless call that they would reject with HTTP 400.
    */
   async primeAnnotationCache(): Promise<AnnotationCachePrimeResult> {
-    const syntheticToolsList: McpRequest = {
-      jsonrpc: '2.0',
-      id: 'helio-prime-annotations',
-      method: 'tools/list',
-    }
     const internal: McpForwarderWithInternal = this.inner
 
     try {
-      const result =
-        typeof internal.forwardInternal === 'function'
-          ? await internal.forwardInternal(syntheticToolsList)
-          : await this.inner.forward(syntheticToolsList)
-      // An HTTP error is never a usable tools/list, even if the error body
-      // happens to contain a result.tools-shaped payload.
-      if (result.response.status >= 400) {
-        internal.resetInternalSession?.()
+      // The list step is shared with `helio scan`; it resets the internal
+      // session itself on an HTTP error or a throw (issue #299).
+      const listed = await listToolsInternal(this.inner)
+      if (!listed.ok) {
         return {
           success: false,
           toolsCached: this.annotationCache.size,
-          reason: classifyPrimeFailure(result.response),
+          reason: listed.reason,
         }
       }
-      const update = this.applyToolDefinitionUpdate(result.response.body, undefined)
+      const update = this.applyToolDefinitionUpdate(listed.response.body, undefined)
       if (!update.updated) {
         if (update.persistenceError === undefined) internal.resetInternalSession?.()
         return {
@@ -443,7 +435,7 @@ export class GovernedForwarder implements McpForwarder {
           toolsCached: this.annotationCache.size,
           reason:
             update.persistenceError === undefined
-              ? classifyPrimeFailure(result.response)
+              ? classifyPrimeFailure(listed.response)
               : `baseline persistence failed: ${update.persistenceError}`,
         }
       }
@@ -461,11 +453,8 @@ export class GovernedForwarder implements McpForwarder {
       }
     } catch (error) {
       // A prime that throws (timeout, network error, expired-session retry
-      // exhausted) leaves the inner forwarder's internal session in an
-      // unknown state — self-heal by dropping it so the next attempt
-      // re-probes from scratch instead of retrying against whatever caused
-      // this failure.
-      internal.resetInternalSession?.()
+      // exhausted) has already had the inner forwarder's internal session
+      // dropped by the list step, so the next attempt re-probes from scratch.
       return {
         success: false,
         toolsCached: this.annotationCache.size,
@@ -2441,30 +2430,6 @@ function ticketDriftContext(
 function hasJsonRpcError(result: ForwardResult): boolean {
   const body = result.response.body as Record<string, unknown> | undefined
   return body?.['error'] !== undefined
-}
-
-/** Produce an actionable reason when a prime tools/list response is unusable. */
-function classifyPrimeFailure(response: McpResponse): string {
-  if (response.status >= 400) {
-    return `upstream returned HTTP ${String(response.status)} to tools/list (session/initialize may be required)`
-  }
-  const rawBody = response.body
-  if (typeof rawBody !== 'object' || rawBody === null) {
-    return `upstream tools/list returned a non-JSON body (content-type ${response.headers['content-type'] ?? 'unknown'})`
-  }
-  const body = rawBody as Record<string, unknown>
-  const error = body['error']
-  if (typeof error === 'string') {
-    // Non-conforming upstreams sometimes return a bare string error.
-    return `upstream tools/list returned a JSON-RPC error: ${error}`
-  }
-  if (error !== null && typeof error === 'object') {
-    const message = (error as Record<string, unknown>)['message']
-    if (typeof message === 'string') {
-      return `upstream tools/list returned a JSON-RPC error: ${message}`
-    }
-  }
-  return 'upstream tools/list response was missing result.tools'
 }
 
 function extractBlockReason(result: ForwardResult): string | null {

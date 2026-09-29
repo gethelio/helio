@@ -8389,7 +8389,8 @@ describe('persisted tool baselines (issue #60)', () => {
   it('a throwing insertNew fails the prime and rolls the new names out of the cache', async () => {
     const store = new FakeBaselineStore()
     store.failInsert = new Error('disk I/O error')
-    const inner = mockForwarder()
+    const resetInternalSession = vi.fn()
+    const inner = { ...mockForwarder(), resetInternalSession }
     inner.forward.mockResolvedValue(toolsListResult([sendEmail, listInbox]))
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
@@ -8407,6 +8408,8 @@ describe('persisted tool baselines (issue #60)', () => {
         '[helio] Tool baseline persistence failed for the upstream: disk I/O error; the new ' +
           'definitions were not baselined and the door stays fail-closed until the write succeeds',
       )
+      // A persistence failure is not a session problem: the internal session stays.
+      expect(resetInternalSession).not.toHaveBeenCalled()
 
       // The retry re-baselines them once the write succeeds.
       store.failInsert = undefined

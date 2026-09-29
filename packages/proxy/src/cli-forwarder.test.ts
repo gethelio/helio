@@ -5,9 +5,12 @@ const sseCtor = vi.fn()
 const streamableCtor = vi.fn()
 const stdioCtor = vi.fn()
 
+const stdioStart = vi.fn().mockResolvedValue(undefined)
+const sseConnect = vi.fn().mockResolvedValue(undefined)
+
 vi.mock('./transport/stdio-wrapper.js', () => ({
   StdioForwarder: class {
-    start = vi.fn().mockResolvedValue(undefined)
+    start = stdioStart
     close = vi.fn().mockResolvedValue(undefined)
     constructor(opts: unknown) {
       stdioCtor(opts)
@@ -18,7 +21,7 @@ vi.mock('./transport/stdio-wrapper.js', () => ({
 vi.mock('./upstream/index.js', () => ({
   UpstreamForwarder: upstreamCtor,
   SseUpstreamForwarder: class {
-    connect = vi.fn().mockResolvedValue(undefined)
+    connect = sseConnect
     close = vi.fn().mockResolvedValue(undefined)
     constructor(opts: unknown) {
       sseCtor(opts)
@@ -42,6 +45,34 @@ describe('createForwarderFromConfig', () => {
     sseCtor.mockClear()
     streamableCtor.mockClear()
     stdioCtor.mockClear()
+    stdioStart.mockClear()
+    sseConnect.mockClear()
+  })
+
+  it('hands the connect signal to the sse connect and the stdio start (issue #299)', async () => {
+    const signal = new AbortController().signal
+    await createForwarderFromConfig(
+      makeConfig({
+        upstream: {
+          url: 'http://upstream/sse',
+          transport: 'sse',
+          connect_timeout: '10s',
+          request_timeout: '30s',
+        },
+      }),
+      undefined,
+      { signal },
+    )
+    expect(sseConnect).toHaveBeenCalledWith(signal)
+
+    await createForwarderFromConfig(
+      makeConfig({
+        upstream: { transport: 'stdio', command: 'node', args: [], request_timeout: '30s' },
+      }),
+      undefined,
+      { signal },
+    )
+    expect(stdioStart).toHaveBeenCalledWith(signal)
   })
 
   it('passes upstream.headers to the streamable-http forwarder', async () => {

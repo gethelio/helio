@@ -91,6 +91,8 @@ Nothing governed yet? `npx @gethelio/proxy init --demo` writes a directory of sa
 
 `npx @gethelio/proxy init` already created a `helio.yaml` in your project root. Open it (e.g. `nano helio.yaml`, or in your editor) and point `upstream.url` at your existing MCP server. The singular `upstream:` form stays fully supported; to govern more than one MCP server, declare a named `upstreams:` list in its place (set exactly one of the two). Tool sets are never merged: each named upstream is served at its own `/mcp/<name>` door. See the [Configuration Reference](./docs/configuration.md#upstreams).
 
+Not sure what the server exposes? `npx @gethelio/proxy scan --upstream http://localhost:8080/mcp` prints every tool, whether the server marks it destructive or leaves the MCP default, and the arguments a rule could match, before you write a rule and without starting the proxy.
+
 > **Heads up — Helio starts in audit-only mode.** `init` scaffolds the `policies` section **commented out**, so out of the box Helio runs with `default: allow` and **zero rules**: it records every tool call to the audit trail but **blocks nothing**. Uncomment and edit `policies` (or paste your own rules) to start enforcing. See the [Policy Guide](./docs/policies.md) for rule syntax.
 
 The block below is an **illustrative target** — not the file `init` writes — showing policies, budgets, audit, and a dashboard secret:
@@ -384,6 +386,7 @@ Helio works with any MCP-compatible agent or framework:
 - **[Getting Started](./docs/getting-started.md)**: Install and configure in 5 minutes
 - **[Configuration Reference](./docs/configuration.md)**: Every YAML option explained
 - **[Policy Guide](./docs/policies.md)**: How to write rules with examples
+- **[Scanning an upstream](./docs/policies.md#scanning-an-upstream-helio-scan)**: `helio scan` prints an MCP server's real tool surface, with hint provenance, coverage and argument candidates, before the proxy runs
 - **[Approval Workflows](./docs/approvals.md)**: Slack, webhook, and dashboard approvals
 - **[Audit Trail](./docs/audit.md)**: What's recorded, how to search, how to export
 - **[Kill Switch](./docs/kill-switch.md)**: `helio kill` halts every governed call without editing policy; `helio resume` lifts it

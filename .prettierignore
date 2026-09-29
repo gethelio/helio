@@ -7,3 +7,5 @@ packages/python-sdk
 .superpowers/
 /sbom.json
 /sbom-dashboard.json
+# A byte-for-byte capture of what helio init writes; the init guard compares it exactly.
+packages/proxy/src/__tests__/fixtures/init-template.yaml

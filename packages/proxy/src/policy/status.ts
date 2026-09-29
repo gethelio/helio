@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SurfaceCoverage, SurfaceDoorRef, SurfaceReport } from './surface.js'
-import { conditionalWhenClause } from './surface.js'
+import { conditionalWhenClause, pairRuleLabel } from './surface.js'
 import { formatUtcDay, formatUtcMinute } from '../util/format-time.js'
 import type { KillSwitchSnapshot } from '../kill-switch/state.js'
 import type { CompiledPolicy, PolicyAction } from './types.js'
@@ -263,38 +263,6 @@ function doorName(door: SurfaceDoorRef): string {
   return door.name ?? 'upstream'
 }
 
-function ruleName(rule: { readonly name: string | null; readonly index: number }): string {
-  return rule.name !== null ? `"${rule.name}"` : `rule[${String(rule.index)}]`
-}
-
-function conditionalClause(pair: SurfaceCoverage['pairs'][number]): string {
-  if (pair.conditional_rules.length === 0) return ''
-  const parts = pair.conditional_rules.map(
-    (r) =>
-      `${ruleName(r)} only when ${r.on === 'arguments' ? 'arguments match' : 'metadata matches'}`,
-  )
-  return `; ${parts.join('; ')}`
-}
-
-function pairRule(report: PolicyStatusReport, pair: SurfaceCoverage['pairs'][number]): string {
-  let head: string
-  switch (pair.effective_source) {
-    case 'rule':
-      head = pair.matched_rule ? `rule ${ruleName(pair.matched_rule)}` : 'rule'
-      break
-    case 'default':
-      head = `no rule, default ${report.policy.default_action}`
-      break
-    case 'flag_destructive':
-      head = 'no rule, flag_destructive'
-      break
-    case 'drift':
-      head = `drifted, on_tool_drift ${report.policy.on_tool_drift}`
-      break
-  }
-  return `${head}${conditionalClause(pair)}`
-}
-
 const ACTION_ORDER: readonly PolicyAction[] = [
   'allow',
   'deny',
@@ -413,7 +381,7 @@ export function renderPolicyStatusText(report: PolicyStatusReport): string {
     tool: pair.tool,
     door: doorName(pair.door),
     action: pair.effective_action,
-    rule: pairRule(report, pair),
+    rule: pairRuleLabel(pair, report.policy),
     calls: n(callsByKey.get(pairKey(pair.door, pair.tool)) ?? 0),
   }))
   const width = (key: 'tool' | 'door' | 'action' | 'rule') =>

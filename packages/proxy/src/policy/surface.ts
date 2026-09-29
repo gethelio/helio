@@ -24,6 +24,7 @@ import { matchRule } from './matchers.js'
 import { evaluatePolicy } from './engine.js'
 import type { PolicyDecision } from './engine.js'
 import { stricterDecision } from './decision-pipeline.js'
+import type { CompiledBudget } from '../budget/types.js'
 
 // ---------------------------------------------------------------------------
 // Input
@@ -450,4 +451,134 @@ export function conditionalWhenClause(coverage: SurfaceCoverage): string {
   if (every('arguments')) return 'arguments match'
   if (every('metadata')) return 'metadata matches'
   return 'arguments or metadata match'
+}
+
+// ---------------------------------------------------------------------------
+// The rule column (issue #299): one label for a pair's deciding rule, shared
+// by `helio policy status` and `helio scan` so the two never drift.
+// ---------------------------------------------------------------------------
+
+/** How a rule is named in text: `"name"`, or `rule[<index>]` for a nameless one. */
+export function ruleName(rule: { readonly name: string | null; readonly index: number }): string {
+  return rule.name !== null ? `"${rule.name}"` : `rule[${String(rule.index)}]`
+}
+
+function conditionalClause(pair: SurfacePair): string {
+  if (pair.conditional_rules.length === 0) return ''
+  const parts = pair.conditional_rules.map(
+    (r) =>
+      `${ruleName(r)} only when ${r.on === 'arguments' ? 'arguments match' : 'metadata matches'}`,
+  )
+  return `; ${parts.join('; ')}`
+}
+
+/** The two policy settings the label names when no rule decides the pair. */
+export interface PairRuleLabelPolicy {
+  readonly default_action: 'allow' | 'deny'
+  readonly on_tool_drift: 'block' | 'require_approval' | 'log'
+}
+
+/**
+ * What decided an argument-less call on this pair: the rule, the default, the
+ * `flag_destructive` posture or the drift mode, followed by the rules ahead of
+ * it that fire only for some calls.
+ */
+export function pairRuleLabel(pair: SurfacePair, policy: PairRuleLabelPolicy): string {
+  let head: string
+  switch (pair.effective_source) {
+    case 'rule':
+      head = pair.matched_rule ? `rule ${ruleName(pair.matched_rule)}` : 'rule'
+      break
+    case 'default':
+      head = `no rule, default ${policy.default_action}`
+      break
+    case 'flag_destructive':
+      head = 'no rule, flag_destructive'
+      break
+    case 'drift':
+      head = `drifted, on_tool_drift ${policy.on_tool_drift}`
+      break
+  }
+  return `${head}${conditionalClause(pair)}`
+}
+
+// ---------------------------------------------------------------------------
+// Rules that match no live tool (issue #299): the reverse of the coverage
+// column. Beside `classifySurface`, never inside its report: the report is
+// spread onto `GET /api/policy/status`, and this check is scan's.
+// ---------------------------------------------------------------------------
+
+/** A rule, or a budget contributor, whose `match.tool` matches no tool on any door it applies to. */
+export interface UnmatchedRule {
+  readonly kind: 'rule' | 'budget_contributor'
+  /** The rule's name (null when nameless), or the budget's name. */
+  readonly name: string | null
+  /** The rule's index in `policies.rules`, or the budget's index in `budgets`. */
+  readonly index: number
+  /** The contributor's index in the budget's `contributors` list. */
+  readonly contributor_index?: number
+  /** The glob as written. */
+  readonly pattern: string
+  /** The `match.upstreams` scope as written, or null for an unscoped entry. */
+  readonly upstreams: readonly string[] | null
+}
+
+export interface UnmatchedRulesInput {
+  readonly policy: CompiledPolicy
+  readonly budgets?: readonly CompiledBudget[]
+  readonly doors: readonly SurfaceDoor[]
+}
+
+type UpstreamDoor = Extract<SurfaceDoor, { readonly kind: 'upstream' }>
+
+/**
+ * The rules and budget contributors whose `match.tool` matches no tool on the
+ * doors they apply to. An entry's scope is every upstream door when it has no
+ * `match.upstreams`, else the named doors. Nothing is reported for an entry
+ * while any door in its scope is unavailable (a door that did not answer is no
+ * evidence about its tools) or when no door in its scope is in the run; a
+ * rule without `match.tool` is never reported; adapter doors are not MCP
+ * doors and are not consulted. A warning, never a block: a rule written
+ * ahead of a tool the upstream has not shipped yet is fine.
+ */
+export function unmatchedRules(input: UnmatchedRulesInput): UnmatchedRule[] {
+  const upstreamDoors = input.doors.filter((d): d is UpstreamDoor => d.kind === 'upstream')
+  const out: UnmatchedRule[] = []
+
+  const check = (
+    matcher: { readonly pattern: string; readonly test: (name: string) => boolean },
+    upstreams: readonly string[] | undefined,
+    entry: Omit<UnmatchedRule, 'pattern' | 'upstreams'>,
+  ): void => {
+    const inScope = upstreamDoors.filter(
+      (d) => upstreams === undefined || (d.name !== undefined && upstreams.includes(d.name)),
+    )
+    if (inScope.length === 0) return
+    if (inScope.some((d) => !('tools' in d))) return
+    const matched = inScope.some(
+      (d) => 'tools' in d && d.tools.some((tool) => matcher.test(tool.name)),
+    )
+    if (matched) return
+    out.push({ ...entry, pattern: matcher.pattern, upstreams: upstreams ?? null })
+  }
+
+  for (const rule of input.policy.rules) {
+    if (rule.match.tool === undefined) continue
+    check(rule.match.tool, rule.match.upstreams, {
+      kind: 'rule',
+      name: rule.name ?? null,
+      index: rule.index,
+    })
+  }
+  for (const [index, budget] of (input.budgets ?? []).entries()) {
+    for (const [contributorIndex, contributor] of budget.contributors.entries()) {
+      check(contributor.match.tool, contributor.upstreams, {
+        kind: 'budget_contributor',
+        name: budget.name,
+        index,
+        contributor_index: contributorIndex,
+      })
+    }
+  }
+  return out
 }

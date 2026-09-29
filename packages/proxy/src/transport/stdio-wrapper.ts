@@ -71,9 +71,20 @@ export class StdioForwarder implements McpForwarder {
     this.logTag = helioLogTag(options.upstreamName)
   }
 
-  /** Spawn the child process and set up event handlers. */
-  start(): Promise<void> {
+  /**
+   * Spawn the child process and set up event handlers. An optional caller
+   * signal covers the spawn window (issue #299): an abort marks the forwarder
+   * closing (so the child's exit schedules no restart), kills the child and
+   * rejects; an already-aborted signal rejects without spawning. The signal
+   * is a connect abort only: once `start()` has settled it is not read again,
+   * and `close()` owns the child from there.
+   */
+  start(signal?: AbortSignal): Promise<void> {
     this.buffer = ''
+    if (signal?.aborted) {
+      this.closing = true
+      return Promise.reject(new Error('stdio forwarder start aborted'))
+    }
     return new Promise<void>((resolve, reject) => {
       const child = spawn(this.command, this.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -81,17 +92,45 @@ export class StdioForwarder implements McpForwarder {
       })
       this.child = child
 
+      let settled = false
+      const onAbort = (): void => {
+        this.closing = true
+        const killTimer = setTimeout(() => {
+          child.kill('SIGKILL')
+        }, KILL_TIMEOUT_MS)
+        killTimer.unref()
+        child.once('close', () => {
+          clearTimeout(killTimer)
+        })
+        child.kill('SIGTERM')
+        if (!settled) {
+          settled = true
+          reject(new Error('stdio forwarder start aborted'))
+        }
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const settle = (): void => {
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+      }
+
       child.stdout.on('data', (chunk: Buffer) => {
         this.onData(chunk.toString('utf-8'))
       })
 
       child.on('spawn', () => {
         this.retryCount = 0
-        resolve()
+        if (!settled) {
+          settle()
+          resolve()
+        }
       })
 
       child.on('error', (err: Error) => {
-        reject(err)
+        if (!settled) {
+          settle()
+          reject(err)
+        }
       })
 
       child.on('close', () => {

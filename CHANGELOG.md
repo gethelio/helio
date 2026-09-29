@@ -21,6 +21,33 @@ Maintainer notes:
 
 ### Added
 
+- **`helio scan --upstream <url>` reports an MCP server's real tool surface
+  before the proxy runs:** every tool with its `readOnlyHint` and its
+  `destructiveHint`, saying whether each was set by the server or is the
+  MCP default, the action an argument-less call gets and the rule that
+  decides it, and the arguments a rule could match (amount-like, path,
+  URL and SQL candidates read from the `inputSchema`), under a summary
+  line such as `7 tools exposed, 1 destructive (0 by MCP default), 0 governed`.
+  With a config (`helio scan -c helio.yaml`, an entry named
+  with `--upstream <name>` on a named list) the coverage column is
+  cross-checked against the live surface and a section lists the rules
+  and budget contributors whose `match.tool` matches no tool the upstream
+  exposes, a warning that never blocks. The JSON form is one document
+  (`--format json`, `schema_version: 1`). The command opens no audit
+  database and starts nothing; a target read from a config fails with a
+  line that names it as written in the file plus an error code or an
+  `HTTP <status>` or `timeout` token, never the transport message, so a
+  `${VAR}` value never reaches the terminal.
+- **`helio scan --write [path]` scaffolds a starter `helio.yaml` from the
+  scanned surface:** the target as the upstream (a config entry copied as
+  written, placeholders intact and headers never copied), a live
+  `require_approval` rule through the dashboard for every tool the server
+  annotates destructive, a live `allow` rule for every read-only tool, a
+  commented rule per tool that is destructive by MCP default, a commented
+  budget over the amount-like candidates, and a live dashboard block with
+  a dashboard secret minted and printed once, as `helio init` does. The
+  file passes `helio validate` as written; an existing file is refused
+  without `--force`, and nothing is written when the list failed.
 - **Drift-escalated approval tickets carry `tool_drift`: what changed in
   the tool's definition, and the call's `on_tool_drift` mode.** Every
   ticket a drifted call raises gets the field, whether the drift gate, a
