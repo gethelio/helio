@@ -143,7 +143,11 @@ function compileMatch(
   }
 }
 
-function compileToolMatcher(pattern: string, ruleIndex: number, ruleName?: string): ToolMatcher {
+export function compileToolMatcher(
+  pattern: string,
+  ruleIndex: number,
+  ruleName?: string,
+): ToolMatcher {
   try {
     const test = picomatch(pattern, { dot: true })
     return { pattern, test }

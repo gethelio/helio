@@ -587,3 +587,69 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     expect(contributors[0]?.match.tool.test('payslash')).toBe(false)
   })
 })
+
+describe('renderScanTemplate against names the glob engine cannot carry', () => {
+  // picomatch refuses a pattern above 65,536 characters at compile time, and a
+  // pattern at exactly that length compiles and then throws when evaluated.
+  const UNSAFE = [
+    ['65537 letters', 'a'.repeat(65537)],
+    ['16385 backslashes', '\\'.repeat(16385)],
+    ['32768 stars', '*'.repeat(32768)],
+    ['16384 backslashes', '\\'.repeat(16384)],
+  ] as const
+  const SAFE = [
+    ['30000 letters', 'a'.repeat(30000)],
+    ['32767 stars', '*'.repeat(32767)],
+  ] as const
+
+  it('writes no live rule for a name whose pattern cannot compile or evaluate, and keeps the safe long names live', () => {
+    const tools = [
+      ...UNSAFE.map(([, name]) => ({ name, annotations: { destructiveHint: true } })),
+      ...SAFE.map(([, name]) => ({ name, annotations: { destructiveHint: true } })),
+      { name: 'plain', annotations: { readOnlyHint: true, destructiveHint: false } },
+    ]
+    const text = renderScanTemplate({
+      report: report(tools),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const config = helioConfigSchema.parse(yaml.load(text))
+    if (!('upstream' in config)) throw new Error('singular expected')
+    const { policy } = compilePolicies(config.policies)
+    expect(policy.rules).toHaveLength(SAFE.length + 1)
+    // Every written matcher must evaluate without throwing, on its own name and on another.
+    for (const rule of policy.rules) {
+      const matcher = rule.match.tool
+      if (matcher === undefined) throw new Error('no matcher')
+      expect(() => matcher.test('other_tool')).not.toThrow()
+    }
+    for (const [label, name] of SAFE) {
+      const rule = policy.rules.find((r) => r.name === `approve-${name}`)
+      expect(rule?.match.tool?.test(name), label).toBe(true)
+    }
+    expect(text).toContain('cannot be named by a match.tool pattern')
+    expect(text.split('cannot be named by a match.tool pattern')).toHaveLength(UNSAFE.length + 1)
+    // The note carries an excerpt and the length, never the whole name.
+    for (const line of text.split('\n')) {
+      if (line.includes('cannot be named by a match.tool pattern')) {
+        expect(line.length).toBeLessThan(400)
+        expect(line).toMatch(/\(\d+ characters\)/)
+      }
+    }
+  }, 30_000)
+
+  it('writes no budget contributor for such a name', () => {
+    const amount = { type: 'object', properties: { amount: { type: 'number' } } }
+    const text = renderScanTemplate({
+      report: report([
+        { name: '*'.repeat(32768), inputSchema: amount },
+        { name: 'pay', inputSchema: amount },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const budgetBlock = text.slice(text.indexOf('# budgets:'), text.indexOf('\napproval:\n'))
+    expect(budgetBlock).toContain('tool: "pay"')
+    expect(budgetBlock.split('\n').filter((line) => line.includes('- match:'))).toHaveLength(1)
+  })
+})

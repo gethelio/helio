@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises'
 import yaml from 'js-yaml'
 import { formatUtcMinute } from '../util/format-time.js'
 import { StartupError } from '../startup-error.js'
+import { compileToolMatcher } from '../policy/parser.js'
 import type { ScanReport, ScanReportTool } from './report.js'
 import { stripUserinfoTextually } from './target.js'
 
@@ -39,28 +40,52 @@ function commentSafe(value: string): string {
 }
 
 /**
- * A tool name as a `match.tool` value. The policy compiles that field as a
+ * A tool name as a `match.tool` pattern. The policy compiles that field as a
  * picomatch glob, so every ASCII character outside `[A-Za-z0-9_]` is escaped
  * with a backslash, and a backslash itself is written as the bracket class
- * `[\\]`, the one form picomatch reads as a literal backslash. The rule then
- * matches that one name and nothing else, whatever the upstream chose (exact
- * over every one- and two-character ASCII name). An empty name is the one
- * value no pattern can carry: `exactlyMatchable` refuses it.
+ * `[\\]`, the one form picomatch reads as a literal backslash. The pattern
+ * then matches that one name and nothing else, whatever the upstream chose
+ * (exact over every one- and two-character ASCII name).
  */
-function globLiteral(name: string): string {
-  return quoted(
-    name.replaceAll(/[^A-Za-z0-9_\u0080-￿]/g, (char) => (char === '\\' ? '[\\\\]' : `\\${char}`)),
+function exactPattern(name: string): string {
+  return name.replaceAll(/[^A-Za-z0-9_\u0080-￿]/g, (char) =>
+    char === '\\' ? '[\\\\]' : `\\${char}`,
   )
 }
 
-/** Whether a `match.tool` glob can name this tool: an empty pattern does not compile. */
+/** The `match.tool` value for a tool name, as a one-line YAML scalar. */
+function globLiteral(name: string): string {
+  return quoted(exactPattern(name))
+}
+
+/**
+ * Whether the policy compiler will accept the exact pattern for this name
+ * and evaluate it: the pattern is compiled with the compiler's own builder
+ * and tested against the name here, because the glob engine refuses a
+ * pattern above 65,536 characters at compile time and one at exactly that
+ * length compiles and then throws when evaluated. An empty name has no
+ * pattern at all.
+ */
 function exactlyMatchable(name: string): boolean {
-  return name !== ''
+  if (name === '') return false
+  try {
+    const matcher = compileToolMatcher(exactPattern(name), 0)
+    return matcher.test(name) && !matcher.test(`${name}_`)
+  } catch {
+    return false
+  }
 }
 
 /** The comment written in place of a rule for a tool no pattern can name. */
-function unmatchableNote(prefix: string): string {
-  return `${prefix}# a tool with an empty name was skipped: match.tool cannot name it\n`
+function unmatchableNote(tool: ScanReportTool, prefix: string): string {
+  if (tool.name === '') {
+    return `${prefix}# a tool with an empty name was skipped: match.tool cannot name it\n`
+  }
+  const excerpt = tool.name.length > 60 ? `${tool.name.slice(0, 60)}...` : tool.name
+  return (
+    `${prefix}# ${commentSafe(excerpt)} (${String(tool.name.length)} characters) cannot be named ` +
+    `by a match.tool pattern: the glob engine refuses it; write its rule by hand\n`
+  )
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -133,13 +158,13 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
       if (exactlyMatchable(tool.name)) lines.push(allowRule(tool, '    '))
     }
   }
-  // An empty name has no rule: the note says so where the rule would sit.
+  // A name no pattern can carry has no rule: the note says so where it would sit.
   for (const tool of [...annotatedDestructive, ...readOnly]) {
-    if (!exactlyMatchable(tool.name)) lines.push(unmatchableNote('    '))
+    if (!exactlyMatchable(tool.name)) lines.push(unmatchableNote(tool, '    '))
   }
   for (const tool of defaultDestructive) {
     if (!exactlyMatchable(tool.name)) {
-      lines.push(unmatchableNote('    '))
+      lines.push(unmatchableNote(tool, '    '))
       continue
     }
     lines.push(
