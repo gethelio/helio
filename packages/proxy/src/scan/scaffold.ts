@@ -39,12 +39,28 @@ function commentSafe(value: string): string {
 }
 
 /**
- * A tool name as a `match.tool` value: the policy compiles that field as a
- * picomatch glob, so every metacharacter the name carries is escaped and the
- * rule matches that one name, never a pattern the upstream chose.
+ * A tool name as a `match.tool` value. The policy compiles that field as a
+ * picomatch glob, so every ASCII character outside `[A-Za-z0-9_]` is escaped
+ * with a backslash (the set picomatch honors for every metacharacter and for
+ * the quote, slash and dot rules around them) and the rule matches that one
+ * name, never a pattern the upstream chose. Only for names `exactlyMatchable`
+ * admits: a backslash in a name cannot be expressed exactly by picomatch, and
+ * an empty pattern does not compile.
  */
 function globLiteral(name: string): string {
-  return quoted(name.replaceAll(/[\\*?[\]{}()!+@]/g, (char) => `\\${char}`))
+  return quoted(name.replaceAll(/[^A-Za-z0-9_\u0080-\uffff]/g, (char) => `\\${char}`))
+}
+
+/** Whether a `match.tool` glob can name this tool and nothing else. */
+function exactlyMatchable(name: string): boolean {
+  return name !== '' && !name.includes('\\')
+}
+
+/** The comment written above a tool no exact glob can name. */
+function unmatchableNote(tool: ScanReportTool, prefix: string): string {
+  return tool.name === ''
+    ? `${prefix}# a tool with an empty name was skipped: match.tool cannot name it\n`
+    : `${prefix}# ${commentSafe(tool.name)} cannot be matched exactly by a match.tool glob (the name carries a backslash); write its rule by hand\n`
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -91,26 +107,48 @@ function approvalRule(tool: ScanReportTool, prefix: string): string {
   )
 }
 
+function allowRule(tool: ScanReportTool, prefix: string): string {
+  return (
+    `${prefix}- name: ${quoted(`allow-${tool.name}`)}\n` +
+    `${prefix}  match:\n` +
+    `${prefix}    tool: ${globLiteral(tool.name)}\n` +
+    `${prefix}  action: allow\n`
+  )
+}
+
 function rulesBlock(tools: readonly ScanReportTool[]): string {
   const annotatedDestructive = tools.filter((tool) => tool.destructive === 'annotated')
   const readOnly = tools.filter((tool) => tool.hints.readOnlyHint.value)
   const defaultDestructive = tools.filter((tool) => tool.destructive === 'default')
+  const live = [...annotatedDestructive, ...readOnly].filter((tool) => exactlyMatchable(tool.name))
   const lines: string[] = []
-  if (annotatedDestructive.length === 0 && readOnly.length === 0) {
+  if (live.length === 0) {
     lines.push('  rules: []\n')
   } else {
     lines.push('  rules:\n')
-    for (const tool of annotatedDestructive) lines.push(approvalRule(tool, '    '))
+    for (const tool of annotatedDestructive) {
+      if (exactlyMatchable(tool.name)) lines.push(approvalRule(tool, '    '))
+    }
     for (const tool of readOnly) {
-      lines.push(
-        `    - name: ${quoted(`allow-${tool.name}`)}\n` +
-          `      match:\n` +
-          `        tool: ${globLiteral(tool.name)}\n` +
-          `      action: allow\n`,
-      )
+      if (exactlyMatchable(tool.name)) lines.push(allowRule(tool, '    '))
     }
   }
+  // A name no glob can match exactly gets its rule commented, with the reason.
+  for (const tool of annotatedDestructive) {
+    if (exactlyMatchable(tool.name)) continue
+    lines.push(unmatchableNote(tool, '    '))
+    if (tool.name !== '') lines.push(approvalRule(tool, '    # '))
+  }
+  for (const tool of readOnly) {
+    if (exactlyMatchable(tool.name)) continue
+    lines.push(unmatchableNote(tool, '    '))
+    if (tool.name !== '') lines.push(allowRule(tool, '    # '))
+  }
   for (const tool of defaultDestructive) {
+    if (!exactlyMatchable(tool.name)) {
+      lines.push(unmatchableNote(tool, '    '))
+      continue
+    }
     lines.push(
       `    # ${commentSafe(tool.name)} sets no destructiveHint: destructive by MCP default\n`,
     )
@@ -120,11 +158,13 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
 }
 
 function budgetsBlock(tools: readonly ScanReportTool[]): string {
-  const contributors = tools.flatMap((tool) =>
-    tool.candidates
-      .filter((candidate) => candidate.kind === 'amount')
-      .map((candidate) => ({ tool: tool.name, field: candidate.path })),
-  )
+  const contributors = tools
+    .filter((tool) => exactlyMatchable(tool.name))
+    .flatMap((tool) =>
+      tool.candidates
+        .filter((candidate) => candidate.kind === 'amount')
+        .map((candidate) => ({ tool: tool.name, field: candidate.path })),
+    )
   if (contributors.length === 0) {
     return '# budgets:\n#   # One depleting pot shared by every tool that spends; see docs/policies.md.\n'
   }

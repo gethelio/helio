@@ -186,7 +186,9 @@ describe('renderScanTemplate', () => {
     })
     const parsed = helioConfigSchema.parse(yaml.load(odd))
     if ('upstream' in parsed) {
-      expect(parsed.policies.rules[0]?.match.tool).toBe("it's Hello, 世界")
+      const { policy } = compilePolicies(parsed.policies)
+      expect(policy.rules[0]?.match.tool?.test("it's Hello, 世界")).toBe(true)
+      expect(policy.rules[0]?.match.tool?.test('its Hello, 世界')).toBe(false)
     }
   })
 
@@ -340,7 +342,7 @@ describe('writeScaffold', () => {
 })
 
 describe('renderScanTemplate writes exact-name matchers, never globs', () => {
-  const NAMES = ['*', 'a?b', '[x]', '{a,b}', '+(a)', '!x', 'back\\slash', 'Hello, 世界']
+  const NAMES = ['*', 'a?b', '[x]', '{a,b}', '+(a)', '!x', 'Hello, 世界']
 
   it('compiles every scaffolded match.tool to a matcher that matches the tool name and nothing else', () => {
     const tools = NAMES.flatMap((name, index) => [
@@ -410,5 +412,148 @@ describe('renderScanTemplate writes exact-name matchers, never globs', () => {
     if (matcher === undefined) throw new Error('no contributor')
     expect(matcher.test('pay*')).toBe(true)
     expect(matcher.test('payments')).toBe(false)
+  })
+})
+
+describe('renderScanTemplate exact-name matchers under metacharacter interactions', () => {
+  const METAS = [
+    '*',
+    '?',
+    '[',
+    ']',
+    '{',
+    '}',
+    '(',
+    ')',
+    '!',
+    '+',
+    '@',
+    '|',
+    ',',
+    '^',
+    '.',
+    '$',
+    '/',
+    '-',
+    '~',
+    ' ',
+    ':',
+    '#',
+    '%',
+    '&',
+    '=',
+    ';',
+    "'",
+    '"',
+    '<',
+    '>',
+    '`',
+  ]
+  const OTHERS = ['a', 'x', 'ab', 'get_weather', 'anything', '', ...METAS]
+
+  function compiledMatchers(names: readonly string[]) {
+    const tools = names.map((name, index) => ({
+      name,
+      annotations:
+        index % 2 === 0
+          ? { readOnlyHint: true, destructiveHint: false }
+          : { destructiveHint: true },
+    }))
+    const text = renderScanTemplate({
+      report: report(tools),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const config = helioConfigSchema.parse(yaml.load(text))
+    if (!('upstream' in config)) throw new Error('singular expected')
+    const { policy } = compilePolicies(config.policies)
+    return { text, policy }
+  }
+
+  it('matches the reviewer cases and every syntax-character pair exactly', () => {
+    const names = new Set<string>([
+      '@(a|b)',
+      '(a|b)',
+      'a|b',
+      '*"',
+      './a',
+      'a/b',
+      '$',
+      '**',
+      'a{1,2}',
+      '[!a]',
+      'Hello, 世界',
+      'x\r\ny',
+    ])
+    // Every character alone, and every pair of the characters picomatch reads
+    // as syntax: the full grid over all 31 characters compiles about a thousand
+    // rules and needs seconds under load, which a CI run cannot afford.
+    const SYNTAX = ['*', '?', '[', ']', '{', '}', '(', ')', '!', '+', '@', '|', ',', '"', '/']
+    for (const a of METAS) names.add(a)
+    for (const a of SYNTAX) {
+      for (const b of SYNTAX) {
+        names.add(`x${a}${b}`)
+      }
+    }
+    const list = [...names]
+    const { policy } = compiledMatchers(list)
+    expect(policy.rules).toHaveLength(list.length)
+    for (const name of list) {
+      const rule = policy.rules.find(
+        (r) => r.name === `approve-${name}` || r.name === `allow-${name}`,
+      )
+      const matcher = rule?.match.tool
+      if (matcher === undefined) throw new Error(`no rule for ${JSON.stringify(name)}`)
+      expect(matcher.test(name), `${JSON.stringify(name)} must match itself`).toBe(true)
+      for (const other of [...OTHERS, ...list.slice(0, 40)]) {
+        if (other === name) continue
+        expect(
+          matcher.test(other),
+          `${JSON.stringify(name)} must not match ${JSON.stringify(other)}`,
+        ).toBe(false)
+      }
+    }
+  }, 20_000)
+
+  it('writes no live rule for a name a glob cannot match exactly (a backslash) and says so', () => {
+    const { text, policy } = compiledMatchers(['back\\slash', 'a\\*', '\\', 'plain'])
+    expect(policy.rules.map((rule) => rule.name)).toEqual(['approve-plain'])
+    expect(text).toContain('cannot be matched exactly by a match.tool glob')
+    expect(text).toContain('# - name: "allow-back\\\\slash"')
+    expect(text).not.toMatch(/^\s+- name: "allow-back/m)
+  })
+
+  it('skips an empty tool name with a note and still validates', () => {
+    const { text, policy } = compiledMatchers(['', 'plain'])
+    expect(policy.rules.map((rule) => rule.name)).toEqual(['approve-plain'])
+    expect(text).toContain('empty name')
+  })
+
+  it('never writes a budget contributor for an unrepresentable or empty name', () => {
+    const amount = { type: 'object', properties: { amount: { type: 'number' } } }
+    const text = renderScanTemplate({
+      report: report([
+        { name: 'pay\\slash', inputSchema: amount },
+        { name: '', inputSchema: amount },
+        { name: 'pay*', inputSchema: amount },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const budgetBlock = text.slice(text.indexOf('# budgets:'), text.indexOf('\napproval:\n'))
+    expect(budgetBlock).toContain('tool: "pay\\\\*"')
+    expect(budgetBlock).not.toContain('pay\\\\slash')
+    expect(budgetBlock).not.toContain('tool: ""')
+    const uncommented = budgetBlock
+      .split('\n')
+      .map((line) => line.replace(/^# ?/, ''))
+      .join('\n')
+    const config = helioConfigSchema.parse({
+      version: '1',
+      upstream: { url: 'http://127.0.0.1:1/mcp' },
+      dashboard: { enabled: false },
+      ...(yaml.load(uncommented) as Record<string, unknown>),
+    })
+    expect(compileBudgets(config.budgets)[0]?.contributors).toHaveLength(1)
   })
 })
