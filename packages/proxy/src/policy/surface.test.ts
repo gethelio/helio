@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest'
-import { classifySurface, formatSurfaceLine, formatCoverageLine } from './surface.js'
+import {
+  classifySurface,
+  formatSurfaceLine,
+  formatCoverageLine,
+  pairRuleLabel,
+  unmatchedRules,
+} from './surface.js'
 import type { SurfaceDoor, SurfaceTool } from './surface.js'
 import { compilePolicies } from './parser.js'
+import { compileBudgets } from '../budget/parser.js'
+import { helioConfigSchema } from '../config/schema.js'
 import type { PoliciesConfig } from '../config/schema.js'
 import type { CompiledPolicy } from './types.js'
 
@@ -423,5 +431,202 @@ describe('formatSurfaceLine and formatCoverageLine', () => {
     const report = classify([crm, files, openclaw])
     const text = `${formatSurfaceLine(report)}\n${formatCoverageLine(report) ?? ''}`
     expect(text).not.toMatch(/flagged|used|occurred/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// unmatchedRules (issue #299): rules whose match.tool matches no live tool
+// ---------------------------------------------------------------------------
+
+describe('unmatchedRules', () => {
+  const bare = (name: string): SurfaceTool => ({
+    name,
+    annotations: undefined,
+    current_annotations: undefined,
+    drifted: false,
+  })
+
+  // A named two-entry config: the schema admits match.upstreams only beside an
+  // upstreams: list, so scoped rules can exist only there.
+  const config = helioConfigSchema.parse({
+    version: '1',
+    upstreams: [
+      { name: 'crm', url: 'http://x/crm' },
+      { name: 'files', url: 'http://x/files' },
+    ],
+    dashboard: { enabled: false },
+    policies: {
+      default: 'allow',
+      rules: [
+        { name: 'gh', match: { tool: 'github_*' }, action: 'deny' },
+        {
+          name: 'files-only-reads',
+          match: { tool: 'read_*', upstreams: ['files'] },
+          action: 'allow',
+        },
+        { name: 'crm-only-gets', match: { tool: 'get_*', upstreams: ['crm'] }, action: 'allow' },
+        {
+          name: 'annotation-only',
+          match: { annotations: { destructiveHint: true } },
+          action: 'deny',
+        },
+        { match: { tool: 'stripe_*' }, action: 'deny' },
+      ],
+    },
+    budgets: [
+      {
+        name: 'pot',
+        limit: 10,
+        currency: 'USD',
+        window: '24h',
+        key: 'global',
+        on_exceed: 'deny',
+        contributors: [
+          { match: { tool: 'paypal_*' }, field: '$.total' },
+          { match: { tool: 'get_*' }, field: '$.x' },
+        ],
+      },
+    ],
+  })
+  const policy = compilePolicies(config.policies).policy
+  const budgets = compileBudgets(config.budgets)
+
+  const stripeEntry = { kind: 'rule', name: null, index: 4, pattern: 'stripe_*', upstreams: null }
+  const paypalEntry = {
+    kind: 'budget_contributor',
+    name: 'pot',
+    index: 0,
+    contributor_index: 0,
+    pattern: 'paypal_*',
+    upstreams: null,
+  }
+  const potGetsEntry = {
+    kind: 'budget_contributor',
+    name: 'pot',
+    index: 0,
+    contributor_index: 1,
+    pattern: 'get_*',
+    upstreams: null,
+  }
+
+  it('reports a scoped rule on its live door and skips rules scoped to doors not in the run', () => {
+    const doors: SurfaceDoor[] = [
+      { kind: 'upstream', name: 'crm', tools: [bare('github_x'), bare('lookup')] },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors })).toEqual([
+      { kind: 'rule', name: 'crm-only-gets', index: 2, pattern: 'get_*', upstreams: ['crm'] },
+      stripeEntry,
+      paypalEntry,
+      potGetsEntry,
+    ])
+  })
+
+  it('reports nothing for an unscoped rule while any door it applies to is unavailable', () => {
+    const doors: SurfaceDoor[] = [
+      { kind: 'upstream', name: 'crm', tools: [bare('get_a')] },
+      { kind: 'upstream', name: 'files', unavailable: 'refused' },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors })).toEqual([])
+  })
+
+  it('tells a gateway-prefixed name apart from the glob and skips annotation-only rules', () => {
+    const prefixed: SurfaceDoor[] = [
+      {
+        kind: 'upstream',
+        name: undefined,
+        label: 'http://x/mcp',
+        tools: [bare('github-search_issues'), bare('get_a')],
+      },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors: prefixed })).toEqual([
+      { kind: 'rule', name: 'gh', index: 0, pattern: 'github_*', upstreams: null },
+      stripeEntry,
+      paypalEntry,
+    ])
+    const plain: SurfaceDoor[] = [
+      {
+        kind: 'upstream',
+        name: undefined,
+        label: 'http://x/mcp',
+        tools: [bare('github_search_issues'), bare('get_a')],
+      },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors: plain })).toEqual([stripeEntry, paypalEntry])
+  })
+
+  it('reports nothing on an unreachable door alone and everything in scope on an empty list', () => {
+    const down: SurfaceDoor[] = [
+      { kind: 'upstream', name: undefined, label: 'http://x/mcp', unavailable: 'refused' },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors: down })).toEqual([])
+    const empty: SurfaceDoor[] = [
+      { kind: 'upstream', name: undefined, label: 'http://x/mcp', tools: [] },
+    ]
+    expect(unmatchedRules({ policy, budgets, doors: empty })).toEqual([
+      { kind: 'rule', name: 'gh', index: 0, pattern: 'github_*', upstreams: null },
+      stripeEntry,
+      paypalEntry,
+      potGetsEntry,
+    ])
+  })
+
+  it('reads budgets as optional and ignores adapter doors', () => {
+    const doors: SurfaceDoor[] = [
+      {
+        kind: 'upstream',
+        name: 'files',
+        tools: [bare('read_file'), bare('github_x'), bare('stripe_charge')],
+      },
+      { kind: 'adapter', origin: 'openclaw', tools: [bare('paypal_payout')] },
+    ]
+    expect(unmatchedRules({ policy, doors })).toEqual([])
+    expect(unmatchedRules({ policy, budgets, doors })).toEqual([paypalEntry, potGetsEntry])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pairRuleLabel (issue #299): the rule column shared by policy status and scan
+// ---------------------------------------------------------------------------
+
+describe('pairRuleLabel', () => {
+  const policy = compile({
+    default: 'deny',
+    flag_destructive: 'require_approval',
+    on_tool_drift: 'log',
+    rules: probeRules,
+  })
+  const report = classifySurface({ doors: [crm], policy, environment: 'production' })
+  const pair = (name: string) => {
+    const found = report.coverage.pairs.find((p) => p.tool === name)
+    if (found === undefined) throw new Error(`no pair for ${name}`)
+    return found
+  }
+  const labels = { default_action: 'deny' as const, on_tool_drift: 'log' as const }
+
+  it('names the deciding rule, the default, flag_destructive and drift the way policy status does', () => {
+    expect(pairRuleLabel(pair('delete_record'), labels)).toBe('rule "r1-name-only"')
+    expect(pairRuleLabel(pair('get_weather'), labels)).toBe('rule "r4-upstream-scoped"')
+    expect(pairRuleLabel(pair('lookup_order'), labels)).toBe('no rule, default deny')
+  })
+
+  it('appends the conditional clause after the head', () => {
+    expect(pairRuleLabel(pair('transfer_funds'), labels)).toBe(
+      'rule "r5-deny-with-inert-evidence"; "r2-input-conditioned" only when arguments match',
+    )
+  })
+
+  it('names a drifted pair by the drift mode', () => {
+    const drifted = classifySurface({
+      doors: [
+        { kind: 'upstream', name: 'crm', tools: [tool('exec', undefined, { drifted: true })] },
+      ],
+      policy: compile({ default: 'allow', rules: [] }),
+      environment: undefined,
+    })
+    const only = drifted.coverage.pairs[0]
+    if (only === undefined) throw new Error('no pair')
+    expect(pairRuleLabel(only, { default_action: 'allow', on_tool_drift: 'block' })).toBe(
+      'drifted, on_tool_drift block',
+    )
   })
 })

@@ -1,0 +1,85 @@
+# Helio MCP Governance Proxy configuration
+# Docs: https://github.com/gethelio/helio
+
+version: "1"
+
+upstream:
+  # URL of the upstream MCP server
+  url: "http://localhost:8080/mcp"
+  # Transport: streamable-http (default), sse, or stdio
+  transport: streamable-http
+#   headers:
+#     Authorization: "Bearer ${UPSTREAM_TOKEN}"
+
+# Multiple named upstreams (multi-upstream mode) replace `upstream:` —
+# set exactly one of the two. See docs/configuration.md.
+# upstreams:
+#   - name: files
+#     url: "http://localhost:8081/mcp"
+
+# listen:
+#   port: 3000
+#   host: 127.0.0.1
+
+# environment: production
+
+# session:
+#   identity: # ordered; first match wins
+#     - source: header
+#       name: x-helio-session-id
+#     - source: legacy_header # verbatim Mcp-Session-Id (deprecation window)
+#   on_unresolved: deny # deny | anonymous
+
+# policies:
+#   default: allow
+#   dry_run: false
+#   rules: []
+
+# budgets:
+#   # One depleting pot shared by every tool that spends.
+#   - name: agent-payments
+#     limit: 50
+#     currency: USD
+#     window: session
+#     key: session
+#     on_exceed: deny # or require_approval for a break-glass ticket
+#     contributors:
+#       - match:
+#           tool: 'stripe_*'
+#         field: '$.amount'
+#       - match:
+#           tool: 'paypal_*'
+#         field: '$.total'
+
+# approval:
+#   timeout: 300s
+#   default_on_timeout: deny
+#   channels: []
+
+# audit:
+#   storage: sqlite
+#   path: ./helio-audit.db
+#   retention: 90d
+#   include_responses: true
+
+# Operator dashboard + approval REST API. Bound to 127.0.0.1 by default. Do
+# not change to 0.0.0.0 without putting an authenticating reverse proxy in
+# front. dashboard.api_secret holds the SHA-256 digest of the dashboard
+# secret, never the secret itself: log in to the dashboard and authenticate
+# sideband API clients with the secret that `helio init` printed once. To
+# rotate, run `helio secret`, paste the new digest here, and restart the
+# proxy; active dashboard sessions are invalidated. A plaintext value is
+# still accepted.
+dashboard:
+  enabled: true
+  port: 3100
+  host: 127.0.0.1
+  api_secret: "sha256:<masked>"
+
+# sdk:
+#   enabled: false
+#   port: 3200
+#   host: 127.0.0.1
+# When enabled, the proxy generates a per-boot Bearer token and prints it
+# to stderr. Pass HELIO_SDK_TOKEN to your SDK clients, or pre-set it in
+# the proxy's environment for a stable cross-restart value.

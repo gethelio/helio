@@ -60,10 +60,16 @@ export class SseUpstreamForwarder implements McpForwarder {
     this.pending = new PendingRequests(this.requestTimeoutMs)
   }
 
-  /** Connect to the upstream SSE server and learn the POST endpoint. */
-  connect(): Promise<void> {
+  /**
+   * Connect to the upstream SSE server and learn the POST endpoint. An
+   * optional caller signal aborts the wait for the endpoint event alongside
+   * the connect timeout (issue #299).
+   */
+  connect(signal?: AbortSignal): Promise<void> {
     const controller = new AbortController()
     this.abortController = controller
+    const connectSignals = [controller.signal, AbortSignal.timeout(this.connectTimeoutMs)]
+    if (signal !== undefined) connectSignals.push(signal)
 
     // Case-collapse the static names, then re-stamp text/event-stream over
     // a merged accept — the only answer the connect can consume (issue #304).
@@ -79,7 +85,7 @@ export class SseUpstreamForwarder implements McpForwarder {
 
       fetch(this.url, {
         headers,
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.connectTimeoutMs)]),
+        signal: AbortSignal.any(connectSignals),
       })
         .then((res) => {
           if (!res.ok) {

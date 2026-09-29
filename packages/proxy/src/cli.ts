@@ -59,6 +59,12 @@ import type { Hono } from 'hono'
 import { createApp, createMultiApp, startServer, startSidebandServer } from './server.js'
 import { applyReloadedPolicy } from './reload-fanout.js'
 import { createForwarderFromConfig } from './cli-forwarder.js'
+import yaml from 'js-yaml'
+import { classifyUpstreamArgument, resolveScanTarget, scanNeedsConfig } from './scan/target.js'
+import type { ScanConfigInput, ScanTarget } from './scan/target.js'
+import { runScan } from './scan/run.js'
+import type { ScanPolicyInput } from './scan/run.js'
+import { renderScanTemplate } from './scan/scaffold.js'
 import type { BuiltForwarder } from './cli-forwarder.js'
 import type { McpForwarder } from './mcp/types.js'
 import { compilePolicies, PolicyParseError } from './policy/index.js'
@@ -211,6 +217,11 @@ function getBundledDashboardDistPath(): string | null {
 // Config template for `helio init`
 // ---------------------------------------------------------------------------
 
+// The bytes `helio init` writes are pinned by
+// src/__tests__/fixtures/init-template.yaml (the api_secret line masked on
+// both sides). Any edit to this template updates that fixture in the same
+// commit. `helio scan --write` renders its own text in scan/scaffold.ts and
+// shares nothing here but the section order.
 function renderConfigTemplate(apiSecretDigest: string): string {
   return `# Helio MCP Governance Proxy configuration
 # Docs: https://github.com/gethelio/helio
@@ -350,17 +361,26 @@ async function loadConfigForReader(configPath: string, reader: ConfigReader): Pr
   try {
     return await loadConfig(configPath)
   } catch (err) {
-    if (err instanceof EnvVarUnsetError) {
-      console.error(envVarUnsetLine(err, configPath, reader))
-      process.exit(1)
-    }
-    if (err instanceof ConfigError) {
-      console.error(`Error: ${err.message}`)
-      printConfigErrorDetails(err)
-      process.exit(1)
-    }
-    throw err
+    exitOnReaderConfigError(err, configPath, reader)
   }
+}
+
+/**
+ * The reader commands' one exit for a config that did not load: an unset
+ * placeholder names the variable, the field and the action; any other
+ * ConfigError prints as start does; anything else keeps the crash path.
+ */
+function exitOnReaderConfigError(err: unknown, configPath: string, reader: ConfigReader): never {
+  if (err instanceof EnvVarUnsetError) {
+    console.error(envVarUnsetLine(err, configPath, reader))
+    process.exit(1)
+  }
+  if (err instanceof ConfigError) {
+    console.error(`Error: ${err.message}`)
+    printConfigErrorDetails(err)
+    process.exit(1)
+  }
+  throw err
 }
 
 /**
@@ -1362,6 +1382,152 @@ async function startCommand(configPath: string, options: StartOptions): Promise<
   )
 }
 
+// ---------------------------------------------------------------------------
+// helio scan (issue #299)
+// ---------------------------------------------------------------------------
+
+interface ScanOptions {
+  readonly upstream?: string
+  readonly transport?: string
+  readonly config: string
+  readonly format: string
+  readonly write?: string | true
+  readonly force: boolean
+}
+
+/**
+ * Load the config for `helio scan`: the validated object plus the file text
+ * as parsed before interpolation, which the report's labels and `--write`
+ * read so a `${VAR}` value never reaches stdout or the written file. One read
+ * of the file; the refusals are the reader commands' (issue #415).
+ */
+async function loadScanConfig(configPath: string): Promise<ScanConfigInput> {
+  const reader: ConfigReader = { command: 'helio scan', presentsSecret: false }
+  try {
+    const source = await readConfigSource(configPath)
+    const { config } = parseConfigSource(source, configPath)
+    return { path: configPath, loaded: config, raw: yaml.load(source.raw) }
+  } catch (err) {
+    exitOnReaderConfigError(err, configPath, reader)
+  }
+}
+
+/**
+ * `helio scan`: connect to one upstream, read `tools/list`, and report the
+ * real tool surface with its provenance and coverage. Every argument refusal
+ * is one StartupError line before anything connects; a config is read only
+ * when `-c` was passed, or when the target is an entry name or the config
+ * itself.
+ */
+async function scanCommand(opts: ScanOptions, configExplicit: boolean): Promise<void> {
+  if (opts.format !== 'text' && opts.format !== 'json') {
+    throw new StartupError(`Error: --format must be text or json (got "${opts.format}")`)
+  }
+  if (opts.force && opts.write === undefined) {
+    throw new StartupError('Error: --force applies only with --write')
+  }
+  const writePath =
+    opts.write === undefined ? undefined : opts.write === true ? DEFAULT_CONFIG_PATH : opts.write
+  if (writePath !== undefined && existsSync(writePath) && !opts.force) {
+    throw new StartupError(`Error: ${writePath} already exists. Use --force to overwrite.`)
+  }
+  const argument = opts.upstream === undefined ? undefined : classifyUpstreamArgument(opts.upstream)
+  if (argument?.kind === 'invalid') throw new StartupError(argument.message)
+  const config = scanNeedsConfig(argument, configExplicit)
+    ? await loadScanConfig(opts.config)
+    : undefined
+  const target = resolveScanTarget({
+    ...(opts.upstream === undefined ? {} : { upstream: opts.upstream }),
+    ...(opts.transport === undefined ? {} : { transport: opts.transport }),
+    ...(config === undefined ? {} : { config }),
+  })
+  const policy = config === undefined ? undefined : compileScanPolicy(config)
+  if (target.source === 'config' && target.transport === 'stdio' && config !== undefined) {
+    warnIfStdioUrlIgnored(config.loaded)
+  }
+  if (target.credentialDropped) console.error(credentialDroppedLine(target))
+
+  const code = await runScan({
+    target,
+    format: opts.format,
+    config: policy,
+    connect: (signal) =>
+      createForwarderFromConfig({ upstream: target.upstream }, target.upstreamName, { signal }),
+    ...(writePath === undefined
+      ? {}
+      : {
+          onReport: async (report) => {
+            // Nothing is scaffolded from a surface that could not be listed.
+            if (report.surface.unavailable.length > 0) return
+            const secret = randomBytes(32).toString('hex')
+            const text = renderScanTemplate({
+              report,
+              rawUpstream: target.rawUpstream,
+              apiSecretDigest: secretDigest(secret),
+            })
+            try {
+              await writeFile(writePath, text, 'utf-8')
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err)
+              throw new StartupError(`Error: cannot write ${writePath}: ${message}`)
+            }
+            printMintedSecret(writePath, secret)
+          },
+        }),
+    stdout: (text) => {
+      console.log(text)
+    },
+    stderr: (text) => {
+      console.error(text)
+    },
+    exit: (exitCode) => {
+      process.exit(exitCode)
+    },
+    signals: {
+      on: (signal, handler) => {
+        process.on(signal, handler)
+      },
+      off: (signal, handler) => {
+        process.off(signal, handler)
+      },
+    },
+  })
+  process.exitCode = code
+}
+
+/**
+ * Compile the loaded config's policy and budgets for the coverage column; a
+ * rule or budget that does not compile prints as `validate` prints it.
+ */
+function compileScanPolicy(config: ScanConfigInput): ScanPolicyInput {
+  try {
+    return {
+      path: config.path,
+      policy: compilePolicies(config.loaded.policies).policy,
+      budgets: compileBudgets(config.loaded.budgets),
+      environment: config.loaded.environment,
+    }
+  } catch (err) {
+    const line = compileFailureLine(err)
+    if (line !== undefined) throw new StartupError(line)
+    throw err
+  }
+}
+
+/** The one stderr line for a URL whose username and password scan removed before connecting. */
+function credentialDroppedLine(target: ScanTarget): string {
+  const field =
+    target.source === 'argument'
+      ? '--upstream'
+      : target.upstreamName === undefined
+        ? 'upstream.url'
+        : `upstreams[${target.upstreamName}].url`
+  return (
+    `[helio] Warning: the username and password in ${field} were dropped before connecting ` +
+    '(fetch never sends them); put the credential in upstream.headers instead.'
+  )
+}
+
 async function initCommand(outputPath: string, force: boolean): Promise<void> {
   if (existsSync(outputPath) && !force) {
     console.error(`Error: ${outputPath} already exists. Use --force to overwrite.`)
@@ -1370,7 +1536,14 @@ async function initCommand(outputPath: string, force: boolean): Promise<void> {
 
   const secret = randomBytes(32).toString('hex')
   await writeFile(outputPath, renderConfigTemplate(secretDigest(secret)), 'utf-8')
+  printMintedSecret(outputPath, secret)
+}
 
+/**
+ * The lines `helio init` and `helio scan --write` print once for a freshly
+ * minted dashboard secret whose digest the written file carries.
+ */
+function printMintedSecret(outputPath: string, secret: string): void {
   console.error(`Created ${outputPath}`)
   console.error('')
   console.error('Dashboard secret (shown once; the file stores only its SHA-256 digest):')
@@ -2821,6 +2994,31 @@ program
       }
       return sandboxCommand(opts.sandbox === true ? SANDBOX_DEFAULT_DIR : opts.sandbox, opts.force)
     },
+  )
+
+program
+  .command('scan')
+  .description(
+    "Report an upstream's real tool surface: every tool, its hints and where they came from, the rule that covers it and the arguments a rule could match",
+  )
+  .option(
+    '--upstream <target>',
+    'The MCP server to scan: an http(s) URL, or an entry name of a named-upstreams config',
+  )
+  .option('--transport <transport>', 'With --upstream <url>: streamable-http (default) or sse')
+  .option(
+    '-c, --config <path>',
+    'Path to helio.yaml, cross-checked for coverage; read only when passed, or when --upstream is a name or absent',
+    DEFAULT_CONFIG_PATH,
+  )
+  .option('--format <format>', 'Output format: text or json', 'text')
+  .option(
+    '--write [path]',
+    'Write a starter helio.yaml scaffolded from the scanned surface (default: helio.yaml)',
+  )
+  .option('--force', 'Overwrite an existing --write file', false)
+  .action((opts: ScanOptions, command: Command) =>
+    scanCommand(opts, command.getOptionValueSource('config') === 'cli').catch(exitOnStartupError),
   )
 
 program

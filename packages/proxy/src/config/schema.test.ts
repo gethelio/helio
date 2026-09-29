@@ -5,6 +5,7 @@ import {
   durationSchema,
   parseDuration,
   upstreamNameSchema,
+  upstreamSchema,
   namedUpstreamEntrySchema,
   upstreamsListSchema,
   isSingularConfig,
@@ -3776,5 +3777,27 @@ describe('helioConfigSchema', () => {
       expect(paths).toContain('audit')
       expect(paths).toContain('sdk')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// upstreamSchema (issue #299): the singular entry schema, exported so a bare
+// `helio scan --upstream <url>` target takes the same defaults and checks as a
+// configured upstream without going through the root schema.
+// ---------------------------------------------------------------------------
+
+describe('upstreamSchema (issue #299)', () => {
+  it('parses a bare url with the entry defaults', () => {
+    const entry = upstreamSchema.parse({ url: 'http://127.0.0.1:8080/mcp' })
+    expect(entry.transport).toBe('streamable-http')
+    expect(entry.request_timeout).toBe('30s')
+    expect(entry.connect_timeout).toBe('10s')
+    expect(entry.protocol_version).toBe('auto')
+    expect(entry.headers).toEqual({})
+  })
+
+  it('applies the shared entry checks', () => {
+    const result = upstreamSchema.safeParse({ transport: 'stdio' })
+    expect(result.success).toBe(false)
   })
 })

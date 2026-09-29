@@ -203,7 +203,40 @@ restores every backup byte for byte, removes the backups and the manifest, and l
 
 What survives a rewrite: unrelated keys, their order and their values. Comments, trailing commas, and escape spellings do not, because the file is re-serialized (the backup has them), and a file whose values or key order would change is refused before anything is written. Substitution tokens are rewritten to what each client actually sends: Cursor's and VS Code's `${env:NAME}` becomes Helio's `${NAME}` and `${workspaceFolder}` becomes the directory; in a Claude Code file the command emulates Claude Code's own expansion, drops the credential names Claude Code reads as empty (`ANTHROPIC_API_KEY` and its siblings) and refuses an entry whose header or URL Claude Code would send with a bare placeholder in it. Every such decision prints one line.
 
-## Step 3: Start the Proxy
+## Step 3: See What Your Agent Can Reach, Before the Proxy Runs
+
+Before anything is running, ask the upstream itself what it exposes. With the echo server from the [prerequisites](#no-mcp-server-to-test-with) on port 8080:
+
+```bash
+helio scan --upstream http://localhost:8080/mcp
+```
+
+```
+[helio] Upstream MCP era detected: legacy (initialize handshake)
+Scan of http://localhost:8080/mcp (streamable-http), 2026-09-29 08:11 UTC
+Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive
+Policy coverage: 0 of 7 have a rule that can match them, default allow
+  no config loaded: pass -c helio.yaml to cross-check coverage
+
+Tools
+  get_weather     read-only (server)      not destructive (server)  allow  no rule, default allow
+  send_email      not read-only (server)  not destructive (server)  allow  no rule, default allow
+  delete_record   not read-only (server)  destructive (server)      allow  no rule, default allow
+  create_payment  not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  create_refund   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  stripe_charge   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  paypal_payout   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.total
+
+Summary: 7 tools exposed, 1 destructive (0 by MCP default), 0 governed
+```
+
+One row per tool: whether the server marks it read-only or destructive, or whether that reading is the MCP default because the server set no hint; the action an argument-less call would get; the rule that decides it; and the arguments a rule could match (here an amount on each of the four payment tools). The command connects to the upstream, reads `tools/list` once and prints. It starts no proxy, opens no audit database and reaches nothing else, so it is safe to run against any server you can point a client at. The vocabulary, the candidates table, the JSON form and the failure lines are in [Scanning an upstream](./policies.md#scanning-an-upstream-helio-scan). A stdio upstream is scanned from its config with `helio scan -c helio.yaml`; a stdio server that requires `initialize` before `tools/list` (the Python SDK and FastMCP servers) fails the command with one `Error:` line until issue #256 lands.
+
+`helio scan --upstream http://localhost:8080/mcp --write starter.yaml` turns that report into a starter config: a `require_approval` rule for `delete_record`, an `allow` rule for `get_weather`, a commented budget over the four amounts, and a dashboard secret minted and printed once, exactly as `helio init` does. It passes `helio validate` as written; the [policy guide](./policies.md#scanning-an-upstream-helio-scan) describes the file.
+
+Run this against your own setup before you write a rule: the destructive count and the candidates are the rules waiting to be written.
+
+## Step 4: Start the Proxy
 
 ```bash
 npx @gethelio/proxy start
@@ -230,7 +263,7 @@ Config: helio.yaml
 Watching helio.yaml for policy changes
 ```
 
-The two lines after `Policies:` describe your system. `Authority surface` counts the tool-door pairs the agent can reach through Helio right now (one tool name on one upstream is one pair) and how many of them the upstream annotates `destructiveHint: true`; of the echo server's seven tools that is one, `delete_record`. `Policy coverage` says how many of those pairs have a rule that can match them: `block-destructive` matches `delete_record`, `allow-reads` matches `get_weather`, and the other five fall through to `default: allow`. With the scaffolded config (zero rules) the second line reads `0 of 7 have a rule that can match them, default allow`, and the no-enforcement warning prints above it. [Step 8](#step-8-see-what-your-agent-can-reach) prints the full report.
+The two lines after `Policies:` describe your system. `Authority surface` counts the tool-door pairs the agent can reach through Helio right now (one tool name on one upstream is one pair) and how many of them the upstream annotates `destructiveHint: true`; of the echo server's seven tools that is one, `delete_record`. `Policy coverage` says how many of those pairs have a rule that can match them: `block-destructive` matches `delete_record`, `allow-reads` matches `get_weather`, and the other five fall through to `default: allow`. With the scaffolded config (zero rules) the second line reads `0 of 7 have a rule that can match them, default allow`, and the no-enforcement warning prints above it. [Step 9](#step-9-see-what-your-agent-can-reach) prints the full report.
 
 The final `Watching` line prints once the config watcher is armed — an edit to `helio.yaml` made after it appears will be picked up (see [Hot Reload](./configuration.md#hot-reload)).
 
@@ -242,7 +275,7 @@ The final `Watching` line prints once the config watcher is armed — an edit to
 >
 > If `listen.port`, `dashboard.port`, or `sdk.port` is already in use, Helio exits with one line naming the setting, the host, and the port instead of printing its listening line, for example `listen.port 3000 is already in use on 127.0.0.1 (EADDRINUSE). Stop the process holding it, or set listen.port in helio.yaml to a free port.` With `-c`, the line names the config file you passed.
 
-## Step 4: Point Your MCP Client at Helio
+## Step 5: Point Your MCP Client at Helio
 
 Instead of connecting your MCP client directly to the upstream server, point it at the proxy on `http://localhost:3000/mcp`. With a named [`upstreams:`](./configuration.md#upstreams) list, each upstream is served at its own door instead: point the client at `http://localhost:3000/mcp/<name>`. If you ran `helio init --client` in Step 2, the files it rewrote already point there.
 
@@ -283,7 +316,7 @@ Claude Desktop reaches HTTP servers through Settings > Connectors, not its confi
 **No client or agent handy?** You don't need one to try Helio:
 
 - **MCP Inspector** — run `npx @modelcontextprotocol/inspector`, choose the Streamable HTTP transport, and point it at `http://localhost:3000/mcp`. Inspector reaches Helio through its own local backend process, which sends no `Origin` header, so this works as written; if you switch it to connect directly from the browser, the browser-sent `Origin` is rejected by design (`listen.allowed_origins` is an allowlist, not CORS support). Every tool call you make appears in the dashboard with its policy decision.
-- **curl** — send a request straight through the proxy (see [Step 6](#step-6-send-a-test-tool-call) below). This works against any upstream, including the echo server.
+- **curl**: send a request straight through the proxy (see [Step 7](#step-7-send-a-test-tool-call) below). This works against any upstream, including the echo server.
 
 ### Error normalization behavior
 
@@ -294,7 +327,7 @@ For requests that pass JSON-RPC ingress validation at `/mcp`, Helio always retur
   `{"jsonrpc":"2.0","id":<request-id>,"error":{"code":-32603,"message":"...","data":{"failure_class":"..."}}}`
 - HTTP ingress validation errors (for example malformed JSON or wrong `Content-Type`) still return transport HTTP errors such as `400` or `415`. Their JSON-RPC error bodies omit the `id` member when no request id was readable, per the MCP 2026-07-28 error shape; when the invalid envelope carried a usable id, it is echoed.
 
-## Step 5: Open the Dashboard
+## Step 6: Open the Dashboard
 
 Navigate to [http://localhost:3100](http://localhost:3100) to open the governance dashboard. If `dashboard.api_secret` is set (recommended/default), enter the dashboard secret on the login screen first: the value `helio init` printed, never the `sha256:` digest stored in the file.
 
@@ -311,7 +344,7 @@ The dashboard has six tabs:
 
 Every time the dashboard shows is UTC and says so (`2026-09-23 14:23:45 UTC` on rows and tickets, `Actions Per Hour (UTC)` on the chart), matching `helio policy status` and the activation report; the Audit tab's custom time range is entered in your local time and converted for the query.
 
-## Step 6: Send a Test Tool Call
+## Step 7: Send a Test Tool Call
 
 With the proxy running, send a request through it:
 
@@ -335,7 +368,7 @@ The tool call passes through the policy engine, gets forwarded to the upstream s
 
 ![Dashboard Test Call](./images/dashboard-test-call.png)
 
-## Step 7: Try a Policy Rule
+## Step 8: Try a Policy Rule
 
 Add a rule to your config and watch hot-reload pick it up. With the proxy still running, edit `helio.yaml` and add a deny rule at the top of `policies.rules`, before the existing rules:
 
@@ -376,15 +409,23 @@ curl -s -X POST http://localhost:3000/mcp \
 
 The response includes a structured error with the feedback message and suggestion — information an AI agent can use to self-correct.
 
-## Step 8: See What Your Agent Can Reach
+Cross-check the file against the live surface without touching the running proxy:
 
-With the proxy still running, ask it for the full report:
+```bash
+helio scan -c helio.yaml
+```
+
+The coverage line now reads `3 of 7 have a rule that can match them, default allow (helio.yaml)`, each row names its rule (`rule "block-email"` on `send_email`), and a section headed `Rules that match no tool on this upstream` lists any rule whose `match.tool` matches nothing the server exposes, a warning that never blocks anything.
+
+## Step 9: See What Your Agent Can Reach
+
+With the proxy still running, ask it for the full report. `helio scan` in Step 3 asked the upstream and needed no proxy; `helio policy status` asks the running proxy for the same surface plus what the audit store holds:
 
 ```bash
 helio policy status
 ```
 
-It prints the surface the proxy primed at startup, what the loaded rules cover, and what the audit store holds for the last four hours. After Step 7's rule and the two calls above, it reads:
+It prints the surface the proxy primed at startup, what the loaded rules cover, and what the audit store holds for the last four hours. After Step 8's rule and the two calls above, it reads:
 
 ```
 Authority surface
@@ -417,7 +458,7 @@ Tool-door pairs (calls in the last 4h)
 
 > **The secret.** `helio policy status` reads the running proxy through its dashboard API on `dashboard.host:port`, because the primed surface exists only in that process. The dashboard must be enabled, and the command needs the secret itself: it reads `HELIO_DASHBOARD_SECRET` from the environment (the value you exported in Step 2, or the one `helio init` printed), else a plaintext `dashboard.api_secret` from the file. The `sha256:` digest `helio init` writes into the file is refused with one line before any request, because the API verifies the secret, not its digest. In a terminal where the file reads `${HELIO_DASHBOARD_SECRET}` and the variable is not exported, the command refuses with one line before any request: `Error: HELIO_DASHBOARD_SECRET is not set and helio.yaml reads dashboard.api_secret from it. Export it to the secret helio init printed (or the value you exported before helio start) and rerun helio policy status.`
 
-## Step 9: Share What Happened
+## Step 10: Share What Happened
 
 You now have a history: two governed calls, one rule that fired, one that was added live. To show that to someone who has never seen this machine (a team lead, the Helio maintainers, a forum thread), write the activation report:
 
@@ -425,7 +466,7 @@ You now have a history: two governed calls, one rule that fired, one that was ad
 helio report activation
 ```
 
-It reads the audit database on disk for a timeline and the last seven days of counts, asks the running proxy for the same coverage snapshot `helio policy status` prints, and renders one report. Over the fixture of this guide, after Step 6's call and Step 7's rule and denied call, it reads:
+It reads the audit database on disk for a timeline and the last seven days of counts, asks the running proxy for the same coverage snapshot `helio policy status` prints, and renders one report. Over the fixture of this guide, after Step 7's call and Step 8's rule and denied call, it reads:
 
 ```
 Helio activation report

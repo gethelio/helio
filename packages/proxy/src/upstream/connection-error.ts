@@ -35,7 +35,7 @@ const UNREACHABLE_CODES = new Set([
  * Walk the `.cause` chain of a thrown error to find the first string `code`.
  * undici nests the real system error one or more levels below the wrapper.
  */
-function extractErrorCode(error: unknown): string | undefined {
+export function extractErrorCode(error: unknown): string | undefined {
   let current: unknown = error
   for (let depth = 0; depth < 5 && current != null; depth += 1) {
     if (typeof current === 'object' && 'code' in current) {
@@ -50,8 +50,10 @@ function extractErrorCode(error: unknown): string | undefined {
 /**
  * If `error` indicates the upstream server is unreachable at the transport
  * level, return a clear operator-facing Error that names the URL and points to
- * the docs. Returns `null` for anything that does not look like a connection
- * failure, so callers can rethrow the original error unchanged.
+ * the docs, carrying the original error as its `cause` so the code stays
+ * reachable through `extractErrorCode`. Returns `null` for anything that does
+ * not look like a connection failure, so callers can rethrow the original
+ * error unchanged.
  */
 export function describeUnreachableUpstream(error: unknown, url: string): Error | null {
   const code = extractErrorCode(error)
@@ -71,5 +73,6 @@ export function describeUnreachableUpstream(error: unknown, url: string): Error 
       `Helio proxies an existing MCP server: set upstream.url (or upstreams[].url) ` +
       `in helio.yaml to a reachable server, or start the server it points at. ` +
       `See ${UPSTREAM_DOCS_URL}`,
+    { cause: error },
   )
 }

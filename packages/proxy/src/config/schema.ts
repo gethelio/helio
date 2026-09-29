@@ -159,7 +159,12 @@ function upstreamEntryChecks(
   }
 }
 
-const upstreamSchema = upstreamObjectSchema.superRefine(upstreamEntryChecks)
+/**
+ * The singular `upstream:` entry schema. Exported for `helio scan`, whose bare
+ * `--upstream <url>` target takes the entry defaults and checks without going
+ * through the root schema (issue #299).
+ */
+export const upstreamSchema = upstreamObjectSchema.superRefine(upstreamEntryChecks)
 
 /**
  * Upstream entry names embed in mount paths, limiter keys

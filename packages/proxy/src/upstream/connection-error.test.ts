@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { describeUnreachableUpstream } from './connection-error.js'
+import { describeUnreachableUpstream, extractErrorCode } from './connection-error.js'
 
 const URL = 'http://localhost:8080/mcp'
 
@@ -30,6 +30,13 @@ describe('describeUnreachableUpstream', () => {
     )
   })
 
+  it('carries the original error as its cause, so the code stays reachable (issue #299)', () => {
+    const original = fetchFailed('ECONNREFUSED')
+    const result = describeUnreachableUpstream(original, URL)
+    expect(result?.cause).toBe(original)
+    expect(extractErrorCode(result)).toBe('ECONNREFUSED')
+  })
+
   it.each(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH', 'ETIMEDOUT'])(
     'recognizes %s as unreachable',
     (code) => {
@@ -52,5 +59,15 @@ describe('describeUnreachableUpstream', () => {
 
   it('returns null for a non-error value', () => {
     expect(describeUnreachableUpstream('boom', URL)).toBeNull()
+  })
+})
+
+describe('extractErrorCode', () => {
+  it('returns the first string code on the error or its cause chain', () => {
+    expect(extractErrorCode(Object.assign(new Error('x'), { code: 'ENOENT' }))).toBe('ENOENT')
+    expect(extractErrorCode(fetchFailed('ECONNRESET'))).toBe('ECONNRESET')
+    expect(extractErrorCode(new Error('plain'))).toBeUndefined()
+    expect(extractErrorCode(Object.assign(new Error('x'), { code: 7 }))).toBeUndefined()
+    expect(extractErrorCode(undefined)).toBeUndefined()
   })
 })

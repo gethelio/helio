@@ -90,7 +90,7 @@ Four annotation hints are available:
 | `idempotentHint`  | Safe to call repeatedly with same args   | `false`     |
 | `openWorldHint`   | Tool can affect systems beyond its scope | `true`      |
 
-> **Important:** The MCP spec defaults `destructiveHint` to `true` when a tool does not explicitly set it. This means a rule matching `destructiveHint: true` will match _most_ tools unless they explicitly opt out with `destructiveHint: false`. Always set annotations explicitly on your MCP server tools.
+> **Important:** The MCP spec defaults `destructiveHint` to `true` when a tool does not explicitly set it. This means a rule matching `destructiveHint: true` will match _most_ tools unless they explicitly opt out with `destructiveHint: false`. Always set annotations explicitly on your MCP server tools. `helio scan` prints, per tool, whether each hint was set by the server or is this default ([Scanning an upstream](#scanning-an-upstream-helio-scan)).
 >
 > Helio startup now auto-primes annotations with a synthetic upstream `tools/list`. If upstream is temporarily unavailable, Helio retries priming in the background. Until priming succeeds, annotation checks intentionally remain fail-closed using these MCP defaults.
 
@@ -982,6 +982,65 @@ policies:
       approval:
         channel: slack
 ```
+
+## Scanning an upstream: `helio scan`
+
+`helio scan` connects to one MCP server, reads `tools/list` once and prints its real tool surface: every tool, its two hints with their provenance, the action an argument-less call gets under the loaded policy, the rule that decides it, and the arguments a rule could match. It runs without the proxy, opens no audit database, starts no dashboard and reaches nothing but the upstream. Two readers: before a config exists, `helio scan --upstream <url>` says in ten seconds what an agent can do ungoverned; with a config, `helio scan -c helio.yaml` cross-checks the rules against the live surface.
+
+```bash
+helio scan --upstream http://localhost:8080/mcp [--transport streamable-http|sse] [--format text|json]
+helio scan -c helio.yaml [--upstream <name>] [--format text|json]
+```
+
+`--upstream` takes an http(s) URL, or the name of an entry in a named `upstreams:` list; a value with no scheme is refused before anything is read (`Error: "localhost:8080/mcp" is not an http(s) URL or an upstream name. A URL needs a scheme, for example http://localhost:8080/mcp.`). A config is read only when `-c` is passed, or when the target is an entry name or the config itself, so a bare URL scan in a directory that holds a `helio.yaml` never turns that file into a coverage claim. A stdio upstream is scanned from its config (`transport: stdio` with `command`); `--transport stdio` with a URL is refused. Against a named config the entry must be named (`helio scan -c helio.yaml --upstream crm`), and a URL is scanned against a config only when the config is singular, because a bare URL has no door name for `match.upstreams` rules to apply to. The URL a scan prints and `--write` stores is the normalized form: the scheme and host lowercased, a default port dropped, the path percent-encoded, and any username and password removed before connecting (`fetch` never sends them; one warning names `upstream.headers` as the place for a credential). A URL read from a config is labeled as written in the file, `${VAR}` placeholders intact.
+
+The report against the echo server, with no config:
+
+```
+[helio] Upstream MCP era detected: legacy (initialize handshake)
+Scan of http://localhost:8080/mcp (streamable-http), 2026-09-29 08:11 UTC
+Authority surface: 7 tool-door pairs across 1 upstream, 1 annotated destructive
+Policy coverage: 0 of 7 have a rule that can match them, default allow
+  no config loaded: pass -c helio.yaml to cross-check coverage
+
+Tools
+  get_weather     read-only (server)      not destructive (server)  allow  no rule, default allow
+  send_email      not read-only (server)  not destructive (server)  allow  no rule, default allow
+  delete_record   not read-only (server)  destructive (server)      allow  no rule, default allow
+  create_payment  not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  create_refund   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  stripe_charge   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.amount
+  paypal_payout   not read-only (server)  not destructive (server)  allow  no rule, default allow  candidate: amount $.total
+
+Summary: 7 tools exposed, 1 destructive (0 by MCP default), 0 governed
+```
+
+- **Provenance.** Each hint cell says where its value came from: `(server)` when the tool's `annotations` set the key, `(MCP default)` when it did not. An unset `readOnlyHint` reads **not read-only** and an unset `destructiveHint` reads **destructive**, the MCP defaults from the table above. The `Authority surface` and `Policy coverage` lines are the two `helio start` prints, with the config path in parentheses when one was loaded; without a config the coverage line classifies against no rule and `default allow`, and the summary says `0 governed`.
+- **Action and rule.** The action column is the effective action of an argument-less call, and the rule column names what decided it in the words `helio policy status` uses: `rule "name"`, `no rule, default allow`, `no rule, flag_destructive`, followed by `; "name" only when arguments match` for a rule ahead of it that fires only for some calls.
+- **Candidates.** `candidate: amount $.amount` names an argument a `budgets` contributor, a `spend_limit` or an `input` matcher could read, found by deterministic name-and-type rules over the tool's `inputSchema`:
+
+| Candidate                              | Property name matches (whole word, `_`-delimited, case-insensitive)                              | And `type` includes                                       | Extra door                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------- | ------------------------------------------------------------ |
+| amount-like (`budgets`, `spend_limit`) | `amount, amt, total, subtotal, price, cost, fee, fees, sum, budget, quantity, qty, cents`        | `number`, `integer`                                       | none                                                         |
+| path (`input` matcher)                 | `path, paths, file, files, filename, filepath, dir, directory, folder, cwd, source, destination` | `string`; or `array` whose `items.type` includes `string` | none                                                         |
+| URL (`input` matcher)                  | `url, urls, uri, href, endpoint, link, webhook, callback`                                        | `string`                                                  | `format: uri` or `format: url` on any string                 |
+| SQL string (`input` matcher)           | `sql, statement, raw_query`                                                                      | `string`                                                  | a `query` string whose `description` contains the word `sql` |
+
+Nested objects are walked three levels deep and rendered as the `$.a.b` dot-path the `input` matcher resolves; array elements are never walked, so an array of objects yields nothing (the GitHub MCP server's `push_files`, whose `files` is a list of `{ path, content }` objects, is a known miss). A candidate is a hint to look at, not a certainty: `quantity` on a non-money tool or `link` on a text field will show up too, and the `--write` scaffold writes candidates commented.
+
+- **Rules that match no tool.** With a config, a section headed `Rules that match no tool on this upstream (N)` lists every rule, and every budget contributor, whose `match.tool` matches no tool the upstream exposes, respecting `match.upstreams`: a rule scoped to a door not in the run is skipped, and nothing is reported while any door in scope is unavailable, because a door that did not answer is no evidence about its tools. A gateway that prefixes tool names (`github-search_issues` against a `github_*` rule) shows up here; so does a rule written ahead of a tool the upstream has not shipped yet, which is fine. This section never blocks anything.
+- **Duplicates.** A name the list repeats prints `Warning: "<name>" appears N times in tools/list; its annotations are read as unset`, the same fail-closed reading the proxy applies.
+- **Summary.** `Summary: 7 tools exposed, 1 destructive (0 by MCP default), 0 governed` counts every tool, the annotated plus MCP-default destructive ones, and the pairs a rule can match (the coverage line's first number); `, K only when arguments match` is appended when conditional pairs exist.
+
+`--format json` prints one document for scripts: `schema_version` (1; scan's own document, separate from the policy status report's version), `generated_at`, `target` (`label`, `transport`, `upstream`, `config`), `policy` (null with no config), `surface` and `coverage` as the status report carries them, `tools[]` with `hints` (`{ value, source: "server" | "default" }`) and `candidates`, `duplicates`, `unmatched_rules` and `summary`. Everything the proxy prints while connecting (the era line, a protocol pin) goes to stderr, so stdout is the document alone. A failed list prints the document with `surface.unavailable` filled and exits 1, so a CI job keeps the artifact and still fails.
+
+When the upstream cannot be listed, the text report ends on one line and the process exits 1. A bare URL prints the transport's message: `Error: cannot list tools on http://localhost:8080/mcp: Upstream MCP server at http://localhost:8080/mcp is unreachable (ECONNREFUSED) ...`. A target read from a config prints the target as written in the file plus one token, never the transport message, because that sentence carries the resolved URL or command, where a `${VAR}` has already been replaced by its value: `Error: cannot list tools on http://host/mcp?key=${API_KEY} (ECONNREFUSED)`. The token is the error's code when it has one (`ECONNREFUSED`, `ENOENT`, `EACCES`), else `HTTP <status>` or `timeout` taken from Helio's own phrases, else nothing; a message the server wrote is never quoted.
+
+`--write [path]` (default `helio.yaml`) writes a starter config generated from the real surface, refusing an existing file unless `--force` is passed (`Error: helio.yaml already exists. Use --force to overwrite.`) and writing nothing when the list failed. The file carries the scanned target as its `upstream:` (a config target is copied as written in the file, `${VAR}` placeholders intact, without its `headers`; a bare URL is the normalized URL), `default: allow` with a comment naming the production posture, a live `require_approval` rule through the dashboard channel for every tool the server annotates destructive (`approve-<tool>`), a live `allow` rule for every tool it annotates read-only (`allow-<tool>`), a commented rule per tool that is destructive by MCP default (so the trap is named per tool without holding every call), a commented budget with one contributor per amount-like candidate, a live `approval.channels: [{ type: dashboard }]`, and a live dashboard block. Because a `require_approval` rule cannot validate without `dashboard.api_secret`, the command mints a dashboard secret exactly as `helio init` does, prints it once and writes only its digest; if you already ran `helio init`, you now hold two secrets and the header comment says which file this one belongs to. The written file passes `helio validate` as is. Every top-level section of `helio init` is present as a live block or a commented stub, in the same order.
+
+A stdio server that requires `initialize` before `tools/list` (the Python SDK and FastMCP servers do; the TypeScript SDK answers without it) fails this command with one `Error:` line until issue #256 lands, because scan sends the same single `tools/list` the proxy's startup prime sends.
+
+Run this against your own setup: `helio scan --upstream <your server>` before you write a rule, and `helio scan -c helio.yaml` after each rule you add.
 
 ## Policy coverage: `helio policy status`
 

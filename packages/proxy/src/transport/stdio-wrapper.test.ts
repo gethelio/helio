@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { StdioForwarder } from './stdio-wrapper.js'
@@ -391,4 +391,96 @@ describe('StdioForwarder', () => {
       result: { probe: 'from-options', hasPath: true },
     })
   })
+})
+
+// ---------------------------------------------------------------------------
+// start(signal) (issue #299): a caller-owned abort during the spawn window
+// ---------------------------------------------------------------------------
+
+describe('StdioForwarder.start(signal)', () => {
+  /** A child that appends its pid to a file on start and then ignores stdin EOF. */
+  function spawnLogScript(logPath: string): string {
+    return (
+      `require('fs').appendFileSync(${JSON.stringify(logPath)}, String(process.pid) + '\\n'); ` +
+      `for (const s of [process.stdin, process.stdout, process.stderr]) s.on('error', () => {}); ` +
+      `process.stdin.resume(); setInterval(() => {}, 1000)`
+    )
+  }
+
+  function pidsIn(logPath: string): number[] {
+    if (!existsSync(logPath)) return []
+    return readFileSync(logPath, 'utf-8')
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map(Number)
+  }
+
+  function alive(pid: number): boolean {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  it('rejects at once on an already-aborted signal and spawns nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-stdio-abort-'))
+    const logPath = join(dir, 'spawns.log')
+    const forwarder = new StdioForwarder({
+      command: 'node',
+      args: ['-e', spawnLogScript(logPath)],
+      retryDelayMs: 50,
+    })
+    const controller = new AbortController()
+    controller.abort()
+    try {
+      await expect(forwarder.start(controller.signal)).rejects.toThrow(/aborted/)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(pidsIn(logPath)).toEqual([])
+      await expect(forwarder.forward(makeRequest(1, 'ping'))).rejects.toThrow('not started')
+    } finally {
+      await forwarder.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('kills the child, rejects start and schedules no restart when aborted before spawn resolves', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-stdio-abort-'))
+    const logPath = join(dir, 'spawns.log')
+    const forwarder = new StdioForwarder({
+      command: 'node',
+      args: ['-e', spawnLogScript(logPath)],
+      retryDelayMs: 50,
+    })
+    const controller = new AbortController()
+    try {
+      const start = forwarder.start(controller.signal)
+      controller.abort()
+      await expect(start).rejects.toThrow(/aborted/)
+      // Past several retry delays: one spawn at most, and it is gone.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const pids = pidsIn(logPath)
+      expect(pids.length).toBeLessThanOrEqual(1)
+      for (const pid of pids) {
+        await vi.waitFor(
+          () => {
+            expect(alive(pid)).toBe(false)
+          },
+          { timeout: 3_000, interval: 20 },
+        )
+      }
+      await expect(forwarder.forward(makeRequest(1, 'ping'))).rejects.toThrow('not started')
+    } finally {
+      await forwarder.close()
+      for (const pid of pidsIn(logPath)) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          // Already gone.
+        }
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 10_000)
 })
