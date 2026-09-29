@@ -38,6 +38,15 @@ function commentSafe(value: string): string {
   return JSON.stringify(value).slice(1, -1)
 }
 
+/**
+ * A tool name as a `match.tool` value: the policy compiles that field as a
+ * picomatch glob, so every metacharacter the name carries is escaped and the
+ * rule matches that one name, never a pattern the upstream chose.
+ */
+function globLiteral(name: string): string {
+  return quoted(name.replaceAll(/[\\*?[\]{}()!+@]/g, (char) => `\\${char}`))
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -75,7 +84,7 @@ function approvalRule(tool: ScanReportTool, prefix: string): string {
   return (
     `${prefix}- name: ${quoted(`approve-${tool.name}`)}\n` +
     `${prefix}  match:\n` +
-    `${prefix}    tool: ${quoted(tool.name)}\n` +
+    `${prefix}    tool: ${globLiteral(tool.name)}\n` +
     `${prefix}  action: require_approval\n` +
     `${prefix}  approval:\n` +
     `${prefix}    channel: dashboard\n`
@@ -96,7 +105,7 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
       lines.push(
         `    - name: ${quoted(`allow-${tool.name}`)}\n` +
           `      match:\n` +
-          `        tool: ${quoted(tool.name)}\n` +
+          `        tool: ${globLiteral(tool.name)}\n` +
           `      action: allow\n`,
       )
     }
@@ -131,7 +140,7 @@ function budgetsBlock(tools: readonly ScanReportTool[]): string {
     '#     contributors:\n',
   ]
   for (const contributor of contributors) {
-    lines.push(`#       - match:\n#           tool: ${quoted(contributor.tool)}\n`)
+    lines.push(`#       - match:\n#           tool: ${globLiteral(contributor.tool)}\n`)
     lines.push(`#         field: ${quoted(contributor.field)}\n`)
   }
   return lines.join('')

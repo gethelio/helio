@@ -9,6 +9,8 @@ import { buildScanReport, emptyAllowPolicy } from './report.js'
 import type { ScanReport } from './report.js'
 import { surfaceToolsFromList } from './tools.js'
 import { helioConfigSchema } from '../config/schema.js'
+import { compilePolicies } from '../policy/parser.js'
+import { compileBudgets } from '../budget/parser.js'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -248,8 +250,12 @@ describe('renderScanTemplate against hostile or credentialed input', () => {
     if (!('upstream' in parsed)) throw new Error('singular expected')
     expect(parsed.policies.rules.map((rule) => rule.action)).toEqual(['require_approval', 'allow'])
     expect(parsed.policies.rules[0]?.name).toBe(`approve-${hostile}`)
-    expect(parsed.policies.rules[0]?.match.tool).toBe(hostile)
-    expect(parsed.policies.rules[1]?.match.tool).toBe('ro\r\nlist')
+    // match.tool is a glob: compile it and check it matches the name itself, nothing else.
+    const { policy } = compilePolicies(parsed.policies)
+    expect(policy.rules[0]?.match.tool?.test(hostile)).toBe(true)
+    expect(policy.rules[0]?.match.tool?.test('anything')).toBe(false)
+    expect(policy.rules[1]?.match.tool?.test('ro\r\nlist')).toBe(true)
+    expect(policy.rules[1]?.match.tool?.test('rolist')).toBe(false)
   })
 
   it('keeps a hostile default-destructive name inside comment lines', () => {
@@ -330,5 +336,79 @@ describe('writeScaffold', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('renderScanTemplate writes exact-name matchers, never globs', () => {
+  const NAMES = ['*', 'a?b', '[x]', '{a,b}', '+(a)', '!x', 'back\\slash', 'Hello, 世界']
+
+  it('compiles every scaffolded match.tool to a matcher that matches the tool name and nothing else', () => {
+    const tools = NAMES.flatMap((name, index) => [
+      {
+        name,
+        annotations:
+          index % 2 === 0
+            ? { readOnlyHint: true, destructiveHint: false }
+            : { destructiveHint: true },
+      },
+    ])
+    const text = renderScanTemplate({
+      report: report(tools),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    const config = helioConfigSchema.parse(yaml.load(text))
+    if (!('upstream' in config)) throw new Error('singular expected')
+    const { policy } = compilePolicies(config.policies)
+    expect(policy.rules).toHaveLength(NAMES.length)
+    for (const rule of policy.rules) {
+      const matcher = rule.match.tool
+      if (matcher === undefined) throw new Error(`rule ${String(rule.name)} has no tool matcher`)
+      const own = NAMES.find(
+        (name) => rule.name === `approve-${name}` || rule.name === `allow-${name}`,
+      )
+      if (own === undefined) throw new Error(`unexpected rule ${String(rule.name)}`)
+      expect(matcher.test(own), rule.name).toBe(true)
+      for (const other of [
+        ...NAMES.filter((name) => name !== own),
+        'other',
+        'x',
+        'a',
+        'axb',
+        'anything_at_all',
+      ]) {
+        expect(matcher.test(other), `${String(rule.name)} must not match ${other}`).toBe(false)
+      }
+    }
+  })
+
+  it('escapes the budget contributor glob the same way', () => {
+    const text = renderScanTemplate({
+      report: report([
+        {
+          name: 'pay*',
+          inputSchema: { type: 'object', properties: { amount: { type: 'number' } } },
+        },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    // The budget is commented out; read the contributor glob by uncommenting the stub.
+    const budgetBlock = text.slice(text.indexOf('# budgets:'), text.indexOf('\napproval:\n'))
+    const uncommented = budgetBlock
+      .split('\n')
+      .map((line) => line.replace(/^# ?/, ''))
+      .join('\n')
+    const config = helioConfigSchema.parse({
+      version: '1',
+      upstream: { url: 'http://127.0.0.1:1/mcp' },
+      dashboard: { enabled: false },
+      ...(yaml.load(uncommented) as Record<string, unknown>),
+    })
+    const budgets = compileBudgets(config.budgets)
+    const matcher = budgets[0]?.contributors[0]?.match.tool
+    if (matcher === undefined) throw new Error('no contributor')
+    expect(matcher.test('pay*')).toBe(true)
+    expect(matcher.test('payments')).toBe(false)
   })
 })
