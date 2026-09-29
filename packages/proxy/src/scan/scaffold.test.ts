@@ -483,6 +483,11 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
       'a{1,2}',
       '[!a]',
       'Hello, 世界',
+      'back\\slash',
+      'a\\*',
+      'foo\\\\bar',
+      '\\',
+      'x\\',
       'x\r\ny',
     ])
     // Every character alone, and every pair of the characters picomatch reads
@@ -515,12 +520,34 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     }
   }, 20_000)
 
-  it('writes no live rule for a name a glob cannot match exactly (a backslash) and says so', () => {
-    const { text, policy } = compiledMatchers(['back\\slash', 'a\\*', '\\', 'plain'])
-    expect(policy.rules.map((rule) => rule.name)).toEqual(['approve-plain'])
-    expect(text).toContain('cannot be matched exactly by a match.tool glob')
-    expect(text).toContain('# - name: "allow-back\\\\slash"')
-    expect(text).not.toMatch(/^\s+- name: "allow-back/m)
+  it('writes live exact rules for names carrying a backslash, encoded as a bracket class', () => {
+    const names = ['back\\slash', 'a\\*', '\\', 'foo\\\\bar', 'plain']
+    const { text, policy } = compiledMatchers(names)
+    expect(policy.rules).toHaveLength(names.length)
+    // The file carries the JSON-escaped form of the bracket class.
+    expect(text).toContain('[\\\\\\\\]')
+    expect(text).not.toContain('cannot be matched exactly')
+    for (const name of names) {
+      const rule = policy.rules.find(
+        (r) => r.name === `approve-${name}` || r.name === `allow-${name}`,
+      )
+      const matcher = rule?.match.tool
+      if (matcher === undefined) throw new Error(`no live rule for ${JSON.stringify(name)}`)
+      expect(matcher.test(name), name).toBe(true)
+      for (const other of [
+        'backslash',
+        'a*',
+        'a\\\\*',
+        '',
+        'foo\\bar',
+        'plain2',
+        ...names.filter((n) => n !== name),
+      ]) {
+        expect(matcher.test(other), `${JSON.stringify(name)} vs ${JSON.stringify(other)}`).toBe(
+          false,
+        )
+      }
+    }
   })
 
   it('skips an empty tool name with a note and still validates', () => {
@@ -529,7 +556,7 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     expect(text).toContain('empty name')
   })
 
-  it('never writes a budget contributor for an unrepresentable or empty name', () => {
+  it('writes a budget contributor for a backslash name, exactly, and none for an empty name', () => {
     const amount = { type: 'object', properties: { amount: { type: 'number' } } }
     const text = renderScanTemplate({
       report: report([
@@ -542,7 +569,7 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     })
     const budgetBlock = text.slice(text.indexOf('# budgets:'), text.indexOf('\napproval:\n'))
     expect(budgetBlock).toContain('tool: "pay\\\\*"')
-    expect(budgetBlock).not.toContain('pay\\\\slash')
+    expect(budgetBlock).toContain('tool: "pay[\\\\\\\\]slash"')
     expect(budgetBlock).not.toContain('tool: ""')
     const uncommented = budgetBlock
       .split('\n')
@@ -554,6 +581,9 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
       dashboard: { enabled: false },
       ...(yaml.load(uncommented) as Record<string, unknown>),
     })
-    expect(compileBudgets(config.budgets)[0]?.contributors).toHaveLength(1)
+    const contributors = compileBudgets(config.budgets)[0]?.contributors ?? []
+    expect(contributors).toHaveLength(2)
+    expect(contributors[0]?.match.tool.test('pay\\slash')).toBe(true)
+    expect(contributors[0]?.match.tool.test('payslash')).toBe(false)
   })
 })
