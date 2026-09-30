@@ -21,11 +21,15 @@ overrides:
   # later.
   'fast-uri@<3.1.7': 3.1.7
   follow-redirects: 1.16.0
-  # Both brace-expansion advisories at once: GHSA-mh99-v99m-4gvg (patched 1.1.17
-  # / 5.0.8) and GHSA-rgw5-rvv9-x895, which bypasses that mitigation (patched
-  # 1.1.18 / 5.0.9). The 1.x line has a patch now, so it is no longer an ignore.
-  'brace-expansion@<1.1.18': 1.1.18
-  'brace-expansion@>=3.0.0 <5.0.9': 5.0.9
+  # Four brace-expansion advisories on the same two lines: GHSA-mh99-v99m-4gvg
+  # (patched 1.1.17 / 5.0.8), GHSA-rgw5-rvv9-x895, which bypasses that
+  # mitigation (patched 1.1.18 / 5.0.9), then GHSA-6j4f-fj2g-mc7p (stack
+  # exhaustion in parseCommaParts, patched 1.1.19 / 5.0.10) and
+  # GHSA-qhr7-859c-m2p7 (the same on another path, patched 1.1.20 / 5.0.11).
+  # Every path is dev-only through minimatch under eslint and
+  # typescript-eslint. The 1.x line has a patch, so it is no longer an ignore.
+  'brace-expansion@<1.1.20': 1.1.20
+  'brace-expansion@>=3.0.0 <5.0.11': 5.0.11
   'form-data@>=4.0.0 <4.0.6': 4.0.6
   # nanoid custom-generator infinite loop when size is zero
   # (GHSA-2v37-7h3g-55p8, patched 3.3.18; dev-only paths, postcss via
@@ -46,6 +50,13 @@ overrides:
   # so the ranged override carries it; the range self-retires once
   # natural resolution reaches 4.28.7 or later.
   'browserslist@<4.28.7': 4.28.8
+  # undici denial of service via an unrequested WebSocket subprotocol
+  # (GHSA-rfgv-xxqx-mfg5) and a TLS certificate validation bypass via dropped
+  # connect options in BalancedPool (GHSA-w293-vg96-wgc3), both patched
+  # 7.29.1. The only path is dev-only,
+  # jsdom under the dashboard's tests; the ranged override carries the lift
+  # and self-retires once natural resolution reaches 7.29.1 or later.
+  'undici@>=7.0.0 <7.29.1': 7.29.1
 
 # pnpm 11 reads settings from this file only; the package.json "pnpm" field
 # is ignored. The GHSA below is triaged and tracked (esbuild dev-server: #64).
