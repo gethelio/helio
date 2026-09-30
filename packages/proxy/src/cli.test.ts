@@ -8992,6 +8992,371 @@ audit:
 })
 
 // ---------------------------------------------------------------------------
+// Availability posture (issue #399)
+// ---------------------------------------------------------------------------
+
+describe('availability across a restart (issue #399)', () => {
+  const WAIT = { timeout: 15_000, interval: 50 }
+  const SECRET = 'availability-test-secret'
+  const SDK_TOKEN = 'availability-test-sdk-token'
+  const SESSION = 'availability-test'
+  const TOOLS: readonly Record<string, unknown>[] = [
+    { name: 'get_status', description: 'Report the current server status' },
+    { name: 'stripe_charge', description: 'Charge a card' },
+    { name: 'create_refund', description: 'Refund an order' },
+    { name: 'send_email', description: 'Send an email' },
+  ]
+
+  let mock: Awaited<ReturnType<typeof startModernOnlyHttpMcpServer>>
+  beforeAll(async () => {
+    mock = await startModernOnlyHttpMcpServer()
+    mock.setTools(TOOLS)
+  })
+  afterAll(async () => {
+    await mock.close()
+  })
+
+  function writeAvailabilityConfig(): {
+    dir: string
+    configPath: string
+    listenPort: number
+    dashboardPort: number
+    sdkPort: number
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-availability-'))
+    const configPath = join(dir, 'helio.yaml')
+    const listenPort = randomChildPort()
+    const dashboardPort = listenPort + 1
+    const sdkPort = listenPort + 2
+    writeFileSync(
+      configPath,
+      `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:${String(mock.port)}/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+policies:
+  default: allow
+  rules:
+    - name: status-rate
+      match: { tool: get_status }
+      action: rate_limit
+      limits: { max_calls: 1, window: 1h, key: tool }
+    - name: refund-evidence
+      match: { tool: create_refund }
+      action: allow
+      evidence: { requires: ['order.lookup'] }
+    - name: email-approval
+      match: { tool: send_email }
+      action: require_approval
+      approval: { channel: dashboard, timeout: 120s }
+budgets:
+  - name: card-pot
+    limit: 100
+    currency: USD
+    window: 24h
+    key: global
+    on_exceed: deny
+    contributors:
+      - match: { tool: stripe_charge }
+        field: $.amount
+approval:
+  timeout: 120s
+  default_on_timeout: deny
+  channels:
+    - type: dashboard
+dashboard:
+  enabled: true
+  port: ${String(dashboardPort)}
+  host: 127.0.0.1
+  api_secret: "${SECRET}"
+sdk:
+  enabled: true
+  port: ${String(sdkPort)}
+  host: 127.0.0.1
+audit:
+  path: "${join(dir, 'audit.db')}"
+`,
+    )
+    return { dir, configPath, listenPort, dashboardPort, sdkPort }
+  }
+
+  /** Every child this suite spawned, so a failed assertion never orphans one. */
+  const children: ChildProcess[] = []
+  afterAll(() => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+  })
+
+  /** Boot the shipped binary on the config and wait until it serves. */
+  async function boot(configPath: string, listenPort: number) {
+    const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, HELIO_SDK_TOKEN: SDK_TOKEN },
+    })
+    children.push(child)
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8')
+    })
+    const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+    await waitForProxyHealthOrExit(child, baseUrl, 15_000, () => stderr)
+    return {
+      child,
+      baseUrl,
+      stderr: () => stderr,
+      /** SIGTERM the proxy and return its exit code. */
+      async stop(): Promise<number | null> {
+        child.kill('SIGTERM')
+        const exit = await waitForChildExit(child, 15_000)
+        return exit.code
+      },
+    }
+  }
+
+  interface CallBody {
+    result?: unknown
+    error?: { code: number; data?: { reason?: string; retry_allowed?: boolean } }
+  }
+
+  function callTool(baseUrl: string, name: string, args: unknown, id: number): Promise<CallBody> {
+    return fetch(`${baseUrl}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-helio-session-id': SESSION },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name, arguments: args },
+      }),
+    }).then((res) => res.json() as Promise<CallBody>)
+  }
+
+  async function dashboardGet<T>(dashboardPort: number, path: string): Promise<T> {
+    const res = await fetch(`http://127.0.0.1:${String(dashboardPort)}${path}`, {
+      headers: { authorization: `Bearer ${SECRET}` },
+    })
+    expect(res.status).toBe(200)
+    return (await res.json()) as T
+  }
+
+  it('keeps budget spend, clears rate windows and evidence, and settles a held approval on SIGTERM', async () => {
+    const { dir, configPath, listenPort, dashboardPort, sdkPort } = writeAvailabilityConfig()
+    try {
+      // Run 1: build up every kind of state the durability table names.
+      const first = await boot(configPath, listenPort)
+      const charged = await callTool(first.baseUrl, 'stripe_charge', { amount: 10 }, 1)
+      expect(charged.result).toEqual({
+        content: [{ type: 'text', text: 'stripe_charge executed' }],
+      })
+
+      const slot = await callTool(first.baseUrl, 'get_status', {}, 2)
+      expect(slot.result).toEqual({ content: [{ type: 'text', text: 'get_status executed' }] })
+      // The one slot is spent: without this check a rate counter that never
+      // records would still let run 2's "allowed again" pass.
+      const exhausted = await callTool(first.baseUrl, 'get_status', {}, 3)
+      expect(exhausted.error?.data?.reason).toBe('rate_limited')
+
+      const ungrounded = await callTool(first.baseUrl, 'create_refund', { order: 'ord-42' }, 4)
+      expect(ungrounded.error?.data?.reason).toBe('evidence_missing')
+      const evidence = await fetch(`http://127.0.0.1:${String(sdkPort)}/evidence`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${SDK_TOKEN}` },
+        body: JSON.stringify({
+          session_id: SESSION,
+          tool_name: 'lookup_order',
+          evidence_key: 'order.lookup',
+          evidence_data: { order: 'ord-42' },
+        }),
+      })
+      expect(evidence.status).toBe(201)
+      const grounded = await callTool(first.baseUrl, 'create_refund', { order: 'ord-42' }, 5)
+      expect(grounded.result).toEqual({
+        content: [{ type: 'text', text: 'create_refund executed' }],
+      })
+
+      // Hold one call on an approval nobody will answer, then stop the proxy.
+      const held = callTool(first.baseUrl, 'send_email', { to: 'a@b.c' }, 6)
+      await vi.waitFor(async () => {
+        const pending = await dashboardGet<{ data: unknown[] }>(
+          dashboardPort,
+          '/api/approvals?status=pending',
+        )
+        expect(pending.data).toHaveLength(1)
+      }, WAIT)
+      expect(await first.stop()).toBe(0)
+      const cancelled = await held
+      expect(cancelled.error?.code).toBe(-32001)
+      expect(cancelled.error?.data?.reason).toBe('shutdown_cancelled')
+      expect(cancelled.error?.data?.retry_allowed).toBe(true)
+
+      // Run 2: the same config and audit database.
+      const second = await boot(configPath, listenPort)
+      const budgets = await dashboardGet<{ budgets: { buckets: { spent: number }[] }[] }>(
+        dashboardPort,
+        '/api/budgets',
+      )
+      expect(budgets.budgets[0]?.buckets[0]?.spent).toBe(10)
+
+      const allowedAgain = await callTool(second.baseUrl, 'get_status', {}, 7)
+      expect(allowedAgain.result).toEqual({
+        content: [{ type: 'text', text: 'get_status executed' }],
+      })
+
+      const regrounding = await callTool(second.baseUrl, 'create_refund', { order: 'ord-42' }, 8)
+      expect(regrounding.error?.data?.reason).toBe('evidence_missing')
+
+      const pending = await dashboardGet<{ data: unknown[] }>(
+        dashboardPort,
+        '/api/approvals?status=pending',
+      )
+      expect(pending.data).toEqual([])
+
+      const emailRows = await dashboardGet<{
+        data: {
+          policy_decision: string
+          block_reason: string | null
+          approval_status: string | null
+        }[]
+      }>(dashboardPort, '/api/audit?tool=send_email')
+      expect(emailRows.data).toHaveLength(1)
+      expect(emailRows.data[0]).toMatchObject({
+        policy_decision: 'require_approval',
+        block_reason: 'shutdown_cancelled',
+        approval_status: 'shutdown_cancelled',
+      })
+      expect(await second.stop()).toBe(0)
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+})
+
+describe('crash drain (issue #399)', () => {
+  let mock: Awaited<ReturnType<typeof startModernOnlyHttpMcpServer>>
+  beforeAll(async () => {
+    mock = await startModernOnlyHttpMcpServer()
+  })
+  afterAll(async () => {
+    await mock.close()
+  })
+
+  function countToolCallRows(auditPath: string): number {
+    const db = new Database(auditPath, { readonly: true })
+    try {
+      const row = db
+        .prepare("SELECT COUNT(*) AS n FROM audit_records WHERE record_kind = 'tool_call'")
+        .get() as { n: number }
+      return row.n
+    } finally {
+      db.close()
+    }
+  }
+
+  it('a crash drains the audit buffer and exits 1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-crash-drain-'))
+    const configPath = join(dir, 'helio.yaml')
+    const auditPath = join(dir, 'audit.db')
+    const markerPath = join(dir, 'crash-now')
+    const preloadPath = join(dir, 'crash-preload.mjs')
+    const listenPort = randomChildPort()
+    writeFileSync(
+      configPath,
+      `
+version: "1"
+upstream:
+  url: "http://127.0.0.1:${String(mock.port)}/mcp"
+  transport: streamable-http
+listen:
+  port: ${String(listenPort)}
+  host: 127.0.0.1
+policies:
+  default: allow
+dashboard:
+  enabled: false
+audit:
+  path: "${auditPath}"
+`,
+    )
+    // The preload keeps the audit writer's 100 ms timer flush from ever
+    // running (only that period is intercepted; the stand-in must expose
+    // unref() because the writer calls it), so allowed calls stay buffered
+    // until something drains them. It then throws from a real timer once the
+    // marker file exists, which reaches the CLI's uncaughtException handler.
+    writeFileSync(
+      preloadPath,
+      `
+import { existsSync } from 'node:fs'
+const realSetInterval = globalThis.setInterval
+globalThis.setInterval = (callback, delay, ...args) => {
+  if (delay === 100) {
+    const inert = { unref: () => inert, ref: () => inert, hasRef: () => false, refresh: () => inert }
+    return inert
+  }
+  return realSetInterval(callback, delay, ...args)
+}
+const marker = process.env.HELIO_TEST_CRASH_MARKER
+realSetInterval(() => {
+  if (existsSync(marker)) throw new Error('injected crash for the audit drain test')
+}, 50)
+`,
+    )
+    const child = spawn('node', [CLI_PATH, 'start', '-c', configPath], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `--import=${preloadPath}`,
+        HELIO_TEST_CRASH_MARKER: markerPath,
+      },
+    })
+    let stderr = ''
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf-8')
+    })
+    try {
+      const baseUrl = `http://127.0.0.1:${String(listenPort)}`
+      await waitForProxyHealthOrExit(child, baseUrl, 15_000, () => stderr)
+
+      const N = 3
+      for (let id = 1; id <= N; id += 1) {
+        const res = await fetch(`${baseUrl}/mcp`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-helio-session-id': 'crash-drain' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id,
+            method: 'tools/call',
+            params: { name: 'get_status', arguments: {} },
+          }),
+        })
+        const body = (await res.json()) as { result?: unknown }
+        expect(body.result).toEqual({ content: [{ type: 'text', text: 'get_status executed' }] })
+      }
+      // The guard: the rows are still in the writer's buffer. If the flush
+      // interval ever changes, this fails loudly instead of the drain
+      // assertion below passing for the wrong reason.
+      expect(countToolCallRows(auditPath)).toBe(0)
+
+      writeFileSync(markerPath, '')
+      const exit = await waitForChildExit(child, 15_000)
+      expect(exit.code).toBe(1)
+      expect(stderr).toContain('[helio] Uncaught exception:')
+      expect(countToolCallRows(auditPath)).toBe(N)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
+// ---------------------------------------------------------------------------
 // helio scan (issue #299)
 // ---------------------------------------------------------------------------
 
