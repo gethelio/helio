@@ -83,6 +83,8 @@ Helio's enforcement point is a separate process. It is outside the agent's trust
 
 **The kill switch.** `helio kill` halts every governed call by writing `<config>.kill` beside the config, and `helio resume` removes it; the marker lives in the config directory, so it sits behind the same boundary as the file it names: on the separate-user tier only root writes or removes it, and on the detection-only tier the agent can reach it like every other control. The authenticated `POST /api/kill-switch` writes the same file where the proxy's user can, and is otherwise a memory-only halt that ends with the process. See [docs/kill-switch.md](./docs/kill-switch.md).
 
+**When the proxy stops.** A stopped, crashed, restarting or refusing proxy refuses traffic at every tier, and [docs/availability.md](./docs/availability.md) states what the agent sees in each case and what a restart keeps. A restart clears rule-level rate and spend windows and session evidence, so a same-user agent that can restart the proxy gets that headroom back; it does not reset budget spend, which deleting the audit file does, and a change to a budget's `limit`, `currency`, `window` or `key`, or a removal the proxy observes, starts that pot fresh.
+
 ## Scope
 
 The following are in scope for security reports:

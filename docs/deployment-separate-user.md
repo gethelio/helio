@@ -174,6 +174,12 @@ This page stops at a proxy started by hand. It ships no systemd unit: the
 environment the recipe was run in cannot witness one, and a recipe that has
 not been run is not documentation.
 
+When the proxy stops, crashes or refuses to start, the agent's calls are
+refused and nothing reaches the upstream through Helio;
+[Availability and Failure Modes](./availability.md) states what the agent sees
+in each case, what a restart keeps, and how to run the proxy under a
+supervisor.
+
 ## 5. Prove it from the agent's account
 
 Log in as the account your agent runs as (`dev` in the run: a normal user

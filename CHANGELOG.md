@@ -21,6 +21,19 @@ Maintainer notes:
 
 ### Added
 
+- **`docs/availability.md` publishes the availability and failure-mode
+  posture:** what the agent sees at the wire and what the operator does when
+  Helio is never started, refuses to start, crashes, is stopped, loses its
+  upstream or its sideband, is halted, or is handed a bad config while
+  running; what every gate does with the upstream down; what survives a
+  restart (audit records, the budget ledger, tool baselines, held approvals,
+  pending sideband evaluations, the adapter registry); and the supervisor
+  guidance (exit codes, the three health probes and what none of them
+  proves, the Docker HEALTHCHECK port caveat, pinned tokens, the 5 s stop
+  grace). Every claim names the test that pins it or is marked "not
+  currently guaranteed", and the gaps found on the way are filed as #458 to
+  #461. SECURITY.md, the two tier recipes and the kill-switch page link it,
+  and the configuration reference now documents the MCP port's `GET /healthz`.
 - **`helio scan --upstream <url>` reports an MCP server's real tool surface
   before the proxy runs:** every tool with its `readOnlyHint` and its
   `destructiveHint`, saying whether each was set by the server or is the
