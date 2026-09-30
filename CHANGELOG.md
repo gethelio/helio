@@ -442,6 +442,18 @@ Maintainer notes:
   not use `parseBody()`, `toSSG()`, or `hono/jsx` (whose XSS 4.13.7 also
   closes). A minor release within the v4 line.
 
+### Security
+
+- **`brace-expansion` lifted to `1.1.20` and `5.0.11`, `undici` to `7.29.1`**
+  (GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7: stack exhaustion through
+  uncontrolled recursion in brace-expansion, on dev-only paths under eslint
+  and typescript-eslint; GHSA-rfgv-xxqx-mfg5 and GHSA-w293-vg96-wgc3: a
+  denial of service via an unrequested WebSocket subprotocol and a TLS
+  certificate validation bypass in undici's BalancedPool, on the dashboard's
+  jsdom test path only). None of the four reaches the shipped proxy or the
+  dashboard bundle; the overrides keep the audit gate honest and self-retire
+  once natural resolution passes the patched versions.
+
 ## [0.14.0] - 2026-09-07
 
 ### Added
