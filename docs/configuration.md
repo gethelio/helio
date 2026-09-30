@@ -371,7 +371,11 @@ stays valid:
 
 ### listen
 
-Where the proxy listens for incoming MCP requests.
+Where the proxy listens for incoming MCP requests. The same port serves an
+unauthenticated `GET /healthz` that says only that the HTTP server answers,
+nothing about the upstream, the prime or the kill switch; the Docker image's
+HEALTHCHECK uses it. See
+[Availability and Failure Modes](./availability.md#running-under-a-supervisor).
 
 | Field             | Type     | Required | Default     | Description                                                      |
 | ----------------- | -------- | -------- | ----------- | ---------------------------------------------------------------- |

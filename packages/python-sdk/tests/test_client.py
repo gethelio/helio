@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 import respx
 
@@ -90,6 +91,16 @@ class TestMarkEvidence:
                 client.mark_evidence("tool", "key", "data")
             assert exc_info.value.status_code == 400
             assert "POST /evidence" in str(exc_info.value)
+
+    def test_raises_helio_error_when_proxy_is_unreachable(self, mock_api: respx.MockRouter):
+        mock_api.post("/evidence").mock(side_effect=httpx.ConnectError("connection refused"))
+
+        with HelioClient(session_id="s1") as client:
+            with pytest.raises(HelioError) as exc_info:
+                client.mark_evidence("tool", "key", "data")
+            assert str(exc_info.value).startswith("Cannot connect to proxy at http://127.0.0.1:3200")
+            assert exc_info.value.status_code is None
+            assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
 
     def test_surfaces_allowlist_rejection_details(self, mock_api: respx.MockRouter):
         mock_api.post("/evidence").respond(

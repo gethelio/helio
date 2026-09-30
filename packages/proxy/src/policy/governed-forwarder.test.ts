@@ -1128,6 +1128,100 @@ describe('GovernedForwarder', () => {
       writer.close()
     })
 
+    describe('consumes the budget charge and the rate slot before a forward that fails', () => {
+      // On the MCP door the ledger commit and the rule-limit commit both run
+      // before the inner forward, and the catch that builds the -32603
+      // envelope releases neither. A call the upstream never received is
+      // charged exactly like one it answered: there is no refund path.
+      const chargeBudget = {
+        name: 'card-pot',
+        limit: 100,
+        currency: 'USD',
+        window: '24h',
+        key: 'global' as const,
+        on_exceed: 'deny' as const,
+        contributors: [{ match: { tool: 'stripe_*' }, field: '$.amount' }],
+      }
+
+      async function forwardAgainstFailingUpstream(failureMessage: string) {
+        const inner = mockForwarder()
+        inner.forward.mockRejectedValue(new Error(failureMessage))
+        const auditStore = new AuditStore({
+          path: ':memory:',
+          retention: '90d',
+          includeResponses: true,
+          cleanupIntervalMs: 0,
+        })
+        const ledger = new BudgetLedger({ database: auditStore.database })
+        const engine = new BudgetEngine({
+          budgets: compileBudgets([chargeBudget]),
+          cleanupIntervalMs: 0,
+          ledger,
+        })
+        engine.hydrate()
+        const limiter = new RateLimiter({ cleanupIntervalMs: 0 })
+        const policy = compile({
+          default: 'allow',
+          rules: [
+            {
+              name: 'charge-rate',
+              match: { tool: 'stripe_*' },
+              action: 'rate_limit',
+              limits: { max_calls: 5, window: '1h', key: 'tool' },
+            },
+          ],
+        })
+        const auditWriter = new AuditWriter({ store: auditStore, flushIntervalMs: 0 })
+        const governed = new GovernedForwarder(inner, policy, {
+          budgetEngine: engine,
+          rateLimiter: limiter,
+          auditWriter,
+        })
+
+        const result = await governed.forward(toolsCallRequest('stripe_charge', { amount: 10 }))
+
+        expect(inner.forward).toHaveBeenCalledTimes(1)
+        const error = errorFromResult(result)
+        expect(error.code).toBe(-32603)
+        expect(error.data['failure_class']).toBe('upstream_forward_error')
+        expect(error.data['failure_reason']).toBe(failureMessage)
+
+        // The ledger row is durable before the forward, so it is read before
+        // the audit flush and carries the full amount of the failed call.
+        const ledgerRows = auditStore.database
+          .prepare('SELECT budget_name, kind, amount, currency, tool_name FROM budget_events')
+          .all()
+        expect(ledgerRows).toEqual([
+          {
+            budget_name: 'card-pot',
+            kind: 'spend',
+            amount: 10,
+            currency: 'USD',
+            tool_name: 'stripe_charge',
+          },
+        ])
+        expect(engine.listStates()[0]?.buckets[0]?.spent).toBe(10)
+        expect(limiter.getKeyState('tool:stripe_charge:rule:0')?.current).toBe(1)
+
+        auditWriter.flush()
+        const { records } = auditStore.list()
+        expect(records).toHaveLength(1)
+        expect(records[0]?.policy_decision).toBe('rate_limit')
+        expect(records[0]?.upstream_error).toBe(failureMessage)
+
+        auditWriter.close()
+        auditStore.close()
+      }
+
+      it('charges the budget and uses the rate slot when the connect is refused', async () => {
+        await forwardAgainstFailingUpstream('connect ECONNREFUSED 127.0.0.1:8080')
+      })
+
+      it('charges the budget and uses the rate slot when the upstream times out', async () => {
+        await forwardAgainstFailingUpstream('upstream request timed out after 5000ms')
+      })
+    })
+
     it('works without audit writer configured', async () => {
       const inner = mockForwarder()
       const policy = compile({ default: 'allow', rules: [] })

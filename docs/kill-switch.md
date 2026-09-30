@@ -313,6 +313,8 @@ These are documented, not designed around.
 - [Sideband API Reference](./sideband-api.md#kill-switch): the endpoint and
   the `kill_switch` field of `GET /api/policy/status`
 - [Adapter API](./adapter-api.md): the sideband refusal
+- [Availability and Failure Modes](./availability.md): the other ways a call
+  stops being served, and what a restart keeps
 - [Configuration Reference](./configuration.md#starting-killed): the boot
   variable beside the config pin
 - [SECURITY.md](../SECURITY.md#process-and-filesystem-boundaries): the tiers

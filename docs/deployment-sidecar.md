@@ -314,6 +314,11 @@ Helio is refused with `403` unless listed in `listen.allowed_origins`; if
 something in front of the proxy injects or forwards one, either strip it
 there or name it in the list.
 
+While the `helio` service is stopped or restarting, the agent's calls fail at
+`helio-edge` and nothing reaches `mcp-server` through the gap;
+[Availability and Failure Modes](./availability.md) states what the agent sees
+in each case and what a restart keeps.
+
 ## VS Code Dev Containers
 
 If your agent runs inside a [VS Code dev container](https://containers.dev),
