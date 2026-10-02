@@ -19,6 +19,15 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Fixed
+
+- **One tag push now leaves one Release run.** `release.yml` carries a
+  concurrency group keyed on the tag with `cancel-in-progress: true`: when
+  GitHub delivers a tag push twice, one run survives and the other is
+  cancelled where it is; on `v0.15.0` the twin ran CI and Docker again,
+  pushed the image a second time and waited on the environment approvals
+  beside the real run.
+
 ## [0.15.0] - 2026-10-02
 
 ### Added

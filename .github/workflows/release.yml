@@ -5,6 +5,19 @@ on:
     tags:
       - 'v*.*.*'
 
+# One run per tag. GitHub delivered the v0.15.0 tag push twice and started two
+# Release runs in the same second (run 37053833825 was the twin); with this
+# group the newer run takes the ref and the other is cancelled on whatever job
+# it has reached. Publishers and the Docker push only start after ci, so a
+# twin cancelled early has published and pushed nothing; one cancelled in
+# docker may already have pushed, and the last push to finish owns the image
+# tags. Never push the same tag again while a run is in progress, and do not
+# add a workflow_dispatch on a tag ref to this file: either joins this group
+# and cancels a release in flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify-tag-on-main:
     name: Verify tag ancestry on main
