@@ -131,6 +131,9 @@ jobs:
       - name: Docs drift + config samples check
         run: pnpm docs:check:ci
 
+      - name: No-telemetry guard
+        run: pnpm check:no-telemetry
+
       - name: Lint
         run: pnpm lint
 

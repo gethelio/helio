@@ -20,6 +20,7 @@
     "secrets:scan:staged": "bash ./scripts/secret-scan-staged.sh",
     "docs:check:ci": "bash ./scripts/check-docs-drift-ci.sh && node ./scripts/validate-config-samples.mjs --enforce-order --enforce-completeness",
     "docs:check:samples": "node ./scripts/validate-config-samples.mjs --enforce-order --enforce-completeness",
+    "check:no-telemetry": "node ./scripts/check-no-telemetry.mjs",
     "prepare": "husky"
   },
   "devDependencies": {

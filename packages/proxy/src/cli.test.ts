@@ -1,12 +1,14 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { execFile, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -17,6 +19,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { promises as dns, ADDRCONFIG } from 'node:dns'
 import { createServer, request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -62,6 +65,46 @@ function runCli(
       },
     )
   })
+}
+
+/**
+ * Every network destination a `NODE_DEBUG=net` stderr names, as two sets
+ * (issue #401). Lookups: every `connect: find host <name>` line adds `<name>`,
+ * with or without an attempt after it (a failed lookup prints no attempt and
+ * is still a destination). Attempts: every `attempting to connect to <target>`
+ * line, whether `connect:` or `connect/multiple:`, adds its target when it is
+ * `ip:port`: the target is the FIRST whitespace-delimited field after the
+ * phrase (the raw line ends in `(addressType: N)`), split on THAT field's last
+ * colon, with a digits-only port and no `/` in the ip part, so `::1:<port>` and
+ * `127.0.0.1:<port>` are kept and a Unix socket's `<path>:NaN` is dropped.
+ * Nothing binds an attempt to a lookup: two sockets opened in one turn
+ * interleave their lines and no field on a line tells them apart. Every other
+ * line (`createConnection`, `dns options`, `autodetecting`, `will try the
+ * following addresses`, `setting the attempt timeout`, `completed with
+ * status`, `destroy`, `afterConnect`, `_read`) is ignored. A bag, not a count:
+ * a hostname target yields one lookup and, on a dual-stack machine, two
+ * attempts per logical connection.
+ */
+function networkTargets(stderr: string): { lookups: Set<string>; attempts: Set<string> } {
+  const lookups = new Set<string>()
+  const attempts = new Set<string>()
+  for (const line of stderr.split('\n')) {
+    const lookup = /connect: find host (\S+)/.exec(line)
+    if (lookup) {
+      lookups.add(lookup[1] ?? '')
+      continue
+    }
+    const attempt = /connect(?:\/multiple)?: attempting to connect to (\S+)/.exec(line)
+    if (!attempt) continue
+    const field = attempt[1] ?? ''
+    const colon = field.lastIndexOf(':')
+    if (colon === -1) continue
+    const ip = field.slice(0, colon)
+    const port = field.slice(colon + 1)
+    if (!/^\d+$/.test(port) || ip.includes('/')) continue
+    attempts.add(`${ip}:${port}`)
+  }
+  return { lookups, attempts }
 }
 
 /**
@@ -6185,7 +6228,6 @@ describe('helio report activation (issue #400)', () => {
   const HOUR = 60 * MINUTE
   const HASH_A = 'a'.repeat(64)
   const HASH_B = 'b'.repeat(64)
-  const CONNECT_LINE = /connect: attempting to connect to ([^\s]+)/g
 
   /** Every string the redaction whitelist exists to stop, planted in the database or the config. */
   const PLANTED = {
@@ -6500,10 +6542,10 @@ ${dashboard}audit:
     env: NodeJS.ProcessEnv = {},
   ): Promise<{ code: number; stdout: string; stderr: string; connects: string[] }> {
     const merged = { ...process.env, NODE_DEBUG: 'net', ...env }
-    return runCli(['report', 'activation', ...args], merged).then((r) => ({
-      ...r,
-      connects: [...r.stderr.matchAll(CONNECT_LINE)].map((m) => m[1] ?? ''),
-    }))
+    return runCli(['report', 'activation', ...args], merged).then((r) => {
+      const targets = networkTargets(r.stderr)
+      return { ...r, connects: [...targets.lookups, ...targets.attempts] }
+    })
   }
 
   /** Every key and every string value of a JSON value, depth first. */
@@ -7433,7 +7475,6 @@ ${dashboard}audit:
 
 describe('helio init --demo (issue #397)', () => {
   const DEMO_FILES = ['helio-demo.yaml', 'helio-demo-audit.db', 'mcp-demo-server.mjs', 'README.md']
-  const CONNECT_LINE = /connect: attempting to connect to ([^\s]+)/g
   const AT = '2026-09-24T12:00:00Z'
 
   function demoDir(): string {
@@ -7445,10 +7486,10 @@ describe('helio init --demo (issue #397)', () => {
     dir: string,
     args: string[],
   ): Promise<{ code: number; stdout: string; stderr: string; connects: string[] }> {
-    return runCli(args, { ...process.env, NODE_DEBUG: 'net' }, dir).then((r) => ({
-      ...r,
-      connects: [...r.stderr.matchAll(CONNECT_LINE)].map((m) => m[1] ?? ''),
-    }))
+    return runCli(args, { ...process.env, NODE_DEBUG: 'net' }, dir).then((r) => {
+      const targets = networkTargets(r.stderr)
+      return { ...r, connects: [...targets.lookups, ...targets.attempts] }
+    })
   }
 
   it('writes the four files, says the traffic is sample and prints the next steps', async () => {
@@ -7976,10 +8017,14 @@ audit:
         const env = { ...process.env, NODE_DEBUG: 'net' }
         const kill = await runCli(['kill', '-c', configPath], env)
         expect(kill.code).toBe(0)
-        expect(kill.stderr).not.toMatch(/connect: attempting to connect|listen2/)
+        const killTargets = networkTargets(kill.stderr)
+        expect([...killTargets.lookups, ...killTargets.attempts]).toEqual([])
+        expect(kill.stderr).not.toMatch(/listen2/)
         const resume = await runCli(['resume', '-c', configPath], env)
         expect(resume.code).toBe(0)
-        expect(resume.stderr).not.toMatch(/connect: attempting to connect|listen2/)
+        const resumeTargets = networkTargets(resume.stderr)
+        expect([...resumeTargets.lookups, ...resumeTargets.attempts]).toEqual([])
+        expect(resume.stderr).not.toMatch(/listen2/)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
@@ -10495,5 +10540,451 @@ describe('helio scan --write (issue #299)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('no telemetry (issue #401)', () => {
+  // Every CLI command runs under Node's socket trace (NODE_DEBUG=net) with its
+  // stderr in a file, and the destinations it names are checked against the
+  // fixture: every lookup is a hostname the fixture names, and every attempt is
+  // a fixture IP literal's ip:port or an address of a fixture hostname on that
+  // hostname's port, where the address set comes from a lookup in this process
+  // before the spawn, never a fixed pair. The set of destinations is what is
+  // asserted, never a count of TCP attempts per logical connection.
+  //
+  // How a silent extractor would be caught. Test 1 (offline commands) passes on
+  // EMPTY extractor output by design: a clean offline run prints none of the
+  // shapes, so the right assertion there is "both sets empty", and that is
+  // also what an extractor that reads nothing produces. The pins are the other
+  // tests. An extractor that dropped every plain `connect:` line fails tests 2,
+  // 3 and 4, each of which requires a kept ip:port (the dashboard exactly, the
+  // scan target, the upstream and the webhook). One that dropped every
+  // `connect/multiple:` line, or every `find host` line, fails test 5 (a
+  // `localhost` lookup and a kept attempt on the upstream port). In tests 3, 4
+  // and 5 the clause "every attempt is allowed by the fixture" is true of an
+  // empty set and is not the pin; the `contains` clause is. On a stock Ubuntu
+  // image whose `localhost` resolves to IPv4 only, test 5's upstream attempt is
+  // a plain `connect:` line and a `connect/multiple` drop would be invisible
+  // there; CI runs on `ubuntu-latest`, whose hosts file lists `localhost` on
+  // both loopback lines.
+  //
+  // What this suite does not see. A stdio upstream is the operator's process,
+  // spawned by transport/stdio-wrapper.ts with its stderr unread, so its
+  // network is its own and invisible here. A code path behind an option the
+  // suite does not pass (`export --budgets`, `init --client` with real client
+  // files) is covered by the static half, scripts/check-no-telemetry.mjs, only.
+  // No fixture configures a Slack channel: a notify would reach slack.com with
+  // a bogus token and retry for minutes; that destination is pinned by the
+  // static call-site rule, by approval/slack.test.ts (the client is built with
+  // the token alone) and by the SECURITY.md paragraph.
+
+  const SECRET = 'fixture-dashboard-secret-not-a-real-secret'
+  const WEBHOOK_SECRET = 'fixture-webhook-secret'
+  const TOOLS = [
+    { name: 'read_item', description: 'read', inputSchema: { type: 'object' } },
+    {
+      name: 'pay_invoice',
+      description: 'pay',
+      inputSchema: { type: 'object', properties: { amount: { type: 'number' } } },
+    },
+  ]
+
+  /** What a fixture names: IP literals as ip:port, hostnames with their port and resolved addresses. */
+  interface Fixture {
+    readonly literals: ReadonlySet<string>
+    readonly hostnames: ReadonlyMap<
+      string,
+      { readonly port: number; readonly addresses: ReadonlySet<string> }
+    >
+  }
+
+  /** Every lookup is a fixture hostname; every attempt is allowed by the fixture. */
+  function expectWithinFixture(targets: ReturnType<typeof networkTargets>, fixture: Fixture): void {
+    for (const name of targets.lookups) {
+      expect(fixture.hostnames.has(name), `lookup of ${name} is not a fixture hostname`).toBe(true)
+    }
+    for (const attempt of targets.attempts) {
+      const colon = attempt.lastIndexOf(':')
+      const ip = attempt.slice(0, colon)
+      const port = Number(attempt.slice(colon + 1))
+      const viaHostname = [...fixture.hostnames.values()].some(
+        (host) => host.port === port && host.addresses.has(ip),
+      )
+      expect(
+        fixture.literals.has(attempt) || viaHostname,
+        `attempt ${attempt} is not allowed by the fixture`,
+      ).toBe(true)
+    }
+  }
+
+  const children: ChildProcess[] = []
+  let dir = ''
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'helio-cli-no-telemetry-'))
+  })
+
+  afterEach(() => {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+    children.length = 0
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  function tracedEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, NODE_DEBUG: 'net', HELIO_DASHBOARD_SECRET: SECRET }
+  }
+
+  /** Spawn the CLI with stderr in a file: a pipe can lose the last lines on process exit. */
+  function spawnTraced(args: string[], cwd: string): { child: ChildProcess; stderrPath: string } {
+    const stderrPath = join(dir, `stderr-${String(children.length)}-${String(Date.now())}.log`)
+    const fd = openSync(stderrPath, 'w')
+    const child = spawn('node', [CLI_PATH, ...args], {
+      stdio: ['ignore', 'pipe', fd],
+      env: tracedEnv(),
+      cwd,
+    })
+    closeSync(fd)
+    children.push(child)
+    return { child, stderrPath }
+  }
+
+  /** Run one CLI command to exit under the trace and return its output and destinations. */
+  async function runTraced(
+    args: string[],
+    cwd = dir,
+  ): Promise<{ code: number | null; stdout: string; targets: ReturnType<typeof networkTargets> }> {
+    const { child, stderrPath } = spawnTraced(args, cwd)
+    let stdout = ''
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf-8')
+    })
+    const { code } = await waitForChildExit(child, 20_000)
+    return { code, stdout, targets: networkTargets(readFileSync(stderrPath, 'utf-8')) }
+  }
+
+  async function startUpstream(): Promise<MockMcpServer> {
+    return startMockMcpServer((payload) => {
+      const id = payload['id'] ?? null
+      if (payload['method'] === 'initialize') {
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2025-06-18',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'fixture-upstream', version: '0.0.0' },
+          },
+        }
+      }
+      if (payload['method'] === 'tools/list')
+        return { jsonrpc: '2.0', id, result: { tools: TOOLS } }
+      return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'ok' }] } }
+    })
+  }
+
+  /** A loopback webhook approval channel that records the signature header of every POST. */
+  async function startWebhookStandIn(): Promise<{
+    port: number
+    hits: { readonly signature: string | undefined }[]
+    close: () => Promise<void>
+  }> {
+    const hits: { signature: string | undefined }[] = []
+    const server = createServer((req, res) => {
+      req.on('data', () => undefined)
+      req.on('end', () => {
+        const header = req.headers['x-helio-signature']
+        hits.push({ signature: Array.isArray(header) ? header[0] : header })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"ok":true}')
+      })
+    })
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    return {
+      port: (server.address() as AddressInfo).port,
+      hits,
+      close: () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((err) => {
+            if (err) reject(err)
+            else resolve()
+          })
+        }),
+    }
+  }
+
+  /** The port of a mock upstream URL (`http://127.0.0.1:<port>/mcp`). */
+  function portOf(url: string): number {
+    return Number(new URL(url).port)
+  }
+
+  /**
+   * Write a start-ready config: the upstream at `upstreamHost:upstreamPort`, a
+   * webhook channel at the stand-in, one require_approval rule on it with a
+   * 2 s timeout, listen and dashboard ports from randomChildPort() (the stand-ins
+   * bind port 0 first and are written in; `start` binds what the config names).
+   */
+  function writeTracedConfig(options: {
+    upstreamHost: string
+    upstreamPort: number
+    webhookPort: number
+  }): { configPath: string; listenPort: number; dashboardPort: number } {
+    const listenPort = randomChildPort()
+    const dashboardPort = listenPort + 1
+    const configPath = join(dir, 'helio.yaml')
+    writeFileSync(
+      configPath,
+      [
+        "version: '1'",
+        'upstream:',
+        `  url: 'http://${options.upstreamHost}:${String(options.upstreamPort)}/mcp'`,
+        '  transport: streamable-http',
+        "  connect_timeout: '5s'",
+        "  request_timeout: '5s'",
+        'listen:',
+        `  port: ${String(listenPort)}`,
+        "  host: '127.0.0.1'",
+        'policies:',
+        '  default: allow',
+        '  rules:',
+        '    - name: pay-needs-webhook-approval',
+        '      match:',
+        "        tool: 'pay_invoice'",
+        '      action: require_approval',
+        '      approval:',
+        '        channel: hook',
+        "        timeout: '2s'",
+        'approval:',
+        "  timeout: '2s'",
+        '  default_on_timeout: deny',
+        '  channels:',
+        '    - type: dashboard',
+        '    - type: webhook',
+        '      name: hook',
+        `      url: 'http://127.0.0.1:${String(options.webhookPort)}/hook'`,
+        `      secret: '${WEBHOOK_SECRET}'`,
+        'audit:',
+        '  storage: sqlite',
+        `  path: '${join(dir, 'audit.db')}'`,
+        "  retention: '7d'",
+        'dashboard:',
+        '  enabled: true',
+        `  port: ${String(dashboardPort)}`,
+        "  host: '127.0.0.1'",
+        "  api_secret: '${HELIO_DASHBOARD_SECRET}'",
+        '',
+      ].join('\n'),
+    )
+    return { configPath, listenPort, dashboardPort }
+  }
+
+  /** Boot `helio start` under the trace and resolve once the dashboard API is listening. */
+  async function bootTraced(
+    configPath: string,
+  ): Promise<{ child: ChildProcess; stderrPath: string }> {
+    const { child, stderrPath } = spawnTraced(['start', '-c', configPath], dir)
+    child.stdout?.on('data', () => undefined)
+    const started = Date.now()
+    while (Date.now() - started < 15_000) {
+      if (child.exitCode !== null) {
+        throw new Error(
+          `helio start exited ${String(child.exitCode)}. stderr:\n${readFileSync(stderrPath, 'utf-8')}`,
+        )
+      }
+      if (readFileSync(stderrPath, 'utf-8').includes('Dashboard API listening')) {
+        return { child, stderrPath }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    throw new Error(
+      `Timed out waiting for helio start. stderr:\n${readFileSync(stderrPath, 'utf-8')}`,
+    )
+  }
+
+  /** One tools/call of pay_invoice through the proxy; it should time out on the webhook approval. */
+  async function callPayInvoice(listenPort: number): Promise<void> {
+    const response = await fetch(`http://127.0.0.1:${String(listenPort)}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'x-helio-session-id': 'no-telemetry-s1',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'pay_invoice', arguments: { amount: 12 } },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    const body = (await response.json()) as { error?: { data?: { reason?: string } } }
+    expect(body.error?.data?.reason).toBe('approval_timeout')
+  }
+
+  /** Run the start face: boot, one gated call, SIGTERM; return the trace's destinations. */
+  async function runStartFace(upstreamHost: string): Promise<{
+    targets: ReturnType<typeof networkTargets>
+    upstreamPort: number
+    webhookPort: number
+    webhookHits: { readonly signature: string | undefined }[]
+  }> {
+    const upstream = await startUpstream()
+    const webhook = await startWebhookStandIn()
+    try {
+      const upstreamPort = portOf(upstream.url)
+      const { configPath, listenPort } = writeTracedConfig({
+        upstreamHost,
+        upstreamPort,
+        webhookPort: webhook.port,
+      })
+      const proxy = await bootTraced(configPath)
+      try {
+        await callPayInvoice(listenPort)
+      } finally {
+        proxy.child.kill('SIGTERM')
+        await waitForChildExit(proxy.child, 10_000)
+      }
+      return {
+        targets: networkTargets(readFileSync(proxy.stderrPath, 'utf-8')),
+        upstreamPort,
+        webhookPort: webhook.port,
+        webhookHits: webhook.hits,
+      }
+    } finally {
+      await upstream.close()
+      await webhook.close()
+    }
+  }
+
+  it('1. every offline command opens nothing: both sets empty', async () => {
+    const { configPath } = writeTracedConfig({
+      upstreamHost: '127.0.0.1',
+      upstreamPort: 1,
+      webhookPort: 1,
+    })
+    mkdirSync(join(dir, 'init'))
+    const demoDir = join(dir, 'demo')
+    const offline: ReadonlyArray<{ args: string[]; code: number; cwd?: string }> = [
+      { args: ['validate', '-c', configPath], code: 0 },
+      { args: ['config', 'hash', '-c', configPath], code: 0 },
+      { args: ['secret'], code: 0 },
+      { args: ['export', '-c', configPath, '--limit', '5'], code: 0 },
+      { args: ['kill', '-c', configPath], code: 0 },
+      { args: ['resume', '-c', configPath], code: 0 },
+      { args: ['init', '-o', join(dir, 'init', 'helio.yaml')], code: 0 },
+      { args: ['init', '--demo', demoDir, '--force'], code: 0 },
+      { args: ['init', '--sandbox', join(dir, 'sandbox'), '--force'], code: 0 },
+      // From outside the demo directory the demo's relative audit path does not
+      // resolve, so this exits before the dashboard poll and opens nothing; the
+      // in-directory run (one attempt, to the demo dashboard) is pinned by the
+      // helio init --demo describe.
+      { args: ['report', 'activation', '-c', join(demoDir, 'helio-demo.yaml')], code: 1 },
+    ]
+    for (const command of offline) {
+      const { code, targets } = await runTraced(command.args, command.cwd ?? dir)
+      expect(code, command.args.join(' ')).toBe(command.code)
+      expect([...targets.lookups], command.args.join(' ')).toEqual([])
+      expect([...targets.attempts], command.args.join(' ')).toEqual([])
+    }
+  }, 60_000)
+
+  it('2. each reader of the running proxy attempts exactly the dashboard port and looks nothing up', async () => {
+    const { configPath, dashboardPort } = writeTracedConfig({
+      upstreamHost: '127.0.0.1',
+      upstreamPort: 1,
+      webhookPort: 1,
+    })
+    // helio report activation refuses to run without an audit database and
+    // its dashboard poll comes after that check, so the fixture carries an
+    // empty one, as an operator's machine does once helio start has written it.
+    new AuditStore({
+      path: join(dir, 'audit.db'),
+      retention: '7d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    }).close()
+    const readers = [
+      ['report', 'activation', '-c', configPath],
+      ['policy', 'status', '-c', configPath],
+      ['baseline', 'list', '-c', configPath],
+      ['baseline', 'accept', 'read_item', '-c', configPath],
+    ]
+    for (const args of readers) {
+      const { targets } = await runTraced(args)
+      expect([...targets.lookups], args.join(' ')).toEqual([])
+      expect([...targets.attempts], args.join(' ')).toEqual([`127.0.0.1:${String(dashboardPort)}`])
+    }
+  }, 60_000)
+
+  it('3. helio scan --upstream attempts the target it is given and nothing else', async () => {
+    const upstream = await startUpstream()
+    try {
+      const target = `127.0.0.1:${String(portOf(upstream.url))}`
+      const { code, targets } = await runTraced(['scan', '--upstream', upstream.url])
+      expect(code).toBe(0)
+      expectWithinFixture(targets, { literals: new Set([target]), hostnames: new Map() })
+      expect(targets.attempts.has(target)).toBe(true)
+    } finally {
+      await upstream.close()
+    }
+  }, 30_000)
+
+  it('4. helio start reaches the upstream and the webhook it is configured with and nothing else', async () => {
+    const face = await runStartFace('127.0.0.1')
+    const upstreamTarget = `127.0.0.1:${String(face.upstreamPort)}`
+    const webhookTarget = `127.0.0.1:${String(face.webhookPort)}`
+    expectWithinFixture(face.targets, {
+      literals: new Set([upstreamTarget, webhookTarget]),
+      hostnames: new Map(),
+    })
+    expect(face.targets.attempts.has(upstreamTarget)).toBe(true)
+    expect(face.targets.attempts.has(webhookTarget)).toBe(true)
+    expect(face.webhookHits).toHaveLength(1)
+    expect(face.webhookHits[0]?.signature).toMatch(/^sha256=[0-9a-f]{64}$/)
+  }, 60_000)
+
+  it('5. helio start with a hostname upstream looks up that name and attempts only its addresses', async () => {
+    const addresses = new Set(
+      (await dns.lookup('localhost', { all: true, hints: ADDRCONFIG })).map(
+        (entry) => entry.address,
+      ),
+    )
+    expect(addresses.size).toBeGreaterThan(0)
+    const face = await runStartFace('localhost')
+    const webhookTarget = `127.0.0.1:${String(face.webhookPort)}`
+    expectWithinFixture(face.targets, {
+      literals: new Set([webhookTarget]),
+      hostnames: new Map([['localhost', { port: face.upstreamPort, addresses }]]),
+    })
+    expect(face.targets.lookups.has('localhost')).toBe(true)
+    const onUpstreamPort = [...face.targets.attempts].filter((attempt) =>
+      attempt.endsWith(`:${String(face.upstreamPort)}`),
+    )
+    expect(onUpstreamPort.length).toBeGreaterThan(0)
+    expect(face.webhookHits).toHaveLength(1)
+  }, 60_000)
+
+  it('the extractor keeps both attempt shapes and the lookup line, and drops a Unix socket', () => {
+    const stderr = [
+      'NET 4242: connect: find host localhost',
+      'NET 4242: connect/multiple: attempting to connect to ::1:18401 (addressType: 6)',
+      'NET 4242: connect/multiple: attempting to connect to 127.0.0.1:18401 (addressType: 4)',
+      'NET 4242: connect: attempting to connect to 127.0.0.1:18404 (addressType: 4)',
+      'NET 4242: connect: attempting to connect to /tmp/none.sock:NaN (addressType: NaN)',
+      'NET 4242: connect: find host no-such-host.invalid',
+      'NET 4242: dns options { family: undefined, hints: 1024, all: true }',
+      'NET 4242: destroy',
+    ].join('\n')
+    const targets = networkTargets(stderr)
+    expect([...targets.lookups].sort()).toEqual(['localhost', 'no-such-host.invalid'])
+    expect([...targets.attempts].sort()).toEqual([
+      '127.0.0.1:18401',
+      '127.0.0.1:18404',
+      '::1:18401',
+    ])
   })
 })
