@@ -21,6 +21,18 @@ Maintainer notes:
 
 ### Added
 
+- **The no-telemetry claim has a guard:** `pnpm check:no-telemetry`
+  (`scripts/check-no-telemetry.mjs`, run by the pre-commit hook and CI) fails
+  on any `http://` or `https://` literal in shipped source that is not a
+  loopback or example address or a row of `scripts/no-telemetry-allowlist.txt`
+  (keyed by file and literal; a stale row fails), on a network-shaped import
+  outside three named files, on a `fetch(` or `new WebClient(` in a file not on
+  its list, and on a tsup setting that would bundle a dependency into
+  `dist/cli.js`; the build now fails if the dashboard bundle carries a URL
+  literal that is not a known library string or a request sink the dashboard
+  does not use; and a `cli.test.ts` suite runs every CLI command under Node's
+  socket trace and asserts that the only hosts it names are the ones its
+  fixture configures.
 - **`docs/availability.md` publishes the availability and failure-mode
   posture:** what the agent sees at the wire and what the operator does when
   Helio is never started, refuses to start, crashes, is stopped, loses its
@@ -429,6 +441,14 @@ Maintainer notes:
 
 ### Security
 
+- **SECURITY.md publishes the no-telemetry reasoning:** a `## No telemetry`
+  section records the decision (2026-09-14, reconfirmed 2026-09-17), its three
+  reasons, the rejected alternatives, the accepted cost (no denominator and no
+  product-led growth funnel), the local report that replaces it, exactly what
+  Helio connects to, and the guard that holds it. One destination is not
+  written in your config and the section says so: a configured Slack approval
+  channel talks to the Slack API at `slack.com`, through the official SDK, and
+  only when you configure that channel.
 - **`axios` lifted to `1.20.0`** (seven high advisories through
   `@slack/web-api`: GHSA-c29m-xwm3-cm6r, GHSA-mghh-pgcx-3jjj,
   GHSA-x97p-jq2g-jp4f, GHSA-3pq3-5fj3-cg6v, GHSA-542g-h47m-68v8,
