@@ -10988,3 +10988,151 @@ describe('no telemetry (issue #401)', () => {
     ])
   })
 })
+
+describe('registry entry argv (issue #403)', () => {
+  // The MCP registry entry in ../server.json declares what a client spawns:
+  // `npx @gethelio/proxy` plus its packageArguments. The argv under test is
+  // RENDERED from that file, never typed here, so the test proves the
+  // committed shape starts Helio. The listening face moves the port off the
+  // entry's fixed URL (the house rule: a spawned proxy never takes 3000), so
+  // it proves the argv and not the URL; registry-entry.test.ts pins the URL
+  // against the config schema's listen defaults. The refusing face is the
+  // cold start with no helio.yaml: one line naming the file, exit 1.
+  const SERVER_JSON_PATH = join(import.meta.dirname, '../server.json')
+  const INIT_TEMPLATE_PATH = join(
+    import.meta.dirname,
+    '__tests__',
+    'fixtures',
+    'init-template.yaml',
+  )
+
+  interface RegistryArgument {
+    readonly type: 'positional' | 'named'
+    readonly value?: string
+    readonly name?: string
+    readonly placeholder?: string
+  }
+
+  /** Render the entry's packageArguments to argv, filling the named ones from their placeholders when asked. */
+  function renderRegistryArgv(fillNamed: boolean): string[] {
+    const entry = JSON.parse(readFileSync(SERVER_JSON_PATH, 'utf-8')) as {
+      readonly packages: readonly { readonly packageArguments: readonly RegistryArgument[] }[]
+    }
+    const argv: string[] = []
+    for (const arg of entry.packages[0]?.packageArguments ?? []) {
+      if (arg.type === 'positional') {
+        if (arg.value === undefined) throw new Error('positional argument without a value')
+        argv.push(arg.value)
+      } else if (fillNamed) {
+        if (arg.name === undefined || arg.placeholder === undefined) {
+          throw new Error('named argument without a name and a placeholder')
+        }
+        argv.push(arg.name, arg.placeholder)
+      }
+    }
+    return argv
+  }
+
+  /** Replace exactly one occurrence, or fail the test with the text that was expected. */
+  function replaceOnce(text: string, from: string, to: string): string {
+    expect(text.split(from).length - 1, `expected exactly one occurrence of:\n${from}`).toBe(1)
+    return text.replace(from, to)
+  }
+
+  /**
+   * Write `helio init`'s template into `dir` as helio.yaml with the `listen:`
+   * block uncommented onto a free port, the dashboard moved beside it and a
+   * real secret digest in place of the fixture's masked one.
+   */
+  function writeInitConfigOnFreePort(dir: string): number {
+    const listenPort = randomChildPort()
+    let text = readFileSync(INIT_TEMPLATE_PATH, 'utf-8')
+    text = replaceOnce(
+      text,
+      '# listen:\n#   port: 3000\n#   host: 127.0.0.1\n',
+      `listen:\n  port: ${String(listenPort)}\n  host: 127.0.0.1\n`,
+    )
+    text = replaceOnce(text, '  port: 3100\n', `  port: ${String(listenPort + 1)}\n`)
+    text = replaceOnce(
+      text,
+      'api_secret: "sha256:<masked>"',
+      `api_secret: "${secretDigest(`registry-argv-${String(listenPort)}`)}"`,
+    )
+    writeFileSync(join(dir, 'helio.yaml'), text)
+    return listenPort
+  }
+
+  /** Spawn the CLI with `argv` in `dir` and resolve its stderr once `marker` appears. */
+  function spawnUntil(argv: string[], dir: string, marker: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const child = spawn('node', [CLI_PATH, ...argv], {
+        cwd: dir,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      let stderr = ''
+      let settled = false
+      const finish = (result: string | Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          // Process already gone.
+        }
+        if (result instanceof Error) reject(result)
+        else resolve(result)
+      }
+      const timer = setTimeout(() => {
+        finish(new Error(`Timed out waiting for "${marker}". stderr so far:\n${stderr}`))
+      }, 8_000)
+      timer.unref()
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf-8')
+        if (stderr.includes(marker)) finish(stderr)
+      })
+      child.on('error', (err) => {
+        finish(err instanceof Error ? err : new Error(String(err)))
+      })
+      child.on('close', (code) => {
+        if (!settled) {
+          finish(new Error(`exited with ${String(code)} before "${marker}". stderr:\n${stderr}`))
+        }
+      })
+    })
+  }
+
+  it('renders the entry to the bare start and to start with --config filled', () => {
+    expect(renderRegistryArgv(false)).toEqual(['start'])
+    expect(renderRegistryArgv(true)).toEqual(['start', '--config', 'helio.yaml'])
+  })
+
+  for (const fillNamed of [false, true]) {
+    const label = fillNamed ? 'with --config filled from its placeholder' : 'with the bare start'
+    it(`reaches the listening line from a helio init config ${label}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-registry-argv-'))
+      try {
+        const port = writeInitConfigOnFreePort(dir)
+        const stderr = await spawnUntil(
+          renderRegistryArgv(fillNamed),
+          dir,
+          `Helio proxy listening on http://127.0.0.1:${String(port)}`,
+        )
+        expect(stderr).toContain(`Helio proxy listening on http://127.0.0.1:${String(port)}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it('refuses a cold start with no helio.yaml on one line naming the file, exit 1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-registry-argv-empty-'))
+    try {
+      const result = await runCli(renderRegistryArgv(false), undefined, dir)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('Error: Cannot read config file: helio.yaml')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

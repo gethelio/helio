@@ -383,6 +383,16 @@ HEALTHCHECK uses it. See
 | `host`            | string   | No       | `127.0.0.1` | Hostname or IP to bind.                                          |
 | `allowed_origins` | string[] | No       | `[]`        | Origins allowed to send an `Origin` header to `/mcp` and `/sse`. |
 
+The defaults are what Helio's entry in the official MCP registry
+(`so.helio/helio`) hands a client: it spawns `npx @gethelio/proxy start` and
+connects to the fixed URL `http://127.0.0.1:3000/mcp`. `helio start` reads
+`helio.yaml` from the working directory and writes the audit database there;
+an absolute `--config` still writes `./helio-audit.db` to the process working
+directory, and a working directory that is not writable refuses startup with
+the `audit.path` line. A `helio.yaml` that sets another `port` or `host`
+here, or a named `upstreams:` list (one door per upstream at `/mcp/<name>`),
+changes the URL the client must use; the registry entry cannot follow it.
+
 Any request to `/mcp` or `/sse` that carries an `Origin` header not listed in
 `allowed_origins` is refused with `403` before it reaches the transport. The
 default (an empty list) refuses every `Origin`: MCP clients are non-browser

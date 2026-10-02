@@ -21,6 +21,15 @@ Maintainer notes:
 
 ### Added
 
+- **Helio is published to the official MCP registry as `so.helio/helio`.** The
+  entry is `packages/proxy/server.json`: an npm package the client spawns as
+  `npx @gethelio/proxy start`, reached at `http://127.0.0.1:3000/mcp`, the
+  `listen` defaults (a `helio.yaml` that moves the port or lists named
+  `upstreams:` changes the URL the client must use). Every tagged release
+  republishes the entry from the release pipeline after the npm publish, so
+  the registry's latest version follows the tag; `mcpName` in the package
+  manifest is the registry's ownership proof, and the root README carries the
+  registry badge.
 - **The no-telemetry claim has a guard:** `pnpm check:no-telemetry`
   (`scripts/check-no-telemetry.mjs`, run by the pre-commit hook and CI) fails
   on any `http://` or `https://` literal in shipped source that is not a
