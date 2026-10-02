@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { SlackChannel, buildApprovalBlocks, truncate } from './slack.js'
+import { WebClient } from '@slack/web-api'
 import { ApprovalRouter } from './router.js'
 import { ApprovalQueue } from './queue.js'
 import { QueueChannel } from './channels.js'
@@ -64,6 +65,17 @@ describe('SlackChannel', () => {
       channel: '#approvals',
     })
     expect(channel.type).toBe('slack')
+  })
+
+  it('constructs the Slack client with the token alone: no URL, agent or proxy from Helio (issue #401)', () => {
+    new SlackChannel({
+      botToken: 'xoxb-test',
+      signingSecret: 'secret',
+      channel: '#approvals',
+    })
+    const constructed = vi.mocked(WebClient).mock.calls
+    expect(constructed).toHaveLength(1)
+    expect(constructed[0]).toEqual(['xoxb-test'])
   })
 
   it('exposes signingSecret for the action handler', () => {

@@ -129,7 +129,7 @@ test(proxy): add rate limiter edge case coverage
 ### Pull Request Process
 
 - PRs require at least one approving review from a maintainer before merge.
-- CI must pass (secret scan, docs drift check, dependency audit, build, lint, format:check, typecheck, tests, benchmark, Docker build).
+- CI must pass (secret scan, docs drift check, no-telemetry guard, dependency audit, build, lint, format:check, typecheck, tests, benchmark, Docker build).
 - Keep PRs focused - one logical change per PR. If you're fixing a bug and also refactoring nearby code, split them into two PRs.
 - We aim to review PRs within 48 hours. If yours is waiting longer, comment on the PR or open a discussion.
 
@@ -180,6 +180,40 @@ has never been executed, assume it is broken.
   top-level section must appear in the scaffold and the reference (the
   scaffold may satisfy completeness with a commented stub;
   `docs/configuration.md` needs the key live in a fence).
+
+### No-telemetry guard
+
+`SECURITY.md` promises that Helio never phones home, and `pnpm check:no-telemetry`
+(`scripts/check-no-telemetry.mjs`, run by the pre-commit hook and by CI right after
+the docs drift check) keeps that promise mechanical. It reads the shipped source of
+the three packages, tests excluded, and fails, naming the file, the line and the text,
+on:
+
+- an `http://` or `https://` literal whose host is not a loopback or compose example
+  host (`127.0.0.1`, `localhost`, `mcp-server`, `helio-edge`, `helio`,
+  `host.docker.internal`) and is not allowlisted for that exact file and literal in
+  `scripts/no-telemetry-allowlist.txt`; a row that no longer matches its file fails
+  too;
+- a network-shaped module (`node:http`, `node:https`, `node:http2`, `node:net`,
+  `node:tls`, `node:dgram`, `node:dns`, `node:child_process`, `undici`,
+  `worker_threads`, with or without the `node:` prefix or a subpath) named by a proxy
+  module other than the three the script lists with their reasons, in a static import,
+  a bare import, a dynamic `import()` or a `require()` written on one line;
+- a `fetch(` or `new WebClient(` in a proxy file that is not on the script's call-site
+  list;
+- a `packages/proxy/tsup.config.ts` that would bundle dependencies into `dist/cli.js`.
+
+The build check `packages/proxy/scripts/check-dashboard-assets.ts` does the same for
+the dashboard bundle: every URL literal must be a known library string, and the JS
+carries no `XMLHttpRequest`, `sendBeacon` or `WebSocket`. The runtime half is the
+`no telemetry (issue #401)` suite in `packages/proxy/src/cli.test.ts`, which runs every
+CLI command under `NODE_DEBUG=net` and asserts that the only hosts it names are the
+ones its fixture configures.
+
+If your change prints a new documentation URL, add a row to the allowlist with the
+reason it is printed and never fetched. If it needs a new outbound call, add the file to
+the call-site list in the script and say in the PR why Helio should open that
+connection; the reviewer reads the row. Never widen the host class.
 
 ### Performance
 
@@ -288,7 +322,7 @@ pnpm start
 **Checking your changes end-to-end:**
 
 ```bash
-pnpm secrets:scan && pnpm audit --audit-level=high && pnpm build && pnpm docs:check:ci && pnpm test && pnpm lint && pnpm format:check && pnpm typecheck
+pnpm secrets:scan && pnpm audit --audit-level=high && pnpm build && pnpm docs:check:ci && pnpm check:no-telemetry && pnpm test && pnpm lint && pnpm format:check && pnpm typecheck
 ```
 
 If all checks pass, your PR is likely in good shape.

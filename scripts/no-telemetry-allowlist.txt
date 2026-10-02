@@ -1,0 +1,11 @@
+# Printed, never fetched: the http(s) literals shipped source may carry beyond the loopback and
+# example hosts that scripts/check-no-telemetry.mjs allows on its own. One row per literal, keyed by
+# path AND literal: the row allows exactly this URL text in exactly this file, and a row that no
+# longer matches a line of its file fails the check (stale or misfiled).
+# Format: <path relative to the repo root><TAB><literal as matched><TAB><why it is printed and never fetched>
+packages/proxy/src/upstream/connection-error.ts	https://github.com/gethelio/helio/blob/main/docs/getting-started.md	docs link printed in the unreachable-upstream error message
+packages/proxy/src/cli.ts	https://github.com/gethelio/helio	docs comment written by helio init and the helio init --client header
+packages/proxy/src/scan/scaffold.ts	https://github.com/gethelio/helio	docs comment written by helio scan --write
+packages/proxy/src/sandbox-scaffold.ts	https://raw.githubusercontent.com/gethelio/helio/main/docker/mcp-echo-server.mjs	echo-server source named in a comment of the generated compose file
+packages/proxy/src/approval/slack.ts	https://evil/|click	example of a hostile link in a sanitizer doc comment
+packages/proxy/src/scan/target.ts	https://crm/	example of a mis-parsed bare name in a doc comment
