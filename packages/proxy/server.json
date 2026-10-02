@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "so.helio/helio",
+  "title": "Helio",
+  "description": "Open-source governance for MCP agents: useful autonomy without unlimited authority",
+  "websiteUrl": "https://www.helio.so",
+  "repository": {
+    "url": "https://github.com/gethelio/helio",
+    "source": "github",
+    "subfolder": "packages/proxy"
+  },
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@gethelio/proxy",
+      "version": "0.0.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:3000/mcp"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "start",
+          "description": "Start the proxy; it reads helio.yaml from the working directory"
+        },
+        {
+          "type": "named",
+          "name": "--config",
+          "description": "Path to helio.yaml (default: helio.yaml in the working directory)",
+          "placeholder": "helio.yaml",
+          "format": "filepath",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

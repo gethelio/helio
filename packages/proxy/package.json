@@ -1,5 +1,6 @@
 {
   "name": "@gethelio/proxy",
+  "mcpName": "so.helio/helio",
   "version": "0.0.0",
   "type": "module",
   "description": "Open-source governance for MCP agents: useful autonomy without unlimited authority",
