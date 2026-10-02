@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-02
+
 ### Added
 
 - **Helio is published to the official MCP registry as `so.helio/helio`.** The
@@ -1879,7 +1881,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/gethelio/helio/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/gethelio/helio/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/gethelio/helio/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/gethelio/helio/compare/v0.12.0...v0.13.0
