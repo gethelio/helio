@@ -429,6 +429,13 @@ Maintainer notes:
 
 ### Security
 
+- **`axios` lifted to `1.20.0`** (seven high advisories through
+  `@slack/web-api`: GHSA-c29m-xwm3-cm6r, GHSA-mghh-pgcx-3jjj,
+  GHSA-x97p-jq2g-jp4f, GHSA-3pq3-5fj3-cg6v, GHSA-542g-h47m-68v8,
+  GHSA-m8m8-qj5v-23w3 and GHSA-r4gj-5m52-g5wh: two ReDoS, two prototype
+  pollution gadgets, two HTTP/2 adapter faults and a fetch-adapter redirect
+  SSRF). The Slack SDK's HTTP transport is the one path, used only under a
+  configured Slack channel; the pin keeps the audit gate honest.
 - **js-yaml `4.3.1` → `4.3.2`** (GHSA-2883-xcg3-v3hh: `maxTotalMergeKeys`
   did not bound CPU use for a sequence of empty merge sources). js-yaml
   parses `helio.yaml`, which is operator-authored, so there is no remote
@@ -441,9 +448,6 @@ Maintainer notes:
   dashboard and SSE routes, the one served path the fixes reach; it does
   not use `parseBody()`, `toSSG()`, or `hono/jsx` (whose XSS 4.13.7 also
   closes). A minor release within the v4 line.
-
-### Security
-
 - **`brace-expansion` lifted to `1.1.20` and `5.0.11`, `undici` to `7.29.1`**
   (GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7: stack exhaustion through
   uncontrolled recursion in brace-expansion, on dev-only paths under eslint

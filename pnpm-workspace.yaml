@@ -7,7 +7,17 @@ packages:
 # fast-uri and postcss in #194).
 overrides:
   path-to-regexp: 8.4.2
-  axios: 1.18.1
+  # Seven axios advisories, all patched 1.20.0: GHSA-c29m-xwm3-cm6r (ReDoS in
+  # the data: URL parser), GHSA-mghh-pgcx-3jjj (ReDoS in proxy-bypass host
+  # normalization via a redirect Location), GHSA-x97p-jq2g-jp4f (prototype
+  # pollution gadget in toFormData options), GHSA-3pq3-5fj3-cg6v (the HTTP/2
+  # adapter bypasses DNS lookup and proxy controls), GHSA-542g-h47m-68v8
+  # (unhandled error event in HTTP/2 session setup), GHSA-m8m8-qj5v-23w3 (Node
+  # adapter socket hijack via an inherited createConnection) and
+  # GHSA-r4gj-5m52-g5wh (maxRedirects: 0 not enforced by the fetch adapter).
+  # The one path is @slack/web-api's HTTP transport, which the proxy uses only
+  # under a configured Slack channel; an exact pin per the policy above.
+  axios: 1.20.0
   # fast-uri host confusion and SSRF via IDN canonicalization, IPv6
   # normalization, percent-decoding, scheme handling, port authority
   # injection in serialize(), and IP-literal bracket confusion
