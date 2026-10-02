@@ -9,6 +9,7 @@
   <a href="https://www.npmjs.com/package/@gethelio/proxy"><img src="https://img.shields.io/npm/v/@gethelio/proxy.svg" alt="npm version" /></a>
   <a href="https://mcpservers.org/servers/gethelio/helio"><img src="https://mcpservers.org/badge.svg" alt="Listed on mcpservers.org" /></a>
   <a href="https://glama.ai/mcp/servers/gethelio/helio"><img src="https://glama.ai/mcp/servers/gethelio/helio/badges/score.svg" alt="Helio MCP server on Glama" /></a>
+  <a href="https://registry.modelcontextprotocol.io/v0.1/servers/so.helio%2Fhelio/versions/latest"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0.1%2Fservers%2Fso.helio%252Fhelio%2Fversions%2Flatest&query=%24.server.version&label=MCP%20Registry&logo=modelcontextprotocol" alt="Helio on the MCP registry" /></a>
 </p>
 
 <p align="center">
@@ -380,6 +381,8 @@ Helio works with any MCP-compatible agent or framework:
 - **CrewAI**
 - **AutoGen**
 - **Custom agents** using any MCP client SDK
+
+Helio is listed in the official MCP registry as `so.helio/helio`. The entry runs `npx @gethelio/proxy start` and points the client at `http://127.0.0.1:3000/mcp`, the `listen` defaults. `helio start` reads `helio.yaml` from the working directory and writes the audit database there; an absolute `--config` still writes `./helio-audit.db` to the process working directory, and a working directory that is not writable refuses startup with the `audit.path` line. A `helio.yaml` that sets another `listen.port`, or a named `upstreams:` list (one door per upstream at `/mcp/<name>`), changes the URL the client must use.
 
 ## Documentation
 
