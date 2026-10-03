@@ -870,6 +870,11 @@ async function record(name, recording, options) {
   if (timeline.failedCues.length > 0) {
     throw new Error(`the take is not usable: cue ${timeline.failedCues.join(', ')} failed`)
   }
+  if (timeline.anchors.length < 2) {
+    throw new Error(
+      "the take is not usable: VHS's frame directory was not found, so the terminal pane cannot be re-timed to the wall clock",
+    )
+  }
   if (timeline.terminalStartedAt === 0) timeline.terminalStartedAt = timeline.vhsStartedAt
   // The progress-block estimate lags by the encoder's latency; the file's
   // own start_time is exact.
