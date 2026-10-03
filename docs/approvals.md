@@ -101,7 +101,7 @@ The attribution fields and the context fields are optional-absent: `session_sour
 
 ### Slack
 
-The Slack channel sends a Block Kit message with interactive Approve and Deny buttons to a Slack channel. When a user clicks a button, Helio resolves the ticket and updates the message with the result.
+The Slack channel sends a Block Kit message with interactive Approve and Deny buttons to a Slack channel. When a user clicks a button, Helio resolves the ticket and updates the message with the result. The card shows the arguments as JSON up to 2,000 characters; a longer value ends with an ellipsis, and the section is kept under Slack's 3,000-character limit.
 
 > **Slack deny does not capture a denial reason.** The router supports optional denial reasons (`denial_reason` in the JSON-RPC error response; a supplied reason is also stored on the ticket and in the audit record's `evidence_chain.approval`), but Slack button clicks have no free-text input, so Slack-resolved denials always return `denial_reason: null` to the caller. The dashboard's deny modal does capture a reason. A future Slack modal flow could capture reasons too — tracked as a follow-up.
 

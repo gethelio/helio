@@ -19,6 +19,13 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Changed
+
+- **The Slack approval card shows up to 2,000 characters of tool input.**
+  The cap was 200, which truncated any real command line; the fenced input
+  is also clamped so the card's first section stays under Slack's
+  3,000-character limit however many backticks the arguments carry.
+
 ### Fixed
 
 - **One tag push now leaves one Release run.** `release.yml` carries a

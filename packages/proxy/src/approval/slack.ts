@@ -28,7 +28,20 @@ export interface SlackChannelOptions {
 // Block Kit helpers
 // ---------------------------------------------------------------------------
 
-const MAX_INPUT_LENGTH = 200
+/** Slack rejects section text over 3,000 chars; leave margin for the header line. */
+const MAX_SECTION_TEXT = 2_900
+/**
+ * Cap on the JSON-serialized tool input shown in the card's fenced block.
+ * An approver reading a command line of one to two kilobytes must see it
+ * whole, so the cap is 2,000; the labels around the fence measure at most
+ * 389 characters at their own caps, so plain input never reaches
+ * {@link MAX_SECTION_TEXT}. Fence neutralization can nearly double a
+ * backtick payload AFTER this cap, and Slack rejects a section over 3,000
+ * characters while {@link SlackChannel.notify} logs that error without
+ * rethrowing, so an oversized card would never post: the detail section is
+ * measured after neutralization and clamped under the margin.
+ */
+export const MAX_INPUT_LENGTH = 2_000
 const MAX_INLINE_FIELD_LENGTH = 64
 /**
  * Per-side cap on a drift value (issue #60). Seven aspects at two values of
@@ -107,24 +120,39 @@ function sanitizeForCodeBlock(value: string): string {
 function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   const safeName = sanitizeCodeSpanContent(ticket.tool_name)
   const rawInput = truncate(JSON.stringify(ticket.tool_input), MAX_INPUT_LENGTH)
-  const safeInput = sanitizeForCodeBlock(rawInput)
 
-  const detailLines = [`*Tool:* \`${safeName}\``]
-  if (ticket.upstream) {
-    detailLines.push(`*Upstream:* \`${sanitizeCodeSpanContent(ticket.upstream)}\``)
+  const renderDetail = (safeInput: string): string => {
+    const lines = [`*Tool:* \`${safeName}\``]
+    if (ticket.upstream) {
+      lines.push(`*Upstream:* \`${sanitizeCodeSpanContent(ticket.upstream)}\``)
+    }
+    lines.push(`*Input:*\n\`\`\`\n${safeInput}\n\`\`\``)
+    if (ticket.matched_rule) {
+      lines.push(`*Rule:* ${sanitizeMrkdwnText(ticket.matched_rule)}`)
+    }
+    if (ticket.session_id) {
+      const sessionLine = `*Session:* \`${sanitizeCodeSpanContent(ticket.session_id)}\``
+      lines.push(
+        ticket.session_source
+          ? `${sessionLine} (${sanitizeMrkdwnText(ticket.session_source)})`
+          : sessionLine,
+      )
+    }
+    return lines.join('\n')
   }
-  detailLines.push(`*Input:*\n\`\`\`\n${safeInput}\n\`\`\``)
 
-  if (ticket.matched_rule) {
-    detailLines.push(`*Rule:* ${sanitizeMrkdwnText(ticket.matched_rule)}`)
-  }
-  if (ticket.session_id) {
-    const sessionLine = `*Session:* \`${sanitizeCodeSpanContent(ticket.session_id)}\``
-    detailLines.push(
-      ticket.session_source
-        ? `${sessionLine} (${sanitizeMrkdwnText(ticket.session_source)})`
-        : sessionLine,
-    )
+  // Neutralization runs after the cap and can grow the body, so the joined
+  // section is measured afterwards. Past the margin, the fenced body loses
+  // the overage plus one character, takes the ellipsis, and goes through
+  // the neutralizer once more: the cut lands between already-separated
+  // backticks, so no new fence can form, and the second pass pins that
+  // rather than trusting it. The labels are bounded, so plain input never
+  // clamps.
+  const neutralized = sanitizeForCodeBlock(rawInput)
+  let detailText = renderDetail(neutralized)
+  if (detailText.length > MAX_SECTION_TEXT) {
+    const keep = Math.max(0, neutralized.length - (detailText.length - MAX_SECTION_TEXT) - 1)
+    detailText = renderDetail(sanitizeForCodeBlock(neutralized.slice(0, keep) + '\u2026'))
   }
 
   // Break-glass context (issue #14): the approver is deciding a budget
@@ -148,7 +176,7 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
     },
     {
       type: 'section',
-      text: { type: 'mrkdwn', text: detailLines.join('\n') },
+      text: { type: 'mrkdwn', text: detailText },
     },
     ...budgetBlocks,
     ...driftBlocks,
@@ -182,8 +210,6 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   ]
 }
 
-/** Slack rejects section text over 3,000 chars; leave margin for the header line. */
-const MAX_SECTION_TEXT = 2_900
 /**
  * Bound the breach sections inside Slack's 50-block message cap (4 base
  * blocks + up to 40 sections + 1 omission context line = 45). At ~16
