@@ -1,9 +1,9 @@
 /**
- * Start script for the multi-upstream example.
+ * Start script for the agent-budget example.
  *
- * Spawns two shared MCP echo servers (one per named upstream), waits
- * for both to be ready, then starts the Helio proxy with the local
- * helio.yaml config.
+ * Spawns three shared MCP echo servers, one per named upstream, each
+ * with its own tool set, waits for all three to be ready, then starts
+ * the Helio proxy with the local helio.yaml config.
  */
 
 import { spawn } from 'node:child_process'
@@ -16,29 +16,40 @@ const echoServer = resolve(__dirname, '..', '_shared', 'mcp-echo-server.mjs')
 const proxyCli = resolve(__dirname, '..', '..', 'packages', 'proxy', 'dist', 'cli.js')
 const config = resolve(__dirname, 'helio.yaml')
 
+if (!process.env.HELIO_DASHBOARD_SECRET) {
+  console.error('HELIO_DASHBOARD_SECRET is not set.')
+  console.error('Copy .env.example to .env, fill it in, then load it:')
+  console.error('  set -a; . ./.env; set +a; pnpm start')
+  process.exit(1)
+}
+
 const children = []
 const state = { exitCode: 0 }
 const cleanup = registerCleanup(children, state)
 
-// Start one echo server per named upstream
-const echoPorts = ['8080', '8081']
-for (const port of echoPorts) {
+// One echo server per door, each listing its own tool set
+const doors = [
+  { name: 'compute', port: '8080' },
+  { name: 'market-data', port: '8081' },
+  { name: 'tools', port: '8082' },
+]
+for (const door of doors) {
   const echo = spawn('node', [echoServer], {
     stdio: 'inherit',
-    env: { ...process.env, HOST: '127.0.0.1', PORT: port, TOOLSET: 'default' },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: door.port, TOOLSET: door.name },
   })
   children.push(echo)
 
   echo.on('error', (err) => {
-    console.error(`Failed to start echo server on port ${port}:`, err.message)
+    console.error(`Failed to start echo server on port ${door.port}:`, err.message)
     process.exit(1)
   })
 }
 
-// Wait for both echo servers to be ready
+// Wait for all three echo servers to be ready
 try {
-  for (const port of echoPorts) {
-    await waitForHealthcheck(`http://127.0.0.1:${port}/healthz`)
+  for (const door of doors) {
+    await waitForHealthcheck(`http://127.0.0.1:${door.port}/healthz`)
   }
 } catch (err) {
   console.error(err.message)
@@ -66,11 +77,11 @@ proxy.on('exit', (code) => {
   cleanup()
 })
 
-// Wait for proxy to be ready, then prime both doors
+// Wait for the proxy to be ready, then prime every door
 try {
   await waitForHealthcheck('http://127.0.0.1:3100/api/health')
-  for (const door of ['files', 'payments']) {
-    await fetch(`http://127.0.0.1:3000/mcp/${door}`, {
+  for (const door of doors) {
+    await fetch(`http://127.0.0.1:3000/mcp/${door.name}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list' }),
@@ -85,26 +96,25 @@ try {
 
 console.log(`
 ─────────────────────────────────────────
-  Helio Multi-Upstream Example
+  Helio Agent Budget Example
 ─────────────────────────────────────────
 
-  Dashboard:      http://localhost:3100
-  Files door:     http://localhost:3000/mcp/files
-  Payments door:  http://localhost:3000/mcp/payments
+  Dashboard:         http://localhost:3100  (log in with HELIO_DASHBOARD_SECRET)
+  Compute door:      http://localhost:3000/mcp/compute
+  Market-data door:  http://localhost:3000/mcp/market-data
+  Tools door:        http://localhost:3000/mcp/tools
 
-  Each named upstream has its own door — bare /mcp answers 404:
+  One $50 pot, coding-agent-run, drawn down by all three doors.
+  Every call needs both headers: the door answers 415 without the
+  Content-Type, and a call without the session id charges nothing.
 
-  curl -s -X POST http://localhost:3000/mcp \\
+  curl -s -X POST http://localhost:3000/mcp/compute \\
     -H 'Content-Type: application/json' \\
-    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    -H 'x-helio-session-id: coding-agent-run' \\
+    -d @demo/calls/top-up-compute.json | jq
 
-  # List tools through each door:
-  curl -s -X POST http://localhost:3000/mcp/files \\
-    -H 'Content-Type: application/json' \\
-    -H 'x-helio-session-id: demo' \\
-    -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq
-
-  # See README.md for the scoped rate-limit and budget walkthrough.
+  # See README.md for the full walkthrough: four allowed calls, the
+  # held overage, the approved overage in the ledger, the restart.
 
 ─────────────────────────────────────────
 `)

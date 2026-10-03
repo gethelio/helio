@@ -1,0 +1,6 @@
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": { "name": "run_check", "arguments": { "target": "api.example.com", "price": 9 } }
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { SlackChannel, buildApprovalBlocks, truncate } from './slack.js'
+import { MAX_INPUT_LENGTH, SlackChannel, buildApprovalBlocks, truncate } from './slack.js'
 import { WebClient } from '@slack/web-api'
 import { ApprovalRouter } from './router.js'
 import { ApprovalQueue } from './queue.js'
@@ -794,5 +794,76 @@ describe('SlackChannel integration with ApprovalRouter', () => {
     const outcome = await outcomePromise
     expect(outcome.status).toBe('approved')
     expect(outcome.ticketId).toBe(ticketId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The input cap and the section clamp (issue #395). A 1 to 2 KB command
+// line must be legible on the card, so the cap is 2,000; fence
+// neutralization can nearly double a backtick payload AFTER the cap, and
+// Slack rejects a section over 3,000 characters, so the detail section is
+// measured after neutralization and clamped under the house margin.
+// ---------------------------------------------------------------------------
+
+describe('buildApprovalBlocks: input cap and section clamp (issue #395)', () => {
+  function detailSection(ticket: ApprovalTicket): string {
+    const blocks = buildApprovalBlocks(ticket)
+    const section = blocks.find((b) => b.type === 'section') as { text: { text: string } }
+    return section.text.text
+  }
+
+  /** The text between the opening and closing fence of the Input block. */
+  function fenceBody(section: string): string {
+    const match = /\*Input:\*\n```\n([\s\S]*)\n```/.exec(section)
+    expect(match).not.toBeNull()
+    return match?.[1] ?? ''
+  }
+
+  function tripleRuns(section: string): number {
+    return (section.match(/```/g) ?? []).length
+  }
+
+  it('renders a 5 KB backtick-free input as exactly 2,000 characters ending in an ellipsis', () => {
+    const section = detailSection(makeTicket({ tool_input: { s: 'x'.repeat(5_000) } }))
+    const body = fenceBody(section)
+    expect(MAX_INPUT_LENGTH).toBe(2_000)
+    expect(body.length).toBe(MAX_INPUT_LENGTH)
+    expect(body.endsWith('\u2026')).toBe(true)
+    expect(tripleRuns(section)).toBe(2)
+  })
+
+  it('keeps the detail section at or under 2,900 with every label at its cap and a 5 KB input', () => {
+    const section = detailSection(
+      makeTicket({
+        tool_name: 't'.repeat(64),
+        upstream: 'u'.repeat(64),
+        matched_rule: 'r'.repeat(64),
+        session_id: 's'.repeat(64),
+        session_source: 'o'.repeat(64),
+        tool_input: { s: 'x'.repeat(5_000) },
+      }),
+    )
+    expect(section.length).toBeLessThanOrEqual(2_900)
+    expect(tripleRuns(section)).toBe(2)
+  })
+
+  it('renders a 1,500-character input whole, with no ellipsis', () => {
+    // `{"s":"` and `"}` are 8 characters around the value.
+    const input = { s: 'x'.repeat(1_492) }
+    const json = JSON.stringify(input)
+    expect(json.length).toBe(1_500)
+    const body = fenceBody(detailSection(makeTicket({ tool_input: input })))
+    expect(body).toBe(json)
+    expect(body).not.toContain('\u2026')
+  })
+
+  it('clamps a 5 KB backtick-only input to one section at or under 2,900 with two unbroken fences', () => {
+    const blocks = buildApprovalBlocks(makeTicket({ tool_input: { s: '`'.repeat(5_000) } }))
+    const sections = blocks.filter((b) => b.type === 'section')
+    expect(sections).toHaveLength(1)
+    const section = (sections[0] as { text: { text: string } }).text.text
+    expect(section.length).toBeLessThanOrEqual(2_900)
+    expect(tripleRuns(section)).toBe(2)
+    expect(fenceBody(section).endsWith('\u2026')).toBe(true)
   })
 })

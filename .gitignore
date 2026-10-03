@@ -54,6 +54,10 @@ docs/.local/
 # generated benchmark report (machine-specific)
 docs/benchmark-results.md
 
+# recording pipeline runtime files (examples/agent-budget/demo)
+examples/agent-budget/demo/cues/
+examples/agent-budget/demo/out/
+
 # runtime-generated audit databases
 helio-audit.db
 *.db
