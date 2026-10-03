@@ -279,7 +279,7 @@ budgets:
         field: '$.total'
 ```
 
-Budgets govern tools that expose what they are spending in an argument field. Watch the full flow — live depletion, breach, break-glass approval, the approved overage landing in the ledger — in the [Docker quickstart demo](./docker/README.md#break-the-budget) or the runnable [budgets example](./examples/budgets/).
+Budgets govern tools that expose what they are spending in an argument field. Watch the full flow — live depletion, breach, break-glass approval, the approved overage landing in the ledger — in the [Docker quickstart demo](./docker/README.md#break-the-budget) or the runnable [budgets example](./examples/budgets/). The [agent budget example](./examples/agent-budget/) records the same flow as one $50 pot across three MCP servers, a held overage approved on the dashboard and the ledger surviving a restart: watch it as a [GIF](https://helio.so/demo/agent-budget.gif) or an [mp4](https://helio.so/demo/agent-budget.mp4).
 
 ### Evidence Grounding
 
@@ -406,7 +406,7 @@ Ready-made configurations for common patterns:
 - **[Spend Limits](./examples/spend-limits/)**: Govern payment tool usage
 - **[Budgets](./examples/budgets/)**: A cross-tool budget across Stripe and PayPal tools with break-glass overage approvals, paired with a category cap that only charges calls declaring their spend category
 - **[Multi-Upstream](./examples/multi-upstream/)**: Two named upstreams behind one proxy, with a door-scoped rate limit and budget
-- **[Agent Budget](./examples/agent-budget/)**: One $50 session pot drawn down by three MCP servers behind three doors, a held overage approved as break-glass, a write tool held by a rule, and the ledger surviving a restart
+- **[Agent Budget](./examples/agent-budget/)**: One $50 session pot drawn down by three MCP servers behind three doors, a held overage approved as break-glass, a write tool held by a rule, and the ledger surviving a restart. Recorded: the budget demo as a [GIF](https://helio.so/demo/agent-budget.gif) or [mp4](https://helio.so/demo/agent-budget.mp4), the approval card as a [GIF](https://helio.so/demo/approval-card.gif) or [mp4](https://helio.so/demo/approval-card.mp4)
 
 ## Contributing
 

@@ -2,6 +2,12 @@
 
 One coding agent, one $50 pot, three MCP servers behind three doors. The `compute` door sells compute units, the `market-data` door sells price lookups, and the `tools` door runs paid checks and ops jobs. Every spending tool declares its amount in an argument, and one budget, `coding-agent-run`, draws every door down. The call that would cross $50 is held for a human, the approved overage lands in the ledger, and the ledger survives a restart. A second control holds every `run_job` call for approval, so the approver reads the tool, the door, the rule and the arguments before anything runs.
 
+<p align="center">
+  <img src="../../docs/images/approval-card.png" alt="The dashboard's approval card for run_job on the tools door: the approve-job-runs rule, the session, and the whole arguments object" width="900" />
+</p>
+
+_The approval card as the approver sees it. Watch the budget demo as a [GIF](https://helio.so/demo/agent-budget.gif) or an [mp4](https://helio.so/demo/agent-budget.mp4): one $50 budget, three merchants, three servers, same agent mandate._
+
 This is the job a buyer of agent payments describes for themselves, in Adyen's words: "define limits and approvals, and review usage and spend." Here that job runs on MCP tools, with the proxy as the only moving part.
 
 ## What This Demonstrates
@@ -145,7 +151,7 @@ Prints `"approved_overage"`, `"run_check"` and `"tools"`: the newest ledger row,
 
 ### A write tool held by a rule
 
-`run_job` carries no amount, so the pot never sees it. The `approve-job-runs` rule holds it instead:
+`run_job` carries no amount, so the pot never sees it. The `approve-job-runs` rule holds it instead. Watch the approver read the tool, the door, the rule and the arguments, then click Approve: the dashboard pane as a [GIF](https://helio.so/demo/approval-card.gif), or the full side-by-side [mp4](https://helio.so/demo/approval-card.mp4).
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/mcp/tools \
