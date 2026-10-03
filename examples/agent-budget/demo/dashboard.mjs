@@ -11,8 +11,11 @@
  * what a human would see.
  */
 
+import { click, moveTo, scroll } from './pointer.mjs'
+
 const EVALUATE_TIMEOUT_MS = 15_000
 const POLL_MS = 150
+const GLIDE_MS = 700
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -98,14 +101,70 @@ export class Dashboard {
     }
   }
 
-  /** The app window's screen rectangle, for screencapture -R. */
+  /** The app window's screen rectangle, in points, for the screen capture's crop. */
   async windowBounds() {
     const { bounds } = await this.send('Browser.getWindowForTarget', { targetId: this.targetId })
     return bounds
   }
 
+  /**
+   * Put the app window where the recording expects it. Chrome does not
+   * always honor --window-size for a fresh profile (it sometimes opens the
+   * window at the screen's full height), and a window taller than the
+   * capture loses its bottom edge.
+   */
+  async setWindowBounds({ left, top, width, height }) {
+    const { windowId } = await this.send('Browser.getWindowForTarget', { targetId: this.targetId })
+    await this.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { left, top, width, height, windowState: 'normal' },
+    })
+  }
+
   bringToFront() {
     return this.send('Page.bringToFront')
+  }
+
+  /**
+   * The screen point at the center of the element `expr` evaluates to:
+   * its page rectangle, offset by the window's placement and the height of
+   * the window's own title bar.
+   */
+  async screenPoint(expr, label) {
+    await this.waitFor(`!!${expr}`, label)
+    const rect = JSON.parse(
+      await this.evaluate(`JSON.stringify((${expr}).getBoundingClientRect())`),
+    )
+    const { bounds } = await this.send('Browser.getWindowForTarget', { targetId: this.targetId })
+    const { innerHeight } = JSON.parse(await this.evaluate('JSON.stringify({ innerHeight })'))
+    return {
+      x: bounds.left + rect.x + rect.width / 2,
+      y: bounds.top + (bounds.height - innerHeight) + rect.y + rect.height / 2,
+    }
+  }
+
+  /** Glide the real pointer onto an element and click it. */
+  async pointAndClick(expr, label) {
+    moveTo(await this.screenPoint(expr, label), GLIDE_MS)
+    await sleep(150)
+    click()
+  }
+
+  /**
+   * Scroll the element under the pointer to its end with the wheel, and
+   * report how far it moved so the timeline shows the wheel reached it.
+   */
+  async wheelToEnd(expr, label) {
+    moveTo(await this.screenPoint(expr, label), GLIDE_MS)
+    const extent = JSON.parse(
+      await this.evaluate(
+        `(() => { const e = ${expr}; return JSON.stringify({ before: e.scrollTop, max: e.scrollHeight - e.clientHeight }) })()`,
+      ),
+    )
+    if (extent.max > 0) scroll(extent.max + 40)
+    await sleep(300)
+    const after = await this.evaluate(`(${expr}).scrollTop`)
+    return { ...extent, after }
   }
 
   /**
@@ -125,36 +184,49 @@ export class Dashboard {
     await this.waitFor(`!document.querySelector('#dashboard-secret')`, 'the login to complete')
   }
 
-  /** Follow the sidebar link to `path` without a page reload. */
+  /** Click the sidebar link to `path` with the real pointer. */
   async go(path) {
-    const link = JSON.stringify(`a[href="${path}"]`)
-    await this.waitFor(`!!document.querySelector(${link})`, `the ${path} link`)
-    await this.evaluate(`(document.querySelector(${link}).click(), true)`)
+    const link = `document.querySelector(${JSON.stringify(`a[href="${path}"]`)})`
+    await this.pointAndClick(link, `the ${path} link`)
     await this.waitFor(`location.pathname === ${JSON.stringify(path)}`, `the ${path} page`)
   }
 
   /**
-   * On the Approvals page: expand the one pending ticket, hold it on screen
-   * long enough to read, then click its Approve button and wait for the
-   * ticket to leave the pending list.
+   * On the Approvals page: click the one pending ticket open, hold it on
+   * screen long enough to read, wheel through the arguments and down to
+   * the Approve button, click it, and wait for the ticket to leave the
+   * pending list. Every step is the real pointer on the page's own
+   * controls; the waits confirm each click landed.
    */
   async approvePending({ readMs }) {
     await this.go('/approvals')
     const row = `[...document.querySelectorAll('main button')].find((b) => b.className.includes('w-full') && b.querySelector('svg'))`
-    await this.waitFor(`!!${row}`, 'the pending ticket')
-    await this.evaluate(`(${row}.click(), true)`)
+    await this.pointAndClick(row, 'the pending ticket')
     const approve = `[...document.querySelectorAll('main button')].find((b) => b.textContent.trim() === 'Approve')`
     await this.waitFor(`!!${approve}`, 'the Approve button')
-    await sleep(readMs)
-    await this.evaluate(`(${approve}.click(), true)`)
+    // Read with the pointer out of the way, in the empty sidebar below its
+    // last link, so the card is unobstructed on screen.
+    const aside = await this.screenPoint(
+      `document.querySelector('a[href="/analytics"]')`,
+      'the sidebar',
+    )
+    moveTo({ x: aside.x, y: aside.y + 140 }, GLIDE_MS)
+    await sleep(readMs / 2)
+    const input = await this.wheelToEnd(`document.querySelector('main pre')`, 'the Input box')
+    await sleep(readMs / 2)
+    const list = await this.wheelToEnd(
+      `${approve}.closest('main .overflow-y-auto')`,
+      'the pending list',
+    )
+    await this.pointAndClick(approve, 'the Approve button')
     await this.waitFor(`!${approve}`, 'the ticket to resolve')
+    return { input, list }
   }
 
-  /** On the Budgets page: open the first pot's Recent events panel. */
+  /** On the Budgets page: click the first pot's Recent events open. */
   async expandRecentEvents() {
     const button = `[...document.querySelectorAll('main button')].find((b) => b.textContent.trim() === 'Recent events')`
-    await this.waitFor(`!!${button}`, 'the Recent events button')
-    await this.evaluate(`(${button}.click(), true)`)
+    await this.pointAndClick(button, 'the Recent events button')
     await this.waitFor(
       `[...document.querySelectorAll('main button')].some((b) => b.textContent.trim() === 'Hide recent events')`,
       'the events panel',

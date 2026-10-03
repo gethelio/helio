@@ -253,6 +253,7 @@ Prerequisites, all on macOS:
 - Google Chrome, launched by the driver as its own app window with a fresh profile (a Chrome that is already open is left alone)
 - `jq`, which the tapes pipe `tools/list` through (current macOS ships it at `/usr/bin/jq`)
 - Screen Recording permission for the terminal that runs the driver; macOS asks once
+- Accessibility permission for the same terminal (System Settings, Privacy & Security, Accessibility), so the driver can move the real mouse pointer and click the dashboard's own controls on screen; the driver refuses to start without it
 - `.env` filled in as above, with the dashboard channel as committed; nothing in `helio.yaml` is edited for a take
 
 Then, from this directory:
@@ -262,11 +263,11 @@ node demo/record.mjs budget      # one $50 pot, three doors, a held overage, a r
 node demo/record.mjs approval    # the approval card for a write tool
 ```
 
-The driver deletes this example's audit database so the pot starts at `$0.00 / $50.00`, starts `pnpm start` from this directory in its own process group, waits for the dashboard's health route, opens the dashboard as a Chrome app window and logs it in, starts `screencapture` on that window, and runs the tape (`demo/budget.tape` or `demo/approval.tape`). The tape types every call from `demo/calls/` with both headers and never types the secret: its two API lines read the bearer from the environment the driver passes to the tape's own zsh.
+The driver deletes this example's audit database so the pot starts at `$0.00 / $50.00`, starts `pnpm start` from this directory in its own process group, waits for the dashboard's health route, opens the dashboard as a Chrome app window and logs it in, starts an `ffmpeg` screen capture of that window, and runs the tape (`demo/budget.tape` or `demo/approval.tape`). The tape types every call from `demo/calls/` with both headers and never types the secret: its two API lines read the bearer from the environment the driver passes to the tape's own zsh.
 
 The tape and the driver talk through cue files under `demo/cues/`:
 
-- `approve`: the driver opens the Approvals page, expands the one pending ticket, holds it on screen long enough to read, and clicks Approve; the tape's `wait` returns when the held call completes
+- `approve`: the driver moves the pointer to the Approvals link, opens the one pending ticket, holds it on screen long enough to read, wheels through the arguments and down to the buttons, and clicks Approve; the tape's `wait` returns when the held call completes
 - `expand-1` and `expand-2`: the driver clicks the pot's **Recent events** so the ledger row and its badge are on screen
 - `restart`: the driver sends the example's process group the same SIGINT as `Ctrl-C`, starts it again from this directory, waits for the health route, logs the dashboard in again and writes `restart-ready`; the tape's `demo/wait-ready.mjs` exits the moment that file appears, so the events line it is chained to reads the restarted process however long the boot took
 
@@ -276,7 +277,7 @@ Outputs land under `demo/out/`: the raw terminal and dashboard captures, `budget
 node demo/record.mjs budget --assemble --trim-dashboard 0.8
 ```
 
-Keep the app window unobscured while a take runs. The published assets live on the website, deployed before any README links to them; this repository carries the pipeline, not the videos.
+Keep the app window unobscured while a take runs and leave the mouse alone: the driver parks the pointer below the window before the capture starts and drives it from there. The published assets live on the website, deployed before any README links to them; this repository carries the pipeline, not the videos.
 
 ## Next Steps
 

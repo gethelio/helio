@@ -53,6 +53,7 @@ Sleep 2s
 # prints its ticket id; the wait builtin blocks until the approval lands
 Type "date -u +%H:%M:%S"
 Enter
+Sleep 500ms
 Type "curl -s -H 'Content-Type: application/json' -H 'x-helio-session-id: coding-agent-run' -d @calls/run-check.json http://127.0.0.1:3000/mcp/tools &"
 Enter
 Sleep 1.5s
@@ -61,6 +62,7 @@ Enter
 Sleep 1s
 Type "touch cues/approve"
 Enter
+Sleep 500ms
 Type "wait"
 Enter
 Wait@60s
@@ -75,8 +77,10 @@ Sleep 5s
 # on cues/restart-ready, so the events line reads the second process.
 Type "date -u +%H:%M:%S"
 Enter
+Sleep 500ms
 Type "touch cues/restart"
 Enter
+Sleep 500ms
 Type `node wait-ready.mjs && node -e 'const r=await fetch("http://127.0.0.1:3100/api/budgets/coding-agent-run/events",{headers:{authorization:"Bearer "+process.env.HELIO_DASHBOARD_SECRET}});const e=(await r.json()).data[0];console.log(e.kind,e.tool_name,e.upstream)'`
 Enter
 Wait@45s
