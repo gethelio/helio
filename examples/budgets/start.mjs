@@ -29,7 +29,7 @@ const cleanup = registerCleanup(children, state)
 // Start the echo server
 const echo = spawn('node', [echoServer], {
   stdio: 'inherit',
-  env: { ...process.env, HOST: '127.0.0.1', PORT: '8080' },
+  env: { ...process.env, HOST: '127.0.0.1', PORT: '8080', TOOLSET: 'default' },
 })
 children.push(echo)
 

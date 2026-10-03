@@ -25,7 +25,7 @@ const echoPorts = ['8080', '8081']
 for (const port of echoPorts) {
   const echo = spawn('node', [echoServer], {
     stdio: 'inherit',
-    env: { ...process.env, HOST: '127.0.0.1', PORT: port },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: port, TOOLSET: 'default' },
   })
   children.push(echo)
 

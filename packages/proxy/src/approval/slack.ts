@@ -144,10 +144,10 @@ function buildApprovalBlocks(ticket: ApprovalTicket): KnownBlock[] {
   // Neutralization runs after the cap and can grow the body, so the joined
   // section is measured afterwards. Past the margin, the fenced body loses
   // the overage plus one character, takes the ellipsis, and goes through
-  // the neutralizer once more: the cut lands between already-separated
-  // backticks, so no new fence can form, and the second pass pins that
-  // rather than trusting it. The labels are bounded, so plain input never
-  // clamps.
+  // the neutralizer once more: the cut only removes a suffix of an already
+  // neutralized body, so no new run of three backticks can form, and the
+  // second pass pins that rather than trusting it. The labels are bounded,
+  // so plain input never clamps.
   const neutralized = sanitizeForCodeBlock(rawInput)
   let detailText = renderDetail(neutralized)
   if (detailText.length > MAX_SECTION_TEXT) {

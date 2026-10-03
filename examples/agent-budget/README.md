@@ -118,7 +118,7 @@ curl -s -X POST http://127.0.0.1:3000/mcp/tools \
 
 The command **hangs**. The contributor for this door reads `$.price`, not `$.amount`, and the budget is `on_exceed: require_approval`, so the breach raised a break-glass ticket instead of a denial.
 
-Open the **Approvals** tab. The pending card shows the tool (`run_check`), the door (`tools`), the session, the arguments, and the breached pot with its numbers: $44 spent of $50, attempting $9 more. Approve it, and the curl returns `Check of api.example.com ran for 9 USD`. Deny it, or let it time out, and the call is blocked: budget tickets always fail closed on timeout.
+Open the **Approvals** tab. The pending card shows the tool (`run_check`), the door (`tools`), the session, the arguments, and the breached pot with its numbers: `44/50 USD spent, attempting +9 (session window)`. Approve it, and the curl returns `Check of api.example.com ran for 9 USD`. Deny it, or let it time out, and the call is blocked: budget tickets always fail closed on timeout.
 
 Back on the **Budgets** tab the pot reads `$53.00 / $50.00` with a full bar. Click **Recent events** on the pot: the newest row is the `run_check` charge, attributed to the `tools` door, with the **approved overage** badge. That badge is how the charge is recorded in the ledger, not a flourish of the page.
 

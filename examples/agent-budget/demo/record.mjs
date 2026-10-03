@@ -243,7 +243,11 @@ function clearCues() {
   for (const file of readdirSync(CUES_DIR)) unlinkSync(join(CUES_DIR, file))
 }
 
-/** Answer each cue file once, in the order the tape touches them. */
+/**
+ * Answer each cue file once, in the order the tape touches them. A handler
+ * that throws is recorded on the timeline and fails the take once the tape
+ * ends: a frame the driver could not produce is not a take.
+ */
 function watchCues(handlers, timeline) {
   let busy = Promise.resolve()
   const timer = setInterval(() => {
@@ -256,6 +260,7 @@ function watchCues(handlers, timeline) {
         .then(() => handlers[name]())
         .catch((err) => {
           console.error(`cue ${name} failed: ${err.message}`)
+          timeline.failedCues.push(name)
         })
     }
   }, 100)
@@ -384,6 +389,7 @@ async function record(name, recording, options) {
     vhsStartedAt: 0,
     captureStartedAt: 0,
     cues: {},
+    failedCues: [],
     trimTerminal: 0,
     trimDashboard: 0,
   }
@@ -455,6 +461,9 @@ async function record(name, recording, options) {
     if (code !== 0) throw new Error(`vhs exited ${String(code)}`)
   } finally {
     await cleanup()
+  }
+  if (timeline.failedCues.length > 0) {
+    throw new Error(`the take is not usable: cue ${timeline.failedCues.join(', ')} failed`)
   }
 
   timeline.trimTerminal = options.trimTerminal ?? 0
