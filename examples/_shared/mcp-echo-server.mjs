@@ -6,6 +6,11 @@
  * payment, unannotated) so the Helio policy engine has something
  * meaningful to evaluate.
  *
+ * TOOLSET selects which tools the server lists: `default` (the seven
+ * demo tools, used when the variable is unset), or one of the smaller
+ * sets the agent-budget example gives its three servers (`compute`,
+ * `market-data`, `tools`). An unknown value exits 1.
+ *
  * No dependencies — just node:http.
  */
 
@@ -13,18 +18,21 @@ import { createServer } from 'node:http'
 
 const PORT = Number(process.env.PORT ?? 8080)
 const HOST = process.env.HOST ?? '127.0.0.1'
+const TOOLSET = process.env.TOOLSET ?? 'default'
 
-const TOOLS = [
-  {
-    name: 'get_weather',
-    description: 'Get the current weather for a city',
-    inputSchema: {
-      type: 'object',
-      properties: { city: { type: 'string' } },
-      required: ['city'],
-    },
-    annotations: { readOnlyHint: true, destructiveHint: false },
+const GET_WEATHER = {
+  name: 'get_weather',
+  description: 'Get the current weather for a city',
+  inputSchema: {
+    type: 'object',
+    properties: { city: { type: 'string' } },
+    required: ['city'],
   },
+  annotations: { readOnlyHint: true, destructiveHint: false },
+}
+
+const DEFAULT_TOOLS = [
+  GET_WEATHER,
   {
     name: 'send_email',
     description: 'Send an email to a recipient',
@@ -104,8 +112,10 @@ const TOOLS = [
   },
 ]
 
-const TOOL_RESPONSES = {
-  get_weather: (args) => `Sunny, 22°C in ${args?.city ?? 'unknown'}`,
+const getWeather = (args) => `Sunny, 22°C in ${args?.city ?? 'unknown'}`
+
+const DEFAULT_RESPONSES = {
+  get_weather: getWeather,
   send_email: (args) => `Email sent to ${args?.to ?? 'unknown'}`,
   delete_record: (args) => `Record ${args?.id ?? 'unknown'} deleted`,
   create_payment: (args) =>
@@ -117,6 +127,109 @@ const TOOL_RESPONSES = {
   paypal_payout: (args) =>
     `PayPal payout of ${args?.total ?? 0} sent to ${args?.recipient ?? 'unknown'}`,
 }
+
+// The agent-budget example runs three of these servers, one per door, so
+// each door lists a different tool set. Every tool that spends declares
+// the amount in a numeric argument; run_job carries no amount.
+const COMPUTE_TOOLS = [
+  GET_WEATHER,
+  {
+    name: 'top_up_compute',
+    description: 'Buy compute units for the current run',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        units: { type: 'number', description: 'Compute units to add' },
+        amount: { type: 'number', description: 'Charge in dollars' },
+      },
+      required: ['units', 'amount'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+]
+
+const COMPUTE_RESPONSES = {
+  get_weather: getWeather,
+  top_up_compute: (args) => `Added ${args?.units ?? 0} compute units for ${args?.amount ?? 0} USD`,
+}
+
+const MARKET_DATA_TOOLS = [
+  GET_WEATHER,
+  {
+    name: 'get_prices',
+    description: 'Fetch current prices for a list of symbols',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        symbols: { type: 'array', items: { type: 'string' }, description: 'Ticker symbols' },
+        amount: { type: 'number', description: 'Data fee in dollars' },
+      },
+      required: ['symbols', 'amount'],
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  },
+]
+
+const MARKET_DATA_RESPONSES = {
+  get_weather: getWeather,
+  get_prices: (args) =>
+    `Prices for ${Array.isArray(args?.symbols) ? args.symbols.join(', ') : 'nothing'} fetched for ${args?.amount ?? 0} USD`,
+}
+
+const OPS_TOOLS = [
+  GET_WEATHER,
+  {
+    name: 'run_check',
+    description: 'Run a paid check against a target',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'What to check' },
+        price: { type: 'number', description: 'Price of the check in dollars' },
+      },
+      required: ['target', 'price'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+  {
+    name: 'run_job',
+    description: 'Run an ops job: a named job on a branch with a command list',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job: { type: 'string', description: 'Job name' },
+        branch: { type: 'string', description: 'Branch to run against' },
+        commands: { type: 'array', items: { type: 'string' }, description: 'Commands, in order' },
+        env: { type: 'object', description: 'Environment variables for the job' },
+      },
+      required: ['job', 'branch', 'commands'],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false },
+  },
+]
+
+const OPS_RESPONSES = {
+  get_weather: getWeather,
+  run_check: (args) => `Check of ${args?.target ?? 'unknown'} ran for ${args?.price ?? 0} USD`,
+  run_job: (args) =>
+    `Job ${args?.job ?? 'unknown'} queued on ${args?.branch ?? 'unknown'} with ${Array.isArray(args?.commands) ? args.commands.length : 0} commands`,
+}
+
+const TOOL_SETS = {
+  default: { tools: DEFAULT_TOOLS, responses: DEFAULT_RESPONSES },
+  compute: { tools: COMPUTE_TOOLS, responses: COMPUTE_RESPONSES },
+  'market-data': { tools: MARKET_DATA_TOOLS, responses: MARKET_DATA_RESPONSES },
+  tools: { tools: OPS_TOOLS, responses: OPS_RESPONSES },
+}
+
+if (!Object.hasOwn(TOOL_SETS, TOOLSET)) {
+  console.error(
+    `Unknown TOOLSET "${TOOLSET}": expected one of ${Object.keys(TOOL_SETS).join(', ')}`,
+  )
+  process.exit(1)
+}
+
+const { tools: TOOLS, responses: TOOL_RESPONSES } = TOOL_SETS[TOOLSET]
 
 function handleJsonRpc(request) {
   const { method, params, id } = request

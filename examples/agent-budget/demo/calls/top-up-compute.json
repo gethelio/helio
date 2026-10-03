@@ -1,0 +1,6 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": { "name": "top_up_compute", "arguments": { "units": 2000, "amount": 20 } }
+}

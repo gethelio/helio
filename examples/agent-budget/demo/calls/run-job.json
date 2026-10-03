@@ -1,0 +1,30 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "run_job",
+    "arguments": {
+      "job": "release-preview",
+      "branch": "release/2026.10",
+      "commands": [
+        "git fetch --prune origin release/2026.10 && git checkout --detach origin/release/2026.10",
+        "pnpm install --frozen-lockfile --prefer-offline",
+        "pnpm build && pnpm --filter @example/web build --mode preview",
+        "pnpm test -- --reporter=dot --coverage.enabled=false",
+        "node scripts/db-migrate.mjs --target preview --dry-run=false --timeout 120",
+        "node scripts/publish-preview.mjs --channel preview --tag 2026.10-rc1 --region eu-west-1 --replace",
+        "curl -fsS --retry 5 --retry-delay 3 https://preview.internal.example.com/healthz",
+        "node scripts/notify.mjs --room releases --message 'preview 2026.10-rc1 is up on eu-west-1'"
+      ],
+      "env": {
+        "NODE_ENV": "production",
+        "PREVIEW_REGION": "eu-west-1",
+        "PUBLISH_TARGET": "preview",
+        "DATABASE_URL": "postgres://preview-rw@db.preview.internal.example.com:5432/app",
+        "LOG_LEVEL": "info",
+        "FEATURE_FLAGS": "new-checkout,agent-budget-panel"
+      }
+    }
+  }
+}
