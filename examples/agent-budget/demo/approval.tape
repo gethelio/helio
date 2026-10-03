@@ -36,6 +36,7 @@ Sleep 3s
 # the ticket id; the wait builtin blocks until the approval lands
 Type "date -u +%H:%M:%S"
 Enter
+Sleep 500ms
 Type "curl -s -H 'Content-Type: application/json' -H 'x-helio-session-id: coding-agent-run' -d @calls/run-job.json http://127.0.0.1:3000/mcp/tools &"
 Enter
 Sleep 1.5s
@@ -44,6 +45,7 @@ Enter
 Sleep 1s
 Type "touch cues/approve"
 Enter
+Sleep 500ms
 Type "wait"
 Enter
 Wait@60s

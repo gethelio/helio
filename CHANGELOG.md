@@ -19,6 +19,15 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Added
+
+- **The demo recordings: the approval card and the three-merchant budget
+  demo, with the pipeline that re-records them under
+  `examples/agent-budget/demo/`.** Both recordings are served from
+  helio.so and linked from the READMEs; each is one live session captured
+  twice, the terminal and the dashboard, with the real pointer on the
+  dashboard's own controls.
+
 ### Changed
 
 - **The Slack approval card shows up to 2,000 characters of tool input.**
