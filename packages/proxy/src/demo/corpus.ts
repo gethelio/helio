@@ -1,11 +1,15 @@
 // ---------------------------------------------------------------------------
 // The sample corpus `helio init --demo` writes (issue #397): ten tools on two
-// doors, six sessions plus one sideband channel, 45 days of governed calls
-// in three config epochs, and the budget ledger of one pot past its limit.
-// Everything derives from one base instant and one seeded generator, so two
-// builds from one base are deep-equal; every audit id is a hash. The rows
-// are typed against the store's own input shape and the ledger's row shape,
-// so a column added as required later fails to typecheck here instead of
+// doors, six sessions, 45 days of governed calls in three config epochs,
+// and the budget ledger of one pot the current epoch's own calls filled.
+// The current epoch is what the written config decides: every row under it
+// carries the columns the proxy would have written under `helio-demo.yaml`,
+// and the pot is walked the way the budget engine walks it, so a replay of
+// the epoch through the real pipeline reproduces every row. Everything
+// derives from one base instant and one seeded generator, so two builds
+// from one base are deep-equal; every audit id is a hash. The rows are
+// typed against the store's own input shape and the ledger's row shape, so
+// a column added as required later fails to typecheck here instead of
 // silently writing a stale corpus. Nothing here touches a file or a socket:
 // `seed.ts` writes what this module builds.
 // ---------------------------------------------------------------------------
@@ -18,6 +22,10 @@ import {
   HELIO_MCP_LEGACY_PROTOCOL_VERSION,
   HELIO_MCP_MODERN_PROTOCOL_VERSION,
 } from '../mcp/protocol-version.js'
+
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
 
 // ---------------------------------------------------------------------------
 // Names: the directory, the four files, the marks every consumer prints
@@ -45,9 +53,10 @@ export const DEMO_FILES = [
 export const DEMO_ENVIRONMENT = 'demo'
 /** The two named doors. */
 export const DEMO_UPSTREAMS = { crm: 'demo-crm', billing: 'demo-billing' } as const
-/** The one pot, and the limit the rendered config gives it. */
+/** The one pot, and the limit and window the rendered config gives it (`window: 24h`). */
 export const DEMO_BUDGET_NAME = 'demo-payments'
 export const DEMO_BUDGET_LIMIT = 500
+export const DEMO_BUDGET_WINDOW_MS = 24 * HOUR
 /** The header-resolved sessions; eight characters or fewer so the dashboard shows them whole. */
 export const DEMO_SESSIONS = [
   'demo-s01',
@@ -57,10 +66,6 @@ export const DEMO_SESSIONS = [
   'demo-s05',
   'demo-s06',
 ] as const
-/** The sideband row's session, resolved by an adapter rather than a header. */
-export const DEMO_CHANNEL_SESSION = 'demo-ch'
-/** The origin string of the one sideband row. */
-export const DEMO_AGENT_ORIGIN = 'demo-agent'
 
 type DemoUpstream = (typeof DEMO_UPSTREAMS)[keyof typeof DEMO_UPSTREAMS]
 
@@ -200,7 +205,11 @@ export interface DemoCorpus {
   /** The audit rows, oldest first. */
   readonly records: readonly DemoAuditRow[]
   readonly ledgerMeta: BudgetMetaRow
-  /** The ledger rows: an epoch-1 history and the epoch-2 spend inside the last 24 hours. */
+  /**
+   * The ledger rows: a generation-1 history under the second config, then
+   * one generation-2 row per allowed contributor call of the current epoch,
+   * carrying that call's own audit id, amount and instant.
+   */
   readonly ledgerRows: readonly BudgetLedgerRow[]
 }
 
@@ -210,10 +219,6 @@ export interface BuildDemoCorpusOptions {
   /** The hash stamped on the current epoch's rows: the sha256 of the config file the caller writes. */
   readonly configSha256: string
 }
-
-const MINUTE = 60_000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
 
 const CONFIG_EPOCH_A_HASH = sha256('helio-demo-config-epoch-a')
 const CONFIG_EPOCH_B_HASH = sha256('helio-demo-config-epoch-b')
@@ -469,7 +474,9 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
     ),
   )
 
-  // Epoch C, 6 days back to 5 minutes back: the written rules decide.
+  // Epoch C, 6 days back to 5 minutes back: the written rules decide. The
+  // file sets no `flag_destructive`, so the proxy flags nothing under it;
+  // the pot's refusals are placed afterwards by the walk below.
   const currentTools = [
     'get_customer',
     'get_invoice',
@@ -494,29 +501,20 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
             block_reason: 'policy_denied',
             matched_rule: 'block-destructive',
             matched_rule_index: 1,
+            flagged_destructive: false,
           }),
         ),
       )
       return
     }
     if (isReadOnly(tool)) {
-      push(when, call(tool, configSha256, { matched_rule: 'allow-reads', matched_rule_index: 0 }))
-      return
-    }
-    if (i % 23 === 11) {
       push(
         when,
-        call(
-          tool,
-          configSha256,
-          blocked({
-            dry_run: true,
-            policy_decision: 'deny',
-            block_reason: 'policy_denied',
-            matched_rule: 'block-destructive',
-            matched_rule_index: 1,
-          }),
-        ),
+        call(tool, configSha256, {
+          matched_rule: 'allow-reads',
+          matched_rule_index: 0,
+          flagged_destructive: false,
+        }),
       )
       return
     }
@@ -527,11 +525,12 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
           upstream_error: 'upstream returned 503',
           upstream_response: null,
           upstream_http_status: 503,
+          flagged_destructive: false,
         }),
       )
       return
     }
-    push(when, call(tool, configSha256))
+    push(when, call(tool, configSha256, { flagged_destructive: false }))
   }
   for (let i = 0; i < 120; i++) {
     currentCall(
@@ -549,21 +548,6 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
     )
   }
 
-  // One sideband row: an adapter-governed message with no MCP door.
-  push(
-    at(3 * HOUR),
-    call(toolByName('send_invoice'), configSha256, {
-      tool_name: 'send_message',
-      tool_input: { channel: 'C-demo', text: 'invoice inv_5031 sent' },
-      upstream: null,
-      origin: DEMO_AGENT_ORIGIN,
-      session_id: DEMO_CHANNEL_SESSION,
-      session_source: 'sideband',
-      protocol_version: null,
-      flagged_destructive: false,
-      metadata: { channel_id: 'C-demo', sender_id: 'U-demo' },
-    }),
-  )
   // One drift event: update_customer's annotations changed under the proxy.
   push(
     at(2 * HOUR),
@@ -599,22 +583,22 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
       flagged_destructive: false,
     }),
   )
-  // One anonymous dry-run allow.
+  // One anonymous allow: a call that carried no session id.
   push(
     at(100 * MINUTE),
     call(toolByName('send_invoice'), configSha256, {
-      dry_run: true,
       session_id: null,
       session_source: null,
+      flagged_destructive: false,
     }),
   )
-  // The budget refusal, 30 minutes back, as the store writes it: the policy
-  // allowed the call and the pot refused it.
+  // The charge the docs repeat live, 30 minutes back: the walk below
+  // refuses it, because the pot is already at 498 when it arrives.
   push(
     at(30 * MINUTE),
     call(toolByName('create_charge'), configSha256, {
       tool_input: { amount: 60, currency: 'USD', customer: 'cus_1077' },
-      ...blocked({ block_reason: 'budget_exceeded' }),
+      flagged_destructive: false,
     }),
   )
 
@@ -628,9 +612,9 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
     record: row.record,
   }))
 
-  // The ledger: epoch 1 under config B (eight spends and the one approved
-  // overage), epoch 2 under the written file (ten spends inside 24 hours,
-  // 540 against a limit of 500), keyed the way the engine charges.
+  // The ledger, keyed the way the engine charges: generation 1 under config
+  // B (eight spends and the one approved overage), then generation 2 under
+  // the written file, which is the walk's own rows below.
   const bucketKey = budgetBucketKey(DEMO_BUDGET_NAME, 'global', { sessionId: null, senderId: null })
   const ledgerRow = (
     generation: number,
@@ -659,17 +643,59 @@ export function buildDemoCorpus(options: BuildDemoCorpusOptions): DemoCorpus {
     ledgerRows.push(ledgerRow(1, 'spend', 40 + i * 5, 'create_charge', 19 * DAY - i * DAY))
   }
   ledgerRows.push(ledgerRow(1, 'approved_overage', 750, 'create_charge', 12 * DAY - 2 * HOUR))
-  for (let i = 0; i < 10; i++) {
-    const refund = i % 3 === 2
-    ledgerRows.push(
-      ledgerRow(
-        2,
-        'spend',
-        refund ? 40 : 60,
-        refund ? 'refund_charge' : 'create_charge',
-        20 * HOUR - i * 2 * HOUR,
-      ),
-    )
+
+  // The pot, decided the way the engine decides it: every contributor call
+  // the policy allowed in the current epoch, in time order, against a
+  // strict sliding window of the amounts committed before it. A call that
+  // fits commits and becomes one generation-2 ledger row carrying its own
+  // id, amount and instant; a call that does not fit is stored as the
+  // proxy stores a refusal (the policy allowed it, the pot refused it, and
+  // nothing went upstream).
+  const isContributor = (record: AuditRecordInput): boolean =>
+    record.config_sha256 === configSha256 &&
+    record.record_kind === 'tool_call' &&
+    record.upstream === DEMO_UPSTREAMS.billing &&
+    (record.tool_name === 'create_charge' || record.tool_name === 'refund_charge') &&
+    record.policy_decision === 'allow'
+  const committed: Array<{ timestampMs: number; amount: number }> = []
+  for (let index = 0; index < records.length; index++) {
+    const row = records[index] as DemoAuditRow
+    if (!isContributor(row.record)) continue
+    const amount = row.record.tool_input['amount']
+    if (typeof amount !== 'number') throw new Error(`demo corpus contributor without an amount`)
+    const timestampMs = new Date(row.created_at).getTime()
+    const windowStart = timestampMs - DEMO_BUDGET_WINDOW_MS
+    while (
+      committed.length > 0 &&
+      (committed[0] as { timestampMs: number }).timestampMs <= windowStart
+    ) {
+      committed.shift()
+    }
+    const spent = committed.reduce((sum, entry) => sum + entry.amount, 0)
+    if (spent + amount <= DEMO_BUDGET_LIMIT) {
+      committed.push({ timestampMs, amount })
+      ledgerRows.push({
+        budget_name: DEMO_BUDGET_NAME,
+        bucket_key: bucketKey,
+        kind: 'spend',
+        amount,
+        currency: 'USD',
+        tool_name: row.record.tool_name,
+        origin: 'mcp',
+        audit_record_id: row.id,
+        timestamp: row.created_at,
+        timestamp_ms: timestampMs,
+        generation: 2,
+      })
+      continue
+    }
+    records[index] = {
+      ...row,
+      record: {
+        ...row.record,
+        ...blocked({ block_reason: 'budget_exceeded', upstream_error: null }),
+      },
+    }
   }
   const ledgerMeta: BudgetMetaRow = {
     budget_name: DEMO_BUDGET_NAME,

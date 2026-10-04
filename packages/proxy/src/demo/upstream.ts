@@ -10,8 +10,12 @@ import { HELIO_MCP_LEGACY_PROTOCOL_VERSION } from '../mcp/protocol-version.js'
 import { DEMO_TOOLS, DEMO_UPSTREAMS } from './corpus.js'
 import type { DemoTool } from './corpus.js'
 
-/** The tool as the wire lists it: no door name, no annotations key when the corpus has none. */
-function wireTool(tool: DemoTool): Record<string, unknown> {
+/**
+ * The tool as the wire lists it: no door name, no annotations key when the
+ * corpus has none. The definition the sample server lists and the baseline
+ * the seed writes are the same object.
+ */
+export function wireTool(tool: DemoTool): Record<string, unknown> {
   return {
     name: tool.name,
     description: tool.description,

@@ -109,7 +109,7 @@ dashboard:
 `
 }
 
-/** Render the README: what is sample, what to run, what each surface shows, and the two holes. */
+/** Render the README: what is sample, what to run, what each surface shows, and how to regenerate. */
 export function renderDemoReadme(): string {
   return `# Helio demo directory
 
@@ -128,8 +128,9 @@ label \`${DEMO_ENVIRONMENT}\`, and the config reload records are titled
   on loopback. Nothing in it needs a secret.
 - \`${DEMO_AUDIT_FILE}\`: about 360 audit rows over 45 days in three
   config epochs (a first one with no rule, a second under an approval
-  rule, the current one under the file above) and 19 budget ledger rows
-  with the pot past its limit.
+  rule, the current one under the file above), 41 budget ledger rows with
+  the pot at 498 of ${String(DEMO_BUDGET_LIMIT)} USD after 19 refused calls, and the ten tool
+  baselines the first start restores.
 - \`${DEMO_UPSTREAM_FILE}\`: a dependency-free MCP upstream serving the
   same ten tools, five on \`/crm\` and five on \`/billing\`.
 - \`README.md\`: this file.
@@ -176,14 +177,13 @@ purpose, and the line is a fact about it, not a fault.
   blocked call's tool, and the \`${DEMO_UPSTREAMS.crm}\` and \`${DEMO_UPSTREAMS.billing}\`
   door names sit in the JSON's called pairs (\`--format json --include-names\`)
   and in the text pairs table once a proxy answers.
-- \`helio start\`: two doors, ten tool-door pairs, a pot at 540 of
-  ${String(DEMO_BUDGET_LIMIT)} USD. A \`create_charge\` through the proxy is refused with
+- \`helio start\`: two doors, ten tool-door pairs, a pot at 498 of
+  ${String(DEMO_BUDGET_LIMIT)} USD. A \`create_charge\` of 60 through the proxy is refused with
   \`budget_exceeded\`; a \`delete_customer\` is refused by \`block-destructive\`.
 - \`helio policy status\`: the authority surface, the coverage of the two
   rules, and one tool the upstream lists that no row has ever called.
 - The dashboard: the feed, the audit log and the budgets page over the
-  same rows. The analytics page labels the one sideband row's bar
-  \`send_message\` with no door beside it, because that row has no door.
+  same rows.
 
 ## Regenerating
 

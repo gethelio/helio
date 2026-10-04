@@ -7,6 +7,7 @@ import Database from 'better-sqlite3'
 import { AuditStore } from '../audit/store.js'
 import { BudgetEngine, BudgetLedger, compileBudgets } from '../budget/index.js'
 import { loadConfig } from '../config/index.js'
+import { canonicalize } from '../util/canonical-json.js'
 import { mintGatedCharges } from '../__tests__/helpers/session-gate-mints.js'
 import {
   DEMO_AUDIT_FILE,
@@ -14,10 +15,12 @@ import {
   DEMO_CONFIG_FILE,
   DEMO_FILES,
   DEMO_README_FILE,
+  DEMO_TOOLS,
   DEMO_UPSTREAM_FILE,
   buildDemoCorpus,
 } from './corpus.js'
 import { DEMO_MAX_BASE_AGE_MS, parseDemoBase, seedDemoDirectory } from './seed.js'
+import { wireTool } from './upstream.js'
 
 // ---------------------------------------------------------------------------
 // Every seed lands in its own temp directory and is deleted after the test.
@@ -63,6 +66,7 @@ const EVENTS_SQL =
   'audit_record_id, timestamp, timestamp_ms, created_at FROM budget_events ' +
   'ORDER BY timestamp_ms, audit_record_id'
 const META_SQL = 'SELECT * FROM budget_meta ORDER BY budget_name'
+const BASELINES_SQL = 'SELECT * FROM tool_baselines ORDER BY upstream, tool'
 
 describe('parseDemoBase', () => {
   const now = new Date('2026-09-24T12:34:56.789Z')
@@ -121,7 +125,7 @@ describe('seedDemoDirectory: what it writes', () => {
       for (const path of result.files) expect(existsSync(path), path).toBe(true)
       const corpus = buildDemoCorpus({ base: BASE, configSha256: result.configSha256 })
       expect(result.auditRows).toBe(corpus.records.length)
-      expect(result.ledgerRows).toBe(19)
+      expect(result.ledgerRows).toBe(41)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -164,7 +168,7 @@ describe('seedDemoDirectory: what it writes', () => {
     }
   })
 
-  it('writes the ledger meta and the 19 events through the ledger', async () => {
+  it('writes the ledger meta and the 41 events through the ledger', async () => {
     const dir = tempDir()
     try {
       await seedDemoDirectory(dir, { base: BASE, force: false })
@@ -180,8 +184,8 @@ describe('seedDemoDirectory: what it writes', () => {
           epoch: 2,
         })
         const page = ledger.listEventsForExport(DEMO_BUDGET_NAME)
-        expect(page.total).toBe(19)
-        expect(page.events).toHaveLength(19)
+        expect(page.total).toBe(41)
+        expect(page.events).toHaveLength(41)
         const meta = store.database.prepare('SELECT updated_at FROM budget_meta').get() as {
           updated_at: string
         }
@@ -195,7 +199,7 @@ describe('seedDemoDirectory: what it writes', () => {
     }
   })
 
-  it('hydrates into one pot past its limit that refuses the next charge', async () => {
+  it('hydrates into one pot at 498 of 500 that refuses the documented charge of 60', async () => {
     const dir = tempDir()
     try {
       await seedDemoDirectory(dir, { base: BASE, force: false })
@@ -217,8 +221,8 @@ describe('seedDemoDirectory: what it writes', () => {
         expect(states[0]?.buckets).toHaveLength(1)
         expect(states[0]?.buckets[0]).toMatchObject({
           bucket_key: `budget:${DEMO_BUDGET_NAME}:global`,
-          spent: 540,
-          remaining: 0,
+          spent: 498,
+          remaining: 2,
         })
         const { charges } = engine.resolveCharges({
           toolName: 'create_charge',
@@ -233,6 +237,35 @@ describe('seedDemoDirectory: what it writes', () => {
       } finally {
         store.close()
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes one tool_baselines row per demo tool per door, fingerprinted as the sample server lists it', async () => {
+    const dir = tempDir()
+    try {
+      await seedDemoDirectory(dir, { base: BASE, force: false })
+      const rows = dump(
+        join(dir, DEMO_AUDIT_FILE),
+        'SELECT upstream, tool, fingerprint, definition_json, first_seen, last_confirmed, ' +
+          'accepted_at FROM tool_baselines ORDER BY upstream, tool',
+      )
+      const expected = [...DEMO_TOOLS]
+        .sort((a, b) => a.upstream.localeCompare(b.upstream) || a.name.localeCompare(b.name))
+        .map((tool) =>
+          JSON.stringify({
+            upstream: tool.upstream,
+            tool: tool.name,
+            fingerprint: canonicalize(wireTool(tool)),
+            definition_json: JSON.stringify(wireTool(tool)),
+            first_seen: BASE.toISOString(),
+            last_confirmed: BASE.toISOString(),
+            accepted_at: null,
+          }),
+        )
+      expect(expected).toHaveLength(10)
+      expect(rows).toEqual(expected)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -317,7 +350,7 @@ describe('seedDemoDirectory: refusals and --force', () => {
 })
 
 describe('seedDemoDirectory: determinism', () => {
-  it('writes byte-equal audit rows and ledger rows (minus the event id) from one base', async () => {
+  it('writes byte-equal audit rows, ledger rows (minus the event id) and baselines from one base', async () => {
     const dir = tempDir()
     try {
       const a = join(dir, 'a')
@@ -338,6 +371,9 @@ describe('seedDemoDirectory: determinism', () => {
       expect(auditA).toEqual(dump(dbB, AUDIT_SQL))
       expect(dump(dbA, EVENTS_SQL)).toEqual(dump(dbB, EVENTS_SQL))
       expect(dump(dbA, META_SQL)).toEqual(dump(dbB, META_SQL))
+      const baselinesA = dump(dbA, BASELINES_SQL)
+      expect(baselinesA).toHaveLength(10)
+      expect(baselinesA).toEqual(dump(dbB, BASELINES_SQL))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
