@@ -40,7 +40,7 @@ name of what it prints: every upstream name, session id and pot name in
 the database starts with `demo-`, every row carries the environment label
 `demo`, the config file is `helio-demo.yaml` and the config reload records
 in the database are titled after it. The one surface that prints no name
-by design is the default activation report; see [the marks](#the-marks-and-the-two-holes).
+by design is the default activation report; see [the marks](#the-marks-and-the-one-hole).
 
 ## The four files
 
@@ -50,16 +50,21 @@ by design is the default activation report; see [the marks](#the-marks-and-the-t
   `on_exceed: deny`), the audit database beside it, and the dashboard in
   open mode on loopback. No rule uses `require_approval`, so nothing here
   needs `dashboard.api_secret`.
-- `helio-demo-audit.db`: 358 audit rows over 45 days in three config
-  epochs and 19 budget ledger rows. The first epoch has no rule and the
-  destructive tools run unopposed; the second sits under an approval rule
-  (`big-charge-approval`) with four approved charges; the current one is
-  the written file, with read-only calls decided by `allow-reads`,
-  destructive calls denied by `block-destructive`, a few dry-run denies,
-  a few upstream 503s, one drift event, one rejected nameless call, one
-  sideband row, and the pot's refusal of a charge 30 minutes before the
-  end. Two applied reloads and one refused edit sit between the epochs.
-  The ledger holds the pot at 540 of 500 inside the last 24 hours.
+- `helio-demo-audit.db`: 357 audit rows over 45 days in three config
+  epochs, 41 budget ledger rows and the ten tool baselines. The first
+  epoch has no rule and the destructive tools run unopposed; the second
+  sits under an approval rule (`big-charge-approval`) with four approved
+  charges; the current one is the written file, with read-only calls
+  decided by `allow-reads`, destructive calls denied by
+  `block-destructive`, a few upstream 503s, one drift event, one rejected
+  nameless call, and the pot's refusals. Two applied reloads and one
+  refused edit sit between the epochs. The ledger is the calls' own
+  amounts walked through the pot the way the proxy walks it: the pot
+  filled 2 h 52 min before the end, refusing a refund of 21; of the 19
+  contributor calls after that, 18 were refused and one refund of 11
+  still fit, so the ledger holds it at 498 of 500 with 19 refusals in
+  all. The baselines are the ten definitions the sample upstream lists,
+  so the first `helio start` restores them instead of baselining anew.
 - `mcp-demo-server.mjs`: a dependency-free MCP upstream on `node:http`
   serving the same ten tools, five on `/crm` and five on `/billing`,
   answering every call with `<tool>: ok (sample)`. `PORT` overrides its 8080.
@@ -164,36 +169,38 @@ Right after seeding, on a 7-day window:
 
 ```text
 Helio activation report
-  Written by Helio 0.0.0 (unreleased build) on 2026-09-27 (UTC). Names: excluded (--include-names restores tool, door and rule names).
+  Written by Helio 0.0.0 (unreleased build) on 2026-10-04 (UTC). Names: excluded (--include-names restores tool, door and rule names).
   Counts cover the last 7d; dates are within the audit retention of 90d.
   Sources: the audit database (read; this config file is the one that last wrote policy to it). No proxy answered on the configured dashboard port, so the snapshot section is absent.
   Kill switch: unknown; this report got no kill-switch status (see Sources), and the audit rows record kills and resumes as they happened, not whether a halt is in force now.
 
 Timeline (dates within retention)
-  First call observed            2026-08-13   earliest persisted tool call
-  First rule                     2026-09-07   first applied config reload
+  First call observed            2026-08-20   earliest persisted tool call
+  First rule                     2026-09-14   first applied config reload
                                  Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.
   First generation               not available in this version
   First simulation               not available in this version
   First apply                    not available in this version
-  First enforcement decision     2026-09-22   first blocked call (policy_denied)
+  First enforcement decision     2026-09-28   first blocked call (policy_denied)
 
 Persisted (last 7d)
-  253 calls across 9 tool-door pairs, 7 sessions, 1 call without a session id (denied and dry-run calls included)
-  Decisions: 198 permitted, 51 blocked (budget_exceeded 1, policy_denied 50), 4 dry-run, 0 approvals requested
+  252 calls across 8 tool-door pairs, 6 sessions, 1 call without a session id (denied and dry-run calls included)
+  Decisions: 183 permitted, 69 blocked (budget_exceeded 19, policy_denied 50), 0 dry-run, 0 approvals requested
   Config versions seen: 1
   Config reloads: 2 (1 applied)
-  audit rows since 2026-08-13
+  audit rows since 2026-08-20
 ```
 
 The dates move with the day you seed (the first call is always 45 days
 before the base instant); the counts hold for the windows the rows were
-placed in. `--window 4h` right after seeding reads `133 calls across 9
-tool-door pairs, 7 sessions`; `--window 30d` reads `313 calls`, `4
+placed in. `--window 4h` right after seeding reads `132 calls across 8
+tool-door pairs, 6 sessions`; `--window 30d` reads `312 calls`, `4
 approvals requested`, `Config versions seen: 2` and `Config reloads: 3 (2
 applied)`, because the approval rule's epoch and the first reload fall
-inside it. The counts slide out of each window as time passes; a day
-later the 4-hour window is empty.
+inside it. The counts slide out of each window as time passes: the oldest
+call in the 4-hour window sits 3 h 55 min before the base, so that count
+starts falling five minutes after the seed, and a day later the window is
+empty.
 
 `--include-names` restores tool, door and rule names. With no proxy
 answering, the text face restores the first blocked call's tool
@@ -203,8 +210,8 @@ under `persisted.pairs_called_in_window`), and in the text face's
 tool-door pairs table once a proxy answers (below).
 
 ```bash
-helio export -c helio-demo.yaml                      # 358 records, every one with "environment": "demo"
-helio export -c helio-demo.yaml --budgets demo-payments   # the 19 ledger rows, newest first
+helio export -c helio-demo.yaml                      # 357 records, every one with "environment": "demo"
+helio export -c helio-demo.yaml --budgets demo-payments   # the 41 ledger rows, newest first
 helio validate -c helio-demo.yaml                    # Config is valid: helio-demo.yaml (2 policy rules, 1 budget)
 ```
 
@@ -225,14 +232,21 @@ cd helio-demo
 helio start -c helio-demo.yaml
 ```
 
-The boot begins with one line per door that is a fact about the sample
-upstream, not a fault: it answers `initialize` with the 2025-06-18
-revision, so the proxy detects the legacy era and says so. Then the two
+The boot begins, per door, with three lines that are facts about the
+sample directory, not faults: the ten tool baselines the seed wrote are
+restored from the database; the upstream answers `initialize` with the
+2025-06-18 revision, so the proxy detects the legacy era and says so; and
+the annotation cache primes against the live listing, which matches the
+restored baselines (`5 restored, 0 new`, nothing drifted). Then the two
 authority lines, the doors and the audit path:
 
 ```text
+[helio][demo-crm] Tool baselines restored: 5 for demo-crm from helio-demo-audit.db
 [helio][demo-crm] Upstream MCP era detected: legacy (initialize handshake)
+[helio][demo-crm] Annotation cache primed: 5 tool definitions baselined for drift detection (5 restored, 0 new)
+[helio][demo-billing] Tool baselines restored: 5 for demo-billing from helio-demo-audit.db
 [helio][demo-billing] Upstream MCP era detected: legacy (initialize handshake)
+[helio][demo-billing] Annotation cache primed: 5 tool definitions baselined for drift detection (5 restored, 0 new)
 Helio proxy listening on http://127.0.0.1:3000
 Policies: 2 rules loaded (default: allow)
 Authority surface: 10 tool-door pairs across 2 upstreams, 2 annotated destructive
@@ -243,9 +257,8 @@ Audit: ./helio-demo-audit.db (retention: 90d)
 Dashboard API listening on http://127.0.0.1:3100
 ```
 
-(The annotation-cache line that follows each era line, and the open-mode
-and enforcement-posture warnings after the dashboard line, are the same
-ones any config prints.)
+(The open-mode and enforcement-posture warnings after the dashboard line
+are the same ones any config prints.)
 
 ```bash
 helio policy status -c helio-demo.yaml
@@ -264,11 +277,10 @@ Policy coverage
   on_tool_drift: block
 
 Persisted (last 4h)
-  133 calls across 9 tool-door pairs, 7 sessions (denied and dry-run calls included)
+  132 calls across 8 tool-door pairs, 6 sessions (denied and dry-run calls included)
   1 reachable and permitted, never called in the last 4h
-  1 called in the last 4h on no primed door
-  audit rows since 2026-08-10
-  Readiness: suppressed, the policy enforces something (133 calls across 9 tool-door pairs in the last 4h)
+  audit rows since 2026-08-20
+  Readiness: suppressed, the policy enforces something (132 calls across 8 tool-door pairs in the last 4h)
 
 Tool-door pairs (calls in the last 4h)
   get_customer      demo-crm      allow  rule "allow-reads"        26
@@ -287,11 +299,11 @@ Every face of the status command has a row here: `export_customers` is
 the tool with no annotations, destructive by MCP default and denied by
 `block-destructive`; `merge_customers` is exposed by the upstream and has
 never been called; `list_invoices` is reachable, permitted and never
-called; the one call on no primed door is the sideband row
-(`send_message`, an adapter origin with no MCP door).
+called. Every call sits on a primed door, so the line that would count
+calls on none does not print.
 
-The pot is past its limit, so a charge through the proxy is refused, and
-so is a destructive call:
+The pot stands at 498 of 500, so a charge of 60 is refused, and so is a
+destructive call:
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/mcp/demo-billing \
@@ -317,13 +329,13 @@ curl -s -X POST http://127.0.0.1:3000/mcp/demo-billing \
         {
           "name": "demo-payments",
           "limit": 500,
-          "spent": 540,
-          "remaining": 0,
+          "spent": 498,
+          "remaining": 2,
           "attempted_amount": 60,
           "currency": "USD",
           "window": "24h",
           "on_exceed": "deny",
-          "reset_at": "2026-09-24T18:55:00.000Z"
+          "reset_at": "2026-10-04T17:47:00.000Z"
         }
       ],
       "suggestion": "Budget \"demo-payments\" would be exceeded by this call. Wait for the window to reset or reduce the amount.",
@@ -336,8 +348,8 @@ curl -s -X POST http://127.0.0.1:3000/mcp/demo-billing \
 The same call with `"name":"delete_customer"` on `/mcp/demo-crm` is
 refused with `"reason":"policy_denied"` and `"rule":"block-destructive"`.
 Both refusals are written to the same database, and the pot survives a
-restart of the proxy (`GET http://127.0.0.1:3100/api/budgets` reads `540`
-spent, `0` remaining, before and after).
+restart of the proxy (`GET http://127.0.0.1:3100/api/budgets` reads `498`
+spent, `2` remaining, before and after, within 2 h 20 min of the seed).
 
 With the proxy answering, `helio report activation -c helio-demo.yaml
 --include-names` gains its snapshot section and the tool-door pairs table
@@ -345,33 +357,28 @@ with `demo-crm` and `demo-billing` on every row.
 
 Open http://127.0.0.1:3100. The feed and the audit log show the door
 (`demo-crm` or `demo-billing`) on every MCP row and the session id whole
-(`demo-s01` to `demo-s06`, `demo-ch`); the budgets page shows
-`demo-payments` at 540.00 of 500.00 USD with its 19 events; the analytics
-page ranks the tools as `tool (door)`.
+(`demo-s01` to `demo-s06`); the budgets page shows `demo-payments` at
+498.00 of 500.00 USD with its 41 events; the analytics page ranks the
+tools as `tool (door)`.
 
-## The marks, and the two holes
+## The marks, and the one hole
 
-| Surface                                     | What it prints from the rows                  | The mark                                                                                                                                                        |
-| ------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `helio init --demo`                         | the four paths, the next steps                | the sentence `Sample traffic, not your own`, and `-c helio-demo.yaml` on every next step                                                                        |
-| `helio report activation`                   | counts, dates, decision classes               | none from the rows, by design (below)                                                                                                                           |
-| `helio report activation --include-names`   | tool, door and rule names                     | `demo-crm`, `demo-billing` (in the JSON's called pairs without a proxy; in the pairs table with one)                                                            |
-| `helio start`                               | upstream names, the audit path                | `Upstream[demo-crm]`, `Upstream[demo-billing]`, `Audit: ./helio-demo-audit.db`                                                                                  |
-| `helio policy status`                       | the door on every pair                        | `demo-crm`, `demo-billing`                                                                                                                                      |
-| the dashboard feed, audit log, detail panel | the door when the row has one, the session id | `demo-crm` / `demo-billing` on every MCP row; `demo-s01` to `demo-s06` and `demo-ch` whole; the three reload rows have neither and are titled `helio-demo.yaml` |
-| the dashboard budgets page                  | the pot name                                  | `demo-payments`                                                                                                                                                 |
-| `helio export`                              | every column                                  | `environment: demo`, `upstream: demo-*`, `session_id: demo-*`, `origin: demo-agent` on the sideband row                                                         |
+| Surface                                     | What it prints from the rows                  | The mark                                                                                                                                          |
+| ------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `helio init --demo`                         | the four paths, the next steps                | the sentence `Sample traffic, not your own`, and `-c helio-demo.yaml` on every next step                                                          |
+| `helio report activation`                   | counts, dates, decision classes               | none from the rows, by design (below)                                                                                                             |
+| `helio report activation --include-names`   | tool, door and rule names                     | `demo-crm`, `demo-billing` (in the JSON's called pairs without a proxy; in the pairs table with one)                                              |
+| `helio start`                               | upstream names, the audit path                | `Upstream[demo-crm]`, `Upstream[demo-billing]`, `Audit: ./helio-demo-audit.db`                                                                    |
+| `helio policy status`                       | the door on every pair                        | `demo-crm`, `demo-billing`                                                                                                                        |
+| the dashboard feed, audit log, detail panel | the door when the row has one, the session id | `demo-crm` / `demo-billing` on every MCP row; `demo-s01` to `demo-s06` whole; the three reload rows have neither and are titled `helio-demo.yaml` |
+| the dashboard budgets page                  | the pot name                                  | `demo-payments`                                                                                                                                   |
+| `helio export`                              | every column                                  | `environment: demo`, `upstream: demo-*`, `session_id: demo-*`                                                                                     |
 
-Two surfaces carry no mark, and both are stated here rather than
-patched:
-
-- The default activation report is nameless by design: it holds counts,
-  dates and enum values so it can be handed over, and nothing on its face
-  says which database it read. Share a demo report with
-  `--include-names`, or say where it came from.
-- The analytics page labels a bar `tool (door)` only when the row has a
-  door. The one sideband row's bar reads `send_message` with nothing
-  beside it, because that row has no door.
+One surface carries no mark, and it is stated here rather than patched:
+the default activation report is nameless by design. It holds counts,
+dates and enum values so it can be handed over, and nothing on its face
+says which database it read. Share a demo report with `--include-names`,
+or say where it came from.
 
 ## The report's same-file line
 
@@ -394,10 +401,13 @@ text report; the one column that differs is the ledger's own event id.
 the oldest row is 45 days before the base, and the config's retention is
 90 days.
 
-The pot's window is 24 hours, so the breach face (a refused charge, 540
-of 500) lasts a day; the report's 4-hour window empties within hours and
-its 7-day window over the following days; the audit retention purges the
-oldest rows at the next open once they pass 90 days. Rerun
+The pot's window is 24 hours and slides: `498 of 500` reads for 2 h 20
+min after the seed, until the oldest in-window charge ages out; the
+documented charge of 60 is refused for 4 h 40 min, until the pot drops to
+401; a day after the seed the window is empty. The report's 4-hour window
+empties within hours and its 7-day window over the following days; the
+audit retention purges the oldest rows at the next open once they pass 90
+days. Rerun
 `helio init --demo --force` in the parent directory for a fresh history.
 `--force` removes the database and its `-wal` and `-shm` sidecars before
 writing, overwrites the other three files, and leaves anything else in the

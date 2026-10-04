@@ -74,6 +74,14 @@ describe('renderDemoReadme', () => {
     expect(readme).toContain('Error: Cannot read config file: helio.yaml')
     expect(readme).toContain('--force')
   })
+
+  it('describes the pot the corpus writes and no sideband row', () => {
+    expect(readme).toContain('498 of 500')
+    expect(readme).toContain('19 refused calls')
+    expect(readme).toContain('41 budget ledger rows')
+    expect(readme).not.toContain('send_message')
+    expect(readme).not.toContain('540')
+  })
 })
 
 describe('renderDemoUpstream', () => {
