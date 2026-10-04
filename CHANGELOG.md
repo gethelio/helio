@@ -43,6 +43,18 @@ Maintainer notes:
   cancelled where it is; on `v0.15.0` the twin ran CI and Docker again,
   pushed the image a second time and waited on the environment approvals
   beside the real run.
+- **The demo corpus's current epoch is now what `helio-demo.yaml` decides.**
+  `helio init --demo` wrote rows under the current config that the config
+  cannot produce: dry-run denies (the file has no `dry_run`), a sideband
+  `send_message` row on no door, a `flagged_destructive` mark the file
+  never sets, and a budget ledger of invented amounts (540 of 500) beside
+  one labeled refusal. Every row of that epoch now carries the columns the
+  proxy writes under the file, and the ledger is the calls' own amounts
+  walked through the pot the way the engine walks it: the pot fills 2 h
+  52 min before the seed, 19 contributor calls are refused, and the ledger
+  holds 498 of 500 USD at the base, so the documented `create_charge` of
+  60 is refused for the same reason live. A test replays the epoch through
+  the real decision pipeline and budget engine and pins every column.
 
 ## [0.15.0] - 2026-10-02
 

@@ -7610,10 +7610,13 @@ describe('helio init --demo (issue #397)', () => {
       const rowsA = dump(join(a, 'helio-demo-audit.db'))
       expect(rowsA.length).toBeGreaterThan(300)
       expect(rowsA).toEqual(dump(join(b, 'helio-demo-audit.db')))
-      // The budget refusal sits 30 minutes before the pinned base.
-      const refusal = rowsA.find((row) => row.includes('"block_reason":"budget_exceeded"')) ?? ''
-      expect(refusal).toContain(
-        `"created_at":"${new Date(new Date(AT).getTime() - 30 * 60_000).toISOString()}"`,
+      // A budget_exceeded row sits 30 minutes before the pinned base.
+      const refusals = rowsA.filter((row) => row.includes('"block_reason":"budget_exceeded"'))
+      expect(refusals.length).toBeGreaterThan(1)
+      expect(refusals).toContainEqual(
+        expect.stringContaining(
+          `"created_at":"${new Date(new Date(AT).getTime() - 30 * 60_000).toISOString()}"`,
+        ),
       )
     } finally {
       rmSync(dir, { recursive: true, force: true })
@@ -7702,8 +7705,8 @@ describe('helio init --demo (issue #397)', () => {
         'demo-payments',
       ])
       expect(budgets.code).toBe(0)
-      expect(budgets.stderr).toContain('Exported 19 of 19 records')
-      expect(JSON.parse(budgets.stdout)).toHaveLength(19)
+      expect(budgets.stderr).toContain('Exported 41 of 41 records')
+      expect(JSON.parse(budgets.stdout)).toHaveLength(41)
 
       const validate = await runIn(dir, ['validate', '-c', 'helio-demo.yaml'])
       expect(validate.code).toBe(0)
