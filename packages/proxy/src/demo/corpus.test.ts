@@ -133,7 +133,7 @@ describe('buildDemoCorpus: the coverage of the current epoch', () => {
   })
 
   it('carries no dry-run row (the file cannot emit one) and a few upstream 503 rows', () => {
-    expect(inC.filter((row) => row.record.dry_run)).toHaveLength(0)
+    for (const row of inC) expect(row.record.dry_run, row.id).toBe(false)
     const errors = inC.filter((row) => row.record.upstream_http_status === 503)
     expect(errors.length).toBeGreaterThanOrEqual(2)
     for (const row of errors) {
@@ -317,24 +317,25 @@ describe('buildDemoCorpus: every kind and every mark', () => {
     expect(rejected[0]?.record.tool_name).toBe('<nameless>')
     expect(rejected[0]?.record.block_reason).toBe('missing_tool_name')
 
-    expect(rows.filter((row) => row.record.session_source === 'sideband')).toHaveLength(0)
-    expect(rows.filter((row) => row.record.origin === 'demo-agent')).toHaveLength(0)
-    expect(byTool('send_message')).toHaveLength(0)
+    const ids = (set: readonly DemoAuditRow[]): string[] => set.map((row) => row.id)
+    expect(ids(rows.filter((row) => row.record.session_source === 'sideband'))).toEqual([])
+    expect(ids(rows.filter((row) => row.record.origin === 'demo-agent'))).toEqual([])
+    expect(ids(byTool('send_message'))).toEqual([])
     for (const row of calls) expect(row.record.upstream, row.id).not.toBeNull()
 
     const anonymous = callsInC.filter(
       (row) => row.record.session_id === null && row.record.policy_decision === 'allow',
     )
-    expect(anonymous).toHaveLength(1)
-    expect(anonymous[0]?.record.dry_run).toBe(false)
-    expect(anonymous[0]?.record.tool_name).toBe('send_invoice')
+    expect(anonymous.map((row) => row.id)).toHaveLength(1)
+    expect(anonymous[0]?.record.dry_run, anonymous[0]?.id).toBe(false)
+    expect(anonymous[0]?.record.tool_name, anonymous[0]?.id).toBe('send_invoice')
   })
 
   it('marks every row with the demo environment and every name with demo-', () => {
     for (const row of rows) expect(row.record.environment).toBe('demo')
     for (const row of calls) {
       if (row.record.origin === 'mcp') {
-        expect(row.record.upstream).toMatch(/^demo-/)
+        expect(row.record.upstream ?? '', row.id).toMatch(/^demo-/)
       }
       if (row.record.session_id !== null) {
         expect(row.record.session_id).toMatch(/^demo-/)

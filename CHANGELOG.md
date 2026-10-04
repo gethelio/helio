@@ -54,11 +54,11 @@ Maintainer notes:
   52 min before the seed, 19 contributor calls are refused, and the ledger
   holds 498 of 500 USD at the base, so the documented `create_charge` of
   60 is refused for the same reason live. A test replays the epoch through
-  the real decision pipeline and budget engine and pins every column. The
-  command also seeds the `tool_baselines` rows for the ten tools the sample
-  upstream lists, first seen at the base, so the first `helio start` in the
-  directory restores them (`5 restored, 0 new` per door) instead of
-  baselining the upstream anew.
+  the real decision pipeline and budget engine and pins the six decision
+  columns and the ledger rows. The command also seeds the `tool_baselines`
+  rows for the ten tools the sample upstream lists, first seen at the base,
+  so the first `helio start` in the directory restores them
+  (`5 restored, 0 new` per door) instead of baselining the upstream anew.
 
 ## [0.15.0] - 2026-10-02
 
