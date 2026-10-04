@@ -1,11 +1,12 @@
 // ---------------------------------------------------------------------------
 // `seedDemoDirectory`: write the four demo files (issue #397). The config
 // goes first so its bytes' sha256 can stamp the current epoch; the corpus
-// then goes through `AuditStore.insert` in one transaction and through the
-// `BudgetLedger` with the base instant as its clock, never through DDL or a
-// column list of its own, so the next schema migration is picked up by
-// rerunning the command. Nothing here opens a socket or reads the working
-// directory's own helio.yaml or audit database.
+// then goes through `AuditStore.insert` in one transaction, through the
+// `BudgetLedger` with the base instant as its clock, and through the
+// `ToolBaselineStore` for the ten tool baselines the sample upstream lists,
+// never through DDL or a column list of its own, so the next schema
+// migration is picked up by rerunning the command. Nothing here opens a
+// socket or reads the working directory's own helio.yaml or audit database.
 // ---------------------------------------------------------------------------
 
 import { createHash } from 'node:crypto'
@@ -13,8 +14,10 @@ import { existsSync } from 'node:fs'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { AuditStore } from '../audit/store.js'
+import { ToolBaselineStore } from '../baseline/store.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { StartupError } from '../startup-error.js'
+import { canonicalize } from '../util/canonical-json.js'
 import {
   DEMO_AUDIT_RETENTION,
   DEMO_DEFAULT_PORTS,
@@ -27,10 +30,12 @@ import {
   DEMO_CONFIG_FILE,
   DEMO_FILES,
   DEMO_README_FILE,
+  DEMO_TOOLS,
   DEMO_UPSTREAM_FILE,
+  DEMO_UPSTREAMS,
   buildDemoCorpus,
 } from './corpus.js'
-import { renderDemoUpstream } from './upstream.js'
+import { renderDemoUpstream, wireTool } from './upstream.js'
 
 const MINUTE = 60_000
 const DAY = 24 * 60 * MINUTE
@@ -152,6 +157,22 @@ export async function seedDemoDirectory(
     const ledger = new BudgetLedger({ database: store.database, now: () => options.base.getTime() })
     ledger.writeMeta(corpus.ledgerMeta)
     ledger.commitAll(corpus.ledgerRows)
+    // The baselines the first `helio start` restores: one row per tool per
+    // door, fingerprinted on the definition the sample upstream lists, first
+    // seen at the base. The store's own insert; a fresh database has no row
+    // to collide with (`--force` removed it before the open).
+    const baselines = new ToolBaselineStore({ database: store.database })
+    const firstSeen = options.base.toISOString()
+    for (const door of Object.values(DEMO_UPSTREAMS)) {
+      baselines.insertNew(
+        door,
+        DEMO_TOOLS.filter((tool) => tool.upstream === door).map((tool) => {
+          const definition = wireTool(tool)
+          return { tool: tool.name, definition, fingerprint: canonicalize(definition) }
+        }),
+        firstSeen,
+      )
+    }
   } finally {
     store.close()
   }
