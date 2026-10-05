@@ -94,7 +94,7 @@ audit:
   storage: sqlite # Only option for MVP
   path: ./helio-audit.db # SQLite database file
   retention: '90d' # Auto-delete records older than this
-  include_responses: true # Store full upstream responses
+  include_responses: true # Store the full outcome: the MCP response body or the adapter's result
 
 dashboard:
   enabled: true # Serve the dashboard UI
@@ -726,7 +726,7 @@ Audit trail configuration. See [Audit Trail](./audit.md) for what's recorded and
 | `storage`           | string   | No       | `sqlite`           | Storage backend. Only `sqlite` is supported.                                                                                                                                                                                                                                                                                                         |
 | `path`              | string   | No       | `./helio-audit.db` | Path to the SQLite database file. A relative path resolves against the directory `helio start` runs in. Its directory must already exist, and must be writable by the proxy user when the database does not exist yet; Helio does not create it. The value must not be empty; leading and trailing whitespace is trimmed, as SQLite itself trims it. |
 | `retention`         | duration | No       | `90d`              | Records older than this are automatically deleted.                                                                                                                                                                                                                                                                                                   |
-| `include_responses` | boolean  | No       | `true`             | Store full upstream JSON-RPC responses. Set to `false` to store only a summary.                                                                                                                                                                                                                                                                      |
+| `include_responses` | boolean  | No       | `true`             | Store the full tool outcome in `upstream_response`: the MCP door's JSON-RPC response body, or the adapter's bare `result` on a sideband row. Set to `false` to store a summary of either (see [Response Recording](./audit.md#response-recording)).                                                                                                  |
 
 Audit rows also include:
 

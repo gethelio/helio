@@ -5,7 +5,11 @@ import { chmodSync } from 'node:fs'
 import { POLICY_RELOAD_OUTCOMES } from '../config/reload-outcomes.js'
 import { parseDuration } from '../config/schema.js'
 import { StartupError } from '../startup-error.js'
-import { extractResponseSummary } from '../upstream/response-summary.js'
+import {
+  extractResponseSummary,
+  summarizeToolResult,
+  type ResponseSummary,
+} from '../upstream/response-summary.js'
 import { clamp } from '../util/clamp.js'
 import type {
   ActivationTimeline,
@@ -568,6 +572,24 @@ function restrictAuditFilePerms(dbPath: string): void {
   }
 }
 
+/**
+ * Summarize a record's `upstream_response` for storage under
+ * `audit.include_responses: false`.
+ *
+ * The MCP door (`GovernedForwarder`, origin `mcp`) stores the upstream
+ * JSON-RPC envelope; every other origin is a sideband row holding the
+ * adapter's bare tool result, whose outcome is the row's `upstream_error`
+ * (set exactly when the adapter reported `status: error`). The origin
+ * column is the only shape fact the row carries: `mcp` is also a legal
+ * adapter origin, so an adapter that declares it has its bare result read
+ * as an envelope, the same collision the per-origin counts document.
+ */
+function summarizeResponse(record: AuditRecordInput): ResponseSummary {
+  return record.origin === 'mcp'
+    ? extractResponseSummary(record.upstream_response)
+    : summarizeToolResult(record.upstream_response, record.upstream_error != null)
+}
+
 // ---------------------------------------------------------------------------
 // AuditStore
 // ---------------------------------------------------------------------------
@@ -753,7 +775,7 @@ export class AuditStore {
         record.upstream_response != null
           ? this.includeResponses
             ? JSON.stringify(record.upstream_response)
-            : JSON.stringify(extractResponseSummary(record.upstream_response))
+            : JSON.stringify(summarizeResponse(record))
           : null,
       upstream_error: record.upstream_error,
       upstream_http_status: record.upstream_http_status,

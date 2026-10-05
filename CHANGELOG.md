@@ -65,6 +65,14 @@ Maintainer notes:
   rows for the ten tools the sample upstream lists, first seen at the base,
   so the first `helio start` in the directory restores them
   (`5 restored, 0 new` per door) instead of baselining the upstream anew.
+- **A sideband tool result is summarized as the outcome the adapter
+  reported.** Under `audit.include_responses: false` the store read every
+  stored body as a JSON-RPC envelope, so an executed sideband success whose
+  adapter supplied a bare `result` was stored as `success: false` with no
+  content. A row whose `origin` is not `mcp` is now summarized from the row
+  itself: `has_error: true` when the adapter reported `status: error`,
+  `success: true` when it did not, and the content types from
+  `result.content`. Nothing changes under the default `true`.
 
 ## [0.15.0] - 2026-10-02
 

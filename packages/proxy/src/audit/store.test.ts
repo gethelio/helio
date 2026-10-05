@@ -1011,6 +1011,95 @@ CREATE TABLE IF NOT EXISTS audit_records (
       }
     })
 
+    describe('a sideband row under includeResponses: false', () => {
+      const bareResult = { content: [{ type: 'text', text: 'ok' }] }
+
+      it('summarizes an adapter-origin bare result as the success the adapter reported', () => {
+        const noResponseStore = createStore({ includeResponses: false })
+        try {
+          const record = insertAndGet(
+            noResponseStore,
+            makeRecord({ origin: 'lab-adapter', upstream_response: bareResult }),
+          )
+          expect(record.upstream_response).toEqual({
+            success: true,
+            has_error: false,
+            error_code: null,
+            content_types: ['text'],
+            content_count: 1,
+          })
+        } finally {
+          noResponseStore.close()
+        }
+      })
+
+      it('summarizes an adapter-origin result beside upstream_error as a failure', () => {
+        const noResponseStore = createStore({ includeResponses: false })
+        try {
+          const record = insertAndGet(
+            noResponseStore,
+            makeRecord({
+              origin: 'lab-adapter',
+              upstream_response: bareResult,
+              upstream_error: 'host failed',
+            }),
+          )
+          expect(record.upstream_response).toEqual({
+            success: false,
+            has_error: true,
+            error_code: null,
+            content_types: ['text'],
+            content_count: 1,
+          })
+        } finally {
+          noResponseStore.close()
+        }
+      })
+
+      it('summarizes a bare result on an origin: mcp row as an envelope', () => {
+        // `mcp` is a legal adapter origin, so an adapter declaring it collides
+        // with the MCP door and its bare result is read as a JSON-RPC envelope.
+        const noResponseStore = createStore({ includeResponses: false })
+        try {
+          const record = insertAndGet(
+            noResponseStore,
+            makeRecord({ origin: 'mcp', upstream_response: bareResult }),
+          )
+          expect(record.upstream_response).toEqual({
+            success: false,
+            has_error: false,
+            error_code: null,
+            content_types: [],
+            content_count: 0,
+          })
+        } finally {
+          noResponseStore.close()
+        }
+      })
+
+      it('stores the same rows verbatim under includeResponses: true', () => {
+        const succeeded = insertAndGet(
+          store,
+          makeRecord({ origin: 'lab-adapter', upstream_response: bareResult }),
+        )
+        expect(succeeded.upstream_response).toEqual(bareResult)
+        const failed = insertAndGet(
+          store,
+          makeRecord({
+            origin: 'lab-adapter',
+            upstream_response: bareResult,
+            upstream_error: 'host failed',
+          }),
+        )
+        expect(failed.upstream_response).toEqual(bareResult)
+        const collided = insertAndGet(
+          store,
+          makeRecord({ origin: 'mcp', upstream_response: bareResult }),
+        )
+        expect(collided.upstream_response).toEqual(bareResult)
+      })
+    })
+
     it('preserves the createdAt override', () => {
       const past = '2020-01-01T00:00:00.000Z'
       const record = insertAndGet(store, makeRecord(), past)

@@ -123,7 +123,7 @@ A breach of an `on_exceed: deny` budget returns `decision: "budget_exceeded"` �
   "status": "success" | "error" | "not_executed",
   "error": "…",            // optional, when status == "error"
   "duration_ms": 412,      // optional
-  "result": { },           // optional outcome summary
+  "result": { },           // optional outcome summary; stored as the row's upstream_response, summarized under include_responses: false
   "actual_amount": 0.42,   // optional, finite ≥0 — true post-execution spend; overrides the arg-derived amount
   "evidence": [            // optional — see "Populating evidence" below
     { "evidence_key": "recipient", "evidence_data": { "to": "a@b.com" }, "ttl_seconds": 300 }
