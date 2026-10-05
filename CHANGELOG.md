@@ -21,6 +21,12 @@ Maintainer notes:
 
 ### Added
 
+- **A fidelity matrix for policy simulation, `docs/policy-fidelity.md`
+  (draft).** Which `decide()` inputs an audit record can rebuild, per
+  door; the rows a replay skips; the cumulative state it rebuilds; and
+  the warnings a simulation prints when it cannot. Written ahead of
+  `helio policy simulate`, as the specification its harness is built from.
+
 - **The demo recordings: the approval card and the three-merchant budget
   demo, with the pipeline that re-records them under
   `examples/agent-budget/demo/`.** Both recordings are served from

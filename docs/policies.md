@@ -1285,4 +1285,5 @@ longer than Helio itself re-checks that definition for drift. See
 - [Configuration Reference](./configuration.md) — Full `helio.yaml` schema
 - [Approval Workflows](./approvals.md) — `require_approval` action details
 - [Audit Trail](./audit.md) — How policy decisions are recorded
+- [Simulation fidelity](./policy-fidelity.md): which policy inputs an audit record can replay, per door, and what a simulation reports when it cannot
 - [Examples](../examples/) — Runnable configurations demonstrating these patterns
