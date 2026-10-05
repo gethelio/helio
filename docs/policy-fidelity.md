@@ -1,0 +1,238 @@
+# Simulation fidelity: what the audit trail can replay
+
+> **Status: draft.** This page is written ahead of `helio policy simulate` (issue #490) and is the specification its harness (issue #488) is built from. Every verdict below was derived by running the proxy and reading the rows it wrote, on the code as of 2026-10-05, and the harness re-derives none of it. When the command exists this page stays as the reference for what a simulation can and cannot know.
+
+## Why this page exists
+
+A policy simulation reconstructs a `DecideInput` from a stored audit record and hands it to the same `decide()` the live doors run (`policy/decision-pipeline.ts`), with a candidate policy in place of the one that was in force. That only works if the record kept enough to rebuild every input `decide()` reads. Some inputs are on the row verbatim, some are a snapshot of what the decision saw, some were never written, and one is written by one door and not the other.
+
+The rule this page serves is the one the harness is held to: it must **report** every rule it could not fully evaluate and must never silently pass a rule it could not check. The sections below say, per input, where the harness gets its value, what it rebuilds when the row does not carry one, and what it prints when it cannot.
+
+Two doors write `tool_call` rows. The MCP door is `GovernedForwarder.handleToolsCall` in `policy/governed-forwarder.ts`, whose `writeAuditRecord` writes rows with `origin: mcp`. The sideband door is `GovernanceService` in `sideband/governance-service.ts`, whose `evaluate`, `audit` and `refuseKilled` write rows through `writeAudit` with the adapter's origin (`origin` is anything but `mcp`). Both call the same `decide()`; they differ in what they keep.
+
+## The matrix
+
+One row per `DecideInput` field. "Full" means the harness can hand `decide()` the value it saw; "partial" means a snapshot or a derived value stands in for it; "lost" means the row holds nothing; "unknown" means the row cannot tell whether there was anything to hold; "n/a" means the harness supplies the value itself.
+
+| Field                    | MCP `tool_call` row                                                                                                                         | Sideband `tool_call` row                                                                           | Verdict                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `toolName`               | `tool_name`                                                                                                                                 | `tool_name`                                                                                        | full                                                                           |
+| `toolArguments`          | `tool_input`: the arguments object, or `{}` when the call sent none                                                                         | `tool_input`: the adapter's `arguments`, or `{}` when absent                                       | full, with the `{}` rider below                                                |
+| `sessionId`              | `session_id`, the proxy-resolved identity (`session_source` beside it)                                                                      | `session_id`, the adapter-supplied id after the well-formedness check (`session_source: sideband`) | full; a null column is `undefined` at `decide()`                               |
+| `sessionStrategySummary` | `evidence_chain.session.tried`, on two denies only                                                                                          | the same                                                                                           | partial; the harness passes the candidate's compiled summary                   |
+| `policy`                 | the candidate under test                                                                                                                    | the same                                                                                           | n/a (supplied)                                                                 |
+| `environment`            | `environment`                                                                                                                               | `environment`                                                                                      | full                                                                           |
+| `evidenceStore`          | `evidence_chain.evidence` and `.dependencies`: the matched rule's snapshot, under the conditions below                                      | nothing                                                                                            | partial (MCP); lost (sideband)                                                 |
+| `baselineAnnotations`    | the row's own `tool_drift.changes`; else the `tool_baselines` row, unwound and dated; else unknown                                          | nothing                                                                                            | partial (MCP); unknown (sideband)                                              |
+| `currentAnnotations`     | `tool_drift.changes[aspect = annotations].current` on a drifted row; `undefined` for aspect `duplicate`; otherwise the baseline, and unread | unknown, as `driftEvent` is                                                                        | partial on a drifted MCP row; harmless on an undrifted one; unknown (sideband) |
+| `driftEvent`             | `evidence_chain.tool_drift` (`mode`, `changes`); an absent key means no drift                                                               | nothing is copied onto the row                                                                     | full (MCP); unknown (sideband)                                                 |
+| `metadata`               | never supplied by the door; the column is null                                                                                              | `metadata`, verbatim when the adapter sent an object; null when it sent none                       | full on both doors as a replay input, with the `undefined` rider below         |
+| `agentId`                | never supplied by the door; the column is null                                                                                              | `agent_id`; null when the adapter sent none                                                        | full on both doors as a replay input, with the `undefined` rider below         |
+| `upstream`               | `upstream`, the door name; null in singular mode                                                                                            | always null                                                                                        | full on both doors                                                             |
+
+Riders the harness applies, per field:
+
+- **`toolArguments`.** Both doors store `toolArguments ?? {}` where `decide()` saw `undefined` for a call that sent no arguments object. The replay passes `{}`. The two differ only for a rule whose `input` conditions all pass on an empty object: `matchInput` returns false on `undefined` whenever a condition exists, and on `{}` every `$.field` operator fails a missing path, so the difference is confined to conditions that hold on nothing. `audit.include_responses` gates `upstream_response` only; `tool_input` is stored under both settings.
+- **`sessionId`.** `decide()` normalizes a trim-empty id to `undefined` through `isWellFormedSessionId`; both doors normalize before the row too, so a null column is exactly the `undefined` the decision saw.
+- **`sessionStrategySummary`.** `decide()` reads it only to word the grounded-rule no-session deny; the action never depends on it. Both doors write `evidence_chain.session: { unresolved, tried }` on two denies: the grounded-rule deny with no session (`block_reason: policy_denied`, a rule with `evidence` or `requires` and no identity) and the `session_unresolved` deny of a session-keyed limit or budget. The harness passes the candidate config's compiled summary and never reads the column for the decision.
+- **`evidenceStore`.** The MCP row's `evidence_chain.evidence` (`required`, `found`, `missing`, `expired`) and `evidence_chain.dependencies` (`satisfied`, `missing`) are the matched rule's snapshot at decision time, written by `buildEvidenceChain`. They are present only when the rule has `evidence` or `requires`, a session resolved, and the action was not already `deny` (a drift block and a `deny` rule never snapshot; issue #412 is that live behavior). `dependencies` is written only when the evidence check passed, so a `requires` rule can leave a row with `evidence` and no `dependencies`. The block holds key names only: no TTL, no expiry instant, no payload. The store's own entries are never persisted on either door (`POST /evidence` and the sideband's `/audit` evidence payload write no audit row). The sideband writes no evidence or dependency block at all; its evidence and dependency denies are stored as `policy_denied` with `evidence_chain: null` (issue #499).
+- **`driftEvent` and `currentAnnotations`.** On an MCP row `tool_name` plus `evidence_chain.tool_drift.changes` rebuilds the `ToolDriftEvent`, and `tool_drift.mode` is the mode it was evaluated under; `writeAuditRecord` copies the event in every `on_tool_drift` mode, so an absent key means the call was not evaluated under drift. The sideband's `/evaluate` response carries `tool_drift`, and `writeAudit` does not (issue #496), so "no key" must not be read as "no drift" there, and because the drift event is unknown so is whether `currentAnnotations` was read: `decide()` reads it only when a drift event is set under `on_tool_drift: log`.
+- **`metadata` and `agentId`.** The replay passes `undefined`, never the SQL null, on BOTH doors. `buildMetadataView` returns the metadata untouched only when `agentId === undefined`; a null `agentId` would merge `agent_id: null` into the view and `matchMetadata` would then index an object the door never built, waking a `match.metadata` rule the door never evaluated. On the MCP door the column is structurally null (`decide()` received `undefined`), so `match.metadata` rules are inert on MCP rows live and in replay alike. On the sideband `evaluate` passes `req.metadata ?? undefined` and `req.agent_id ?? undefined` while the route stores `?? null`, so a null column is `undefined` at `decide()` there too; verbatim applies to an object the adapter actually sent.
+- **`upstream`.** Null on the MCP door in singular mode and always null on the sideband, where `decide()` also received `undefined`; `matchUpstreams` fails closed on `undefined`, so no rider is needed beyond passing `undefined` for null. `environment` behaves the same way through `matchEnvironment`.
+
+## Rows that never entered policy evaluation
+
+Some `tool_call` rows were written without a decision. Replaying them as decisions would report a false delta, so the harness skips them by this predicate and counts them:
+
+```sql
+record_kind = 'tool_call'
+  AND (policy_decision = 'rejected' OR block_reason = 'kill_switch')
+```
+
+Four writers produce such rows. On the MCP door, `rejectNamelessToolsCall` writes the nameless call (`rejected` / `missing_tool_name`, `tool_name: <nameless>`) and `rejectKilledToolsCall` the kill-switch refusal (`deny` / `kill_switch`, under the real tool name); the composition root writes the header mismatch through `buildHeaderMismatchAuditRecord` in `audit/header-mismatch.ts` (`rejected` / `header_mismatch`) for every method, `tools/list`, `ping` and notifications included, since `record_kind` stays `tool_call` for that whole class. On the sideband, `refuseKilled` writes the kill-switch refusal (`deny` / `kill_switch`, kind `tool_call`; its `install_scan` variant is another kind and is never selected). Every other `tool_call` row entered `decide()`, including approval outcomes (`client_disconnected`, `shutdown_cancelled`) and dry runs, and is replayed.
+
+Two neighbors the predicate must never widen into. `evaluation_expired` rows are a different kind: decided at `/evaluate` but never reported by the adapter, counted separately by the report (the third sentence below) and never replayed as outcomes. `drift_event`, `policy_reload`, `kill_switch` and `install_scan` rows are other kinds and are never replayed.
+
+## Cumulative state
+
+`decide()` is pure, but the doors apply state after it that the next decision depends on: rate windows, per-rule spend windows, named budgets, evidence entries and dependency chains. A replay rebuilds each from the rows, in the order the door applied them, and checks its rebuilt state against the snapshot each row carries.
+
+### Rule rate and spend windows
+
+Neither limiter persists anything: `RateLimiter` and `SpendLimiter` hold memory only, and a restart clears every window (see `SECURITY.md`, "When the proxy stops"). The harness rebuilds them by replaying the rows that consumed a slot, with a warm-up over the rows before the epoch start inside the window length.
+
+**Which rows consumed.** On the MCP door a `tool_call` row with `dry_run = 0`, `block_reason IS NULL` and a matched rule whose action was `rate_limit` or `spend_limit` consumed its slot at the forward site (`commitRuleLimit` runs `record()` just before `inner.forward`). On the sideband those columns are not enough: an adapter that reports `status: not_executed` leaves `policy_decision: rate_limit` (or `spend_limit`), a null `block_reason`, `dry_run: 0`, and consumed nothing, because `commitPlans` runs only when the call executed (`callHappened` is true for `success` and `error` alone). The consumed sideband row is the one whose `evidence_chain` carries the commit block `rate_limit` or `spend_limit`, which `commitPlans` writes. A sideband limit row without that block is named by the report under the dimension `rate window` as a slot it could not settle (issue #497 asks for the fact to be recorded instead of inferred).
+
+**Bucket keys, per door.** Every base key takes the suffix `:rule:<index>` from `ruleBucketKey` in `policy/bucket-key.ts`, where `<index>` is the matched rule's position (`matched_rule_index` on the row). The base shapes:
+
+| `limits.key` | MCP door                                                                      | Sideband                                                                 |
+| ------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `tool`       | `upstream:<name>:tool:<tool>` on a named door; `tool:<tool>` in singular mode | `tool:<tool>` (never an upstream prefix)                                 |
+| `agent`      | the tool key (the door has no agent id; it warns once)                        | `tool:<tool>`                                                            |
+| `sender_id`  | the tool key (the door has no sender; it warns once)                          | `sender:<sender_id>`, or `sender:unknown` when the metadata carries none |
+| `session`    | `session:<session_id>`                                                        | `session:<session_id>`                                                   |
+
+One `RateLimiter` and one `SpendLimiter` serve both doors, so a singular-mode MCP door and an adapter origin share `tool:<tool>:rule:<index>`, as do two adapter origins calling one tool under one rule.
+
+**The snapshot on the row.** Every consumed row carries the door's own view of the bucket: `evidence_chain.rate_limit` (`allowed`, `current`, `limit`, `window_ms`, `reset_at_ms`) or `evidence_chain.spend_limit` (the same with `current_spend`). On the MCP door that block is the **peek**: `handleRateLimit` and `handleSpendLimit` keep `peek()`'s result for the chain, and `commitRuleLimit` discards what `record()` returns. On the sideband the block is `record()`'s return at `/audit`, while the row's `timestamp` is the `/evaluate` instant. A sideband row finalized at `/evaluate` (a deny, a limit block, a dry run) carries the response's `limits` block under `rate` or `spend` instead and consumed nothing.
+
+**When the rebuild does not meet the snapshot.** A `current` the rebuilt window does not reproduce is named under `rate window`; a `current_spend` the replayed amounts do not reproduce is named under `spend amount`. The report never names a cause, because the row cannot tell them apart:
+
+- an `actual_amount` override at `/audit` (the sideband's post-hoc cost, which overrides the planned amount and is stored nowhere; the report never claims it saw one);
+- another caller on the same bucket (the shared keys above);
+- an entry that slid out of the window between two rows, or, on the sideband alone, inside one call: `record()` evicts against its own clock at `/audit`, which can be later than the row's `timestamp` by the whole adapter round trip;
+- a commit that landed out of `timestamp` order: on the MCP door a budget break-glass wait can sit between the peek and `commitRuleLimit`, so a concurrent call on the same key records first; on the sideband two overlapping evaluations of one tool sort in `/evaluate` order and commit in `/audit` order;
+- a bucket cleared under the process: a restart wipes every window and writes no row; a hot reload's `reconcile` deletes a bucket whose tuple or rule index changed while its entries are still inside the window and still in the table (the rate tuple is `{maxCalls, windowMs}`, the spend tuple `{limit, currency, windowMs}`, so a currency-only change evicts too; a `policy_reload` row is the hint, never a proof).
+
+**The amount the replay charges.** The amount is `resolvePath` of the `max_spend.field` on the rule that committed the snapshot, in that row's config epoch, resolved on the row's `tool_input`. A candidate that names a different field is a decision delta, not a fidelity cause. The row stores `matched_rule`, `matched_rule_index` and `config_sha256`, never the path, and the database never stores the config text the hash names, so the pin applies only when all three hold:
+
+1. A config the run was given (the candidate, or any other file handed to the run) has bytes whose SHA-256 equals the row's `config_sha256`. That hash is of the file bytes as read, before parsing and before `${VAR}` interpolation (`readConfigSource`; the value `helio config hash` prints), so the candidate counts when its hash matches, a whitespace resave does not, and the harness never searches the disk for a file the database does not name. A null hash, or a hash matching nothing the run was given, fails this test.
+2. The committing rule's field in that file is a literal. The test is `yaml.load` of the matching bytes (never `parseConfigSource`: that loader interpolates against this run's environment and throws `EnvVarUnsetError` from inside the substitution, before it records the path, for the first unset variable anywhere in the file, and a schema failure discards the list the same way, so a load that throws returns no path list and "no list" must never be read as "absent"), then the resolved value at `policies.rules[matched_rule_index].limits.max_spend.field`. A string that the loader's `${NAME}` pattern does not match (`[A-Za-z_][A-Za-z0-9_]*` between the braces) is the path the door compiled; anything else, a matched `${VAR}`, a non-string, a missing rule or field, fails this test. Aliases and merge keys are already resolved by `yaml.load`, and this run's environment is not an input. The pattern is a module-private constant in `config/loader.ts`, so the harness exports it or restates it.
+3. That path resolves on `tool_input` to a finite non-negative number. Both doors deny an unreadable amount (`invalid_amount`) before they record, so a consumed row whose field does not resolve disagrees with what the door charged for a reason that is none of the causes above.
+
+When any test fails there is **no replayed amount**: the row is named under `spend amount` with no cause, a missing amount is never read as zero and never skipped in silence.
+
+### Named budgets
+
+Budgets are rebuilt from the ledger (`budget_events`, `budget_meta`) through `BudgetEngine.hydrate()` in `budget/engine.ts`, with the engine's clock parked on the epoch start. `hydrate()` samples the clock once, for the duration lookback and the session idle cutoff, and it **writes**: `writeMeta` on a first boot, a tuple change or an observed removal, and `recordBucketGc` for a session pot idle past its TTL at that instant. The harness therefore hands it a ledger wrapper whose writes are no-ops, so a simulation never touches the live file. Each row's `evidence_chain.budgets[]` blocks are the per-call snapshots for the cross-check, and `audit_record_id` joins a ledger row to the call that committed it. That join is the engine's guarantee on a live proxy; in the demo corpus it holds for the current epoch only (issue #492), so every read is scoped to the epoch under replay.
+
+### Evidence entries
+
+Evidence is never persisted, and the SDK token lives in the agent's process by design. The only trace is the MCP row's `evidence_chain.evidence` snapshot for the matched rule's keys, present under the conditions the matrix states. The harness seeds a simulation-owned `EvidenceStore` by **classification**, not by `putEvidence` on a virtual clock: a `found` key is present at that instant and pinned so the clock cannot expire it (the historical TTL is not on the row); an `expired` key was seen and is invalid; a `missing` key was never posted. Pinning means the clock is not the mechanism; a later snapshot of the same session is. A later `expired` downgrades a pinned key, a later `found` promotes an expired one, and a `missing` on one row never deletes a key an earlier snapshot of the session classified (`seenEvidenceKeys` is never pruned live, so `expired` stays reachable for the session's life). The report names every candidate rule whose `evidence.requires` names a key no snapshot of that session names, and every evidence rule evaluated on a sideband row, where there is no snapshot.
+
+### Dependency chains
+
+Dependency chains are rebuilt into the same store with `recordToolCall`, so the sticky-success semantics come with the real class. The success bit is a predicate over the row, per door:
+
+- **MCP.** A row with `origin = 'mcp'`, `dry_run = 0`, `block_reason IS NULL` and a session id was forwarded. It succeeded when its response has no JSON-RPC `error` member: `upstream_response.error` absent under `include_responses: true`; `has_error = false` on the summary under `include_responses: false` (equivalent for a well-formed response); and false when `upstream_response` is null with `upstream_error` set (a forwarding failure). An `isError: true` tool result counts as success, because the door's bit is `succeeded = !hasJsonRpcError(result)` (issue #413); the page records that predicate and does not re-judge it.
+- **Sideband.** The door's bit is the adapter's report, `status === 'success'`, applied only when the call executed. A row with `upstream_error` set executed and failed; one with `upstream_response` set executed and succeeded; one with neither is ambiguous (a `not_executed` report and a result-less `success` write identical columns, and only the latter fed the store), and the report names it as a dependency it could not settle (issue #497). Under `include_responses: false` an executed sideband success is summarized as `success: false` (issue #498), so the predicate reads the presence of the summary, not its `success` flag.
+
+### Approval outcomes
+
+Approval outcomes are not state. A `require_approval` row's `approval_status` is the human's decision, replayed as recorded and never re-asked. The kill switch is the skip class.
+
+### Block-reason vocabulary per origin
+
+The sideband's `deriveBlockReason` maps every wire `deny` to `policy_denied`, so an evidence or dependency deny on a sideband row is stored as `policy_denied` with no snapshot, where the MCP door stores `evidence_missing`, `evidence_expired` or `dependency_missing` with its snapshot. A replay that produces an evidence or dependency deny for a sideband row compares it equal to the stored `policy_denied`; otherwise every historical sideband evidence deny reports a false delta. Issue #499 asks for parity in the writer; until it lands this mapping is part of the harness's interface.
+
+## Tool annotations
+
+`decide()` reads `baselineAnnotations` for rule matching (`matchAnnotations` and its defaults: `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` for an absent hint) and for the `flag_destructive` escalation of a call no rule matched (`destructiveHint ?? true`, its own default, not the matcher's). Two cases are kept apart throughout:
+
+- A **known hintless definition**, listed by the upstream with no `annotations`, is evaluated through the defaults exactly as live. `extractAnnotations` returns `undefined` for it, which is what `decide()` saw. This is product behavior: it is what denies the demo corpus's `export_customers` under `block-destructive`. It is never suppressed and never warned.
+- An **unknown definition**, for which the harness found no source, is also evaluated through the defaults, because a tool the live proxy had never seen got them too, and the report names every rule with an `annotations` matcher evaluated on it and every `flag_destructive` escalation on it, under the dimension `tool annotations`.
+
+The two hand `decide()` the same `undefined`; only the report's naming differs.
+
+### The source order
+
+For every replayed MCP row the harness resolves `baselineAnnotations` in this order and names the step it stopped at:
+
+1. **The row's own drift.** When `evidence_chain.tool_drift.changes` is present, the `annotations` change's `baseline` side is the baseline `decide()` used and its `current` side is `currentAnnotations`. An `other` or `duplicate` change carries whole definitions on its `baseline` side (`extractAnnotations` of it is the baseline; the current side of a `duplicate` is `undefined`; a `duplicate` whose tool had no baseline yet omits the `baseline` side, and a missing side means `undefined`). A drift that lists other aspects only (`inputSchema`, `description`, `outputSchema`, `title`) leaves the annotations equal to the baseline resolved at step 2. A drifted call always carries the key in every `on_tool_drift` mode, so step 1 answers for every drifted row.
+2. **The baseline table, unwound and dated.** Else the `tool_baselines` row for the door and tool (`upstream` stored as `''` on a singular door) in the same database. Its `definition_json` is the baseline of **now**: `acceptBaseline` replaces it with the tool's current definition, so a call from before an acceptance was judged on the previous one. The harness collects every `baseline_accepted` record (`record_kind: drift_event`, `policy_decision: baseline_accepted`) for that door and tool whose `timestamp` is later than the call row's `timestamp`, walks them in `timestamp` order and takes the `baseline` side of the first change whose aspect is `annotations`, `other` or `duplicate` (whole definitions read through `extractAnnotations`; a missing side is `undefined`). An acceptance whose changes name only `inputSchema`, `description`, `outputSchema` or `title` replaced the table but did not move the hints, so it supplies nothing and the walk continues. When no later acceptance supplies hints, the table's `definition_json` through `extractAnnotations` is the baseline the call saw, **provided the row existed at the decision**:
+
+   ```sql
+   -- step 2 applies only when the baseline row predates the call
+   tool_baselines.first_seen <= audit_records.timestamp
+   ```
+
+   `insertNew` writes a first-seen baseline when a `tools/list` names the tool for the first time, and that list can land while the call awaits an approval or a budget ticket, after `decide()` already read the cache as `undefined`; `replace` never moves `first_seen`, so a `first_seen` later than the call's `timestamp` means the row did not exist at the decision, step 2 does not apply, and the call is UNKNOWN (step 3) and named. A definition that lists no `annotations` is a known hintless definition: the value is `undefined`, evaluated through the defaults, never warned.
+
+3. **Unknown.** Else `undefined`, evaluated through the same defaults, and named in the report as described above. Under `persist_baselines: false` every undrifted row is UNKNOWN and stays so: with no table the acceptance record carries `first_seen: null` and cannot date an undrifted call, so it is never a source for one (an undrifted call from before the tool was listed and one from after the in-memory baseline existed look alike). A drifted row still answers at step 1 from its own `tool_drift`.
+
+Sideband rows reach step 3 always: adapter baselines are per-process (`cacheFor` builds a fresh cache per origin, nothing restores or persists it), the definition travels on `/evaluate` only, and the row carries no `tool_drift` (issue #496). The report aggregates them per origin and tool.
+
+**Why the order compares `timestamp`, not `created_at`.** The call row's `timestamp` is taken at the top of `handleToolsCall`, before `decide()` and before any approval wait; the acceptance record's `timestamp` is taken when the operator accepts. `timestamp` is therefore the order `decide()` and `acceptBaseline` actually ran in. `created_at` is the insert instant: `AuditStore.insert` stamps it, `insertBatch` inserts a flush's rows in one transaction so a batch stamps many rows alike (the list query tie-breaks on `rowid` for that reason), and an acceptance pushed through the writer's immediate queue during a call's approval wait is inserted before the call's buffered row although it ran after the decision.
+
+**There is no live-proxy step.** `GET /api/baselines`, the route `helio baseline list` reads, returns a name, a fingerprint and flags (`restored`, `present`, `drifted`), nothing `matchAnnotations` can read, and treating a hit there as a known hintless definition would silence the one case the warning exists for. The harness does not reach for the route.
+
+**Two divergences inside step 2 that the rows do not mark.** A restored baseline is inert live until the door's first list names it (`get()` answers `undefined` while the entry is pending), so a call served before a failed boot prime completed was judged on the defaults while the table holds its hints. And a call judged under the pre-accept baseline that carries no `tool_drift` key, which is any undrifted call before the drift appeared, is the case the unwind exists for.
+
+### The demo corpus and `--demo`
+
+The demo seed (`helio init --demo`) inserts its ten baselines at the base instant and stamps every corpus row earlier, so a harness that follows the order above names every undrifted current-epoch demo call UNKNOWN for annotations (all 253 of them predate `first_seen`, and none carries `tool_drift`). That is the worked example of the predicate, not a defect to exempt: an exemption for the seed would also trust a baseline a list inserted during a wait, which is the same shape.
+
+What that does to `helio policy simulate --demo` is settled here. Its acceptance (issue #490) is zero changed decisions over the current epoch with `helio-demo.yaml` as the candidate, whose two rules match on `readOnlyHint: true` and `destructiveHint: true`. Under UNKNOWN the defaults make every `destructiveHint: false` tool match `block-destructive`, so every stored `allow` on a read-only or mutation tool replays as a deny and the delta is not zero (`export_customers`, listed with no annotations, is the one tool the default does not move). A table-only replay cannot meet that acceptance. Therefore `--demo` **must** hand `decide()` the sample server's listed definitions as `baselineAnnotations`, the input the corpus replay test already uses (`extractAnnotations` of each wired `DEMO_TOOLS` entry), a documented fourth source that exists for the demo alone and that the report names as the source it used (the `--demo` line below). A `--demo` that reads the table instead names all 253 calls UNKNOWN and fails the acceptance by design. Issue #490's own sentence, that the `tool_baselines` row is the harness's first annotation source and answers for every demo tool, is stale against this order; a comment on that issue says so.
+
+## The report's language
+
+Three sentences, printed by the harness (issue #488) on every run, including when the candidate it simulates was generated for it rather than written by hand. Their wording is frozen; later tickets use them verbatim.
+
+1. Per rule and dimension, the warning for a rule the harness could not fully evaluate:
+
+   ```text
+   Could not fully evaluate rule "<rule>" on <n> call(s): <dimension> was not recorded for <subject>. These calls count as unverified, never as passed.
+   ```
+
+   `<rule>` is the rule's name, or `rule[<index>]` for an unnamed rule (`CompiledPolicyRule.name` is optional). `<subject>` names the tool and its door or origin (`tool "sb_flip" on origin "lab-adapter"`). `<dimension>` is one of a closed set of six:
+
+   | Dimension               | When it prints                                                                                                                                                                                                                                                                                                                                   |
+   | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | `tool annotations`      | an unknown definition (the annotation order reached step 3) under a rule with an `annotations` matcher, or a `flag_destructive` escalation on one                                                                                                                                                                                                |
+   | `tool definition drift` | a sideband row, where the drift event is unknown                                                                                                                                                                                                                                                                                                 |
+   | `evidence`              | a candidate rule whose `evidence.requires` names a key no snapshot of the session names, or any evidence rule on a sideband row                                                                                                                                                                                                                  |
+   | `dependency state`      | a sideband row whose execution the columns cannot settle, feeding a `requires` rule                                                                                                                                                                                                                                                              |
+   | `rate window`           | a sideband limit row with no commit block, or a `current` the rebuilt window does not meet                                                                                                                                                                                                                                                       |
+   | `spend amount`          | a `current_spend` the replayed amounts do not meet, or a consumed spend row for which no replayed amount exists (no config the run was given hashes to the row's `config_sha256`, or the committing rule's `max_spend.field` read by `yaml.load` from that file is not a string free of `${VAR}`, or the field does not resolve on `tool_input`) |
+
+2. The skip class:
+
+   ```text
+   Skipped <n> row(s) that never entered policy evaluation: <a> rejected, <b> refused by the kill switch.
+   ```
+
+   "Row", not "call" or "request": a header-mismatch row for `tools/list` or for a notification is in the set, and the predicate selects rows.
+
+3. The unreported class:
+
+   ```text
+   <n> sideband evaluation(s) were decided but never reported (evaluation_expired); their outcome is unknown.
+   ```
+
+   This count is a lower bound. A graceful stop can drop a pending sideband evaluation with no row at all (issue #458); a crash ends an approval-held MCP call with no row (issue #460); a `SIGKILL` drops whatever ordinary allows the writer still buffered (50 rows or 100 ms by default; the crash drain and the `SIGTERM` shutdown flush them, a `SIGKILL` does not); and a batch the store refuses is logged and dropped by the writer's `flush`, which clears its buffer before inserting.
+
+One more line, outside the three frozen sentences and printed by `--demo` alone, names the demo-only annotation source so its passes are never confused with trail-derived ones:
+
+```text
+Annotations for --demo came from the sample server's listed definitions, not from the audit trail.
+```
+
+Per row class the report names: for a warned call, the tool, the door or origin, the rule, the dimension and the instant; for a skipped row, its reason and instant. Never an argument value and never a record id (next section).
+
+## Privacy
+
+Reading the database adds no exposure. The audit database already holds `tool_input`, `upstream_response` (full under `include_responses: true`), `evidence_chain` (argument-derived values such as budget amounts) and `metadata`; it is local and mode `0600`, and `SECURITY.md` already says audit data never leaves the machine. The risk is **output**: a fidelity report pasted into an issue or a CI log, or a candidate policy generated from traffic whose `input` conditions quote argument values. Redaction belongs on the way out.
+
+The default set a report may carry is exactly the identifiers `helio report activation --include-names` restores (tool, door, origin and rule names) plus counts and instants. It never carries `tool_input`, `upstream_response`, `upstream_error`, evidence data, metadata values, session ids, record ids, the audit or config path, or any hash. A record id is a join key into the row that holds the arguments; the operator who has the database filters by tool, rule and time instead. One clause stated plainly: an instant beside a tool and a rule still identifies a row for someone who has the database, a weaker join than a record id but a join; the report still carries no argument, session id or record id, and the paste decision stays the operator's, exactly as it does for `--include-names`. Flags that widen or narrow the set belong to `helio policy simulate` (issue #490).
+
+## Follow-up decisions
+
+One row per verdict that is not full, per field the door never populates, and per capture this page filed.
+
+| Field or face                                                            | Decision                                                                                                                                                                                             |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessionStrategySummary` (partial, both doors)                           | Supplied by the candidate's compiled summary; the action never depends on it. No follow-up.                                                                                                          |
+| `evidenceStore` (partial on MCP)                                         | Classification seeding with later-snapshot reclassification, as stated above. No new column. Decided.                                                                                                |
+| `evidenceStore` (lost on the sideband)                                   | Issue #499: store the evidence and dependency snapshot and the specific `block_reason` on sideband rows. Until then the per-origin mapping above is the harness's interface.                         |
+| `baselineAnnotations` and `currentAnnotations` (partial on MCP)          | The three-step order, the acceptance unwind by `timestamp`, the `first_seen` predicate, no live-proxy step. Decided.                                                                                 |
+| `baselineAnnotations` and `currentAnnotations` (unknown on the sideband) | Adapter baselines are per-process by design (`docs/policies.md`, "Baselines across restarts"). Named per origin and tool under `tool annotations`. No change asked.                                  |
+| `baselineAnnotations` for `--demo`                                       | The demo-only fourth source `--demo` must supply, with its one report line. A comment on issue #490 retires that ticket's stale sentence.                                                            |
+| `driftEvent` (unknown on the sideband)                                   | Issue #496: copy `tool_drift` onto the sideband row as the MCP door does. Until then every sideband row is named under `tool definition drift`.                                                      |
+| `metadata` on the MCP door                                               | Structurally absent: the door never supplies it, so a `match.metadata` rule is inert on MCP rows live and in replay alike. The harness passes `undefined`, never the column's null. No change asked. |
+| `agentId` on the MCP door                                                | The same, with issue #249 (a `clientInfo`-backed agent identity) as the change that would populate it. The harness passes `undefined`.                                                               |
+| `upstream` on the sideband                                               | Always null by design (issue #295): `match.upstreams` rules are inert on sideband rows live and in replay alike. No change asked.                                                                    |
+| Sideband dependency ambiguity and the unsettled limit slot               | Issue #497: record whether the adapter executed the call. Until then the commit-block rule and the ambiguous-row naming above.                                                                       |
+| The sideband success summary under `include_responses: false`            | Issue #498: a reader fix in `extractResponseSummary`, landing as its own small change beside this page. Until then the dependency predicate reads the presence of the summary.                       |
+| Sideband evidence vocabulary                                             | Issue #499, as above.                                                                                                                                                                                |
+
+## Known limitation: the counterfactual sequence
+
+A replay evaluates the recorded sequence of calls against the candidate, row by row, and rebuilds cumulative state from what the agent actually did. It cannot know what the agent would have done next had an earlier decision changed. If the candidate denies a call the live proxy allowed, the agent's later calls in that session are still replayed as recorded, including ones the agent would never have made; a dependency the denied call would have satisfied stays satisfied in the rebuilt store because the live call ran; a limit window the denied call consumed live stays consumed. The report counts deltas per row and states none of these consequences. A simulation is a per-call answer to "what would this candidate have decided about each recorded call", not a prediction of a different history. The harness (issue #488) states this limitation in its output.
+
+## See also
+
+- [Policy Guide](./policies.md): the rules, matchers, annotation defaults and drift behavior the replay reproduces
+- [Audit Trail](./audit.md): every column named on this page, the drift records, the baseline table and the activation report's redaction model
+- [Adapter Governance API](./adapter-api.md): the sideband door, `/evaluate`, `/audit` and `not_executed`
+- [Sample traffic: `helio init --demo`](./demo.md): the corpus the `--demo` acceptance is stated against
+- `SECURITY.md`: what a restart clears, and why audit data never leaves the machine

@@ -438,4 +438,5 @@ For detailed numbers, run the benchmark script and inspect the generated local r
 - [Policy Guide](./policies.md) — What generates audit records
 - [Approval Workflows](./approvals.md) — How approval decisions appear in the audit trail
 - [Kill Switch](./kill-switch.md): the operator halt, its two records and the refused calls
+- [Simulation fidelity](./policy-fidelity.md): which columns rebuild a policy decision, the rows a replay skips, and the state it rebuilds from the trail
 - `pnpm --filter @gethelio/proxy benchmark` — Generates local performance report at `docs/benchmark-results.md`
