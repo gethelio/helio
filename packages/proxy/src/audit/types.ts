@@ -39,10 +39,20 @@ export interface AuditRecord {
   /** Identity of the approver, if approval was granted. */
   readonly approved_by: string | null
   /**
-   * Upstream MCP server response. When `audit.include_responses` is true,
-   * this is the full JSON-RPC response body. When false, a {@link ResponseSummary}
-   * with only success/error status and content types. Null for denied calls
-   * (no upstream request was made).
+   * The stored tool outcome. The MCP door (`GovernedForwarder`) stores the
+   * upstream JSON-RPC response body; a sideband row stores the bare
+   * `result` the adapter reported at `/audit`, even when its declared
+   * origin is `mcp`. Under `audit.include_responses: true` either is
+   * stored verbatim. Under `false` a {@link ResponseSummary} replaces it:
+   * the envelope read by its JSON-RPC members, the bare result by the
+   * row's `upstream_error` (`has_error: true` means the adapter reported
+   * `status: error`); the store picks the reading by origin, so an adapter
+   * that declares `origin: mcp` has its bare result summarized as an
+   * envelope. Null on a row the MCP door denied (no upstream request was
+   * made), and on a sideband row when the `/audit` report carried no
+   * `result`, the evaluation ended at `/evaluate` (a block or a dry run
+   * takes no report), it expired unreported (`evaluation_expired`), or the
+   * row is an install scan.
    */
   readonly upstream_response: unknown
   /** Error message from upstream, if the call failed. */
