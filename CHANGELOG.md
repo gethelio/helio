@@ -82,6 +82,19 @@ Maintainer notes:
   `success: true` when it did not, and the content types from
   `result.content`. Nothing changes under the default `true`.
 
+### Security
+
+- **`proxy-addr` refreshed to `2.0.8`, `source-map-js` lifted to `1.2.2`**
+  (GHSA-jqcg-44mw-7w3h: IP spoofing through an IPv4-mapped IPv6 trust subnet
+  in proxy-addr, under `express` via the MCP SDK devDependency;
+  GHSA-68fv-2mgg-jv7q: an event-loop denial of service in source-map-js, on
+  the dashboard's Tailwind and Vite paths, under jsdom's css-tree and under
+  tsup's postcss). Neither reaches the shipped proxy or the dashboard bundle.
+  proxy-addr moved by a lockfile refresh alone; source-map-js takes a ranged
+  override because the installed `postcss@8.5.26` keeps its edge on `1.2.1`
+  after a refresh, and the override self-retires once natural resolution
+  passes `1.2.2`.
+
 ## [0.15.0] - 2026-10-02
 
 ### Added
