@@ -29,8 +29,8 @@ Maintainer notes:
   never calls an upstream. `helio policy simulate` (issue #490) prints its
   result.
 
-- **A fidelity matrix for policy simulation, `docs/policy-fidelity.md`
-  (draft).** Which `decide()` inputs an audit record can rebuild, per
+- **A fidelity matrix for policy simulation, `docs/policy-fidelity.md`.**
+  Which `decide()` inputs an audit record can rebuild, per
   door; the rows a replay skips; the cumulative state it rebuilds; and
   the warnings a simulation prints when it cannot. Written ahead of
   `helio policy simulate`, as the specification its harness is built from.

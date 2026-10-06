@@ -96,7 +96,7 @@ export interface PipelineDecision {
  *
  * Pure with respect to limiter and audit state. The only side effect is an
  * operational line when `flag_destructive: log` matches an unguarded
- * destructive tool — preserved verbatim from the original forwarder so MCP
+ * destructive tool, preserved verbatim from the original forwarder so MCP
  * behavior is bit-identical, printed through `input.warn` when a caller
  * supplies one and to `console.error` otherwise.
  */
