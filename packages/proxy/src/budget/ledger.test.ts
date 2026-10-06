@@ -1018,6 +1018,41 @@ describe('replay reads bounded by the committing call', () => {
     }
   })
 
+  it('ignores a garbage-collection watermark recorded at or after the epoch start, and applies one before it', () => {
+    const { store, ledger } = seeded({ straddle: S1, late: S2, dangling: S1, last: S2 })
+    try {
+      // One more S1 row, committed well before the epoch.
+      ledger.commitAll([
+        ledgerRow({
+          audit_record_id: 'before-t0',
+          amount: 5,
+          timestamp_ms: T0_MS - 5_000,
+          bucket_key: S1,
+        }),
+      ])
+      const bounded = () => ledger.replaySessionBuckets('daily-cap', 1, { iso: T0, endMs: END_MS })
+      expect(bounded()).toEqual([{ bucket_key: S1, total: 45, last_activity_ms: T0_MS + 3_000 }])
+      // The sweep that retired S1 ran a day after the epoch started: at the
+      // epoch's first row the pot was still live with its full sum.
+      ledger.recordBucketGc('daily-cap', S1, T0_MS + 86_400_000)
+      expect(bounded()).toEqual([{ bucket_key: S1, total: 45, last_activity_ms: T0_MS + 3_000 }])
+      // A watermark exactly at the epoch start is not before it either.
+      ledger.recordBucketGc('daily-cap', S1, T0_MS)
+      expect(bounded()).toEqual([{ bucket_key: S1, total: 45, last_activity_ms: T0_MS + 3_000 }])
+      // A watermark before the epoch start applies as the live hydrate applies it.
+      ledger.recordBucketGc('daily-cap', S1, T0_MS - 1_000)
+      expect(bounded()).toEqual([{ bucket_key: S1, total: 40, last_activity_ms: T0_MS + 3_000 }])
+      // The unbounded statement is unchanged: the live sweep's watermark applies.
+      ledger.recordBucketGc('daily-cap', S1, T0_MS + 86_400_000)
+      expect(ledger.replaySessionBuckets('daily-cap', 1)).toEqual([
+        { bucket_key: S1, total: 0, last_activity_ms: T0_MS + 3_000 },
+        { bucket_key: S2, total: 60, last_activity_ms: END_MS },
+      ])
+    } finally {
+      store.close()
+    }
+  })
+
   it('reads every row and runs the original statements when until is absent', () => {
     const { store, ledger } = seeded({ straddle: S1, late: S2, dangling: S1, last: S2 })
     try {

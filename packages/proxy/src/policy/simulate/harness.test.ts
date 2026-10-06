@@ -883,6 +883,77 @@ describe('cumulative state', () => {
     }
   })
 
+  it('names a sideband limit row with no commit block under rate window whatever the candidate matches, and an unsettled allow never', () => {
+    const store = openStore()
+    try {
+      seed(store, [
+        sidebandRow({
+          tool_name: 'send_email',
+          timestamp: at(0),
+          policy_decision: 'rate_limit',
+          matched_rule: 'limited',
+          matched_rule_index: 0,
+          evidence_chain: { rate: { current: 1 } },
+        }),
+        sidebandRow({ tool_name: 'read_email', timestamp: at(1) }),
+      ])
+      for (const rules of [
+        denyRule('send_email'),
+        sessionRateRule('fresh', '*_email', 5),
+        "    - match: { tool: '*' }\n      action: allow",
+      ]) {
+        const result = simulate(store, candidateWith({ rules }))
+        const windows = result.fidelity.warnings.filter(
+          (warning) => warning.dimension === 'rate window',
+        )
+        expect(
+          windows.map((warning) => warning.subject),
+          rules,
+        ).toEqual(['tool "send_email" on origin "lab-adapter"'])
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('charges a pot from the ledger when the candidate field does not resolve on an executed call', () => {
+    const store = openStore()
+    try {
+      const first = mcpRow({ tool_name: 'pay', timestamp: at(0), tool_input: { amount: 90 } })
+      const second = potRefusedRow('charge', 1, 20)
+      seed(store, [first, second])
+      const ledger = new BudgetLedger({ database: store.database, now: () => T0_MS })
+      ledger.writeMeta(meta())
+      ledger.commitAll([
+        {
+          budget_name: 'pot',
+          bucket_key: 'budget:pot:global',
+          kind: 'spend',
+          amount: 90,
+          currency: 'USD',
+          tool_name: 'pay',
+          origin: 'mcp',
+          audit_record_id: first.id,
+          timestamp: first.timestamp,
+          timestamp_ms: T0_MS,
+          generation: 1,
+        },
+      ])
+      // The candidate reads pay through a field no row carries, so it would
+      // have denied the first call; the call still charged 90 live, and the
+      // charge of 20 that follows (stored refused) stays refused.
+      const budgets = `${potYaml('pot', 100, 'deny', 'pay').replace("'$.amount'", "'$.total'")}\n      - match: { tool: 'charge' }\n        field: '$.amount'`
+      const result = simulate(store, candidateWith({ budgets }))
+      expect(result.rows.map((row) => row.simulated.block_reason)).toEqual([
+        'budget_exceeded',
+        'budget_exceeded',
+      ])
+      expect(result.deltas.map((delta) => delta.tool_name)).toEqual(['pay'])
+    } finally {
+      store.close()
+    }
+  })
+
   it('a candidate allow on blocked rows moves nothing, and a new rate rule refuses the sixth executed call', () => {
     const blockedStore = openStore()
     try {

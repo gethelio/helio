@@ -163,9 +163,13 @@ WHERE e.budget_name = @budget_name AND e.epoch = @epoch AND e.timestamp_ms > @si
 ORDER BY e.timestamp_ms ASC, e.rowid ASC
 `
 
+// A watermark recorded at or after the epoch start belongs to a sweep that
+// had not run yet: at the epoch's first row the pot was live with its full
+// sum, so only a watermark before that instant filters the rows.
 const REPLAY_SESSION_UNTIL_SQL = `
 SELECT e.bucket_key AS bucket_key,
-       SUM(CASE WHEN e.timestamp_ms >= COALESCE(g.gc_after_ms, 0) THEN e.amount ELSE 0 END) AS total,
+       SUM(CASE WHEN e.timestamp_ms >= CASE WHEN g.gc_after_ms < @t0_ms THEN g.gc_after_ms ELSE 0 END
+                THEN e.amount ELSE 0 END) AS total,
        MAX(e.timestamp_ms) AS last_activity_ms
 FROM budget_events e
 LEFT JOIN budget_bucket_gc g
@@ -484,6 +488,7 @@ export class BudgetLedger implements BudgetPersistence {
       budget_name: budgetName,
       epoch,
       until_iso: until.iso,
+      t0_ms: Date.parse(until.iso),
       end_ms: until.endMs ?? Number.MAX_SAFE_INTEGER,
     }) as BudgetReplayBucket[]
   }

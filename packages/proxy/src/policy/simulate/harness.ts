@@ -37,6 +37,7 @@ import { RateLimiter } from '../rate-limiter.js'
 import {
   gateBudgetCharges,
   gateSession,
+  mintLedgerCharges,
   repriceGatedCharges,
   sessionLimitKey,
 } from '../session-gate.js'
@@ -701,7 +702,9 @@ class ReplayRun {
     if (state === 'executed') {
       this.fillWindows(row, pipeline, input)
       this.chargePots(row)
-    } else if (state === 'unsettled' && first !== undefined && isLimitAction(first.action)) {
+    } else if (state === 'unsettled' && isLimitAction(row.policy_decision)) {
+      // A sideband limit row with no commit block: a slot the columns cannot
+      // settle, named whatever the candidate matches now.
       marks.push({
         rule: ruleLabel(first),
         dimension: 'rate window',
@@ -787,13 +790,24 @@ class ReplayRun {
       senderId: senderIdOf(row),
       upstream: row.upstream,
     })
-    if (resolved.charges.length === 0) return
+    if (resolved.charges.length === 0 && resolved.failures.length === 0) return
     const gated = gateBudgetCharges(resolved, gate, this.warn)
     if (!gated.ok) return
-    const charges = repriceGatedCharges(
-      gated.charges,
-      (charge) => this.ledgerAmounts.get(`${row.id}\u0000${charge.budget.name}`) ?? charge.amount,
-    )
+    const ledgerAmount = (name: string): number | undefined =>
+      this.ledgerAmounts.get(`${row.id}\u0000${name}`)
+    // Every pot the call fed moves: at the ledger's amount when a row exists,
+    // which also charges a pot whose candidate field the call's arguments do
+    // not resolve, else at the candidate's resolved amount.
+    const charges = [
+      ...repriceGatedCharges(
+        gated.charges,
+        (charge) => ledgerAmount(charge.budget.name) ?? charge.amount,
+      ),
+      ...mintLedgerCharges(gated, resolved.failures, (failure) =>
+        ledgerAmount(failure.budget.name),
+      ),
+    ] as unknown as typeof gated.charges
+    if (charges.length === 0) return
     const snapshots = this.engine.recordAll(charges, {
       kind: 'spend',
       auditRecordId: row.id,

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -125,11 +125,12 @@ interface LiveTrail {
 }
 
 /**
- * Drive the real door through two sessions and two doors on one fake
- * clock. The door stamps its rows from the wall clock while every store
- * runs on the fake one, so once the writer has flushed, the stamps are
- * rewritten to the fake clock: the trail is the one a proxy on that clock
- * would have written, and the replay's clock agrees with the stores'.
+ * Drive the real door through two sessions and two doors on one clock:
+ * `Date` itself is faked for the duration, so the door's row stamps, the
+ * ledger's two time columns, the store's `created_at` and every limiter and
+ * pot read the same instants, and the trail is the one a proxy on that
+ * clock would have written. Timers stay real: the approval router waits on
+ * them.
  */
 async function writeLiveTrail(): Promise<LiveTrail> {
   const candidate = candidateFromYaml(LIVE_YAML)
@@ -142,15 +143,16 @@ async function writeLiveTrail(): Promise<LiveTrail> {
     cleanupIntervalMs: 0,
   })
   let nowMs = Date.parse('2026-07-10T12:00:00.000Z')
-  const now = (): number => nowMs
-  const stamps = new Map<string, string>()
+  vi.useFakeTimers({ toFake: ['Date'], now: nowMs })
+  const now = (): number => Date.now()
+  const advance = (ms: number): void => {
+    nowMs += ms
+    vi.setSystemTime(nowMs)
+  }
   const writer = new AuditWriter({
     store,
     flushIntervalMs: 0,
     configSha256: candidate.source.sha256,
-    onPush: (_record, id) => {
-      stamps.set(id, new Date(nowMs).toISOString())
-    },
   })
   const ledger = new BudgetLedger({ database: store.database, now })
   const budgetEngine = new BudgetEngine({
@@ -191,11 +193,11 @@ async function writeLiveTrail(): Promise<LiveTrail> {
   })
 
   const step = async (door: GovernedForwarder, request: McpRequest, advanceMs = 1_000) => {
-    nowMs += advanceMs
+    advance(advanceMs)
     return door.forward(request)
   }
   const approve = async (request: McpRequest, decide: (ticketId: string) => void) => {
-    nowMs += 1_000
+    advance(1_000)
     const pending = crm.forward(request)
     const ticket = queue.listPending()[0]
     if (!ticket) throw new Error('no ticket raised')
@@ -232,11 +234,8 @@ async function writeLiveTrail(): Promise<LiveTrail> {
     await step(crm, call('get_user', 's1'))
     killSwitch.killed = false
     writer.flush()
-    const rewrite = store.database.prepare(
-      'UPDATE audit_records SET timestamp = ?, created_at = ? WHERE id = ?',
-    )
-    for (const [id, stamp] of stamps) rewrite.run(stamp, stamp, id)
   } finally {
+    vi.useRealTimers()
     approvalRouter.close()
     budgetEngine.close()
     rateLimiter.close()

@@ -20,6 +20,7 @@ import {
   resetSessionGateWarningsForTests,
   ANONYMOUS_POOLING_WARNING,
   repriceGatedCharges,
+  mintLedgerCharges,
 } from './session-gate.js'
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ function failure(b: CompiledBudget, bucketKey: string): BudgetChargeFailure {
     budget: b,
     bucketKey,
     reason: 'invalid_amount',
+    generation: 0,
     spent: 0,
     remaining: b.limit,
     resetAtMs: null,
@@ -448,5 +450,29 @@ describe('repriceGatedCharges (issue #488)', () => {
       gated.charges.map((entry) => entry.bucketKey),
     )
     expect(gated.charges.map((entry) => entry.amount)).toEqual([5, 7])
+  })
+})
+
+describe('mintLedgerCharges (issue #488)', () => {
+  it('mints a charge for each failure the ledger holds an amount for, at the failure generation, and drops the rest', () => {
+    const pot = budget('global')
+    const other = budget('global', 'other-pot')
+    const failures = [
+      { ...failure(pot, 'budget:global-pot:global'), generation: 3 },
+      { ...failure(other, 'budget:other-pot:global'), generation: 2 },
+    ]
+    const gated = gateBudgetCharges({ charges: [], failures }, gateSession('s-1', 'deny'))
+    if (!gated.ok) throw new Error('gate refused')
+    const minted = mintLedgerCharges(gated, failures, (entry) =>
+      entry.budget.name === 'global-pot' ? 42 : undefined,
+    )
+    expect(
+      minted.map((charge) => [
+        charge.budget.name,
+        charge.bucketKey,
+        charge.amount,
+        charge.generation,
+      ]),
+    ).toEqual([['global-pot', 'budget:global-pot:global', 42, 3]])
   })
 })

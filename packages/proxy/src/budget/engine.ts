@@ -63,6 +63,8 @@ export interface BudgetChargeFailure {
   readonly budget: CompiledBudget
   readonly bucketKey: string
   readonly reason: 'invalid_amount'
+  /** The budget's config generation at resolve time, as on a charge. */
+  readonly generation: number
   /** REAL accrued spend on the bucket the charge would have hit. */
   readonly spent: number
   readonly remaining: number
@@ -441,6 +443,7 @@ export class BudgetEngine {
           budget,
           bucketKey,
           reason: 'invalid_amount',
+          generation: this.generations.get(budget.name) ?? 0,
           spent,
           remaining: Math.max(0, budget.limit - spent),
           // null is reserved for session pots on the wire; an empty duration

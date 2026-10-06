@@ -202,6 +202,34 @@ export function repriceGatedCharges(
   })) as unknown as GatedCharges
 }
 
+/**
+ * Mint charges for failures whose amount the ledger holds (issue #488
+ * replay): an executed call whose candidate contributor field does not
+ * resolve still moved the live pot, and the ledger row says by how much.
+ * NOT an embedder API. The gate witness proves the engagement check ran on
+ * the resolution these failures came from; a failure `amountOf` answers
+ * nothing for is dropped.
+ */
+export function mintLedgerCharges(
+  _witness: Extract<GatedBudgetCharges, { readonly ok: true }>,
+  failures: readonly BudgetChargeFailure[],
+  amountOf: (failure: BudgetChargeFailure) => number | undefined,
+): GatedCharges {
+  const charges: BudgetCharge[] = []
+  for (const failure of failures) {
+    const amount = amountOf(failure)
+    if (amount === undefined) continue
+    charges.push({
+      budget: failure.budget,
+      bucketKey: failure.bucketKey,
+      amount,
+      generation: failure.generation,
+    })
+  }
+  // The sanctioned mint: the witness is a gate result on this resolution.
+  return charges as unknown as GatedCharges
+}
+
 // ---------------------------------------------------------------------------
 // Deny messages — one builder per class, both naming the tried strategies.
 // ---------------------------------------------------------------------------
