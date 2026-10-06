@@ -7,6 +7,7 @@ import type { Database as DatabaseType } from 'better-sqlite3'
 import { BudgetLedger } from './ledger.js'
 import type { BudgetLedgerRow, BudgetMetaRow } from './engine.js'
 import { AuditStore, EXPORT_MAX_RECORDS } from '../audit/index.js'
+import type { AuditRecordInput } from '../audit/types.js'
 import { auditBackedDb } from '../__tests__/helpers/audit-backed-db.js'
 
 // ---------------------------------------------------------------------------
@@ -873,6 +874,224 @@ describe('BudgetLedger WAL co-existence', () => {
       second?.close()
       store.close()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Replay reads bounded by the committing call, and the listing read
+// (issue #488)
+// ---------------------------------------------------------------------------
+
+describe('replay reads bounded by the committing call', () => {
+  const T0 = '2026-07-10T12:00:00.000Z'
+  const T0_MS = Date.parse(T0)
+  const END_MS = T0_MS + 10_000
+  const GLOBAL = 'budget:daily-cap:global'
+  const S1 = 'budget:daily-cap:session:s1'
+  const S2 = 'budget:daily-cap:session:s2'
+
+  /** A minimal tool_call row stamped at `timestamp`; the join reads only `id` and `timestamp`. */
+  function auditRow(timestamp: string): AuditRecordInput {
+    return {
+      timestamp,
+      session_id: null,
+      session_source: null,
+      agent_id: null,
+      environment: null,
+      tool_name: 'stripe_charge',
+      tool_input: {},
+      policy_decision: 'allow',
+      block_reason: null,
+      matched_rule: null,
+      matched_rule_index: null,
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: null,
+      upstream_error: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      total_duration_ms: 1,
+      approval_wait_ms: 0,
+      proxy_compute_ms: 1,
+      flagged_destructive: false,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
+      protocol_version: null,
+      upstream: null,
+    }
+  }
+
+  /**
+   * Four ledger rows of one generation: a call that started before T0 and
+   * committed after it (the straddle), a call that started at or after T0,
+   * and two rows whose audit ids point at nothing, one committed before the
+   * epoch's end and one at it.
+   */
+  function seeded(buckets: { straddle: string; late: string; dangling: string; last: string }) {
+    const store = new AuditStore({
+      path: ':memory:',
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    const ledger = new BudgetLedger({ database: store.database, now: () => T0_MS })
+    store.insert(auditRow('2026-07-10T11:59:00.000Z'), undefined, 'before-t0')
+    store.insert(auditRow('2026-07-10T12:00:01.000Z'), undefined, 'at-or-after-t0')
+    ledger.writeMeta(metaRow())
+    ledger.commitAll([
+      ledgerRow({
+        audit_record_id: 'before-t0',
+        amount: 10,
+        timestamp_ms: T0_MS + 1_000,
+        bucket_key: buckets.straddle,
+      }),
+      ledgerRow({
+        audit_record_id: 'at-or-after-t0',
+        amount: 20,
+        timestamp_ms: T0_MS + 2_000,
+        bucket_key: buckets.late,
+      }),
+      ledgerRow({
+        audit_record_id: 'dangling-early',
+        amount: 30,
+        timestamp_ms: T0_MS + 3_000,
+        bucket_key: buckets.dangling,
+      }),
+      ledgerRow({
+        audit_record_id: 'dangling-late',
+        amount: 40,
+        timestamp_ms: END_MS,
+        bucket_key: buckets.last,
+      }),
+    ])
+    return { store, ledger }
+  }
+
+  it("bounds replayDurationEvents by the committing call's timestamp", () => {
+    const { store, ledger } = seeded({
+      straddle: GLOBAL,
+      late: GLOBAL,
+      dangling: GLOBAL,
+      last: GLOBAL,
+    })
+    try {
+      const amounts = (events: ReadonlyArray<{ amount: number }>): number[] =>
+        events.map((event) => event.amount)
+      // The straddle is kept, the later call dropped, the dangling row kept
+      // up to the epoch's end and dropped at it.
+      expect(
+        amounts(ledger.replayDurationEvents('daily-cap', 1, 0, { iso: T0, endMs: END_MS })),
+      ).toEqual([10, 30])
+      // The latest epoch has no end: every dangling row is loaded.
+      expect(amounts(ledger.replayDurationEvents('daily-cap', 1, 0, { iso: T0 }))).toEqual([
+        10, 30, 40,
+      ])
+      // The lower bound still applies under the bound.
+      expect(
+        amounts(
+          ledger.replayDurationEvents('daily-cap', 1, T0_MS + 1_000, { iso: T0, endMs: END_MS }),
+        ),
+      ).toEqual([30])
+      // Another generation is never read.
+      expect(amounts(ledger.replayDurationEvents('daily-cap', 2, 0, { iso: T0 }))).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('bounds replaySessionBuckets the same way and drops a bucket with no earlier row', () => {
+    const { store, ledger } = seeded({ straddle: S1, late: S2, dangling: S1, last: S2 })
+    try {
+      expect(ledger.replaySessionBuckets('daily-cap', 1, { iso: T0, endMs: END_MS })).toEqual([
+        { bucket_key: S1, total: 40, last_activity_ms: T0_MS + 3_000 },
+      ])
+      expect(ledger.replaySessionBuckets('daily-cap', 1, { iso: T0 })).toEqual([
+        { bucket_key: S1, total: 40, last_activity_ms: T0_MS + 3_000 },
+        { bucket_key: S2, total: 40, last_activity_ms: END_MS },
+      ])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('reads every row and runs the original statements when until is absent', () => {
+    const { store, ledger } = seeded({ straddle: S1, late: S2, dangling: S1, last: S2 })
+    try {
+      expect(ledger.replayDurationEvents('daily-cap', 1, 0).map((event) => event.amount)).toEqual([
+        10, 20, 30, 40,
+      ])
+      expect(ledger.replaySessionBuckets('daily-cap', 1)).toEqual([
+        { bucket_key: S1, total: 40, last_activity_ms: T0_MS + 3_000 },
+        { bucket_key: S2, total: 60, last_activity_ms: END_MS },
+      ])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('lists events since an instant in order', () => {
+    const { store, ledger } = seeded({ straddle: GLOBAL, late: GLOBAL, dangling: S1, last: S2 })
+    try {
+      // A second row in the same millisecond as the straddle, inserted later:
+      // rowid breaks the tie, and `>=` keeps a row stamped exactly at `since`.
+      ledger.commitAll([
+        ledgerRow({
+          budget_name: 'other-pot',
+          audit_record_id: 'before-t0',
+          amount: 5,
+          timestamp_ms: T0_MS + 1_000,
+          kind: 'approved_overage',
+        }),
+      ])
+      expect(ledger.listEventsSince(T0_MS + 1_000)).toEqual([
+        {
+          budget_name: 'daily-cap',
+          bucket_key: GLOBAL,
+          kind: 'spend',
+          amount: 10,
+          audit_record_id: 'before-t0',
+          timestamp_ms: T0_MS + 1_000,
+        },
+        {
+          budget_name: 'other-pot',
+          bucket_key: GLOBAL,
+          kind: 'approved_overage',
+          amount: 5,
+          audit_record_id: 'before-t0',
+          timestamp_ms: T0_MS + 1_000,
+        },
+        {
+          budget_name: 'daily-cap',
+          bucket_key: GLOBAL,
+          kind: 'spend',
+          amount: 20,
+          audit_record_id: 'at-or-after-t0',
+          timestamp_ms: T0_MS + 2_000,
+        },
+        {
+          budget_name: 'daily-cap',
+          bucket_key: S1,
+          kind: 'spend',
+          amount: 30,
+          audit_record_id: 'dangling-early',
+          timestamp_ms: T0_MS + 3_000,
+        },
+        {
+          budget_name: 'daily-cap',
+          bucket_key: S2,
+          kind: 'spend',
+          amount: 40,
+          audit_record_id: 'dangling-late',
+          timestamp_ms: END_MS,
+        },
+      ])
+      expect(ledger.listEventsSince(END_MS + 1)).toEqual([])
+    } finally {
+      store.close()
     }
   })
 })

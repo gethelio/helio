@@ -18,6 +18,7 @@ import {
   warnSessionUnresolvedEngagementOnce,
   warnAnonymousPoolingOnce,
   resetSessionGateWarningsForTests,
+  ANONYMOUS_POOLING_WARNING,
 } from './session-gate.js'
 
 // ---------------------------------------------------------------------------
@@ -396,5 +397,32 @@ describe('gate module call-site backstops', () => {
     const raw: BudgetCharge[] = [charge(budget('session'), 'k', 1)]
     // @ts-expect-error — raw BudgetCharge[] must not satisfy GatedCharges
     engine.peekAll(raw)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The warn logger on gateBudgetCharges (issue #488)
+// ---------------------------------------------------------------------------
+
+describe('gateBudgetCharges warn logger (issue #488)', () => {
+  it('prints anonymous pooling through warn and leaves the one-shot latch armed', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const pot = budget('session')
+    const resolved = { charges: [charge(pot, 'budget:session-pot:session:unknown')], failures: [] }
+    const gate = gateSession(undefined, 'anonymous')
+    const lines: string[] = []
+
+    const result = gateBudgetCharges(resolved, gate, (message) => lines.push(message))
+    expect(result.ok).toBe(true)
+    expect(lines).toEqual([ANONYMOUS_POOLING_WARNING])
+    expect(errorSpy).not.toHaveBeenCalled()
+
+    // The latch is untouched: the first call WITHOUT the logger still prints
+    // its one line, and only once.
+    gateBudgetCharges(resolved, gate)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(errorSpy).toHaveBeenCalledWith(ANONYMOUS_POOLING_WARNING)
+    gateBudgetCharges(resolved, gate)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
   })
 })

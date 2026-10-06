@@ -2991,3 +2991,199 @@ describe('kill_switch records and the aggregates (issue #402)', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// Replay reads (issue #488): the rows a policy simulation walks
+// ---------------------------------------------------------------------------
+
+describe('replay reads', () => {
+  const A = 'a'.repeat(64)
+  const B = 'b'.repeat(64)
+  const at = (minute: number): string => new Date(Date.UTC(2026, 6, 10, 12, minute)).toISOString()
+
+  /**
+   * Six tool calls whose `timestamp` order is A, A, B, A, null, null, with
+   * `created_at` deliberately reversed so a read ordered by insert time
+   * would come out backwards.
+   */
+  function seedEpochs(s: AuditStore): void {
+    const rows: ReadonlyArray<readonly [string, string | null, string]> = [
+      [at(0), A, at(5)],
+      [at(1), A, at(4)],
+      [at(2), B, at(3)],
+      [at(3), A, at(2)],
+      [at(4), null, at(1)],
+      [at(5), null, at(0)],
+    ]
+    for (const [timestamp, hash, createdAt] of rows) {
+      s.insert(makeRecord({ timestamp, config_sha256: hash, session_id: 's-1' }), createdAt)
+    }
+  }
+
+  it('cuts the tool_call rows into runs of equal config_sha256, a rollback giving three', () => {
+    const s = createStore()
+    try {
+      seedEpochs(s)
+      s.insert(
+        makeRecord({
+          timestamp: at(6),
+          config_sha256: A,
+          record_kind: 'drift_event',
+          policy_decision: 'tool_drift',
+        }),
+      )
+      expect(s.listConfigEpochs({})).toEqual([
+        { config_sha256: A, rows: 2, first_timestamp: at(0), last_timestamp: at(1) },
+        { config_sha256: B, rows: 1, first_timestamp: at(2), last_timestamp: at(2) },
+        { config_sha256: A, rows: 1, first_timestamp: at(3), last_timestamp: at(3) },
+        { config_sha256: null, rows: 2, first_timestamp: at(4), last_timestamp: at(5) },
+      ])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('applies the window on timestamp inclusively and the upstream and session filters exactly', () => {
+    const s = createStore()
+    try {
+      seedEpochs(s)
+      s.insert(
+        makeRecord({ timestamp: at(7), config_sha256: B, upstream: 'crm', session_id: 's-2' }),
+      )
+      expect(s.listConfigEpochs({ from: at(1), to: at(3) })).toEqual([
+        { config_sha256: A, rows: 1, first_timestamp: at(1), last_timestamp: at(1) },
+        { config_sha256: B, rows: 1, first_timestamp: at(2), last_timestamp: at(2) },
+        { config_sha256: A, rows: 1, first_timestamp: at(3), last_timestamp: at(3) },
+      ])
+      expect(s.listConfigEpochs({ upstream: 'crm' })).toEqual([
+        { config_sha256: B, rows: 1, first_timestamp: at(7), last_timestamp: at(7) },
+      ])
+      expect(s.listConfigEpochs({ sessionId: 's-2' })).toEqual([
+        { config_sha256: B, rows: 1, first_timestamp: at(7), last_timestamp: at(7) },
+      ])
+      expect(s.listConfigEpochs({ sessionId: 's-9' })).toEqual([])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('iterates tool_call and evaluation_expired rows in timestamp order, created_at out of order', () => {
+    const s = createStore()
+    try {
+      seedEpochs(s)
+      s.insert(
+        makeRecord({
+          timestamp: at(7),
+          config_sha256: null,
+          record_kind: 'evaluation_expired',
+          origin: 'lab-adapter',
+        }),
+      )
+      s.insert(
+        makeRecord({
+          timestamp: at(8),
+          record_kind: 'policy_reload',
+          policy_decision: 'policy_reload',
+        }),
+      )
+      const rows = [...s.iterateReplayRows({})]
+      expect(rows.map((row) => row.timestamp)).toEqual([
+        at(0),
+        at(1),
+        at(2),
+        at(3),
+        at(4),
+        at(5),
+        at(7),
+      ])
+      expect(rows.map((row) => row.record_kind)).toContain('evaluation_expired')
+      expect(rows.map((row) => row.record_kind)).not.toContain('policy_reload')
+    } finally {
+      s.close()
+    }
+  })
+
+  it('bounds the iteration with an exclusive before and filters by epoch, the null bucket included', () => {
+    const s = createStore()
+    try {
+      seedEpochs(s)
+      const timestamps = (
+        filters: Parameters<AuditStore['iterateReplayRows']>[0],
+      ): readonly string[] => [...s.iterateReplayRows(filters)].map((row) => row.timestamp)
+      expect(timestamps({ before: at(3) })).toEqual([at(0), at(1), at(2)])
+      expect(timestamps({ configSha256: null })).toEqual([at(4), at(5)])
+      expect(timestamps({ configSha256: A })).toEqual([at(0), at(1), at(3)])
+      expect(timestamps({ configSha256: A, before: at(3) })).toEqual([at(0), at(1)])
+      expect(timestamps({ from: at(1), to: at(4), configSha256: A })).toEqual([at(1), at(3)])
+    } finally {
+      s.close()
+    }
+  })
+
+  it('lists baseline acceptances in timestamp order and nothing else', () => {
+    const s = createStore()
+    try {
+      const acceptance = (timestamp: string, tool: string): InsertRecord =>
+        makeRecord({
+          timestamp,
+          tool_name: tool,
+          record_kind: 'drift_event',
+          policy_decision: 'baseline_accepted',
+          evidence_chain: { tool_drift: { changes: [] }, baseline_accepted: { by: 'ops' } },
+        })
+      s.insert(acceptance(at(9), 'later'))
+      s.insert(acceptance(at(8), 'earlier'))
+      s.insert(
+        makeRecord({ timestamp: at(7), record_kind: 'drift_event', policy_decision: 'tool_drift' }),
+      )
+      s.insert(makeRecord({ timestamp: at(6) }))
+      const rows = s.listBaselineAcceptances()
+      expect(rows.map((row) => [row.timestamp, row.tool_name])).toEqual([
+        [at(8), 'earlier'],
+        [at(9), 'later'],
+      ])
+      expect(rows.every((row) => row.policy_decision === 'baseline_accepted')).toBe(true)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('reads the largest limiter window snapshotted in the selected epoch', () => {
+    const s = createStore()
+    try {
+      s.insert(
+        makeRecord({
+          timestamp: at(0),
+          config_sha256: A,
+          evidence_chain: {
+            rate_limit: { allowed: true, current: 1, limit: 5, window_ms: 3_600_000 },
+          },
+        }),
+      )
+      s.insert(
+        makeRecord({
+          timestamp: at(1),
+          config_sha256: A,
+          evidence_chain: {
+            spend_limit: { allowed: true, current_spend: 1, window_ms: 7_200_000 },
+          },
+        }),
+      )
+      s.insert(makeRecord({ timestamp: at(2), config_sha256: A, evidence_chain: null }))
+      s.insert(
+        makeRecord({
+          timestamp: at(3),
+          config_sha256: B,
+          evidence_chain: { rate_limit: { window_ms: 86_400_000 } },
+        }),
+      )
+      expect(s.maxSnapshotWindowMs({ configSha256: A })).toBe(7_200_000)
+      expect(s.maxSnapshotWindowMs({ configSha256: B })).toBe(86_400_000)
+      expect(s.maxSnapshotWindowMs({ configSha256: null })).toBe(0)
+      expect(s.maxSnapshotWindowMs({})).toBe(86_400_000)
+      expect(s.maxSnapshotWindowMs({ from: at(1), to: at(2) })).toBe(7_200_000)
+    } finally {
+      s.close()
+    }
+  })
+})

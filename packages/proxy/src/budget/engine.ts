@@ -173,6 +173,22 @@ export interface BudgetReplayEvent {
   readonly timestamp_ms: number
 }
 
+/**
+ * An upper bound on the two replay reads (issue #488). A row whose audit
+ * record is stamped at or after `iso` is left out; a row with no audit
+ * record (a null or dangling `audit_record_id`) is kept while its own
+ * `timestamp_ms` is below `endMs`, unbounded when `endMs` is absent. The
+ * live `hydrate()` never passes one; a policy simulation parked on a config
+ * epoch's first row does, so the calls it is about to replay are not loaded
+ * into the pot as well.
+ */
+export interface BudgetReplayUntil {
+  /** The ISO 8601 instant of the epoch's first audit row. */
+  readonly iso: string
+  /** The epoch's end in epoch milliseconds, the bound on rows with no audit record. */
+  readonly endMs?: number
+}
+
 /** One rebuilt session pot: post-watermark lifetime sum + last activity. */
 export interface BudgetReplayBucket {
   readonly bucket_key: string
@@ -206,17 +222,28 @@ export interface BudgetPersistence extends BudgetLedgerSink {
    * be re-minted for a different pot.
    */
   maxEventEpoch(budgetName: string): number
-  /** MUST return rows in ascending `timestamp_ms` order (ties by insert order). */
+  /**
+   * MUST return rows in ascending `timestamp_ms` order (ties by insert
+   * order). `until`, when given, bounds the rows by their committing call
+   * (see {@link BudgetReplayUntil}); an implementer may ignore it only if it
+   * never serves a replay.
+   */
   replayDurationEvents(
     budgetName: string,
     epoch: number,
     sinceMs: number,
+    until?: BudgetReplayUntil,
   ): readonly BudgetReplayEvent[]
   /**
    * Every bucket of the epoch with its post-watermark sum and last activity.
-   * Liveness policy (idle-TTL) is the engine's job, not the store's.
+   * Liveness policy (idle-TTL) is the engine's job, not the store's. `until`
+   * bounds the rows as it does for the duration read.
    */
-  replaySessionBuckets(budgetName: string, epoch: number): readonly BudgetReplayBucket[]
+  replaySessionBuckets(
+    budgetName: string,
+    epoch: number,
+    until?: BudgetReplayUntil,
+  ): readonly BudgetReplayBucket[]
   /** Upsert the idle-GC watermark for one session bucket. */
   recordBucketGc(budgetName: string, bucketKey: string, gcAfterMs: number): void
 }

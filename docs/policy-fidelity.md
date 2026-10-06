@@ -1,6 +1,6 @@
 # Simulation fidelity: what the audit trail can replay
 
-> **Status: draft.** This page is written ahead of `helio policy simulate` (issue #490) and is the specification its harness (issue #488) is built from. Every verdict below was derived by running the proxy and reading the rows it wrote, on the code as of 2026-10-05, and the harness re-derives none of it. When the command exists this page stays as the reference for what a simulation can and cannot know.
+> **Status: specification.** This page is written ahead of `helio policy simulate` (issue #490) and is the specification its harness (issue #488) is built from. Every verdict below was derived by running the proxy and reading the rows it wrote, on the code as of 2026-10-05, and the harness re-derives none of it. The harness (issue #488) implements this page; the subsection `What the harness does not rebuild` is what it leaves out. When the command exists this page stays as the reference for what a simulation can and cannot know.
 
 ## Why this page exists
 
@@ -114,6 +114,10 @@ Approval outcomes are not state. A `require_approval` row's `approval_status` is
 ### Block-reason vocabulary per origin
 
 The sideband's `deriveBlockReason` classifies a kill, an unresolved session, an approval outcome and a budget breach first and maps every remaining wire `deny` to `policy_denied`, so an evidence or dependency deny on a sideband row with `dry_run = 0` is stored as `policy_denied` with no snapshot, where the MCP door stores `evidence_missing`, `evidence_expired` or `dependency_missing` with its snapshot. A replay that produces an evidence or dependency deny for such a sideband row compares it equal to the stored `policy_denied`; otherwise every historical sideband evidence deny reports a false delta. Under dry run (global or per-rule) the mapping does not apply on either door: `decide()` still flips the action to `deny` when evidence fails but leaves the call a dry run, `deriveBlockReason` returns null for a dry run before it reads the wire decision, and the MCP door's dry-run result carries no JSON-RPC error for `extractBlockReason` to read (the MCP row still stores the snapshot). A dry-run evidence deny is therefore `policy_decision: deny`, `dry_run: 1`, `block_reason: null` on both doors, and a replay compares a dry-run row's `block_reason` to null. Issue #499 asks for parity in the writer; until it lands this mapping is part of the harness's interface.
+
+### What the harness does not rebuild
+
+The harness rebuilds the state above from the rows it is given and no more. What it leaves out, each stated once here:
 
 ## Tool annotations
 

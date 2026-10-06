@@ -14,6 +14,7 @@ import { clamp } from '../util/clamp.js'
 import type {
   ActivationTimeline,
   ActivationWindow,
+  ConfigEpochRun,
   PersistedSummary,
   AuditRecord,
   AuditRecordInput,
@@ -22,6 +23,8 @@ import type {
   AuditListResult,
   AuditAggregateStats,
   AuditStoreOptions,
+  ReplayFilters,
+  ReplayRowFilters,
 } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -502,6 +505,51 @@ function buildWhereClause(filters: AuditQueryFilters): {
   const clause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
   return { clause, params }
 }
+
+/**
+ * The WHERE clause of a replay read (issue #488): the kind predicate the
+ * caller names, then the window, the warm-up bound, the two exact filters
+ * and the epoch, every value a `?` placeholder. The window and the bound
+ * compare `timestamp`, the instant the door took before it decided, never
+ * `created_at`.
+ */
+function buildReplayWhereClause(
+  kindPredicate: string,
+  filters: ReplayRowFilters,
+): { clause: string; params: unknown[] } {
+  const conditions: string[] = [kindPredicate]
+  const params: unknown[] = []
+  if (filters.from !== undefined) {
+    conditions.push('timestamp >= ?')
+    params.push(filters.from)
+  }
+  if (filters.to !== undefined) {
+    conditions.push('timestamp <= ?')
+    params.push(filters.to)
+  }
+  if (filters.before !== undefined) {
+    conditions.push('timestamp < ?')
+    params.push(filters.before)
+  }
+  if (filters.upstream !== undefined) {
+    conditions.push('upstream = ?')
+    params.push(filters.upstream)
+  }
+  if (filters.sessionId !== undefined) {
+    conditions.push('session_id = ?')
+    params.push(filters.sessionId)
+  }
+  if (filters.configSha256 === null) {
+    conditions.push('config_sha256 IS NULL')
+  } else if (filters.configSha256 !== undefined) {
+    conditions.push('config_sha256 = ?')
+    params.push(filters.configSha256)
+  }
+  return { clause: `WHERE ${conditions.join(' AND ')}`, params }
+}
+
+/** The kind predicate of the rows a replay walks: the calls and the evaluations that expired unreported. */
+const REPLAY_KINDS_SQL = "record_kind IN ('tool_call', 'evaluation_expired')"
 
 /** The additive nullable columns that migrate in place (issues #292, #341), in the order they were added. */
 const ADDITIVE_AUDIT_COLUMNS: ReadonlyArray<{ readonly name: string; readonly ddl: string }> = [
@@ -1127,6 +1175,103 @@ export class AuditStore {
       first_blocked_call: firstBlocked ?? null,
       newest_record_hash: newest === undefined ? null : { hash: newest.config_sha256 },
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Replay reads (issue #488): the rows a policy simulation walks, selected,
+  // ordered and dated by `timestamp`, the instant the door took before it
+  // decided. `created_at` is the insert instant, and a batched flush stamps
+  // many rows alike, so it is not the order the decisions ran in. No index
+  // covers `timestamp`: the planner takes the kind index and sorts.
+  // -------------------------------------------------------------------------
+
+  /**
+   * The tool calls of the window cut into runs of equal `config_sha256` in
+   * `timestamp` order, a null hash being its own value: the config epochs a
+   * simulation can select. A rollback (A, B, A) yields three runs.
+   */
+  listConfigEpochs(filters: ReplayFilters): readonly ConfigEpochRun[] {
+    const { clause, params } = buildReplayWhereClause("record_kind = 'tool_call'", filters)
+    const rows = this.db
+      .prepare(
+        `SELECT config_sha256, timestamp FROM audit_records ${clause} ORDER BY timestamp ASC, rowid ASC`,
+      )
+      .all(...params) as Array<{ config_sha256: string | null; timestamp: string }>
+    const runs: Array<{
+      config_sha256: string | null
+      rows: number
+      first_timestamp: string
+      last_timestamp: string
+    }> = []
+    for (const row of rows) {
+      const current = runs[runs.length - 1]
+      if (current && current.config_sha256 === row.config_sha256) {
+        current.rows += 1
+        current.last_timestamp = row.timestamp
+      } else {
+        runs.push({
+          config_sha256: row.config_sha256,
+          rows: 1,
+          first_timestamp: row.timestamp,
+          last_timestamp: row.timestamp,
+        })
+      }
+    }
+    return runs
+  }
+
+  /**
+   * The `tool_call` and `evaluation_expired` rows a replay walks, in
+   * `timestamp` order with `rowid` breaking ties, one row at a time, so a
+   * 90-day trail is never held in memory. The statement stays stepped
+   * between rows: another read on this connection is fine, a write on it
+   * (the retention timer) is not, so a replay opens the store with
+   * `cleanupIntervalMs: 0`, as the one-shot CLI commands do.
+   */
+  *iterateReplayRows(filters: ReplayRowFilters): IterableIterator<AuditRecord> {
+    const { clause, params } = buildReplayWhereClause(REPLAY_KINDS_SQL, filters)
+    const stmt = this.db.prepare(
+      `SELECT * FROM audit_records ${clause} ORDER BY timestamp ASC, rowid ASC`,
+    )
+    for (const row of stmt.iterate(...params) as IterableIterator<RawAuditRow>) {
+      yield deserializeRow(row)
+    }
+  }
+
+  /**
+   * Every operator acceptance of a drifted baseline (issue #60's
+   * `baseline_accepted` drift event), oldest first by `timestamp`: the
+   * replay unwinds a baseline table row through the acceptances after a
+   * call to the definition the call was judged on.
+   */
+  listBaselineAcceptances(): readonly AuditRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM audit_records
+         WHERE record_kind = 'drift_event' AND policy_decision = 'baseline_accepted'
+         ORDER BY timestamp ASC, rowid ASC`,
+      )
+      .all() as RawAuditRow[]
+    return rows.map(deserializeRow)
+  }
+
+  /**
+   * The largest limiter window, in milliseconds, among the `rate_limit` and
+   * `spend_limit` snapshots on the selected rows, 0 when none: how far
+   * before an epoch's first row a replay warms the limiters up from.
+   */
+  maxSnapshotWindowMs(filters: ReplayRowFilters): number {
+    const { clause, params } = buildReplayWhereClause(REPLAY_KINDS_SQL, filters)
+    const { window_ms } = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(MAX(
+           COALESCE(json_extract(evidence_chain, '$.rate_limit.window_ms'), 0),
+           COALESCE(json_extract(evidence_chain, '$.spend_limit.window_ms'), 0)
+         )), 0) AS window_ms
+         FROM audit_records ${clause}`,
+      )
+      .get(...params) as { window_ms: number }
+    return window_ms
   }
 
   /** True when the table holds rows and the composite index is not there yet. */

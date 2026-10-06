@@ -44,7 +44,13 @@ export class EnvVarUnsetError extends ConfigError {
 // Environment variable interpolation
 // ---------------------------------------------------------------------------
 
-const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+/**
+ * A `${NAME}` placeholder: `[A-Za-z_][A-Za-z0-9_]*` between the braces.
+ * Exported so a reader of a stored config (the policy simulation's pin on a
+ * rule's `max_spend.field`) tests a string with the loader's own pattern.
+ * Global: probe it with `String.prototype.search`, which ignores `lastIndex`.
+ */
+export const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 
 /**
  * Recursively walk a parsed YAML value and replace `${VAR_NAME}` patterns

@@ -104,7 +104,8 @@ export type GatedBudgetCharges =
  * any session-keyed charge OR failure among the call's resolved charges
  * reports `unresolvedEngaged` before a single peek runs. Calls that feed
  * only global/sender pots pass through untouched, and an anonymous mint
- * pools with a one-shot warning at its first session-keyed engagement.
+ * pools with a one-shot warning at its first session-keyed engagement,
+ * printed through `warn` instead of the one-shot when a caller supplies it.
  */
 export function gateBudgetCharges(
   resolved: {
@@ -112,6 +113,7 @@ export function gateBudgetCharges(
     readonly failures: readonly BudgetChargeFailure[]
   },
   gate: SessionGate,
+  warn?: (message: string) => void,
 ): GatedBudgetCharges {
   const sessionEngaged =
     resolved.charges.some((charge) => charge.budget.key === 'session') ||
@@ -120,7 +122,12 @@ export function gateBudgetCharges(
     if (sessionEngaged) return { ok: false, unresolvedEngaged: true }
     return { ok: true, charges: resolved.charges as GatedCharges }
   }
-  if (gate.anonymous && sessionEngaged) warnAnonymousPoolingOnce()
+  if (gate.anonymous && sessionEngaged) {
+    // A caller with its own outlet (a policy simulation) gets the line
+    // through it and leaves the process-wide one-shot untouched.
+    if (warn) warn(ANONYMOUS_POOLING_WARNING)
+    else warnAnonymousPoolingOnce()
+  }
   return { ok: true, charges: resolved.charges as GatedCharges }
 }
 
@@ -200,6 +207,12 @@ export function sessionRequiredForGroundingMessage(tried: string): string {
 // One-shot operational warnings
 // ---------------------------------------------------------------------------
 
+/** The line printed when an anonymous mint pools a session-keyed control. */
+export const ANONYMOUS_POOLING_WARNING =
+  '[helio] Warning: session identity unresolved; session-keyed limits and budgets ' +
+  'are pooling into the shared "unknown" bucket (session.on_unresolved: anonymous). ' +
+  'Have callers send session identity to isolate them from each other.'
+
 let unresolvedEngagementWarned = false
 let anonymousPoolingWarned = false
 
@@ -232,9 +245,5 @@ export function warnAnonymousPoolingOnce(): void {
   if (anonymousPoolingWarned) return
   anonymousPoolingWarned = true
   // eslint-disable-next-line no-console -- Intentional operational warning
-  console.error(
-    '[helio] Warning: session identity unresolved; session-keyed limits and budgets ' +
-      'are pooling into the shared "unknown" bucket (session.on_unresolved: anonymous). ' +
-      'Have callers send session identity to isolate them from each other.',
-  )
+  console.error(ANONYMOUS_POOLING_WARNING)
 }

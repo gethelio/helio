@@ -11,6 +11,7 @@ import {
   ConfigError,
   EnvVarUnsetError,
   interpolateEnvVars,
+  ENV_VAR_PATTERN,
 } from './loader.js'
 import { isSingularConfig } from './schema.js'
 
@@ -679,5 +680,18 @@ dashboard:
     await expect(readConfigSource(join(tmpDir, 'missing.yaml'))).rejects.toThrow(
       /Cannot read config file/,
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ENV_VAR_PATTERN (issue #488)
+// ---------------------------------------------------------------------------
+
+describe('ENV_VAR_PATTERN', () => {
+  it('is exported and matches ${A_1} but not ${1A}', () => {
+    // `search` ignores the global flag's lastIndex, so a shared pattern is safe to probe.
+    expect('${A_1}'.search(ENV_VAR_PATTERN)).toBe(0)
+    expect('${1A}'.search(ENV_VAR_PATTERN)).toBe(-1)
+    expect('plain.field'.search(ENV_VAR_PATTERN)).toBe(-1)
   })
 })
