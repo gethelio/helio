@@ -21,6 +21,7 @@ import {
   ANONYMOUS_POOLING_WARNING,
   repriceGatedCharges,
   mintLedgerCharges,
+  concatGatedCharges,
 } from './session-gate.js'
 
 // ---------------------------------------------------------------------------
@@ -474,5 +475,24 @@ describe('mintLedgerCharges (issue #488)', () => {
         charge.generation,
       ]),
     ).toEqual([['global-pot', 'budget:global-pot:global', 42, 3]])
+  })
+})
+
+describe('concatGatedCharges (issue #488)', () => {
+  it('joins gated lists in order without a cast outside the gate module', () => {
+    const pot = budget('global')
+    const first = gateBudgetCharges(
+      { charges: [charge(pot, 'budget:global-pot:global', 1)], failures: [] },
+      gateSession('s-1', 'deny'),
+    )
+    const second = gateBudgetCharges(
+      { charges: [charge(pot, 'budget:global-pot:global', 2)], failures: [] },
+      gateSession('s-1', 'deny'),
+    )
+    if (!first.ok || !second.ok) throw new Error('gate refused')
+    expect(concatGatedCharges(first.charges, second.charges).map((entry) => entry.amount)).toEqual([
+      1, 2,
+    ])
+    expect(concatGatedCharges().length).toBe(0)
   })
 })

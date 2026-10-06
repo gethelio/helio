@@ -35,6 +35,7 @@ import type { DecideInput, PipelineDecision } from '../decision-pipeline.js'
 import { matchRule, resolvePath } from '../matchers.js'
 import { RateLimiter } from '../rate-limiter.js'
 import {
+  concatGatedCharges,
   gateBudgetCharges,
   gateSession,
   mintLedgerCharges,
@@ -798,15 +799,13 @@ class ReplayRun {
     // Every pot the call fed moves: at the ledger's amount when a row exists,
     // which also charges a pot whose candidate field the call's arguments do
     // not resolve, else at the candidate's resolved amount.
-    const charges = [
-      ...repriceGatedCharges(
+    const charges = concatGatedCharges(
+      repriceGatedCharges(
         gated.charges,
         (charge) => ledgerAmount(charge.budget.name) ?? charge.amount,
       ),
-      ...mintLedgerCharges(gated, resolved.failures, (failure) =>
-        ledgerAmount(failure.budget.name),
-      ),
-    ] as unknown as typeof gated.charges
+      mintLedgerCharges(gated, resolved.failures, (failure) => ledgerAmount(failure.budget.name)),
+    )
     if (charges.length === 0) return
     const snapshots = this.engine.recordAll(charges, {
       kind: 'spend',

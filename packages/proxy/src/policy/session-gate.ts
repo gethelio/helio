@@ -230,6 +230,16 @@ export function mintLedgerCharges(
   return charges as unknown as GatedCharges
 }
 
+/**
+ * Join gated charge lists into one, in order (issue #488 replay: the
+ * repriced charges and the ledger-minted ones commit in one batch). Lives
+ * here so the harness never spells the brand: every input already carries
+ * it, and the output is the same proof over the same charges.
+ */
+export function concatGatedCharges(...lists: readonly GatedCharges[]): GatedCharges {
+  return lists.flat() as unknown as GatedCharges
+}
+
 // ---------------------------------------------------------------------------
 // Deny messages — one builder per class, both naming the tried strategies.
 // ---------------------------------------------------------------------------

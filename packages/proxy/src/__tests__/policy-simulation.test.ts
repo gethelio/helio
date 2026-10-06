@@ -130,7 +130,9 @@ interface LiveTrail {
  * ledger's two time columns, the store's `created_at` and every limiter and
  * pot read the same instants, and the trail is the one a proxy on that
  * clock would have written. Timers stay real: the approval router waits on
- * them.
+ * them. The writer is flushed after every call, as a proxy whose flush
+ * interval elapsed between two calls would have, so each row's `created_at`
+ * is the instant of its own call and not of the last one.
  */
 async function writeLiveTrail(): Promise<LiveTrail> {
   const candidate = candidateFromYaml(LIVE_YAML)
@@ -194,7 +196,9 @@ async function writeLiveTrail(): Promise<LiveTrail> {
 
   const step = async (door: GovernedForwarder, request: McpRequest, advanceMs = 1_000) => {
     advance(advanceMs)
-    return door.forward(request)
+    const result = await door.forward(request)
+    writer.flush()
+    return result
   }
   const approve = async (request: McpRequest, decide: (ticketId: string) => void) => {
     advance(1_000)
@@ -202,7 +206,9 @@ async function writeLiveTrail(): Promise<LiveTrail> {
     const ticket = queue.listPending()[0]
     if (!ticket) throw new Error('no ticket raised')
     decide(ticket.id)
-    return pending
+    const result = await pending
+    writer.flush()
+    return result
   }
 
   try {
@@ -281,6 +287,11 @@ describe('the live trail the door wrote', () => {
       ['<nameless>', 'rejected', 'missing_tool_name'],
       ['get_user', 'deny', 'kill_switch'],
     ])
+  })
+
+  it('persists every row at the instant of its own call, as a proxy on that clock would have', () => {
+    expect(live.map((row) => row.created_at)).toEqual(live.map((row) => row.timestamp))
+    expect(new Set(live.map((row) => row.timestamp)).size).toBe(live.length)
   })
 })
 
