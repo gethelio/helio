@@ -18,6 +18,10 @@ import {
   warnSessionUnresolvedEngagementOnce,
   warnAnonymousPoolingOnce,
   resetSessionGateWarningsForTests,
+  ANONYMOUS_POOLING_WARNING,
+  repriceGatedCharges,
+  mintLedgerCharges,
+  concatGatedCharges,
 } from './session-gate.js'
 
 // ---------------------------------------------------------------------------
@@ -46,6 +50,7 @@ function failure(b: CompiledBudget, bucketKey: string): BudgetChargeFailure {
     budget: b,
     bucketKey,
     reason: 'invalid_amount',
+    generation: 0,
     spent: 0,
     remaining: b.limit,
     resetAtMs: null,
@@ -396,5 +401,98 @@ describe('gate module call-site backstops', () => {
     const raw: BudgetCharge[] = [charge(budget('session'), 'k', 1)]
     // @ts-expect-error — raw BudgetCharge[] must not satisfy GatedCharges
     engine.peekAll(raw)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The warn logger on gateBudgetCharges (issue #488)
+// ---------------------------------------------------------------------------
+
+describe('gateBudgetCharges warn logger (issue #488)', () => {
+  it('prints anonymous pooling through warn and leaves the one-shot latch armed', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const pot = budget('session')
+    const resolved = { charges: [charge(pot, 'budget:session-pot:session:unknown')], failures: [] }
+    const gate = gateSession(undefined, 'anonymous')
+    const lines: string[] = []
+
+    const result = gateBudgetCharges(resolved, gate, (message) => lines.push(message))
+    expect(result.ok).toBe(true)
+    expect(lines).toEqual([ANONYMOUS_POOLING_WARNING])
+    expect(errorSpy).not.toHaveBeenCalled()
+
+    // The latch is untouched: the first call WITHOUT the logger still prints
+    // its one line, and only once.
+    gateBudgetCharges(resolved, gate)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(errorSpy).toHaveBeenCalledWith(ANONYMOUS_POOLING_WARNING)
+    gateBudgetCharges(resolved, gate)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('repriceGatedCharges (issue #488)', () => {
+  it('keeps the charges and their brand, replacing the amounts only', () => {
+    const pot = budget('global')
+    const gated = gateBudgetCharges(
+      {
+        charges: [
+          charge(pot, 'budget:global-pot:global', 5),
+          charge(pot, 'budget:global-pot:global', 7),
+        ],
+        failures: [],
+      },
+      gateSession('s-1', 'deny'),
+    )
+    if (!gated.ok) throw new Error('gate refused')
+    const repriced = repriceGatedCharges(gated.charges, (entry) => entry.amount * 10)
+    expect(repriced.map((entry) => entry.amount)).toEqual([50, 70])
+    expect(repriced.map((entry) => entry.bucketKey)).toEqual(
+      gated.charges.map((entry) => entry.bucketKey),
+    )
+    expect(gated.charges.map((entry) => entry.amount)).toEqual([5, 7])
+  })
+})
+
+describe('mintLedgerCharges (issue #488)', () => {
+  it('mints a charge for each failure the ledger holds an amount for, at the failure generation, and drops the rest', () => {
+    const pot = budget('global')
+    const other = budget('global', 'other-pot')
+    const failures = [
+      { ...failure(pot, 'budget:global-pot:global'), generation: 3 },
+      { ...failure(other, 'budget:other-pot:global'), generation: 2 },
+    ]
+    const gated = gateBudgetCharges({ charges: [], failures }, gateSession('s-1', 'deny'))
+    if (!gated.ok) throw new Error('gate refused')
+    const minted = mintLedgerCharges(gated, failures, (entry) =>
+      entry.budget.name === 'global-pot' ? 42 : undefined,
+    )
+    expect(
+      minted.map((charge) => [
+        charge.budget.name,
+        charge.bucketKey,
+        charge.amount,
+        charge.generation,
+      ]),
+    ).toEqual([['global-pot', 'budget:global-pot:global', 42, 3]])
+  })
+})
+
+describe('concatGatedCharges (issue #488)', () => {
+  it('joins gated lists in order without a cast outside the gate module', () => {
+    const pot = budget('global')
+    const first = gateBudgetCharges(
+      { charges: [charge(pot, 'budget:global-pot:global', 1)], failures: [] },
+      gateSession('s-1', 'deny'),
+    )
+    const second = gateBudgetCharges(
+      { charges: [charge(pot, 'budget:global-pot:global', 2)], failures: [] },
+      gateSession('s-1', 'deny'),
+    )
+    if (!first.ok || !second.ok) throw new Error('gate refused')
+    expect(concatGatedCharges(first.charges, second.charges).map((entry) => entry.amount)).toEqual([
+      1, 2,
+    ])
+    expect(concatGatedCharges().length).toBe(0)
   })
 })

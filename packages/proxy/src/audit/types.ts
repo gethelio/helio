@@ -206,6 +206,46 @@ export interface AuditListResult {
 }
 
 // ---------------------------------------------------------------------------
+// Replay reads (issue #488): what a policy simulation asks the store for.
+// ---------------------------------------------------------------------------
+
+/** The window and the two exact filters a replay applies, every one on `timestamp`. */
+export interface ReplayFilters {
+  /** Include only rows whose `timestamp` is at or after this ISO 8601 instant. */
+  readonly from?: string
+  /** Include only rows whose `timestamp` is at or before this ISO 8601 instant. */
+  readonly to?: string
+  /** Exact match on `upstream`; a null column never matches. */
+  readonly upstream?: string
+  /** Exact match on `session_id`; a null column never matches. */
+  readonly sessionId?: string
+}
+
+/** The replay filters plus the epoch and the warm-up bound. */
+export interface ReplayRowFilters extends ReplayFilters {
+  /**
+   * Exact match on `config_sha256`; `null` selects the rows with no hash,
+   * absent selects every epoch.
+   */
+  readonly configSha256?: string | null
+  /** Exclusive upper bound on `timestamp`: the warm-up before an epoch's first row. */
+  readonly before?: string
+}
+
+/**
+ * One run of equal `config_sha256` among the tool calls of a window in
+ * `timestamp` order (issue #488): a config epoch. Null is its own value,
+ * and a rollback (A, B, A) is three runs. DTO: snake_case, it is printed
+ * as part of a simulation result.
+ */
+export interface ConfigEpochRun {
+  readonly config_sha256: string | null
+  readonly rows: number
+  readonly first_timestamp: string
+  readonly last_timestamp: string
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate types — for dashboard analytics.
 // ---------------------------------------------------------------------------
 

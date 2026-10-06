@@ -24,6 +24,7 @@ import type {
   BudgetPersistence,
   BudgetReplayBucket,
   BudgetReplayEvent,
+  BudgetReplayUntil,
 } from './engine.js'
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,54 @@ GROUP BY e.bucket_key
 ORDER BY e.bucket_key ASC
 `
 
+// The bounded pair (issue #488): the two replay reads with the committing
+// call's audit row joined, for a policy simulation parked on a config
+// epoch's first row. The bound is the AUDIT row's `timestamp` (the call's
+// start), never the ledger's `timestamp_ms` (the commit): a call that
+// started before the epoch and committed after its first row belongs to the
+// hydrate, and the replay, which walks audit rows, never charges it again.
+// A row whose audit record is missing is loaded while its commit is before
+// the epoch's end, since no replay can reach it. The live hydrate runs the
+// unbounded pair above, byte for byte.
+const REPLAY_DURATION_UNTIL_SQL = `
+SELECT e.bucket_key AS bucket_key, e.amount AS amount, e.timestamp_ms AS timestamp_ms
+FROM budget_events e
+LEFT JOIN audit_records a ON a.id = e.audit_record_id
+WHERE e.budget_name = @budget_name AND e.epoch = @epoch AND e.timestamp_ms > @since_ms
+  AND ((a.id IS NOT NULL AND a.timestamp < @until_iso)
+    OR (a.id IS NULL AND e.timestamp_ms < @end_ms))
+ORDER BY e.timestamp_ms ASC, e.rowid ASC
+`
+
+// A watermark recorded at or after the epoch start belongs to a sweep that
+// had not run yet: at the epoch's first row the pot was live with its full
+// sum, so only a watermark before that instant filters the rows.
+const REPLAY_SESSION_UNTIL_SQL = `
+SELECT e.bucket_key AS bucket_key,
+       SUM(CASE WHEN e.timestamp_ms >= CASE WHEN g.gc_after_ms < @t0_ms THEN g.gc_after_ms ELSE 0 END
+                THEN e.amount ELSE 0 END) AS total,
+       MAX(e.timestamp_ms) AS last_activity_ms
+FROM budget_events e
+LEFT JOIN budget_bucket_gc g
+  ON g.budget_name = e.budget_name AND g.bucket_key = e.bucket_key
+LEFT JOIN audit_records a ON a.id = e.audit_record_id
+WHERE e.budget_name = @budget_name AND e.epoch = @epoch
+  AND ((a.id IS NOT NULL AND a.timestamp < @until_iso)
+    OR (a.id IS NULL AND e.timestamp_ms < @end_ms))
+GROUP BY e.bucket_key
+ORDER BY e.bucket_key ASC
+`
+
+// Oldest first from an instant, inclusive, through
+// idx_budget_events_timestamp_ms: the rows a replay charges executed calls
+// at, looked up by (audit_record_id, budget_name) once loaded.
+const LIST_EVENTS_SINCE_SQL = `
+SELECT budget_name, bucket_key, kind, amount, audit_record_id, timestamp_ms
+FROM budget_events
+WHERE timestamp_ms >= ?
+ORDER BY timestamp_ms ASC, rowid ASC
+`
+
 // Newest first on timestamp_ms — the same event-time axis replay and
 // retention filter on — with rowid breaking same-millisecond ties by insert
 // order. No epoch filter: the listing is spend HISTORY ("where did the money
@@ -197,6 +246,20 @@ export interface BudgetEventRecord {
   readonly upstream: string | null
 }
 
+/**
+ * One `budget_events` row as a replay reads it (issue #488): the columns a
+ * policy simulation needs to charge an executed call at the amount the
+ * ledger holds for it. Snake_case: the column names verbatim.
+ */
+export interface BudgetLedgerEvent {
+  readonly budget_name: string
+  readonly bucket_key: string
+  readonly kind: 'spend' | 'approved_overage'
+  readonly amount: number
+  readonly audit_record_id: string | null
+  readonly timestamp_ms: number
+}
+
 /** One page of a budget's event history plus the unpaginated total. */
 export interface BudgetEventsPage {
   readonly events: readonly BudgetEventRecord[]
@@ -229,6 +292,9 @@ export class BudgetLedger implements BudgetPersistence {
   private readonly maxEventEpochStmt: Statement
   private readonly replayDurationStmt: Statement
   private readonly replaySessionStmt: Statement
+  private readonly replayDurationUntilStmt: Statement
+  private readonly replaySessionUntilStmt: Statement
+  private readonly listEventsSinceStmt: Statement
   private readonly listEventsStmt: Statement
   private readonly countEventsStmt: Statement
   private readonly commitTxn: (rows: readonly BudgetLedgerRow[]) => void
@@ -257,6 +323,9 @@ export class BudgetLedger implements BudgetPersistence {
     )
     this.replayDurationStmt = this.db.prepare(REPLAY_DURATION_SQL)
     this.replaySessionStmt = this.db.prepare(REPLAY_SESSION_SQL)
+    this.replayDurationUntilStmt = this.db.prepare(REPLAY_DURATION_UNTIL_SQL)
+    this.replaySessionUntilStmt = this.db.prepare(REPLAY_SESSION_UNTIL_SQL)
+    this.listEventsSinceStmt = this.db.prepare(LIST_EVENTS_SINCE_SQL)
     this.listEventsStmt = this.db.prepare(LIST_EVENTS_SQL)
     this.countEventsStmt = this.db.prepare(COUNT_EVENTS_SQL)
 
@@ -393,12 +462,45 @@ export class BudgetLedger implements BudgetPersistence {
     budgetName: string,
     epoch: number,
     sinceMs: number,
+    until?: BudgetReplayUntil,
   ): readonly BudgetReplayEvent[] {
-    return this.replayDurationStmt.all(budgetName, epoch, sinceMs) as BudgetReplayEvent[]
+    if (until === undefined) {
+      return this.replayDurationStmt.all(budgetName, epoch, sinceMs) as BudgetReplayEvent[]
+    }
+    return this.replayDurationUntilStmt.all({
+      budget_name: budgetName,
+      epoch,
+      since_ms: sinceMs,
+      until_iso: until.iso,
+      end_ms: until.endMs ?? Number.MAX_SAFE_INTEGER,
+    }) as BudgetReplayEvent[]
   }
 
-  replaySessionBuckets(budgetName: string, epoch: number): readonly BudgetReplayBucket[] {
-    return this.replaySessionStmt.all(budgetName, epoch) as BudgetReplayBucket[]
+  replaySessionBuckets(
+    budgetName: string,
+    epoch: number,
+    until?: BudgetReplayUntil,
+  ): readonly BudgetReplayBucket[] {
+    if (until === undefined) {
+      return this.replaySessionStmt.all(budgetName, epoch) as BudgetReplayBucket[]
+    }
+    return this.replaySessionUntilStmt.all({
+      budget_name: budgetName,
+      epoch,
+      until_iso: until.iso,
+      t0_ms: Date.parse(until.iso),
+      end_ms: until.endMs ?? Number.MAX_SAFE_INTEGER,
+    }) as BudgetReplayBucket[]
+  }
+
+  /**
+   * Every event stamped at or after `sinceMs`, oldest first with `rowid`
+   * breaking ties, across every budget and generation (issue #488). A
+   * replay reads it once at its epoch's first row: a commit is stamped at or
+   * after its call's start, so `>=` keeps a commit in the same millisecond.
+   */
+  listEventsSince(sinceMs: number): readonly BudgetLedgerEvent[] {
+    return this.listEventsSinceStmt.all(sinceMs) as BudgetLedgerEvent[]
   }
 
   recordBucketGc(budgetName: string, bucketKey: string, gcAfterMs: number): void {

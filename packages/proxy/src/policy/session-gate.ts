@@ -104,7 +104,8 @@ export type GatedBudgetCharges =
  * any session-keyed charge OR failure among the call's resolved charges
  * reports `unresolvedEngaged` before a single peek runs. Calls that feed
  * only global/sender pots pass through untouched, and an anonymous mint
- * pools with a one-shot warning at its first session-keyed engagement.
+ * pools with a one-shot warning at its first session-keyed engagement,
+ * printed through `warn` instead of the one-shot when a caller supplies it.
  */
 export function gateBudgetCharges(
   resolved: {
@@ -112,6 +113,7 @@ export function gateBudgetCharges(
     readonly failures: readonly BudgetChargeFailure[]
   },
   gate: SessionGate,
+  warn?: (message: string) => void,
 ): GatedBudgetCharges {
   const sessionEngaged =
     resolved.charges.some((charge) => charge.budget.key === 'session') ||
@@ -120,7 +122,12 @@ export function gateBudgetCharges(
     if (sessionEngaged) return { ok: false, unresolvedEngaged: true }
     return { ok: true, charges: resolved.charges as GatedCharges }
   }
-  if (gate.anonymous && sessionEngaged) warnAnonymousPoolingOnce()
+  if (gate.anonymous && sessionEngaged) {
+    // A caller with its own outlet (a policy simulation) gets the line
+    // through it and leaves the process-wide one-shot untouched.
+    if (warn) warn(ANONYMOUS_POOLING_WARNING)
+    else warnAnonymousPoolingOnce()
+  }
   return { ok: true, charges: resolved.charges as GatedCharges }
 }
 
@@ -176,6 +183,63 @@ export function remintDeferredCharges(
   })) as unknown as GatedCharges
 }
 
+/**
+ * Reprice gated charges for a replay (issue #488): the same charges with the
+ * amount `amountOf` answers for each, the engagement proof carried over. NOT
+ * an embedder API: the policy simulation charges an executed call at the
+ * amount the ledger holds for it, which the candidate's own field may not
+ * resolve to, and this is the one sanctioned mint for that.
+ */
+export function repriceGatedCharges(
+  charges: GatedCharges,
+  amountOf: (charge: BudgetCharge) => number,
+): GatedCharges {
+  // The double cast is the sanctioned mint: the input brand proves the
+  // engagement check ran on these charges.
+  return charges.map((charge) => ({
+    ...charge,
+    amount: amountOf(charge),
+  })) as unknown as GatedCharges
+}
+
+/**
+ * Mint charges for failures whose amount the ledger holds (issue #488
+ * replay): an executed call whose candidate contributor field does not
+ * resolve still moved the live pot, and the ledger row says by how much.
+ * NOT an embedder API. The gate witness proves the engagement check ran on
+ * the resolution these failures came from; a failure `amountOf` answers
+ * nothing for is dropped.
+ */
+export function mintLedgerCharges(
+  _witness: Extract<GatedBudgetCharges, { readonly ok: true }>,
+  failures: readonly BudgetChargeFailure[],
+  amountOf: (failure: BudgetChargeFailure) => number | undefined,
+): GatedCharges {
+  const charges: BudgetCharge[] = []
+  for (const failure of failures) {
+    const amount = amountOf(failure)
+    if (amount === undefined) continue
+    charges.push({
+      budget: failure.budget,
+      bucketKey: failure.bucketKey,
+      amount,
+      generation: failure.generation,
+    })
+  }
+  // The sanctioned mint: the witness is a gate result on this resolution.
+  return charges as unknown as GatedCharges
+}
+
+/**
+ * Join gated charge lists into one, in order (issue #488 replay: the
+ * repriced charges and the ledger-minted ones commit in one batch). Lives
+ * here so the harness never spells the brand: every input already carries
+ * it, and the output is the same proof over the same charges.
+ */
+export function concatGatedCharges(...lists: readonly GatedCharges[]): GatedCharges {
+  return lists.flat() as unknown as GatedCharges
+}
+
 // ---------------------------------------------------------------------------
 // Deny messages — one builder per class, both naming the tried strategies.
 // ---------------------------------------------------------------------------
@@ -199,6 +263,12 @@ export function sessionRequiredForGroundingMessage(tried: string): string {
 // ---------------------------------------------------------------------------
 // One-shot operational warnings
 // ---------------------------------------------------------------------------
+
+/** The line printed when an anonymous mint pools a session-keyed control. */
+export const ANONYMOUS_POOLING_WARNING =
+  '[helio] Warning: session identity unresolved; session-keyed limits and budgets ' +
+  'are pooling into the shared "unknown" bucket (session.on_unresolved: anonymous). ' +
+  'Have callers send session identity to isolate them from each other.'
 
 let unresolvedEngagementWarned = false
 let anonymousPoolingWarned = false
@@ -232,9 +302,5 @@ export function warnAnonymousPoolingOnce(): void {
   if (anonymousPoolingWarned) return
   anonymousPoolingWarned = true
   // eslint-disable-next-line no-console -- Intentional operational warning
-  console.error(
-    '[helio] Warning: session identity unresolved; session-keyed limits and budgets ' +
-      'are pooling into the shared "unknown" bucket (session.on_unresolved: anonymous). ' +
-      'Have callers send session identity to isolate them from each other.',
-  )
+  console.error(ANONYMOUS_POOLING_WARNING)
 }

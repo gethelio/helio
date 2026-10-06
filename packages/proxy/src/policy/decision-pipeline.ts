@@ -65,6 +65,13 @@ export interface DecideInput {
    * in singular mode (upstream-scoped rules inert there).
    */
   readonly upstream?: string | undefined
+  /**
+   * Where the one operational line `decide()` can print goes: the
+   * `flag_destructive: log` notice. Absent, it prints to `console.error` as
+   * both doors expect; a policy simulation passes a collector so a replay
+   * emits no operational output.
+   */
+  readonly warn?: (message: string) => void
 }
 
 /** The decision plus all the metadata the execution/audit steps consume. */
@@ -88,9 +95,10 @@ export interface PipelineDecision {
  * Run the policy decision pipeline for one tool call.
  *
  * Pure with respect to limiter and audit state. The only side effect is an
- * operational `console.error` when `flag_destructive: log` matches an
- * unguarded destructive tool — preserved verbatim from the original forwarder
- * so MCP behavior is bit-identical.
+ * operational line when `flag_destructive: log` matches an unguarded
+ * destructive tool, preserved verbatim from the original forwarder so MCP
+ * behavior is bit-identical, printed through `input.warn` when a caller
+ * supplies one and to `console.error` otherwise.
  */
 export function decide(input: DecideInput): PipelineDecision {
   const { toolName, toolArguments, policy, environment, evidenceStore } = input
@@ -146,8 +154,8 @@ export function decide(input: DecideInput): PipelineDecision {
     flaggedDestructive = true
 
     if (policy.flagDestructive === 'log') {
-      // eslint-disable-next-line no-console -- Intentional operational warning
-      console.error(`[helio] Destructive tool detected: ${toolName} (no matching rule)`)
+      const warn = input.warn ?? defaultWarn
+      warn(`[helio] Destructive tool detected: ${toolName} (no matching rule)`)
     } else {
       // require_approval — override the decision to escalate
       decision = {
@@ -275,6 +283,12 @@ const ACTION_SEVERITY: Record<PolicyAction, number> = {
   allow: 0,
 }
 
+/** The doors' outlet for the `flag_destructive: log` line. */
+function defaultWarn(message: string): void {
+  // eslint-disable-next-line no-console -- Intentional operational warning
+  console.error(message)
+}
+
 /** Pick the stricter of two policy decisions (ties keep the first). */
 export function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDecision {
   return ACTION_SEVERITY[b.action] > ACTION_SEVERITY[a.action] ? b : a
@@ -287,9 +301,10 @@ export function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDe
  * literal `metadata.agent_id` (the adapter-supplied object is rejected for that key
  * at the service boundary, but the shadow keeps match semantics deterministic even
  * if it slips through an embedder). Returns undefined when neither source is present
- * so a `match.metadata` rule stays inert (MCP path).
+ * so a `match.metadata` rule stays inert (MCP path). Exported so a replay that
+ * re-tests one rule against a call builds the view `decide()` built.
  */
-function buildMetadataView(
+export function buildMetadataView(
   metadata: Readonly<Record<string, unknown>> | undefined,
   agentId: string | undefined,
 ): Readonly<Record<string, unknown>> | undefined {

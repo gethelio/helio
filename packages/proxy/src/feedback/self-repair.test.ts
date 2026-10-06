@@ -936,6 +936,7 @@ describe('rule_index emission (issue #144 removed the ruleIndex alias)', () => {
           budget: invalidBudget,
           bucketKey: 'budget:iv:global',
           reason: 'invalid_amount',
+          generation: 0,
           spent: 0,
           remaining: 100,
           resetAtMs: 1_000,

@@ -259,3 +259,61 @@ describe('decide', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// The operational warn collector (issue #488)
+// ---------------------------------------------------------------------------
+
+describe('warn on DecideInput (issue #488)', () => {
+  const logPolicy = compile({ default: 'allow', flag_destructive: 'log', rules: [] })
+  const LINE = '[helio] Destructive tool detected: delete_customer (no matching rule)'
+
+  /** Capture every console.error call by assignment, restoring the original. */
+  function captureConsoleError(run: () => void): unknown[][] {
+    /* eslint-disable no-console -- the capture reads and reassigns console.error by design */
+    const original = console.error
+    const printed: unknown[][] = []
+    console.error = (...args: unknown[]) => {
+      printed.push(args)
+    }
+    try {
+      run()
+    } finally {
+      console.error = original
+    }
+    /* eslint-enable no-console */
+    return printed
+  }
+
+  it('routes the flag_destructive log line through warn when supplied', () => {
+    const lines: string[] = []
+    let result: ReturnType<typeof decide> | undefined
+    const printed = captureConsoleError(() => {
+      result = decide(
+        input({
+          policy: logPolicy,
+          toolName: 'delete_customer',
+          baselineAnnotations: { destructiveHint: true },
+          warn: (message) => lines.push(message),
+        }),
+      )
+    })
+    expect(result?.flaggedDestructive).toBe(true)
+    expect(result?.decision.action).toBe('allow')
+    expect(lines).toEqual([LINE])
+    expect(printed).toEqual([])
+  })
+
+  it('still prints to console.error when warn is absent', () => {
+    const printed = captureConsoleError(() => {
+      decide(
+        input({
+          policy: logPolicy,
+          toolName: 'delete_customer',
+          baselineAnnotations: { destructiveHint: true },
+        }),
+      )
+    })
+    expect(printed).toEqual([[LINE]])
+  })
+})
