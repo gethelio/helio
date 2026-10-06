@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 export { simulatePolicy, createVirtualClock } from './harness.js'
+export { formatBudgetCheckLine, formatConfigEpochNotice } from './fidelity.js'
 export { trailAnnotationSource } from './context.js'
 export type {
   AnnotationQuery,

@@ -13,8 +13,16 @@ import { ruleBucketKey, toolLimitKey } from '../bucket-key.js'
 import { resolvePath } from '../matchers.js'
 import type { RateLimiter } from '../rate-limiter.js'
 import type { SpendLimiter } from '../spend-limiter.js'
+import { formatUtcMinute } from '../../util/format-time.js'
 import type { CompiledPolicyRule } from '../types.js'
-import type { FidelityMark, FidelityWarning } from './types.js'
+import type {
+  BudgetCheck,
+  ConfigEpoch,
+  FidelityDimension,
+  FidelityMark,
+  FidelityWarning,
+  PolicyFidelityReport,
+} from './types.js'
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -205,4 +213,103 @@ export function aggregateWarnings(marks: Iterable<MarkedInstant>): readonly Fide
     calls: instants.length,
     instants,
   }))
+}
+
+// ---------------------------------------------------------------------------
+// The three frozen sentences
+// ---------------------------------------------------------------------------
+
+/** The closed set of six dimensions, in the order the fidelity page's table lists them. */
+export const FIDELITY_DIMENSIONS: readonly FidelityDimension[] = [
+  'tool annotations',
+  'tool definition drift',
+  'evidence',
+  'dependency state',
+  'rate window',
+  'spend amount',
+]
+
+/**
+ * The three sentences the harness prints on every run, frozen on the
+ * fidelity page; later tickets use them verbatim. `<...>` are the slots.
+ */
+export const FIDELITY_SENTENCES = {
+  unverified:
+    'Could not fully evaluate rule "<rule>" on <n> call(s): <dimension> was not recorded for <subject>. These calls count as unverified, never as passed.',
+  skipped:
+    'Skipped <n> row(s) that never entered policy evaluation: <a> rejected, <b> refused by the kill switch.',
+  unreported:
+    '<n> sideband evaluation(s) were decided but never reported (evaluation_expired); their outcome is unknown.',
+} as const
+
+/** Fill one slot; a function replacer keeps a value with `$` in it verbatim. */
+function fill(template: string, slot: string, value: string): string {
+  return template.replace(slot, () => value)
+}
+
+/** The report's lines: one per warning, then the skip class, then the unreported class. */
+export function renderFidelityLines(
+  report: Pick<PolicyFidelityReport, 'warnings' | 'skipped' | 'unreported'>,
+): readonly string[] {
+  const lines = report.warnings.map((warning) => {
+    let line = fill(FIDELITY_SENTENCES.unverified, '<rule>', warning.rule)
+    line = fill(line, '<n>', String(warning.calls))
+    line = fill(line, '<dimension>', warning.dimension)
+    return fill(line, '<subject>', warning.subject)
+  })
+  const total = report.skipped.rejected + report.skipped.kill_switch
+  let skipped = fill(FIDELITY_SENTENCES.skipped, '<n>', String(total))
+  skipped = fill(skipped, '<a>', String(report.skipped.rejected))
+  lines.push(fill(skipped, '<b>', String(report.skipped.kill_switch)))
+  lines.push(fill(FIDELITY_SENTENCES.unreported, '<n>', String(report.unreported)))
+  return lines
+}
+
+// ---------------------------------------------------------------------------
+// The epoch notice and the pot line, outside the frozen set
+// ---------------------------------------------------------------------------
+
+function describeEpoch(epoch: ConfigEpoch): string {
+  return epoch.config_sha256 === null
+    ? 'unknown config'
+    : `config ${epoch.config_sha256.slice(0, 8)}...`
+}
+
+function spanOf(epoch: ConfigEpoch): string {
+  return `${formatUtcMinute(epoch.first_timestamp)} to ${formatUtcMinute(epoch.last_timestamp)}`
+}
+
+/**
+ * The notice a run prints when its window holds more than one config
+ * epoch and one of them was simulated: the simulated run, then every
+ * other run newest first. Empty for one run, for a run over every epoch,
+ * and when nothing was selected. Names no command flag: the caller appends
+ * its own hint.
+ */
+export function formatConfigEpochNotice(epochs: readonly ConfigEpoch[]): string {
+  const selected = epochs.filter((epoch) => epoch.selected)
+  const chosen = selected[0]
+  if (epochs.length < 2 || selected.length !== 1 || chosen === undefined) return ''
+  const others = epochs.filter((epoch) => !epoch.selected).reverse()
+  const head =
+    epochs[epochs.length - 1] === chosen
+      ? 'Simulated the most recent config epoch only'
+      : 'Simulated one config epoch only'
+  return [
+    `${head}: ${describeEpoch(chosen)}, ${spanOf(chosen)}, ${String(chosen.rows)} calls.`,
+    `The window spans ${String(others.length)} other config epoch(s), not simulated:`,
+    ...others.map(
+      (epoch) => `  ${describeEpoch(epoch)}: ${String(epoch.rows)} calls, ${spanOf(epoch)}`,
+    ),
+  ].join('\n')
+}
+
+/** The one line printed when committed pot snapshots on same-file rows were not met; empty otherwise. */
+export function formatBudgetCheckLine(checks: readonly BudgetCheck[]): string {
+  if (checks.length === 0) return ''
+  const names = [...new Set(checks.map((check) => check.budget))].map((name) => `"${name}"`)
+  return (
+    `The rebuilt budget spend did not meet ${String(checks.length)} recorded pot snapshot(s) on ` +
+    `${names.join(', ')}; those pots are unverified at those calls.`
+  )
 }

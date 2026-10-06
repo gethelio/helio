@@ -170,7 +170,7 @@ Three sentences, printed by the harness (issue #488) on every run, including whe
    Could not fully evaluate rule "<rule>" on <n> call(s): <dimension> was not recorded for <subject>. These calls count as unverified, never as passed.
    ```
 
-   `<rule>` is the rule's name, or `rule[<index>]` for an unnamed rule (`CompiledPolicyRule.name` is optional). `<subject>` names the tool and its door or origin (`tool "sb_flip" on origin "lab-adapter"`). `<dimension>` is one of a closed set of six:
+   `<rule>` is the rule's name, `rule[<index>]` for an unnamed rule (`CompiledPolicyRule.name` is optional), or `default` when no rule matched the call (a `flag_destructive` escalation, a sideband row's drift); a rule an operator actually named `default` collides with that token. `<subject>` names the tool and its door or origin (`tool "sb_flip" on origin "lab-adapter"`). `<dimension>` is one of a closed set of six:
 
    | Dimension               | When it prints                                                                                                                                                                                                                                                                                                                                   |
    | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -178,7 +178,7 @@ Three sentences, printed by the harness (issue #488) on every run, including whe
    | `tool definition drift` | a sideband row, where the drift event is unknown                                                                                                                                                                                                                                                                                                 |
    | `evidence`              | a candidate rule whose `evidence.requires` names a key no snapshot of the session names, or any evidence rule on a sideband row                                                                                                                                                                                                                  |
    | `dependency state`      | a sideband row whose execution the columns cannot settle, or an MCP row whose response summary cannot say whether the upstream failed, feeding a `requires` rule                                                                                                                                                                                 |
-   | `rate window`           | a sideband limit row with no commit block, or a `current` the rebuilt window does not meet                                                                                                                                                                                                                                                       |
+   | `rate window`           | a sideband limit row with no commit block, a `current` the rebuilt window does not meet, or a consumed rate row for which no key type can be read (no config the run was given hashes to the row's `config_sha256`, or the rule's `limits.key` cannot be read from it)                                                                           |
    | `spend amount`          | a `current_spend` the replayed amounts do not meet, or a consumed spend row for which no replayed amount exists (no config the run was given hashes to the row's `config_sha256`, or the committing rule's `max_spend.field` read by `yaml.load` from that file is not a string free of `${VAR}`, or the field does not resolve on `tool_input`) |
 
 2. The skip class:
@@ -204,6 +204,29 @@ Annotations for --demo came from the sample server's listed definitions, not fro
 ```
 
 Per row class the report names: for a warned call, the tool, the door or origin, the rule, the dimension and the instant; for a skipped row, its reason and instant. Never an argument value and never a record id (next section).
+
+### The pot check
+
+Outside the three frozen sentences, one more line prints whenever a committed `budgets[]` snapshot on a row the candidate itself decided (its `config_sha256` is the candidate's hash) was not met by the rebuilt pot after the charge:
+
+```text
+The rebuilt budget spend did not meet 3 recorded pot snapshot(s) on "agent-payments", "ops-spend"; those pots are unverified at those calls.
+```
+
+It is a same-file sanity check: a changed candidate leaves it empty on purpose, and the check never silently passes a pot it had the snapshot to test.
+
+### Several config epochs in one window
+
+A window that holds more than one config epoch simulates one of them (the most recent unless the command selects another) and prints, before the sentences, which runs it left out, newest first; a run whose rows carry no `config_sha256` prints as `unknown config`:
+
+```text
+Simulated the most recent config epoch only: config cdf1b846..., 2026-09-29 13:00 UTC to 2026-10-05 11:50 UTC, 253 calls.
+The window spans 2 other config epoch(s), not simulated:
+  config 8a02d014...: 60 calls, 2026-09-15 14:00 UTC to 2026-09-25 10:00 UTC
+  config 49f4aeb2...: 40 calls, 2026-08-21 12:00 UTC to 2026-08-26 09:00 UTC
+```
+
+When the simulated run is not the most recent the first line opens `Simulated one config epoch only`. The flag that widens or moves the selection is named by `helio policy simulate` (issue #490), not by this text.
 
 ## Privacy
 

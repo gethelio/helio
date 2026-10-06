@@ -59,6 +59,7 @@ import {
   HistoricalTracker,
   aggregateWarnings,
   createLimitPin,
+  renderFidelityLines,
   ruleLabel,
   subjectOf,
 } from './fidelity.js'
@@ -888,19 +889,21 @@ class ReplayRun {
 
   private result(): PolicySimulationResult {
     const skipped: SkippedRows = { ...this.skipped }
+    const warnings = aggregateWarnings(this.marks)
+    const unreported = this.unreported
     return {
       candidate_sha256: this.candidate.sha256,
       epochs: this.selection.epochs,
       replayed: this.rows.length,
       skipped,
-      unreported: this.unreported,
+      unreported,
       rows: this.rows,
       deltas: this.deltas,
       fidelity: {
-        lines: [],
-        warnings: aggregateWarnings(this.marks),
+        lines: renderFidelityLines({ warnings, skipped, unreported }),
+        warnings,
         skipped,
-        unreported: this.unreported,
+        unreported,
       },
       budget_checks: this.budgetChecks,
       warnings_suppressed: this.suppressed,
@@ -940,7 +943,12 @@ export function simulatePolicy(options: PolicySimulationOptions): PolicySimulati
       unreported: 0,
       rows: [],
       deltas: [],
-      fidelity: { lines: [], warnings: [], skipped, unreported: 0 },
+      fidelity: {
+        lines: renderFidelityLines({ warnings: [], skipped, unreported: 0 }),
+        warnings: [],
+        skipped,
+        unreported: 0,
+      },
       budget_checks: [],
       warnings_suppressed: 0,
     }
