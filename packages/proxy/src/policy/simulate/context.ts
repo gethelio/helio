@@ -86,8 +86,8 @@ function stringList(value: unknown): readonly string[] {
     : []
 }
 
-/** The `budgets[]` blocks on the chain, objects only. */
-function budgetBlocks(row: AuditRecord): readonly Record<string, unknown>[] {
+/** The `budgets[]` blocks on the chain, objects only: the per-call pot snapshots. */
+export function budgetBlocksOf(row: AuditRecord): readonly Record<string, unknown>[] {
   const blocks = chainOf(row)['budgets']
   if (!Array.isArray(blocks)) return []
   return blocks
@@ -171,7 +171,7 @@ export function recordedAnswers(row: AuditRecord): RecordedAnswers {
   let money: string | null = blockStatus
   if (money === null && row.approval_status !== null) {
     if (row.policy_decision !== 'require_approval') money = row.approval_status
-    else if (budgetBlocks(row).some(isCommittedBreach)) money = row.approval_status
+    else if (budgetBlocksOf(row).some(isCommittedBreach)) money = row.approval_status
   }
   return { rule, money }
 }
@@ -216,7 +216,7 @@ export function executionStateOf(row: AuditRecord): ExecutionState {
       : 'unsettled'
   }
   if (row.upstream_error !== null) return 'executed'
-  if (budgetBlocks(row).some((block) => typeof block['kind'] === 'string')) return 'executed'
+  if (budgetBlocksOf(row).some((block) => typeof block['kind'] === 'string')) return 'executed'
   return 'unsettled'
 }
 

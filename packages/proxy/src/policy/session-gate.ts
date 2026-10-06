@@ -183,6 +183,25 @@ export function remintDeferredCharges(
   })) as unknown as GatedCharges
 }
 
+/**
+ * Reprice gated charges for a replay (issue #488): the same charges with the
+ * amount `amountOf` answers for each, the engagement proof carried over. NOT
+ * an embedder API: the policy simulation charges an executed call at the
+ * amount the ledger holds for it, which the candidate's own field may not
+ * resolve to, and this is the one sanctioned mint for that.
+ */
+export function repriceGatedCharges(
+  charges: GatedCharges,
+  amountOf: (charge: BudgetCharge) => number,
+): GatedCharges {
+  // The double cast is the sanctioned mint: the input brand proves the
+  // engagement check ran on these charges.
+  return charges.map((charge) => ({
+    ...charge,
+    amount: amountOf(charge),
+  })) as unknown as GatedCharges
+}
+
 // ---------------------------------------------------------------------------
 // Deny messages — one builder per class, both naming the tried strategies.
 // ---------------------------------------------------------------------------

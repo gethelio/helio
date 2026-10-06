@@ -19,6 +19,7 @@ import {
   warnAnonymousPoolingOnce,
   resetSessionGateWarningsForTests,
   ANONYMOUS_POOLING_WARNING,
+  repriceGatedCharges,
 } from './session-gate.js'
 
 // ---------------------------------------------------------------------------
@@ -424,5 +425,28 @@ describe('gateBudgetCharges warn logger (issue #488)', () => {
     expect(errorSpy).toHaveBeenCalledWith(ANONYMOUS_POOLING_WARNING)
     gateBudgetCharges(resolved, gate)
     expect(errorSpy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('repriceGatedCharges (issue #488)', () => {
+  it('keeps the charges and their brand, replacing the amounts only', () => {
+    const pot = budget('global')
+    const gated = gateBudgetCharges(
+      {
+        charges: [
+          charge(pot, 'budget:global-pot:global', 5),
+          charge(pot, 'budget:global-pot:global', 7),
+        ],
+        failures: [],
+      },
+      gateSession('s-1', 'deny'),
+    )
+    if (!gated.ok) throw new Error('gate refused')
+    const repriced = repriceGatedCharges(gated.charges, (entry) => entry.amount * 10)
+    expect(repriced.map((entry) => entry.amount)).toEqual([50, 70])
+    expect(repriced.map((entry) => entry.bucketKey)).toEqual(
+      gated.charges.map((entry) => entry.bucketKey),
+    )
+    expect(gated.charges.map((entry) => entry.amount)).toEqual([5, 7])
   })
 })

@@ -301,9 +301,10 @@ export function stricterDecision(a: PolicyDecision, b: PolicyDecision): PolicyDe
  * literal `metadata.agent_id` (the adapter-supplied object is rejected for that key
  * at the service boundary, but the shadow keeps match semantics deterministic even
  * if it slips through an embedder). Returns undefined when neither source is present
- * so a `match.metadata` rule stays inert (MCP path).
+ * so a `match.metadata` rule stays inert (MCP path). Exported so a replay that
+ * re-tests one rule against a call builds the view `decide()` built.
  */
-function buildMetadataView(
+export function buildMetadataView(
   metadata: Readonly<Record<string, unknown>> | undefined,
   agentId: string | undefined,
 ): Readonly<Record<string, unknown>> | undefined {
