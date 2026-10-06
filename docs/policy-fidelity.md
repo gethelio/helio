@@ -121,6 +121,13 @@ The sideband's `deriveBlockReason` classifies a kill, an unresolved session, an 
 
 The harness rebuilds the state above from the rows it is given and no more. What it leaves out, each stated once here:
 
+- Rows are selected, ordered and dated by `timestamp`, and the window is applied to the same column; `created_at` is never read for the order.
+- The limiter warm-up before the epoch's first row reaches back the longest of the candidate's rule windows, its duration budget windows and the largest window snapshotted on the epoch's rows; limiter state older than that is not rebuilt.
+- Evidence and dependency state for a session is rebuilt from every row of that session before the epoch, whatever its age; a session whose rows left the retention window is rebuilt from what remains.
+- The ledger reads behind the hydrate are bounded by the committing call's `timestamp`, so a call that started before the epoch and committed after its first row is loaded once and never replayed.
+- An epoch older than the pot's current generation starts its pots empty: `budget_meta` keeps no generation history, so a simulation of an earlier config hydrates nothing unless that epoch's ledger rows are at the current generation.
+- The pin applies to the limiter key type as it does to the spend field, and a consumed rate row whose key type cannot be read is named under `rate window`, as a consumed spend row with no replayed amount is named under `spend amount`.
+
 ## Tool annotations
 
 `decide()` reads `baselineAnnotations` for rule matching (`matchAnnotations` and its defaults: `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` for an absent hint) and for the `flag_destructive` escalation of a call no rule matched (`destructiveHint ?? true`, its own default, not the matcher's). Two cases are kept apart throughout:

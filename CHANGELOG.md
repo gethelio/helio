@@ -21,6 +21,14 @@ Maintainer notes:
 
 ### Added
 
+- **The policy simulation harness.** `policy/simulate/` replays the audit
+  trail against a candidate policy row by row on a virtual clock, with the
+  limiter, budget, evidence and dependency state rebuilt in the order the
+  doors applied it, and reports what it could not verify in the fidelity
+  matrix's words. Read-only: it never writes the database or the ledger and
+  never calls an upstream. `helio policy simulate` (issue #490) prints its
+  result.
+
 - **A fidelity matrix for policy simulation, `docs/policy-fidelity.md`
   (draft).** Which `decide()` inputs an audit record can rebuild, per
   door; the rows a replay skips; the cumulative state it rebuilds; and
