@@ -1,10 +1,14 @@
 packages:
   - 'packages/*'
 
-# Transitive security pins, exact per the version-pinning policy in
-# DEPENDENCIES.md. A pinned version can itself age into a later advisory, so
-# every entry has to move when the audit gate names it (axios in #188,
-# fast-uri and postcss in #194).
+# Transitive security overrides per the policy in DEPENDENCIES.md. A bare
+# version is an exact pin: ip-address because express-rate-limit depends on
+# exactly 10.1.0; path-to-regexp, axios and follow-redirects are the older
+# bare-pin shape that #198 tracks, whose parents declare caret ranges. A
+# ranged entry self-retires where the parent range already admits the fix.
+# Either kind can itself age into a later advisory, so every entry has to
+# move when the audit gate names it (axios in #188, fast-uri and postcss in
+# #194).
 overrides:
   path-to-regexp: 8.4.2
   # Seven axios advisories, all patched 1.20.0: GHSA-c29m-xwm3-cm6r (ReDoS in
@@ -43,10 +47,9 @@ overrides:
   'form-data@>=4.0.0 <4.0.6': 4.0.6
   # nanoid custom-generator infinite loop when size is zero
   # (GHSA-2v37-7h3g-55p8, patched 3.3.18; dev-only paths, postcss via
-  # tsup/vite/vitest). postcss's ^3.3.17 admits the fix, but pnpm has no
-  # scoped transitive refresh (update is direct-only, dedupe cannot fetch),
-  # so the ranged override carries it; the range self-retires once natural
-  # resolution reaches 3.3.18.
+  # tsup/vite/vitest). postcss's ^3.3.17 admits the fix; the ranged
+  # override carries it and self-retires once natural resolution reaches
+  # 3.3.18 or later.
   'nanoid@<3.3.18': 3.3.18
   # express-rate-limit (via @modelcontextprotocol/sdk) depends on an EXACT
   # ip-address 10.1.0, so no range resolution can reach the fix.
@@ -56,10 +59,20 @@ overrides:
   # both patched 4.28.7). Every path is a dev-only transitive through
   # @babel/core, whose @babel/helper-compilation-targets declares
   # ^4.24.0, a range that already admits the fix. The lockfile was
-  # simply pinned at 4.28.2, and pnpm has no scoped transitive refresh,
-  # so the ranged override carries it; the range self-retires once
-  # natural resolution reaches 4.28.7 or later.
+  # simply pinned at 4.28.2, so the ranged override carries it; the
+  # range self-retires once natural resolution reaches 4.28.7 or later.
   'browserslist@<4.28.7': 4.28.8
+  # source-map-js event-loop denial of service (GHSA-68fv-2mgg-jv7q,
+  # patched 1.2.2). Every path is dev-only: @tailwindcss/node under the
+  # dashboard's @tailwindcss/vite, css-tree under jsdom (vitest in both
+  # packages), and postcss under vite (dashboard) and tsup (proxy). Every
+  # parent range (^1.2.1) admits the fix, but a named refresh moves
+  # @tailwindcss/node and css-tree while the installed postcss@8.5.26
+  # keeps its dependency source-map-js: ^1.2.1 resolved at 1.2.1, so the
+  # ranged override carries it; the range self-retires once natural
+  # resolution reaches 1.2.2 or later (postcss@8.5.29 already wants
+  # ^1.2.2).
+  'source-map-js@<1.2.2': 1.2.2
   # undici denial of service via an unrequested WebSocket subprotocol
   # (GHSA-rfgv-xxqx-mfg5) and a TLS certificate validation bypass via dropped
   # connect options in BalancedPool (GHSA-w293-vg96-wgc3), both patched
