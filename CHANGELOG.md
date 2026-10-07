@@ -107,6 +107,12 @@ Maintainer notes:
 
 ### Security
 
+- **`@modelcontextprotocol/sdk` lifted to `1.31.0`** (GHSA-6qxp-vccf-f47h:
+  the SDK's OAuth client could send credentials to an authorization server
+  chosen by the MCP server). The SDK is the proxy's devDependency, the
+  library of the test MCP servers and clients, and Helio runs no SDK OAuth
+  client; it reaches neither the shipped proxy nor the dashboard bundle. The
+  direct exact pin moved, with no override.
 - **`proxy-addr` refreshed to `2.0.8`, `source-map-js` lifted to `1.2.2`**
   (GHSA-jqcg-44mw-7w3h: IP spoofing through an IPv4-mapped IPv6 trust subnet
   in proxy-addr, under `express` via the MCP SDK devDependency;
