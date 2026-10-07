@@ -15,6 +15,7 @@ import type {
   ActivationTimeline,
   ActivationWindow,
   ConfigEpochRun,
+  EpochReloads,
   PersistedSummary,
   AuditRecord,
   AuditRecordInput,
@@ -55,14 +56,23 @@ const NON_TOOL_DECISIONS_SQL =
 const POLICY_RELOAD_KIND_SQL = "'policy_reload'"
 
 /**
- * Every record_kind the proxy writes about itself rather than about a call:
- * config reloads (issue #341) and kill-switch transitions (issue #402).
- * Excluded from every decision aggregate (they are not decisions about
- * calls) and kept in the raw total and the per-hour series. A `record_kind`
- * list, never a `policy_decision` one: the decision list names decisions on
- * tool calls that carry no real tool.
+ * The kind of a `helio policy simulate` run's record (issue #490), the one
+ * record a process other than the proxy writes. The last-policy-write seek
+ * excludes it: a simulation is stamped with the candidate's hash and writes
+ * no policy.
  */
-const NON_TOOL_KINDS_SQL = "('kill_switch', 'policy_reload')"
+const POLICY_SIMULATION_KIND_SQL = "'policy_simulation'"
+
+/**
+ * Every record_kind written about the proxy or the trail rather than about
+ * a call: config reloads (issue #341), kill-switch transitions (issue #402)
+ * and policy simulations (issue #490), the one record a process other than
+ * the proxy writes. Excluded from every decision aggregate (they are not
+ * decisions about calls) and kept in the raw total and the per-hour series.
+ * A `record_kind` list, never a `policy_decision` one: the decision list
+ * names decisions on tool calls that carry no real tool.
+ */
+const NON_TOOL_KINDS_SQL = "('kill_switch', 'policy_reload', 'policy_simulation')"
 
 /**
  * Maximum records a single bulk export may return. Shared by the dashboard
@@ -291,7 +301,9 @@ export const ACTIVATION_TIMELINE_SQL = {
       AND block_reason <> 'kill_switch'
       AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
     ORDER BY created_at LIMIT 1`,
-  newest_record_hash: `SELECT config_sha256 FROM audit_records ORDER BY created_at DESC LIMIT 1`,
+  newest_record_hash: `SELECT config_sha256 FROM audit_records
+    WHERE record_kind <> ${POLICY_SIMULATION_KIND_SQL}
+    ORDER BY created_at DESC LIMIT 1`,
 } as const
 
 const INSERT_SQL = `
@@ -551,6 +563,21 @@ function buildReplayWhereClause(
 /** The kind predicate of the rows a replay walks: the calls and the evaluations that expired unreported. */
 const REPLAY_KINDS_SQL = "record_kind IN ('tool_call', 'evaluation_expired')"
 
+/**
+ * The position bounds of one config epoch's neighbors (issue #490), on the
+ * aliased row: after the previous run's last row and before the next run's
+ * first row in `(timestamp, rowid)` order, each side open when the named
+ * parameter is null. Shared by both statements of {@link AuditStore.epochReloads}.
+ */
+function epochBoundsSql(alias: string): string {
+  return `(@prev_last IS NULL
+        OR ${alias}.timestamp > @prev_last
+        OR (${alias}.timestamp = @prev_last AND ${alias}.rowid > @prev_last_rowid))
+      AND (@before IS NULL
+        OR ${alias}.timestamp < @before
+        OR (${alias}.timestamp = @before AND ${alias}.rowid < @next_first_rowid))`
+}
+
 /** The additive nullable columns that migrate in place (issues #292, #341), in the order they were added. */
 const ADDITIVE_AUDIT_COLUMNS: ReadonlyArray<{ readonly name: string; readonly ddl: string }> = [
   { name: 'upstream', ddl: 'upstream TEXT' },
@@ -665,6 +692,12 @@ export class AuditStore {
   private readonly includeResponses: boolean
   private readonly retentionSweepHooks: Array<(cutoff: RetentionSweepCutoff) => void> = []
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * How many rows the constructor's retention purge deleted (issue #490):
+   * what a read command that opened the file says it removed, by insert
+   * time, before it read anything.
+   */
+  readonly purgedAtOpen: number
 
   constructor(options: AuditStoreOptions) {
     this.db = new Database(options.path)
@@ -710,7 +743,7 @@ export class AuditStore {
     // Run initial cleanup. This transaction will create the WAL/SHM
     // sidecar files if they did not exist yet, so the second
     // restrictAuditFilePerms call below catches them.
-    this.purgeExpired()
+    this.purgedAtOpen = this.purgeExpired()
     restrictAuditFilePerms(options.path)
 
     // Schedule periodic cleanup. Also re-tightens file permissions in case
@@ -1148,9 +1181,11 @@ export class AuditStore {
    * #400). Two seeks, one covering existence check and up to two walks (see
    * {@link ACTIVATION_TIMELINE_SQL}); the first-block walk runs only when
    * the check finds a reason outside {@link NON_BLOCK_REASONS}. The newest
-   * record of ANY kind carries the config hash in force when it was written
-   * (the writer stamps every record at push), so that one seek is the
-   * "last policy write" the report compares the config file against.
+   * record of any kind but `policy_simulation` carries the config hash in
+   * force when it was written (the writer stamps every record at push), so
+   * that one seek is the "last policy write" the report compares the config
+   * file against; a simulation record is stamped with the candidate's hash
+   * and writes no policy, so the seek steps over it (issue #490).
    */
   activationTimeline(): ActivationTimeline {
     const firstRule = this.db.prepare(ACTIVATION_TIMELINE_SQL.first_rule_decided_call).get() as
@@ -1187,37 +1222,104 @@ export class AuditStore {
 
   /**
    * The tool calls of the window cut into runs of equal `config_sha256` in
-   * `timestamp` order, a null hash being its own value: the config epochs a
-   * simulation can select. A rollback (A, B, A) yields three runs.
+   * `(timestamp, rowid)` order, a null hash being its own value: the config
+   * epochs a simulation can select. A rollback (A, B, A) yields three runs.
+   * Each run carries the rowids of its first and last rows in that order,
+   * the positions {@link epochReloads} bounds a run's reloads by.
    */
   listConfigEpochs(filters: ReplayFilters): readonly ConfigEpochRun[] {
     const { clause, params } = buildReplayWhereClause("record_kind = 'tool_call'", filters)
     const rows = this.db
       .prepare(
-        `SELECT config_sha256, timestamp FROM audit_records ${clause} ORDER BY timestamp ASC, rowid ASC`,
+        `SELECT config_sha256, timestamp, rowid FROM audit_records ${clause} ORDER BY timestamp ASC, rowid ASC`,
       )
-      .all(...params) as Array<{ config_sha256: string | null; timestamp: string }>
+      .all(...params) as Array<{ config_sha256: string | null; timestamp: string; rowid: number }>
     const runs: Array<{
       config_sha256: string | null
       rows: number
       first_timestamp: string
       last_timestamp: string
+      first_rowid: number
+      last_rowid: number
     }> = []
     for (const row of rows) {
       const current = runs[runs.length - 1]
       if (current && current.config_sha256 === row.config_sha256) {
         current.rows += 1
         current.last_timestamp = row.timestamp
+        current.last_rowid = row.rowid
       } else {
         runs.push({
           config_sha256: row.config_sha256,
           rows: 1,
           first_timestamp: row.timestamp,
           last_timestamp: row.timestamp,
+          first_rowid: row.rowid,
+          last_rowid: row.rowid,
         })
       }
     }
     return runs
+  }
+
+  /**
+   * The applied reloads that describe one config epoch (issue #490), for
+   * the first-policy predicate of `helio policy simulate`. `within` is every
+   * applied `policy_reload` row carrying the run's hash after the previous
+   * run's last row and before the next run's first row in `(timestamp,
+   * rowid)` order (no bound on the side with no neighbor), oldest first.
+   * `opener` is the latest of them that no genuine row of the run precedes:
+   * a tool call of the run's hash in the same bounds whose `timestamp` AND
+   * `created_at` are both before the reload's. A call in flight across the
+   * reload (an upstream wait, an approval hold) carries the new hash with a
+   * `timestamp` from before the reload and a `created_at` from after it,
+   * and is not the run's start; a reload and a late call stamped alike by
+   * one batched flush keep the reload. Both reads are by hash and position,
+   * never by the replay filters: the reload's place in the trail is a
+   * physical fact a `--upstream` or `--session` filter does not change, so
+   * a row the filter hid still rules a later reload out as the opener. A
+   * null-hash run has neither (an applied reload always carries a hash).
+   */
+  epochReloads(
+    run: ConfigEpochRun,
+    previousRun?: ConfigEpochRun,
+    nextRun?: ConfigEpochRun,
+  ): EpochReloads {
+    if (run.config_sha256 === null) return { opener: undefined, within: [] }
+    const params = {
+      hash: run.config_sha256,
+      prev_last: previousRun?.last_timestamp ?? null,
+      prev_last_rowid: previousRun?.last_rowid ?? null,
+      before: nextRun?.first_timestamp ?? null,
+      next_first_rowid: nextRun?.first_rowid ?? null,
+    }
+    const within = this.db
+      .prepare(
+        `SELECT r.* FROM audit_records r
+         WHERE r.record_kind = ${POLICY_RELOAD_KIND_SQL} AND r.block_reason IS NULL
+           AND r.config_sha256 = @hash
+           AND ${epochBoundsSql('r')}
+         ORDER BY r.timestamp ASC, r.rowid ASC`,
+      )
+      .all(params) as RawAuditRow[]
+    const opener = this.db
+      .prepare(
+        `SELECT r.* FROM audit_records r
+         WHERE r.record_kind = ${POLICY_RELOAD_KIND_SQL} AND r.block_reason IS NULL
+           AND r.config_sha256 = @hash
+           AND ${epochBoundsSql('r')}
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_records c
+             WHERE c.record_kind = 'tool_call' AND c.config_sha256 = @hash
+               AND ${epochBoundsSql('c')}
+               AND c.timestamp < r.timestamp AND c.created_at < r.created_at)
+         ORDER BY r.timestamp DESC, r.rowid DESC LIMIT 1`,
+      )
+      .get(params) as RawAuditRow | undefined
+    return {
+      opener: opener === undefined ? undefined : deserializeRow(opener),
+      within: within.map(deserializeRow),
+    }
   }
 
   /**

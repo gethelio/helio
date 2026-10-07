@@ -14,7 +14,7 @@ import {
   migrateAdditiveAuditColumns,
 } from './store.js'
 import { StartupError } from '../startup-error.js'
-import type { AuditRecord, AuditRecordInput } from './types.js'
+import type { AuditRecord, AuditRecordInput, ConfigEpochRun } from './types.js'
 
 /** The one-time index build notice (issue #396). */
 const MIGRATION_LINE =
@@ -3033,10 +3033,38 @@ describe('replay reads', () => {
         }),
       )
       expect(s.listConfigEpochs({})).toEqual([
-        { config_sha256: A, rows: 2, first_timestamp: at(0), last_timestamp: at(1) },
-        { config_sha256: B, rows: 1, first_timestamp: at(2), last_timestamp: at(2) },
-        { config_sha256: A, rows: 1, first_timestamp: at(3), last_timestamp: at(3) },
-        { config_sha256: null, rows: 2, first_timestamp: at(4), last_timestamp: at(5) },
+        {
+          config_sha256: A,
+          rows: 2,
+          first_timestamp: at(0),
+          last_timestamp: at(1),
+          first_rowid: 1,
+          last_rowid: 2,
+        },
+        {
+          config_sha256: B,
+          rows: 1,
+          first_timestamp: at(2),
+          last_timestamp: at(2),
+          first_rowid: 3,
+          last_rowid: 3,
+        },
+        {
+          config_sha256: A,
+          rows: 1,
+          first_timestamp: at(3),
+          last_timestamp: at(3),
+          first_rowid: 4,
+          last_rowid: 4,
+        },
+        {
+          config_sha256: null,
+          rows: 2,
+          first_timestamp: at(4),
+          last_timestamp: at(5),
+          first_rowid: 5,
+          last_rowid: 6,
+        },
       ])
     } finally {
       s.close()
@@ -3051,15 +3079,50 @@ describe('replay reads', () => {
         makeRecord({ timestamp: at(7), config_sha256: B, upstream: 'crm', session_id: 's-2' }),
       )
       expect(s.listConfigEpochs({ from: at(1), to: at(3) })).toEqual([
-        { config_sha256: A, rows: 1, first_timestamp: at(1), last_timestamp: at(1) },
-        { config_sha256: B, rows: 1, first_timestamp: at(2), last_timestamp: at(2) },
-        { config_sha256: A, rows: 1, first_timestamp: at(3), last_timestamp: at(3) },
+        {
+          config_sha256: A,
+          rows: 1,
+          first_timestamp: at(1),
+          last_timestamp: at(1),
+          first_rowid: 2,
+          last_rowid: 2,
+        },
+        {
+          config_sha256: B,
+          rows: 1,
+          first_timestamp: at(2),
+          last_timestamp: at(2),
+          first_rowid: 3,
+          last_rowid: 3,
+        },
+        {
+          config_sha256: A,
+          rows: 1,
+          first_timestamp: at(3),
+          last_timestamp: at(3),
+          first_rowid: 4,
+          last_rowid: 4,
+        },
       ])
       expect(s.listConfigEpochs({ upstream: 'crm' })).toEqual([
-        { config_sha256: B, rows: 1, first_timestamp: at(7), last_timestamp: at(7) },
+        {
+          config_sha256: B,
+          rows: 1,
+          first_timestamp: at(7),
+          last_timestamp: at(7),
+          first_rowid: 7,
+          last_rowid: 7,
+        },
       ])
       expect(s.listConfigEpochs({ sessionId: 's-2' })).toEqual([
-        { config_sha256: B, rows: 1, first_timestamp: at(7), last_timestamp: at(7) },
+        {
+          config_sha256: B,
+          rows: 1,
+          first_timestamp: at(7),
+          last_timestamp: at(7),
+          first_rowid: 7,
+          last_rowid: 7,
+        },
       ])
       expect(s.listConfigEpochs({ sessionId: 's-9' })).toEqual([])
     } finally {
@@ -3185,5 +3248,595 @@ describe('replay reads', () => {
     } finally {
       s.close()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Policy simulation records (issue #490)
+// ---------------------------------------------------------------------------
+
+describe('policy_simulation records and the aggregates (issue #490)', () => {
+  const HOUR = 3_600_000
+  const DAY = 24 * HOUR
+  const HASH_A = 'a'.repeat(64)
+  const HASH_B = 'b'.repeat(64)
+  const ago = (ms: number): string => new Date(Date.now() - ms).toISOString()
+
+  /** A simulation record in the store's own shape, stamped with the candidate's hash. */
+  function simulationRecord(hash: string, tool = 'helio.candidate.yaml'): InsertRecord {
+    return makeRecord({
+      tool_name: tool,
+      tool_input: {},
+      policy_decision: 'policy_simulation',
+      block_reason: null,
+      record_kind: 'policy_simulation',
+      origin: 'operator',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      evidence_chain: { policy_simulation: { candidate_sha256: hash } },
+      config_sha256: hash,
+    })
+  }
+
+  it('keeps the record in total and per_hour and out of every decision aggregate', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ tool_name: 'get_weather' }))
+      s.insert(makeRecord({ tool_name: 'send_email' }))
+      s.insert(
+        makeRecord({
+          tool_name: 'delete_record',
+          policy_decision: 'deny',
+          block_reason: 'policy_denied',
+        }),
+      )
+      s.insert(simulationRecord(HASH_B))
+      const stats = s.aggregate()
+      expect(stats.total).toBe(4)
+      expect(stats.allowed_total).toBe(2)
+      expect(stats.blocked_total).toBe(1)
+      expect(stats.dry_run_total).toBe(0)
+      expect(stats.applied_total).toBe(3)
+      expect(stats.by_decision.map((d) => d.decision)).not.toContain('policy_simulation')
+      expect(stats.by_decision.reduce((sum, d) => sum + d.count, 0)).toBe(3)
+      expect(stats.by_block_reason).toEqual([{ reason: 'policy_denied', count: 1 }])
+      expect(stats.top_tools.map((t) => t.tool_name)).not.toContain('helio.candidate.yaml')
+      expect(stats.per_hour.reduce((sum, b) => sum + b.count, 0)).toBe(4)
+      const rows = s.list({ record_kind: 'policy_simulation' })
+      expect(rows.total).toBe(1)
+      expect(rows.records[0]?.tool_name).toBe('helio.candidate.yaml')
+    } finally {
+      s.close()
+    }
+  })
+
+  it('does not count the record in the persisted summary or the activation window', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ tool_name: 'get_weather' }))
+      s.insert(simulationRecord(HASH_B))
+      const since = ago(4 * HOUR)
+      expect(s.persistedSummary(since).calls).toBe(1)
+      const window = s.activationWindow(since)
+      expect(window.permitted).toBe(1)
+      expect(window.blocked).toBe(0)
+      expect(window.reloads_recorded).toBe(0)
+      expect(window.reloads_applied).toBe(0)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('ignores a simulation record newer than the last call for the last-policy-write seek', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ config_sha256: HASH_A }), ago(2 * DAY))
+      s.insert(simulationRecord(HASH_B), ago(1 * DAY))
+      expect(s.activationTimeline().newest_record_hash).toEqual({ hash: HASH_A })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('answers no record for the last-policy-write seek when only a simulation record exists', () => {
+    const s = createStore()
+    try {
+      s.insert(simulationRecord(HASH_B))
+      expect(s.activationTimeline().newest_record_hash).toBeNull()
+    } finally {
+      s.close()
+    }
+  })
+
+  it('counts the rows the open purged and reports zero when nothing was older than retention', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-purged-at-open-'))
+    const path = join(dir, 'audit.db')
+    try {
+      const fresh = new AuditStore({
+        path,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        expect(fresh.purgedAtOpen).toBe(0)
+        fresh.insert(makeRecord(), ago(100 * DAY))
+        fresh.insert(makeRecord(), ago(100 * DAY))
+        fresh.insert(makeRecord(), ago(100 * DAY))
+        fresh.insert(makeRecord(), ago(1 * DAY))
+      } finally {
+        fresh.close()
+      }
+      const reopened = new AuditStore({
+        path,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        expect(reopened.purgedAtOpen).toBe(3)
+        expect(reopened.count()).toBe(1)
+      } finally {
+        reopened.close()
+      }
+      const again = new AuditStore({
+        path,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        expect(again.purgedAtOpen).toBe(0)
+      } finally {
+        again.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The reloads of a config epoch (issue #490)
+// ---------------------------------------------------------------------------
+
+describe('AuditStore.epochReloads (issue #490)', () => {
+  const A = 'a'.repeat(64)
+  const B = 'b'.repeat(64)
+  /** `2026-07-10T12:00:00.000Z` plus `seconds`, as a stored ISO instant. */
+  const at = (seconds: number): string =>
+    new Date(Date.UTC(2026, 6, 10, 12, 0, 0) + seconds * 1000).toISOString()
+
+  interface ReloadCounts {
+    readonly rules: number
+    readonly budgets: number
+    readonly defaultAction: 'allow' | 'deny'
+  }
+  const ZERO: ReloadCounts = { rules: 0, budgets: 0, defaultAction: 'allow' }
+  const FIVE: ReloadCounts = { rules: 5, budgets: 0, defaultAction: 'allow' }
+
+  /** A tool call stamped with `hash`, inserted at `createdAt` (its own instant when absent). */
+  function call(
+    s: AuditStore,
+    timestamp: string,
+    hash: string | null,
+    createdAt = timestamp,
+    extra: Partial<InsertRecord> = {},
+  ): void {
+    s.insert(makeRecord({ timestamp, config_sha256: hash, session_id: 's-1', ...extra }), createdAt)
+  }
+
+  /** An applied reload to `hash`, inserted at `createdAt`, recording `counts` after. */
+  function reload(
+    s: AuditStore,
+    timestamp: string,
+    hash: string,
+    counts: ReloadCounts = ZERO,
+    createdAt = timestamp,
+  ): string {
+    return s.insert(
+      makeRecord({
+        timestamp,
+        tool_name: 'helio.yaml',
+        tool_input: {},
+        policy_decision: 'policy_reload',
+        block_reason: null,
+        record_kind: 'policy_reload',
+        origin: 'config',
+        upstream_response: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        config_sha256: hash,
+        evidence_chain: {
+          policy_reload: {
+            outcome: 'applied',
+            config_path: '/etc/helio/helio.yaml',
+            sha256_before: 'f'.repeat(64),
+            sha256_after: hash,
+            rule_count_before: 0,
+            rule_count_after: counts.rules,
+            default_action_before: 'allow',
+            default_action_after: counts.defaultAction,
+            budget_count_before: 0,
+            budget_count_after: counts.budgets,
+            rules_removed: [],
+            restart_required_paths: [],
+            error: null,
+          },
+        },
+      }),
+      createdAt,
+    )
+  }
+
+  /** A refused reload (the proxy stays on `hash`), inserted at its own instant. */
+  function refusedReload(s: AuditStore, timestamp: string, hash: string): string {
+    return s.insert(
+      makeRecord({
+        timestamp,
+        tool_name: 'helio.yaml',
+        tool_input: {},
+        policy_decision: 'policy_reload',
+        block_reason: 'rejected_invalid',
+        record_kind: 'policy_reload',
+        origin: 'config',
+        upstream_response: null,
+        upstream_http_status: null,
+        upstream_latency_ms: null,
+        config_sha256: hash,
+        evidence_chain: { policy_reload: { outcome: 'rejected_invalid' } },
+      }),
+    )
+  }
+
+  function runs(s: AuditStore, filters: Parameters<AuditStore['listConfigEpochs']>[0] = {}) {
+    return s.listConfigEpochs(filters)
+  }
+
+  function ids(records: ReadonlyArray<{ readonly id: string }>): string[] {
+    return records.map((r) => r.id)
+  }
+
+  describe('the opener', () => {
+    it('finds the applied reload to the run hash that precedes its first call', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        const opener = reload(s, at(10), B)
+        call(s, at(20), B)
+        call(s, at(30), B)
+        const [runA, runB] = runs(s)
+        const reloads = s.epochReloads(runB as ConfigEpochRun, runA)
+        expect(reloads.opener?.id).toBe(opener)
+        expect(ids(reloads.within)).toEqual([opener])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('keeps the opener when the run first row is a call in flight across the reload', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        const opener = reload(s, at(10), B)
+        call(s, at(5), B, at(20))
+        call(s, at(30), B)
+        const [runA, runB] = runs(s)
+        expect(runB?.first_timestamp).toBe(at(5))
+        expect(s.epochReloads(runB as ConfigEpochRun, runA).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('keeps the opener when one batched flush stamped the reload and a late call alike', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        const opener = reload(s, at(10), B, ZERO, at(40))
+        call(s, at(5), B, at(40))
+        call(s, at(30), B, at(40))
+        const [runA, runB] = runs(s)
+        expect(s.epochReloads(runB as ConfigEpochRun, runA).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('keeps the opener when every call of the run was in flight', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        const opener = reload(s, at(10), B)
+        call(s, at(5), B, at(20))
+        call(s, at(6), B, at(21))
+        const [runA, runB] = runs(s)
+        expect(s.epochReloads(runB as ConfigEpochRun, runA).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('finds no opener when a genuine row of the run precedes every reload to its hash', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        call(s, at(5), B)
+        const later = reload(s, at(10), B, FIVE)
+        call(s, at(20), B)
+        const [runA, runB] = runs(s)
+        const reloads = s.epochReloads(runB as ConfigEpochRun, runA)
+        expect(reloads.opener).toBeUndefined()
+        expect(ids(reloads.within)).toEqual([later])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('finds the opener on a same-millisecond tie through the previous run last rowid', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        call(s, at(10), A)
+        const opener = reload(s, at(10), B)
+        call(s, at(10), B)
+        call(s, at(20), B)
+        const [runA, runB] = runs(s)
+        expect(runA?.last_timestamp).toBe(at(10))
+        expect(runB?.first_timestamp).toBe(at(10))
+        expect(s.epochReloads(runB as ConfigEpochRun, runA).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('finds the opener among four rows at one instant by the previous run own last rowid, not the hash largest', () => {
+      const s = createStore()
+      try {
+        for (let i = 1; i <= 9; i++) call(s, at(0), B)
+        call(s, at(10), B)
+        const opener = reload(s, at(10), A)
+        call(s, at(10), A)
+        call(s, at(10), B)
+        const listed = runs(s)
+        expect(listed.map((r) => [r.config_sha256, r.first_rowid, r.last_rowid])).toEqual([
+          [B, 1, 10],
+          [A, 12, 12],
+          [B, 13, 13],
+        ])
+        const [runB1, runA] = listed
+        expect(s.epochReloads(runA as ConfigEpochRun, runB1).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('ignores a refused reload between the opener and the first call', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        const opener = reload(s, at(10), B)
+        refusedReload(s, at(15), B)
+        call(s, at(20), B)
+        const [runA, runB] = runs(s)
+        const reloads = s.epochReloads(runB as ConfigEpochRun, runA)
+        expect(reloads.opener?.id).toBe(opener)
+        expect(ids(reloads.within)).toEqual([opener])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('gives each run of a rollback its own opener', () => {
+      const s = createStore()
+      try {
+        const first = reload(s, at(0), A)
+        call(s, at(10), A)
+        reload(s, at(20), B)
+        call(s, at(30), B)
+        const second = reload(s, at(40), A, FIVE)
+        call(s, at(50), A)
+        const [runA1, runB, runA2] = runs(s)
+        expect(s.epochReloads(runA1 as ConfigEpochRun, undefined, runB).opener?.id).toBe(first)
+        expect(s.epochReloads(runA2 as ConfigEpochRun, runB).opener?.id).toBe(second)
+        expect(ids(s.epochReloads(runA1 as ConfigEpochRun, undefined, runB).within)).toEqual([
+          first,
+        ])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('finds the oldest of 1,001 reloads to the run hash as the opener, uncapped', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), B)
+        call(s, at(10), B)
+        for (let i = 0; i < 1000; i++) reload(s, at(20 + i), B)
+        const [runB] = runs(s)
+        const reloads = s.epochReloads(runB as ConfigEpochRun)
+        expect(reloads.opener?.id).toBe(opener)
+        expect(reloads.within).toHaveLength(1001)
+        expect(reloads.within[0]?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('gives a null-hash run no opener and no reload', () => {
+      const s = createStore()
+      try {
+        reload(s, at(0), B)
+        call(s, at(10), null)
+        const [runNull] = runs(s)
+        expect(runNull?.config_sha256).toBeNull()
+        expect(s.epochReloads(runNull as ConfigEpochRun)).toEqual({ opener: undefined, within: [] })
+      } finally {
+        s.close()
+      }
+    })
+
+    it('reads by hash and position, so a filter that left the run first row out changes nothing', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), B)
+        call(s, at(10), B, at(10), { upstream: 'crm' })
+        call(s, at(20), B, at(20), { upstream: 'billing' })
+        const [runB] = runs(s, { upstream: 'billing' })
+        expect(runB?.first_timestamp).toBe(at(20))
+        expect(s.epochReloads(runB as ConfigEpochRun).opener?.id).toBe(opener)
+      } finally {
+        s.close()
+      }
+    })
+
+    it('does not mistake a reload the filter hid a genuine predecessor of for the opener', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), B)
+        call(s, at(10), B, at(10), { upstream: 'crm' })
+        const resave = reload(s, at(15), B, FIVE)
+        call(s, at(20), B, at(20), { upstream: 'billing' })
+        const [runB] = runs(s, { upstream: 'billing' })
+        const reloads = s.epochReloads(runB as ConfigEpochRun)
+        expect(reloads.opener?.id).toBe(opener)
+        expect(ids(reloads.within)).toEqual([opener, resave])
+      } finally {
+        s.close()
+      }
+    })
+  })
+
+  describe('within', () => {
+    it('holds the rollback reload of a run the filter merged, with no opener', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A, at(0), { upstream: 'billing' })
+        reload(s, at(10), B)
+        call(s, at(20), B, at(20), { upstream: 'crm' })
+        const rollback = reload(s, at(30), A, FIVE)
+        call(s, at(40), A, at(40), { upstream: 'billing' })
+        const listed = runs(s, { upstream: 'billing' })
+        expect(listed).toHaveLength(1)
+        const reloads = s.epochReloads(listed[0] as ConfigEpochRun)
+        expect(reloads.opener).toBeUndefined()
+        expect(ids(reloads.within)).toEqual([rollback])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('holds a same-hash reload that landed after the run last call and before the next run', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        call(s, at(10), A)
+        const resave = reload(s, at(20), A, FIVE)
+        reload(s, at(25), B)
+        call(s, at(30), B)
+        const [runA, runB] = runs(s)
+        const reloads = s.epochReloads(runA as ConfigEpochRun, undefined, runB)
+        expect(reloads.opener).toBeUndefined()
+        expect(ids(reloads.within)).toEqual([resave])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('has no upper bound on the last run', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), A)
+        call(s, at(10), A)
+        const resave = reload(s, at(20), A, FIVE)
+        const [runA] = runs(s)
+        expect(ids(s.epochReloads(runA as ConfigEpochRun).within)).toEqual([opener, resave])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('keeps a resave at the next run first instant with an earlier rowid, through the next run first rowid', () => {
+      const s = createStore()
+      try {
+        for (let i = 1; i <= 9; i++) call(s, at(0), A)
+        call(s, at(10), A)
+        const resave = reload(s, at(20), A, FIVE)
+        call(s, at(20), B)
+        const [runA, runB] = runs(s)
+        expect(runA?.last_rowid).toBe(10)
+        expect(runB?.first_rowid).toBe(12)
+        const reloads = s.epochReloads(runA as ConfigEpochRun, undefined, runB)
+        expect(ids(reloads.within)).toEqual([resave])
+        expect(ids(s.epochReloads(runB as ConfigEpochRun, runA).within)).toEqual([])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('leaves out a reload of the run hash at or after the next run first row', () => {
+      const s = createStore()
+      try {
+        call(s, at(0), A)
+        reload(s, at(10), B)
+        call(s, at(20), B)
+        reload(s, at(20), A, FIVE)
+        reload(s, at(30), A, FIVE)
+        const [runA, runB] = runs(s)
+        expect(s.epochReloads(runA as ConfigEpochRun, undefined, runB).within).toEqual([])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('is empty for a run with no reload between its neighbors', () => {
+      const s = createStore()
+      try {
+        reload(s, at(0), A)
+        call(s, at(10), A)
+        reload(s, at(20), B)
+        call(s, at(30), B)
+        reload(s, at(40), A)
+        call(s, at(50), A)
+        call(s, at(60), B)
+        const listed = runs(s)
+        expect(listed).toHaveLength(4)
+        expect(s.epochReloads(listed[3] as ConfigEpochRun, listed[2]).within).toEqual([])
+        expect(s.epochReloads(listed[3] as ConfigEpochRun, listed[2]).opener).toBeUndefined()
+      } finally {
+        s.close()
+      }
+    })
+
+    it('does not list a refused reload inside the span', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), A)
+        call(s, at(10), A)
+        refusedReload(s, at(15), A)
+        call(s, at(20), A)
+        const [runA] = runs(s)
+        expect(ids(s.epochReloads(runA as ConfigEpochRun).within)).toEqual([opener])
+      } finally {
+        s.close()
+      }
+    })
+
+    it('lists the reloads oldest first, the opener among them', () => {
+      const s = createStore()
+      try {
+        const opener = reload(s, at(0), A)
+        call(s, at(10), A)
+        const second = reload(s, at(20), A)
+        const third = reload(s, at(30), A)
+        const [runA] = runs(s)
+        const reloads = s.epochReloads(runA as ConfigEpochRun)
+        expect(reloads.opener?.id).toBe(opener)
+        expect(ids(reloads.within)).toEqual([opener, second, third])
+      } finally {
+        s.close()
+      }
+    })
   })
 })

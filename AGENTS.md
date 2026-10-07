@@ -179,7 +179,8 @@ CI runs the same checks, plus a full repository secret scan (`pnpm secrets:scan`
 - `packages/proxy/src/evidence/` Evidence store, grounding enforcement, SDK sideband API (bearer-protected).
 - `packages/proxy/src/feedback/` Self-repair feedback builders (policy denied, evidence missing/expired, dependency missing, rate/spend limited, approval denied/timeout, client disconnected, shutdown canceled).
 - `packages/proxy/src/approval/` Approval types, in-memory queue, router (Promise-based hold), channel abstraction, REST API, webhook channel, Slack channel + actions.
-- `packages/proxy/src/audit/` Async writer, SQLite backend (store.ts), CSV export, types.
+- `packages/proxy/src/audit/` Async writer, SQLite backend (store.ts), CSV export, types; the record builders for the proxy's own records (`policy-reload.ts`, `kill-switch.ts`, `policy-simulation.ts`), each a sentinel-shaped `AuditRecordInput` with a strict Zod read of its evidence.
+- `packages/proxy/src/report/` The operator reports built once and rendered as text or JSON: `activation.ts` (`helio report activation`) and `simulation.ts` (`helio policy simulate`: the delta classifier, the first-policy predicate, the builder, the renderer).
 - `packages/proxy/src/transport/` Streamable HTTP, SSE, stdio wrapper adapters; upstream header allowlist (forward-headers.ts); JSON-RPC response normalizer.
 - `packages/proxy/src/config/` YAML loader, Zod schema, chokidar watcher, reload-boundary diff (which config paths need a restart).
 - `packages/proxy/src/kill-switch/` The kill switch (issue #402): the two-hold state object the doors read per call, and the `<config>.kill` marker's atomic write, removal and one-second poller. `helio kill` and `helio resume` live in `cli.ts`; the record builder in `audit/kill-switch.ts`.

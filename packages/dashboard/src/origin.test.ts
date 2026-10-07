@@ -21,6 +21,7 @@ describe('formatRecordKind', () => {
     expect(formatRecordKind('evaluation_expired')).toBe('Expired')
     expect(formatRecordKind('policy_reload')).toBe('Reload')
     expect(formatRecordKind('kill_switch')).toBe('Kill Switch')
+    expect(formatRecordKind('policy_simulation')).toBe('Simulation')
   })
   it('falls back to the raw kind for unknown values', () => {
     expect(formatRecordKind('something_new')).toBe('something_new')

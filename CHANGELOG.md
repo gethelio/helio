@@ -21,6 +21,29 @@ Maintainer notes:
 
 ### Added
 
+- **`helio policy simulate [candidate]`: replay the audit trail against a
+  candidate policy and report what would change, without a running proxy.**
+  The candidate is any complete `helio.yaml` (default `helio.candidate.yaml`
+  when exactly one is present); the deployed `-c` config names the database,
+  the retention and the environment. The report prints the decisions that
+  would change, grouped by tool and rule with their instants, the three
+  frozen fidelity sentences with each unverified call's instants, the
+  multi-epoch notice with the flags that move it (`--across-configs`,
+  `--config-sha`), and a first-policy framing when the replayed baseline
+  had no rule and no budget and the candidate changes a decision (a run
+  that changes nothing names the baseline on one line). `--since`,
+  `--until`, `--upstream` and `--session` bound the window; `--audit-db`
+  replays a copy, opened with the deployed retention (older rows are purged
+  at open) and written into; `--format json` prints the same object;
+  `--fail-on-change` exits 2 when any decision would change; `--demo`
+  replays the `helio init --demo` corpus with the sample server's listed
+  definitions as the annotation source. Every run writes one
+  `record_kind: policy_simulation` provenance record, keyed by the
+  candidate's hash, into the database it replayed; the record stays out of
+  every decision aggregate, the observed counts and the activation report's
+  last-policy-write check. The open purges with the deployed retention, as
+  the other read commands do, and the report says how many rows it deleted.
+
 - **The policy simulation harness.** `policy/simulate/` replays the audit
   trail against a candidate policy row by row on a virtual clock, with the
   limiter, budget, evidence and dependency state rebuilt in the order the

@@ -458,6 +458,45 @@ Tool-door pairs (calls in the last 4h)
 
 > **The secret.** `helio policy status` reads the running proxy through its dashboard API on `dashboard.host:port`, because the primed surface exists only in that process. The dashboard must be enabled, and the command needs the secret itself: it reads `HELIO_DASHBOARD_SECRET` from the environment (the value you exported in Step 2, or the one `helio init` printed), else a plaintext `dashboard.api_secret` from the file. The `sha256:` digest `helio init` writes into the file is refused with one line before any request, because the API verifies the secret, not its digest. In a terminal where the file reads `${HELIO_DASHBOARD_SECRET}` and the variable is not exported, the command refuses with one line before any request: `Error: HELIO_DASHBOARD_SECRET is not set and helio.yaml reads dashboard.api_secret from it. Export it to the secret helio init printed (or the value you exported before helio start) and rerun helio policy status.`
 
+### Try a rule before it lands
+
+Before you add a rule to the file the proxy loads, replay the calls it has already recorded against a copy of the config that carries the rule. `helio policy simulate` reads the audit database on disk and needs no running proxy:
+
+```bash
+cp helio.yaml helio.candidate.yaml   # then add the rule to helio.candidate.yaml
+helio policy simulate                # replays the trail against helio.candidate.yaml
+```
+
+The candidate is any complete `helio.yaml`; with no argument the command takes the one `helio.candidate.yaml` (or `.yml`) in the working directory, and refuses when there are two. Over a trail of ten sample calls recorded under a file with `default: allow` and no rule at all (a fresh install, before Step 2's two rules and Step 8's `block-email` existed: `get_weather`, `send_email` and `delete_record`, every call allowed, as Step 7's call was), with a candidate that adds `block-email`, it prints:
+
+```
+Policy simulation
+  Candidate: helio.candidate.yaml
+  Written by Helio 0.0.0 (unreleased build) on 2026-10-07 (UTC).
+  Window: the whole trail
+  Epoch: the most recent config epoch, 10 calls, 2026-10-06 14:00 UTC to 2026-10-06 14:09 UTC
+  Annotations: the audit trail
+
+Baseline: no restrictive rules (default allow)
+This is your first policy, so every restriction is new.
+
+  3 calls would have been denied (policy_denied 3)
+  7 unaffected
+
+Changed decisions, by tool and rule
+  tool "send_email": allow -> deny (policy_denied), rule "block-email": 3 calls, 2026-10-06 14:01 UTC to 2026-10-06 14:07 UTC
+
+Fidelity
+  Skipped 0 row(s) that never entered policy evaluation: 0 rejected, 0 refused by the kill switch.
+  0 sideband evaluation(s) were decided but never reported (evaluation_expired); their outcome is unknown.
+
+No live tools were called. Nothing was applied.
+```
+
+The first-policy framing prints because every recorded decision was an allow under a file with no rule and the candidate changes some of them; a candidate that changes nothing keeps the `Baseline:` line and prints `N unchanged, 0 changed` under it, and once a rule is in force the report reads `N unchanged, M changed` with no baseline line, the changed decisions grouped the same way. The two `Fidelity` lines are the frozen sentences of [Simulation fidelity](./policy-fidelity.md), printed on every run; a warning there names a rule the replay could not fully evaluate and the calls it counts as unverified. `--format json` prints the same report as JSON, `--fail-on-change` exits 2 when any decision would change (a CI gate), and `--since 7d`, `--until`, `--upstream` and `--session` bound the window.
+
+Every run writes one `policy_simulation` record into the audit database it replayed, keyed by the candidate's hash, so the trail shows what was simulated when (see [Policy Simulation Records](./audit.md#policy-simulation-records)); the open purges rows older than the deployed `audit.retention` first, as `helio report activation` does, and the report says so whenever it deleted any. Inside a `helio init --demo` directory, `helio policy simulate --demo` replays the sample corpus against its own config with the sample server's listed definitions as the annotation source and reports zero changed decisions over the most recent of its three config epochs.
+
 ## Step 10: Share What Happened
 
 You now have a history: two governed calls, one rule that fired, one that was added live. To show that to someone who has never seen this machine (a team lead, the Helio maintainers, a forum thread), write the activation report:

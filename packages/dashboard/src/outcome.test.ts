@@ -201,6 +201,17 @@ describe('session_unresolved outcome', () => {
 // policy_reload outcome (issue #341)
 // ---------------------------------------------------------------------------
 
+describe('policy_simulation outcome (issue #490)', () => {
+  it('renders a simulation record as Allow beside its chip, the applied-reload precedent', () => {
+    // A simulation refuses nothing, so block_reason is null and the badge
+    // reads Allow, as an applied reload's does. The row title and the
+    // label-aware tool filters for every non-tool_call kind are #442's.
+    expect(deriveDisplayOutcome({ policy_decision: 'policy_simulation', block_reason: null })).toBe(
+      'allow',
+    )
+  })
+})
+
 describe('policy_reload outcome (issue #341)', () => {
   it('renders a refused reload as Rejected, never Allow, and an applied one as Allow beside the Reload chip', () => {
     const refused = deriveDisplayOutcome({
