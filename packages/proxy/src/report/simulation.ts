@@ -242,8 +242,12 @@ export function isFirstPolicyBaseline(
 
 const MIN_PREFIX = 8
 
-/** The shortest prefix of each hash that no other hash in the set shares, at least {@link MIN_PREFIX}. */
-function uniquePrefixes(hashes: readonly string[]): Map<string, string> {
+/**
+ * The shortest prefix of each hash that no other hash in the set shares, at
+ * least 8 characters: what the JSON prints for epoch and baseline hashes
+ * and what `--config-sha` takes back.
+ */
+export function shortestUniquePrefixes(hashes: readonly string[]): ReadonlyMap<string, string> {
   const distinct = [...new Set(hashes)]
   const prefixes = new Map<string, string>()
   for (const hash of distinct) {
@@ -292,7 +296,7 @@ function projectDelta(row: SimulatedRow): SimulationReportDelta {
 /** Build the report object. Pure: the same input yields the same object. */
 export function buildSimulationReport(input: SimulationReportInput): SimulationReport {
   const { result } = input
-  const prefixes = uniquePrefixes(
+  const prefixes = shortestUniquePrefixes(
     result.epochs.flatMap((epoch) => (epoch.config_sha256 === null ? [] : [epoch.config_sha256])),
   )
   const prefixOf = (hash: string | null): string | null =>
@@ -602,10 +606,13 @@ export function renderSimulationText(report: SimulationReport): string {
     lines.push(EPOCH_FLAG_HINT)
   }
 
+  // The first-policy framing reads "every restriction is new"; a run that
+  // changes nothing has no restriction to frame, so it prints the standard
+  // block whatever the baseline was.
   lines.push('')
   if (report.replayed === 0) {
     lines.push('No tool calls in the window.')
-  } else if (report.baseline.first_policy) {
+  } else if (report.baseline.first_policy && report.changed) {
     lines.push(...firstPolicyBlock(report))
   } else {
     lines.push(...standardBlock(report))

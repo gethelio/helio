@@ -758,6 +758,13 @@ describe('renderSimulationText (issue #490)', () => {
     expect(text).not.toContain('Decisions (')
   })
 
+  it('prints the standard block on a zero-delta run over a first-policy baseline', () => {
+    const text = render()
+    expect(build().baseline.first_policy).toBe(true)
+    expect(text).toContain('Decisions (1 replayed)\n  1 unchanged\n  0 changed')
+    expect(text).not.toContain('Baseline:')
+  })
+
   it('groups the changed lines by tool, door, outcomes and rule in first-seen order with one or two instants', () => {
     const rows = [
       row({

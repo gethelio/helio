@@ -20,6 +20,8 @@ import {
   readConfigPin,
   isNamedConfig,
 } from './config/index.js'
+import type { ConfigSource } from './config/index.js'
+import { durationSchema } from './config/schema.js'
 import type { HelioConfig, SingularHelioConfig } from './config/index.js'
 import { DEFAULT_REARM_INTERVAL_MS } from './config/watcher.js'
 import { findUnroutableApprovalReferences } from './config/reload-boundary.js'
@@ -39,6 +41,7 @@ import {
   DEMO_UPSTREAM_FILE,
 } from './demo/corpus.js'
 import { DEMO_DEFAULT_PORTS } from './demo/config.js'
+import { demoAnnotationSource } from './demo/annotations.js'
 import { parseDemoBase, seedDemoDirectory } from './demo/seed.js'
 import {
   BACKUP_SUFFIX,
@@ -88,7 +91,28 @@ import type { PolicyStatusReport } from './policy/status.js'
 import { fetchPolicyStatus } from './policy/status-fetch.js'
 import { buildActivationReport, renderActivationText, windowSince } from './report/activation.js'
 import type { ConfigFileVsLastPolicyWrite, SnapshotAbsentReason } from './report/activation.js'
-import type { ActivationTimeline, ActivationWindow, PersistedSummary } from './audit/types.js'
+import {
+  buildSimulationReport,
+  renderSimulationText,
+  shortestUniquePrefixes,
+} from './report/simulation.js'
+import type { SimulationEpochSelector, SimulationReportInput } from './report/simulation.js'
+import type {
+  ActivationTimeline,
+  ActivationWindow,
+  PersistedSummary,
+  ReplayFilters,
+} from './audit/types.js'
+import {
+  buildPolicySimulationRecord,
+  writePolicySimulationRecord,
+} from './audit/policy-simulation.js'
+import type { PolicySimulationEvidence } from './audit/policy-simulation.js'
+import { simulatePolicy, trailAnnotationSource } from './policy/simulate/index.js'
+import type {
+  PolicySimulationCandidate,
+  PolicySimulationEpochSelector,
+} from './policy/simulate/index.js'
 import {
   AuditStore,
   AuditWriter,
@@ -2487,36 +2511,7 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
     presentsSecret: true,
   })
   const source = await readConfigSource(opts.config)
-
-  const auditProblem = auditPathProblem(config.audit.path)
-  if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
-  if (config.audit.path === ':memory:' || !existsSync(config.audit.path)) {
-    throw new StartupError(
-      `Error: no audit database at ${config.audit.path}. helio start writes it on the first ` +
-        'governed call; nothing has been recorded on this machine.',
-    )
-  }
-
-  // The one open, wrapped: a SQLite code becomes one line; the store's own
-  // clean-break StartupError and anything else pass through unchanged.
-  let store: AuditStore
-  try {
-    store = new AuditStore({
-      path: config.audit.path,
-      retention: config.audit.retention,
-      includeResponses: config.audit.include_responses,
-      cleanupIntervalMs: 0,
-    })
-  } catch (err) {
-    const code = (err as { code?: unknown }).code
-    if (typeof code === 'string' && code.startsWith('SQLITE_')) {
-      const message = err instanceof Error ? err.message : String(err)
-      throw new StartupError(
-        `Error: audit.path: cannot open ${config.audit.path} (${code}: ${message})`,
-      )
-    }
-    throw err
-  }
+  const store = openAuditStoreForRead(config.audit.path, config)
 
   const now = new Date()
   const since = windowSince(now, window.ms)
@@ -2563,6 +2558,338 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
   const bytes = Buffer.from(`${rendered}\n`, 'utf-8')
   await writeFile(opts.out, bytes)
   console.error(`Wrote ${opts.out} (${opts.format}, ${String(bytes.length)} bytes)`)
+}
+
+/**
+ * The read commands' one open of the audit database (`helio report
+ * activation`, `helio policy simulate`): `auditPathProblem` refuses a path
+ * that cannot hold a database as an `Invalid config:` line; `:memory:` and
+ * a file that does not exist are refused with the guidance line and never
+ * created; a SQLite open failure becomes one `Error:` line; the store's
+ * own clean-break StartupError and anything else pass through unchanged.
+ * The constructor runs the retention purge with the config's retention
+ * before anything is read, so the caller's retention is the deployed one.
+ */
+function openAuditStoreForRead(auditPath: string, config: HelioConfig): AuditStore {
+  const auditProblem = auditPathProblem(auditPath)
+  if (auditProblem !== undefined) throw new StartupError(`Invalid config: ${auditProblem}`)
+  if (auditPath === ':memory:' || !existsSync(auditPath)) {
+    throw new StartupError(
+      `Error: no audit database at ${auditPath}. helio start writes it on the first ` +
+        'governed call; nothing has been recorded on this machine.',
+    )
+  }
+  try {
+    return new AuditStore({
+      path: auditPath,
+      retention: config.audit.retention,
+      includeResponses: config.audit.include_responses,
+      cleanupIntervalMs: 0,
+    })
+  } catch (err) {
+    const code = (err as { code?: unknown }).code
+    if (typeof code === 'string' && code.startsWith('SQLITE_')) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new StartupError(`Error: audit.path: cannot open ${auditPath} (${code}: ${message})`)
+    }
+    throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// helio policy simulate (issue #490)
+// ---------------------------------------------------------------------------
+
+interface PolicySimulateOptions {
+  config: string
+  auditDb?: string
+  since?: string
+  until?: string
+  upstream?: string
+  session?: string
+  configSha?: string
+  acrossConfigs: boolean
+  format: string
+  failOnChange: boolean
+  demo: boolean
+}
+
+/** The candidate files the command looks for when none is named, in the working directory. */
+const CANDIDATE_DEFAULTS = ['helio.candidate.yaml', 'helio.candidate.yml'] as const
+
+/** A `--config-sha` value: a lowercase hex prefix of a config hash, 8 to 64 characters. */
+const CONFIG_SHA_PATTERN = /^[0-9a-f]{8,64}$/
+
+/** The reader both files of a simulation load as; neither presents a secret to a proxy. */
+const SIMULATE_READER: ConfigReader = { command: 'helio policy simulate', presentsSecret: false }
+
+/**
+ * The candidate path: the positional as given; under --demo the deployed
+ * file itself (the acceptance run); else the one default present in the
+ * working directory, two present or none refused with the choice stated.
+ */
+function resolveCandidatePath(
+  candidate: string | undefined,
+  demo: boolean,
+  configPath: string,
+): string {
+  if (candidate !== undefined) return candidate
+  if (demo) return configPath
+  const present = CANDIDATE_DEFAULTS.filter((name) => existsSync(name))
+  const only = present[0]
+  if (present.length === 1 && only !== undefined) return only
+  if (present.length === 0) {
+    throw new StartupError(
+      'Error: no candidate given and no helio.candidate.yaml here. ' +
+        'Pass the candidate file: helio policy simulate <candidate>.',
+    )
+  }
+  throw new StartupError(
+    `Error: two candidate files here (${present.join(', ')}); pass the one to simulate.`,
+  )
+}
+
+/**
+ * The replay window from --since and --until: the config duration grammar
+ * with no cap (the replay is bounded by retention), an instant the Date
+ * range cannot hold refused before it can throw, --until an ISO 8601
+ * instant not earlier than --since.
+ */
+function parseSimulateWindow(
+  opts: Pick<PolicySimulateOptions, 'since' | 'until'>,
+  now: Date,
+): { readonly from?: string; readonly to?: string } {
+  let from: string | undefined
+  let to: string | undefined
+  if (opts.since !== undefined) {
+    if (!durationSchema.safeParse(opts.since).success) {
+      throw new StartupError('Error: --since must be a duration (for example 24h or 7d)')
+    }
+    const instant = new Date(now.getTime() - parseDuration(opts.since))
+    if (!Number.isFinite(instant.getTime())) {
+      throw new StartupError(`Error: --since is too long to replay (got ${opts.since})`)
+    }
+    from = instant.toISOString()
+  }
+  if (opts.until !== undefined) {
+    const ms = Date.parse(opts.until)
+    if (Number.isNaN(ms)) throw new StartupError('Error: --until must be an ISO 8601 instant')
+    to = new Date(ms).toISOString()
+    if (from !== undefined && to < from) {
+      throw new StartupError('Error: --until is earlier than --since')
+    }
+  }
+  return { ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }
+}
+
+/**
+ * Load and compile the candidate the way validate does: the reader's lines
+ * for a file that does not load (a missing file, an unset placeholder, a
+ * schema failure), the compile warnings on stderr, the one compile-failure
+ * line as a StartupError. Nothing is opened before this returns.
+ */
+async function loadSimulationCandidate(path: string): Promise<PolicySimulationCandidate> {
+  let source: ConfigSource
+  let config: HelioConfig
+  try {
+    source = await readConfigSource(path)
+    config = parseConfigSource(source, path).config
+  } catch (err) {
+    exitOnReaderConfigError(err, path, SIMULATE_READER)
+  }
+  try {
+    const { warnings } = compilePolicies(config.policies)
+    for (const w of warnings) {
+      const label = w.ruleName ? `rule "${w.ruleName}"` : `rule ${String(w.ruleIndex)}`
+      console.error(`Warning: policy ${label}: ${w.message}`)
+    }
+    compileBudgets(config.budgets)
+  } catch (err) {
+    const line = compileFailureLine(err)
+    if (line !== undefined) throw new StartupError(line)
+    throw err
+  }
+  return { config, source }
+}
+
+/**
+ * The epoch the run selects: the harness's own selector for --across-configs
+ * and the default, and for --config-sha the one hash of the window the
+ * prefix names, resolved here over the same filters the harness lists
+ * with; an ambiguous or unknown prefix is refused before any replay, the
+ * unknown one naming what the window holds in the prefixes the JSON emits.
+ */
+function resolveEpochSelector(
+  store: AuditStore,
+  opts: Pick<PolicySimulateOptions, 'acrossConfigs' | 'configSha'>,
+  filters: ReplayFilters,
+): { readonly kind: SimulationEpochSelector; readonly selector: PolicySimulationEpochSelector } {
+  if (opts.acrossConfigs) return { kind: 'all', selector: 'all' }
+  if (opts.configSha === undefined) return { kind: 'latest', selector: 'latest' }
+  const runs = store.listConfigEpochs(filters)
+  const hashes = [
+    ...new Set(runs.flatMap((run) => (run.config_sha256 === null ? [] : [run.config_sha256]))),
+  ]
+  const matches = hashes.filter((hash) => hash.startsWith(opts.configSha ?? ''))
+  const match = matches[0]
+  if (matches.length === 1 && match !== undefined) {
+    return { kind: 'config_sha', selector: { configSha256: match } }
+  }
+  if (matches.length > 1) {
+    throw new StartupError(
+      `Error: --config-sha ${opts.configSha} matches ${String(matches.length)} config epochs; pass more characters`,
+    )
+  }
+  const prefixes = shortestUniquePrefixes(hashes)
+  const held = [
+    ...new Set(
+      [...runs]
+        .reverse()
+        .map((run) =>
+          run.config_sha256 === null ? 'unknown config' : (prefixes.get(run.config_sha256) ?? ''),
+        ),
+    ),
+  ]
+  throw new StartupError(
+    `Error: no config epoch in the window has hash ${opts.configSha}...; the window holds: ` +
+      (held.length === 0 ? 'no tool call' : held.join(', ')),
+  )
+}
+
+async function policySimulateCommand(
+  candidateArg: string | undefined,
+  opts: PolicySimulateOptions,
+  configFromCli: boolean,
+): Promise<void> {
+  if (opts.format !== 'text' && opts.format !== 'json') {
+    throw new StartupError(`Error: --format must be text or json (got "${opts.format}")`)
+  }
+  if (opts.acrossConfigs && opts.configSha !== undefined) {
+    throw new StartupError('Error: --across-configs and --config-sha do not combine')
+  }
+  if (opts.configSha !== undefined && !CONFIG_SHA_PATTERN.test(opts.configSha)) {
+    throw new StartupError('Error: --config-sha must be 8 to 64 lowercase hex characters')
+  }
+  const now = new Date()
+  const window = parseSimulateWindow(opts, now)
+
+  // The deployed file is always loaded: it names the database, the retention
+  // the open purges with, the environment the record carries, and its bytes
+  // let the limiter pin resolve the rows it decided. Under --demo it is the
+  // demo config unless -c was given.
+  const configPath = opts.demo && !configFromCli ? DEMO_CONFIG_FILE : opts.config
+  const config = await loadConfigForReader(configPath, SIMULATE_READER)
+  const deployed = await readConfigSource(configPath)
+  const candidatePath = resolveCandidatePath(candidateArg, opts.demo, configPath)
+  const candidate = await loadSimulationCandidate(candidatePath)
+
+  const auditPath = opts.auditDb ?? config.audit.path
+  const openedAt = new Date()
+  const store = openAuditStoreForRead(auditPath, config)
+  try {
+    const filters: ReplayFilters = {
+      ...window,
+      ...(opts.upstream !== undefined ? { upstream: opts.upstream } : {}),
+      ...(opts.session !== undefined ? { sessionId: opts.session } : {}),
+    }
+    const epoch = resolveEpochSelector(store, opts, filters)
+    const annotationSource = opts.demo ? 'demo' : 'trail'
+    const result = simulatePolicy({
+      store,
+      candidate,
+      sources: [deployed],
+      window,
+      ...(opts.upstream !== undefined ? { upstream: opts.upstream } : {}),
+      ...(opts.session !== undefined ? { sessionId: opts.session } : {}),
+      epoch: epoch.selector,
+      annotations: opts.demo ? demoAnnotationSource() : trailAnnotationSource(store),
+    })
+    const reloads = result.epochs.flatMap((run, index) =>
+      run.selected
+        ? [store.epochReloads(run, result.epochs[index - 1], result.epochs[index + 1])]
+        : [],
+    )
+    const purged =
+      store.purgedAtOpen > 0
+        ? {
+            before: new Date(
+              openedAt.getTime() - parseDuration(config.audit.retention),
+            ).toISOString(),
+            rows: store.purgedAtOpen,
+          }
+        : null
+    const input: SimulationReportInput = {
+      result,
+      candidateName: basename(candidatePath),
+      annotationSource,
+      window: {
+        ...window,
+        ...(opts.upstream !== undefined ? { upstream: opts.upstream } : {}),
+        sessionFiltered: opts.session !== undefined,
+      },
+      epochSelector: epoch.kind,
+      reloads,
+      retention: config.audit.retention,
+      purged,
+      helioVersion: VERSION,
+      generatedAt: now.toISOString(),
+      recordId: null,
+    }
+    const report = buildSimulationReport(input)
+    const text = renderSimulationText(report)
+
+    // The one write, observed: the Wrote line and the JSON's record id come
+    // from the row read back, never from the push.
+    const selected = result.epochs.filter((run) => run.selected)
+    const evidence: PolicySimulationEvidence = {
+      candidate_sha256: result.candidate_sha256,
+      helio_version: VERSION,
+      baseline_config_sha256:
+        epoch.kind === 'all' || selected.length !== 1 ? null : (selected[0]?.config_sha256 ?? null),
+      epoch_selector: epoch.kind,
+      epochs_simulated: selected.length,
+      traffic_start: result.rows[0]?.timestamp ?? null,
+      traffic_end: result.rows[result.rows.length - 1]?.timestamp ?? null,
+      call_count: result.replayed,
+      delta_count: report.deltas.total,
+      deltas_deny: report.deltas.blocked,
+      deltas_approval: report.deltas.unanswered + report.deltas.approval_recorded,
+      deltas_limited: report.deltas.limited,
+      deltas_dry_run: report.deltas.dry_run,
+      deltas_allow: report.deltas.allowed,
+      fidelity_warning_count: result.fidelity.warnings.length,
+      skipped_rows: result.skipped.rejected + result.skipped.kill_switch,
+      unreported: result.unreported,
+      annotation_source: annotationSource,
+    }
+    const record = buildPolicySimulationRecord({
+      candidatePath,
+      environment: config.environment ?? null,
+      evidence,
+    })
+    const recordId = writePolicySimulationRecord(store, record, result.candidate_sha256)
+
+    if (result.warnings_suppressed > 0) {
+      console.error(
+        `${String(result.warnings_suppressed)} operational line(s) the policy pipeline would have printed live were not printed.`,
+      )
+    }
+    if (recordId === null) {
+      console.error(
+        `Could not write the policy_simulation record to ${auditPath}; the run's report stands.`,
+      )
+    } else {
+      console.error(`Wrote one policy_simulation record to ${auditPath}.`)
+    }
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...report, provenance: { record_id: recordId } }, null, 2))
+    } else {
+      console.log(text)
+    }
+    if (opts.failOnChange && report.changed) process.exitCode = 2
+  } finally {
+    store.close()
+  }
 }
 
 /**
@@ -3054,7 +3381,9 @@ configCommand
 
 const policyCommand = program
   .command('policy')
-  .description('Inspect the loaded policy against the running proxy')
+  .description(
+    'Inspect the loaded policy against the running proxy, or replay the audit trail against a candidate',
+  )
 policyCommand
   .command('status')
   .description(
@@ -3064,6 +3393,44 @@ policyCommand
   .option('--format <format>', 'Output format: text or json', 'text')
   .option('--window <duration>', 'Persisted window, 1m to 30d', DEFAULT_STATUS_WINDOW)
   .action((opts: PolicyStatusOptions) => policyStatusCommand(opts).catch(exitOnStartupError))
+policyCommand
+  .command('simulate [candidate]')
+  .description(
+    'Replay the audit trail against a candidate policy and report what would change; reads the audit database, needs no running proxy',
+  )
+  .option(
+    '-c, --config <path>',
+    'Path to the deployed helio.yaml (names audit.path)',
+    DEFAULT_CONFIG_PATH,
+  )
+  .option(
+    '--audit-db <path>',
+    "Audit database to replay instead of the config's audit.path (opened with the config's retention: older rows are purged at open, and the run's record is written into it)",
+  )
+  .option(
+    '--since <duration>',
+    'Replay the trail from this long ago (for example 24h, 7d); default: the whole trail',
+  )
+  .option('--until <iso>', 'Replay the trail up to this ISO 8601 instant')
+  .option('--upstream <name>', 'Only rows of this upstream door')
+  .option('--session <id>', 'Only rows of this session')
+  .option(
+    '--config-sha <hash>',
+    'Simulate the config epoch with this hash (a prefix of 8 or more characters)',
+  )
+  .option('--across-configs', 'Simulate every config epoch in the window in one pass', false)
+  .option('--format <format>', 'Output format: text or json', 'text')
+  .option('--fail-on-change', 'Exit 2 when any decision would change', false)
+  .option(
+    '--demo',
+    "Replay the helio init --demo corpus with the sample server's listed definitions as the annotation source",
+    false,
+  )
+  .action((candidate: string | undefined, opts: PolicySimulateOptions, command: Command) =>
+    policySimulateCommand(candidate, opts, command.getOptionValueSource('config') === 'cli').catch(
+      exitOnStartupError,
+    ),
+  )
 
 const baselineCommand = program
   .command('baseline')

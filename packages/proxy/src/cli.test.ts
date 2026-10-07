@@ -11139,3 +11139,700 @@ describe('registry entry argv (issue #403)', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// helio policy simulate (issue #490)
+// ---------------------------------------------------------------------------
+
+describe('helio policy simulate (issue #490)', () => {
+  const MINUTE = 60_000
+  const HOUR = 60 * MINUTE
+  const DAY = 24 * HOUR
+  const SIM_ENV = 'sim-env'
+  const BLOCK_EMAIL = `
+    - name: block-email
+      match:
+        tool: send_email
+      action: deny`
+
+  /** A deployed config with no rule and default allow, the first-policy baseline, plus its database path. */
+  function simulateDir(options: { rules?: string; retention?: string; name?: string } = {}): {
+    dir: string
+    configPath: string
+    auditPath: string
+    configHash: string
+  } {
+    const dir = mkdtempSync(join(tmpdir(), 'helio-cli-simulate-'))
+    const configPath = join(dir, options.name ?? 'helio.yaml')
+    const auditPath = join(dir, 'audit.db')
+    writeConfigFile(configPath, auditPath, options)
+    return { dir, configPath, auditPath, configHash: fileHash(configPath) }
+  }
+
+  function writeConfigFile(
+    configPath: string,
+    auditPath: string,
+    options: { rules?: string; retention?: string; environment?: string } = {},
+  ): void {
+    writeFileSync(
+      configPath,
+      `version: "1"
+upstream:
+  url: "http://127.0.0.1:1/mcp"
+  transport: streamable-http
+listen:
+  port: 3999
+  host: 127.0.0.1
+environment: ${options.environment ?? SIM_ENV}
+policies:
+  default: allow
+  rules:${options.rules ?? ' []'}
+dashboard:
+  enabled: true
+  port: 4000
+  host: 127.0.0.1
+  api_secret: "test-secret"
+audit:
+  path: "${auditPath}"
+  retention: ${options.retention ?? '90d'}
+`,
+    )
+  }
+
+  function fileHash(path: string): string {
+    return createHash('sha256').update(readFileSync(path)).digest('hex')
+  }
+
+  function simRow(overrides: Partial<AuditRecordInput>): AuditRecordInput {
+    return {
+      timestamp: new Date().toISOString(),
+      session_id: 's-sim',
+      session_source: 'header',
+      protocol_version: null,
+      upstream: null,
+      agent_id: null,
+      environment: SIM_ENV,
+      tool_name: 'get_weather',
+      tool_input: { city: 'London' },
+      policy_decision: 'allow',
+      block_reason: null,
+      matched_rule: null,
+      matched_rule_index: null,
+      evidence_chain: null,
+      approval_status: null,
+      approved_by: null,
+      upstream_response: { content: [{ type: 'text', text: 'ok' }] },
+      upstream_error: null,
+      upstream_http_status: 200,
+      upstream_latency_ms: 1,
+      total_duration_ms: 1,
+      approval_wait_ms: 0,
+      proxy_compute_ms: 1,
+      flagged_destructive: false,
+      dry_run: false,
+      record_kind: 'tool_call',
+      origin: 'mcp',
+      metadata: null,
+      ...overrides,
+    }
+  }
+
+  /** Ten plain allows under `hash`, three tools, from `base` one minute apart, inserted at their own instants. */
+  function seedFirstPolicyEpoch(auditPath: string, hash: string, base: Date): void {
+    const store = new AuditStore({
+      path: auditPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    try {
+      const tools = ['get_weather', 'send_email', 'delete_record']
+      for (let i = 0; i < 10; i++) {
+        const timestamp = new Date(base.getTime() + i * MINUTE).toISOString()
+        store.insert(
+          simRow({
+            timestamp,
+            tool_name: tools[i % 3] ?? 'get_weather',
+            session_id: i % 2 === 0 ? 's-sim' : 's-sim-2',
+            config_sha256: hash,
+          }),
+          timestamp,
+        )
+      }
+    } finally {
+      store.close()
+    }
+  }
+
+  /** Raw row counts, read without the store's purge. */
+  function rawCounts(auditPath: string): { total: number; simulations: number } {
+    const db = new Database(auditPath, { readonly: true })
+    try {
+      const total = (db.prepare('SELECT COUNT(*) AS n FROM audit_records').get() as { n: number }).n
+      const simulations = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM audit_records WHERE record_kind = 'policy_simulation'",
+          )
+          .get() as { n: number }
+      ).n
+      return { total, simulations }
+    } finally {
+      db.close()
+    }
+  }
+
+  function simulationRows(auditPath: string): AuditRecord[] {
+    const store = new AuditStore({
+      path: auditPath,
+      retention: '90d',
+      includeResponses: true,
+      cleanupIntervalMs: 0,
+    })
+    try {
+      return [...store.list({ record_kind: 'policy_simulation' }).records]
+    } finally {
+      store.close()
+    }
+  }
+
+  function evidenceOf(row: AuditRecord): Record<string, unknown> {
+    return (row.evidence_chain?.['policy_simulation'] ?? {}) as Record<string, unknown>
+  }
+
+  function simulate(args: string[], cwd: string, env?: NodeJS.ProcessEnv) {
+    return runCli(['policy', 'simulate', ...args], env, cwd)
+  }
+
+  describe('registration', () => {
+    it('lists simulate under the policy group and names the replay in the group description', async () => {
+      const group = await runCli(['policy', '--help'])
+      expect(group.code).toBe(0)
+      expect(group.stdout).toContain('simulate')
+      expect(group.stdout.replace(/\s+/g, ' ')).toContain(
+        'replay the audit trail against a candidate',
+      )
+      const help = await runCli(['policy', 'simulate', '--help'])
+      expect(help.code).toBe(0)
+      for (const flag of [
+        '-c, --config <path>',
+        '--audit-db <path>',
+        '--since <duration>',
+        '--until <iso>',
+        '--upstream <name>',
+        '--session <id>',
+        '--config-sha <hash>',
+        '--across-configs',
+        '--format <format>',
+        '--fail-on-change',
+        '--demo',
+      ]) {
+        expect(help.stdout, flag).toContain(flag)
+      }
+      const flat = help.stdout.replace(/\s+/g, ' ')
+      expect(flat).toContain('older rows are purged at open')
+      expect(flat).toContain('needs no running proxy')
+    })
+  })
+
+  describe('refusals', () => {
+    let fixture: ReturnType<typeof simulateDir>
+    const base = new Date(Date.now() - 2 * HOUR)
+    beforeAll(() => {
+      fixture = simulateDir()
+      seedFirstPolicyEpoch(fixture.auditPath, fixture.configHash, base)
+    })
+    afterAll(() => {
+      rmSync(fixture.dir, { recursive: true, force: true })
+    })
+
+    async function refuses(args: string[], line: string, cwd = fixture.dir): Promise<void> {
+      const before = rawCounts(fixture.auditPath)
+      const { code, stdout, stderr } = await simulate(args, cwd)
+      expect(code, stderr).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).toContain(line)
+      expect(stderr).not.toContain('    at ')
+      expect(rawCounts(fixture.auditPath)).toEqual(before)
+    }
+
+    it('refuses when no candidate is given and none is in the directory', async () => {
+      await refuses(
+        [],
+        'Error: no candidate given and no helio.candidate.yaml here. Pass the candidate file: helio policy simulate <candidate>.',
+      )
+    })
+
+    it('refuses two candidate files in the directory', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-simulate-two-'))
+      try {
+        writeConfigFile(join(dir, 'helio.yaml'), fixture.auditPath)
+        writeConfigFile(join(dir, 'helio.candidate.yaml'), fixture.auditPath)
+        writeConfigFile(join(dir, 'helio.candidate.yml'), fixture.auditPath)
+        await refuses(
+          [],
+          'Error: two candidate files here (helio.candidate.yaml, helio.candidate.yml); pass the one to simulate.',
+          dir,
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses a candidate that does not parse, with the reader detail lines', async () => {
+      const bad = join(fixture.dir, 'bad.yaml')
+      writeFileSync(bad, 'version: "1"\nupstream:\n  url: 12\n')
+      await refuses(['bad.yaml'], 'Error: Invalid configuration')
+    })
+
+    it('refuses a candidate with an unset placeholder on the reader line', async () => {
+      const unset = join(fixture.dir, 'unset.yaml')
+      writeConfigFile(unset, fixture.auditPath, { environment: '${HELIO_SIM_UNSET_VAR}' })
+      const env = { ...process.env }
+      delete env['HELIO_SIM_UNSET_VAR']
+      const before = rawCounts(fixture.auditPath)
+      const { code, stderr } = await simulate(['unset.yaml'], fixture.dir, env)
+      expect(code).toBe(1)
+      expect(stderr).toContain(
+        'Error: HELIO_SIM_UNSET_VAR is not set and unset.yaml reads environment from it. helio policy simulate loads the whole file before it reads anything; export HELIO_SIM_UNSET_VAR and rerun.',
+      )
+      expect(rawCounts(fixture.auditPath)).toEqual(before)
+    })
+
+    it('refuses a candidate whose rule has a bad regex with the compile line', async () => {
+      const bad = join(fixture.dir, 'regex.yaml')
+      writeConfigFile(bad, fixture.auditPath, {
+        rules: `
+    - name: bad-regex
+      match:
+        input:
+          '$.q': { regex: '(a+)+$' }
+      action: deny`,
+      })
+      await refuses(['regex.yaml'], 'Invalid policy:')
+    })
+
+    it('refuses a bad --format, --since, --until and the flag conflict before any open', async () => {
+      await refuses(['helio.yaml', '--format', 'yaml'], 'Error: --format must be text or json')
+      await refuses(
+        ['helio.yaml', '--since', '3x'],
+        'Error: --since must be a duration (for example 24h or 7d)',
+      )
+      await refuses(
+        ['helio.yaml', '--since', '200000000d'],
+        'Error: --since is too long to replay (got 200000000d)',
+      )
+      await refuses(
+        ['helio.yaml', '--until', 'yesterday'],
+        'Error: --until must be an ISO 8601 instant',
+      )
+      await refuses(
+        ['helio.yaml', '--since', '1h', '--until', '2020-01-01T00:00:00Z'],
+        'Error: --until is earlier than --since',
+      )
+      await refuses(
+        ['helio.yaml', '--across-configs', '--config-sha', 'abcdefgh'],
+        'Error: --across-configs and --config-sha do not combine',
+      )
+      await refuses(
+        ['helio.yaml', '--config-sha', 'ABC'],
+        'Error: --config-sha must be 8 to 64 lowercase hex characters',
+      )
+    })
+
+    it('refuses a --config-sha the window lacks, naming what the window holds', async () => {
+      await refuses(
+        ['helio.yaml', '--config-sha', '0000000000'],
+        `Error: no config epoch in the window has hash 0000000000...; the window holds: ${fixture.configHash.slice(0, 8)}`,
+      )
+    })
+
+    it('refuses a missing database with the guidance line and creates nothing', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-simulate-missing-'))
+      try {
+        const auditPath = join(dir, 'missing.db')
+        writeConfigFile(join(dir, 'helio.yaml'), auditPath)
+        const { code, stderr } = await simulate(['helio.yaml'], dir)
+        expect(code).toBe(1)
+        expect(stderr).toContain(`Error: no audit database at ${auditPath}. helio start writes it`)
+        expect(existsSync(auditPath)).toBe(false)
+        const viaFlag = await simulate(['helio.yaml', '--audit-db', 'nowhere.db'], fixture.dir)
+        expect(viaFlag.code).toBe(1)
+        expect(viaFlag.stderr).toContain('Error: no audit database at nowhere.db')
+        expect(existsSync(join(fixture.dir, 'nowhere.db'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses a text file at audit.path with one SQLITE line and no rejection wrapper', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-simulate-notadb-'))
+      try {
+        const auditPath = join(dir, 'audit.db')
+        writeFileSync(auditPath, 'this is not a database\n')
+        writeConfigFile(join(dir, 'helio.yaml'), auditPath)
+        const { code, stderr } = await simulate(['helio.yaml'], dir)
+        expect(code).toBe(1)
+        expect(stderr).toContain(`Error: audit.path: cannot open ${auditPath} (SQLITE_NOTADB`)
+        expect(stderr).not.toContain('UnhandledPromiseRejection')
+        expect(stderr).not.toContain('    at ')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('runs over a first-policy baseline', () => {
+    let fixture: ReturnType<typeof simulateDir>
+    const base = new Date(Date.now() - 2 * HOUR)
+    beforeEach(() => {
+      fixture = simulateDir()
+      seedFirstPolicyEpoch(fixture.auditPath, fixture.configHash, base)
+    })
+    afterEach(() => {
+      rmSync(fixture.dir, { recursive: true, force: true })
+    })
+
+    it('replays the deployed file against itself with no delta and writes one record keyed by its hash', async () => {
+      const { code, stdout, stderr } = await simulate(['helio.yaml'], fixture.dir)
+      expect(code, stderr).toBe(0)
+      const lines = stdout.trimEnd().split('\n')
+      expect(lines[0]).toBe('Policy simulation')
+      expect(lines[1]).toBe('  Candidate: helio.yaml')
+      expect(stdout).toContain('Decisions (10 replayed)')
+      expect(stdout).toContain('  10 unchanged')
+      expect(stdout).toContain('   0 changed')
+      expect(stdout).not.toContain('Baseline:')
+      expect(stdout).not.toContain('Retention:')
+      expect(lines[lines.length - 1]).toBe('No live tools were called. Nothing was applied.')
+      expect(stderr).toContain(`Wrote one policy_simulation record to ${fixture.auditPath}.`)
+      const rows = simulationRows(fixture.auditPath)
+      expect(rows).toHaveLength(1)
+      const row = rows[0] as AuditRecord
+      expect(row.tool_name).toBe('helio.yaml')
+      expect(row.policy_decision).toBe('policy_simulation')
+      expect(row.block_reason).toBeNull()
+      expect(row.origin).toBe('operator')
+      expect(row.environment).toBe(SIM_ENV)
+      expect(row.config_sha256).toBe(fixture.configHash)
+      const evidence = evidenceOf(row)
+      expect(evidence['candidate_sha256']).toBe(fixture.configHash)
+      expect(evidence['baseline_config_sha256']).toBe(fixture.configHash)
+      expect(evidence['call_count']).toBe(10)
+      expect(evidence['delta_count']).toBe(0)
+      for (const key of [
+        'deltas_deny',
+        'deltas_approval',
+        'deltas_limited',
+        'deltas_dry_run',
+        'deltas_allow',
+      ]) {
+        expect(evidence[key], key).toBe(0)
+      }
+      expect(evidence['epoch_selector']).toBe('latest')
+      expect(evidence['epochs_simulated']).toBe(1)
+      expect(evidence['annotation_source']).toBe('trail')
+      expect(evidence['traffic_start']).toBe(base.toISOString())
+      expect(evidence['traffic_end']).toBe(new Date(base.getTime() + 9 * MINUTE).toISOString())
+      expect(rawCounts(fixture.auditPath)).toEqual({ total: 11, simulations: 1 })
+    })
+
+    it('picks up helio.candidate.yaml, frames the first policy, names the tool and the rule, and exits 2 only under --fail-on-change', async () => {
+      writeConfigFile(join(fixture.dir, 'helio.candidate.yaml'), fixture.auditPath, {
+        rules: BLOCK_EMAIL,
+      })
+      const first = await simulate([], fixture.dir)
+      expect(first.code, first.stderr).toBe(0)
+      expect(first.stdout).toContain('  Candidate: helio.candidate.yaml')
+      expect(first.stdout).toContain(
+        [
+          'Baseline: no restrictive rules (default allow)',
+          'This is your first policy, so every restriction is new.',
+          '',
+          '  3 calls would have been denied (policy_denied 3)',
+          '  7 unaffected',
+        ].join('\n'),
+      )
+      expect(first.stdout).toContain('Changed decisions, by tool and rule')
+      expect(first.stdout).toContain(
+        '  tool "send_email": allow -> deny (policy_denied), rule "block-email": 3 calls, ',
+      )
+      expect(first.stdout).not.toContain('Decisions (')
+      const failing = await simulate(['--fail-on-change'], fixture.dir)
+      expect(failing.code).toBe(2)
+      expect(failing.stdout.replace(/Written by .*\n/, '')).toBe(
+        first.stdout.replace(/Written by .*\n/, ''),
+      )
+      const json = await simulate(['--format', 'json'], fixture.dir)
+      expect(json.code, json.stderr).toBe(0)
+      const report = JSON.parse(json.stdout) as {
+        schema_version: number
+        changed: boolean
+        candidate: { name: string; sha256: string }
+        baseline: { first_policy: boolean; config_sha256_prefix: string | null }
+        deltas: { total: number; blocked: number; rows: Array<Record<string, unknown>> }
+        provenance: { record_id: string | null }
+        window: Record<string, unknown>
+      }
+      expect(report.schema_version).toBe(1)
+      expect(report.changed).toBe(true)
+      expect(report.candidate.name).toBe('helio.candidate.yaml')
+      expect(report.candidate.sha256).toBe(fileHash(join(fixture.dir, 'helio.candidate.yaml')))
+      expect(report.baseline.first_policy).toBe(true)
+      expect(report.baseline.config_sha256_prefix).toBe(fixture.configHash.slice(0, 8))
+      expect(report.deltas.total).toBe(3)
+      expect(report.deltas.blocked).toBe(3)
+      for (const row of report.deltas.rows) {
+        expect('record_id' in row).toBe(false)
+        expect('session_id' in row).toBe(false)
+      }
+      expect('session_id' in report.window).toBe(false)
+      expect(json.stdout).not.toContain('s-sim')
+      const rows = simulationRows(fixture.auditPath)
+      expect(rows).toHaveLength(3)
+      expect(rows.map((r) => r.id)).toContain(report.provenance.record_id)
+      const written = rows.find((r) => r.id === report.provenance.record_id) as AuditRecord
+      expect(evidenceOf(written)['deltas_deny']).toBe(3)
+      expect(evidenceOf(written)['delta_count']).toBe(3)
+    })
+
+    it('reports an empty window with the two frozen lines and writes a record with no bounds', async () => {
+      const { code, stdout, stderr } = await simulate(['helio.yaml', '--since', '1h'], fixture.dir)
+      expect(code, stderr).toBe(0)
+      expect(stdout).toContain('No tool calls in the window.')
+      expect(stdout).toContain('  Epoch: no config epoch in the window')
+      expect(stdout).toContain('Skipped 0 row(s) that never entered policy evaluation')
+      expect(stdout).toContain('0 sideband evaluation(s) were decided but never reported')
+      expect(stdout.trimEnd().endsWith('No live tools were called. Nothing was applied.')).toBe(
+        true,
+      )
+      const rows = simulationRows(fixture.auditPath)
+      expect(rows).toHaveLength(1)
+      const evidence = evidenceOf(rows[0] as AuditRecord)
+      expect(evidence['call_count']).toBe(0)
+      expect(evidence['traffic_start']).toBeNull()
+      expect(evidence['traffic_end']).toBeNull()
+      expect(evidence['baseline_config_sha256']).toBeNull()
+      expect(evidence['epochs_simulated']).toBe(0)
+    })
+
+    it('states the purge on its own line, keeps the requested window and replays a held call whose insert survived', async () => {
+      const store = new AuditStore({
+        path: fixture.auditPath,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        const old = new Date(Date.now() - 100 * DAY).toISOString()
+        store.insert(simRow({ timestamp: old, config_sha256: fixture.configHash }), old)
+        store.insert(
+          simRow({ timestamp: old, config_sha256: fixture.configHash, approval_wait_ms: 1 }),
+          new Date(Date.now() - 80 * DAY).toISOString(),
+        )
+      } finally {
+        store.close()
+      }
+      expect(rawCounts(fixture.auditPath).total).toBe(12)
+      const { code, stdout, stderr } = await simulate(
+        ['helio.yaml', '--since', '365d'],
+        fixture.dir,
+      )
+      expect(code, stderr).toBe(0)
+      const since = stdout.match(/ {2}Window: from (.*)/)?.[1] ?? ''
+      expect(since).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/)
+      expect(
+        Math.abs(
+          Date.parse(since.replace(' UTC', 'Z').replace(' ', 'T')) - (Date.now() - 365 * DAY),
+        ),
+      ).toBeLessThan(2 * MINUTE)
+      expect(stdout).toMatch(
+        /^ {2}Retention: 1 row\(s\) inserted before \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC were deleted at open \(audit\.retention 90d\)\.$/m,
+      )
+      expect(stdout).toContain('Decisions (11 replayed)')
+      const clean = await simulate(['helio.yaml', '--since', '365d'], fixture.dir)
+      expect(clean.code).toBe(0)
+      expect(clean.stdout).not.toContain('Retention:')
+    })
+
+    it('opens an --audit-db copy with the deployed retention, purges it, writes into it and leaves the deployed file alone', async () => {
+      const copy = join(fixture.dir, 'copy.db')
+      const store = new AuditStore({
+        path: copy,
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+      try {
+        const old = new Date(Date.now() - 200 * DAY).toISOString()
+        store.insert(simRow({ timestamp: old, config_sha256: fixture.configHash }), old)
+        store.insert(simRow({ timestamp: old, config_sha256: fixture.configHash }), old)
+        store.insert(simRow({ config_sha256: fixture.configHash }))
+      } finally {
+        store.close()
+      }
+      expect(rawCounts(copy).total).toBe(3)
+      const deployedBefore = rawCounts(fixture.auditPath)
+      const { code, stdout, stderr } = await simulate(
+        ['helio.yaml', '--audit-db', 'copy.db'],
+        fixture.dir,
+      )
+      expect(code, stderr).toBe(0)
+      expect(stdout).toContain('Retention: 2 row(s) inserted before')
+      expect(stderr).toContain('Wrote one policy_simulation record to copy.db.')
+      expect(rawCounts(copy)).toEqual({ total: 2, simulations: 1 })
+      expect(rawCounts(fixture.auditPath)).toEqual(deployedBefore)
+    })
+
+    it('counts the operational lines it did not print on stderr', async () => {
+      writeConfigFile(join(fixture.dir, 'helio.candidate.yaml'), fixture.auditPath, {
+        rules: `
+    - name: log-destructive
+      match:
+        tool: delete_record
+      action: allow`,
+      })
+      const { code, stderr } = await simulate([], fixture.dir)
+      expect(code, stderr).toBe(0)
+      expect(stderr).not.toContain('operational line(s)')
+    })
+  })
+
+  describe('the demo corpus (--demo)', () => {
+    let root: string
+    let demo: string
+    const at = new Date(Math.floor((Date.now() - DAY) / MINUTE) * MINUTE).toISOString()
+    beforeAll(async () => {
+      root = mkdtempSync(join(tmpdir(), 'helio-cli-simulate-demo-'))
+      demo = join(root, 'helio-demo')
+      const init = await runCli(['init', '--demo', demo, '--at', at])
+      expect(init.code, init.stderr).toBe(0)
+    }, 60_000)
+    afterAll(() => {
+      rmSync(root, { recursive: true, force: true })
+    })
+
+    function openDemo(): AuditStore {
+      return new AuditStore({
+        path: join(demo, 'helio-demo-audit.db'),
+        retention: '90d',
+        includeResponses: true,
+        cleanupIntervalMs: 0,
+      })
+    }
+
+    const snapshotSince = new Date(Date.now() - 7 * DAY).toISOString()
+    function snapshot(store: AuditStore) {
+      const since = snapshotSince
+      const { total: _total, per_hour: _perHour, ...aggregate } = store.aggregate()
+      return {
+        persisted: store.persistedSummary(since),
+        window: store.activationWindow(since),
+        timeline: store.activationTimeline(),
+        aggregate,
+      }
+    }
+
+    it('replays the current epoch with zero deltas, the notice, the hint, the demo line and the closing sentence', async () => {
+      const { code, stdout, stderr } = await simulate(['--demo'], demo)
+      expect(code, stderr).toBe(0)
+      expect(stdout).toContain('  Candidate: helio-demo.yaml')
+      expect(stdout).toContain("  Annotations: the sample server's listed definitions (--demo)")
+      expect(stdout).toContain('Decisions (252 replayed)')
+      expect(stdout).toContain('  252 unchanged')
+      expect(stdout).toContain('    0 changed')
+      expect(stdout).toContain('Simulated the most recent config epoch only')
+      expect(stdout).toContain('The window spans 2 other config epoch(s), not simulated:')
+      expect(stdout).toContain(
+        'Pass --across-configs to simulate every epoch in the window, or --config-sha <hash> to pick one.',
+      )
+      expect(stdout).toContain(
+        "Annotations for --demo came from the sample server's listed definitions, not from the audit trail.",
+      )
+      expect(stdout).not.toContain('Retention:')
+      expect(stdout.trimEnd().endsWith('No live tools were called. Nothing was applied.')).toBe(
+        true,
+      )
+      expect(stderr).toContain('Wrote one policy_simulation record to ./helio-demo-audit.db.')
+      const failing = await simulate(['--demo', '--fail-on-change'], demo)
+      expect(failing.code).toBe(0)
+    })
+
+    it('moves nothing the reports print on a second run, and the activation report still names the config as the last policy writer', async () => {
+      const before = openDemo()
+      const first = snapshot(before)
+      const countBefore = before.count()
+      before.close()
+      const one = await simulate(['--demo'], demo)
+      const two = await simulate(['--demo'], demo)
+      expect(one.code).toBe(0)
+      expect(two.code).toBe(0)
+      expect(two.stdout.replace(/Written by .*\n/, '')).toBe(
+        one.stdout.replace(/Written by .*\n/, ''),
+      )
+      const after = openDemo()
+      try {
+        expect(after.count()).toBe(countBefore + 2)
+        expect(snapshot(after)).toEqual(first)
+      } finally {
+        after.close()
+      }
+      const report = await runCli(
+        ['report', 'activation', '-c', 'helio-demo.yaml'],
+        undefined,
+        demo,
+      )
+      expect(report.code, report.stderr).toBe(0)
+      expect(report.stdout).toContain('this config file is the one that last wrote policy to it')
+    })
+
+    it('names tool annotations unverified and reports deltas without the flag, proving --demo is the source', async () => {
+      const { code, stdout } = await simulate(['helio-demo.yaml', '-c', 'helio-demo.yaml'], demo)
+      expect(code).toBe(0)
+      expect(stdout).toContain('  Annotations: the audit trail')
+      expect(stdout).toContain('tool annotations was not recorded for')
+      expect(stdout).not.toContain('    0 changed')
+      expect(stdout).not.toContain('Annotations for --demo came from')
+    })
+
+    it('simulates every epoch under --across-configs and one hash under --config-sha', async () => {
+      const across = await simulate(['--demo', '--across-configs', '--format', 'json'], demo)
+      expect(across.code, across.stderr).toBe(0)
+      const report = JSON.parse(across.stdout) as {
+        epoch: {
+          selector: string
+          epochs: Array<{ config_sha256_prefix: string | null; selected: boolean }>
+        }
+        epoch_notice: string
+        provenance: { record_id: string }
+      }
+      expect(report.epoch.selector).toBe('all')
+      expect(report.epoch_notice).toBe('')
+      expect(report.epoch.epochs).toHaveLength(3)
+      expect(report.epoch.epochs.every((e) => e.selected)).toBe(true)
+      const rows = simulationRows(join(demo, 'helio-demo-audit.db'))
+      const written = rows.find((r) => r.id === report.provenance.record_id) as AuditRecord
+      expect(evidenceOf(written)['baseline_config_sha256']).toBeNull()
+      expect(evidenceOf(written)['epochs_simulated']).toBe(3)
+      expect(evidenceOf(written)['epoch_selector']).toBe('all')
+
+      const epochB = createHash('sha256').update('helio-demo-config-epoch-b').digest('hex')
+      const picked = await simulate(['--demo', '--config-sha', epochB.slice(0, 12)], demo)
+      expect(picked.code, picked.stderr).toBe(0)
+      expect(picked.stdout).toContain('Simulated one config epoch only')
+      expect(picked.stdout).toContain(`  Epoch: config ${epochB.slice(0, 8)}...`)
+      const pickedRows = simulationRows(join(demo, 'helio-demo-audit.db'))
+      const newest = pickedRows.sort((a, b) =>
+        b.created_at.localeCompare(a.created_at),
+      )[0] as AuditRecord
+      expect(evidenceOf(newest)['baseline_config_sha256']).toBe(epochB)
+      expect(evidenceOf(newest)['epoch_selector']).toBe('config_sha')
+    })
+
+    it('refuses --demo outside a demo directory with the reader missing-file line', async () => {
+      const { code, stderr } = await simulate(['--demo'], root)
+      expect(code).toBe(1)
+      expect(stderr).toContain('Error: Cannot read config file: helio-demo.yaml')
+    })
+  })
+})
