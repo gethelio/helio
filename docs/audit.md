@@ -246,7 +246,7 @@ The dashboard provides two views for audit data:
 - Outcome (Allow, Deny, Rejected, Approval Denied, Approval Timeout, Client Disconnected, Shutdown Cancelled, Rate Limited, Spend Limited, Dry Run)
 - Block reason (`policy_denied`, `evidence_missing`, etc. — see [Block Reasons](#block-reasons))
 - Origin (`mcp`, `openclaw`, or any adapter slug)
-- Record kind (`tool_call`, `install_scan`, `drift_event`, `evaluation_expired`, `policy_reload`)
+- Record kind (`tool_call`, `install_scan`, `drift_event`, `evaluation_expired`, `policy_reload`, `kill_switch`, `policy_simulation`; the last three show as **Reload**, **Kill Switch** and **Simulation**)
 - Time range (presets or a custom from/to)
 - Session ID
 - Session source (`header`, `meta`, `legacy_header`, `transport`, `sideband`)

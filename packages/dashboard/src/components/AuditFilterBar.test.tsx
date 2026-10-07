@@ -298,6 +298,17 @@ describe('AuditFilterBar', () => {
     expect(setFilter).toHaveBeenCalledWith('record_kind', 'kill_switch')
   })
 
+  it('exposes a Simulation record-kind option and applies its filter value (#490)', () => {
+    const setFilter = vi.fn()
+    renderBar({ setFilter })
+    const option = screen.getByRole('option', { name: 'Simulation' })
+    expect(option.getAttribute('value')).toBe('policy_simulation')
+    fireEvent.change(screen.getByLabelText('Record Kind'), {
+      target: { value: 'policy_simulation' },
+    })
+    expect(setFilter).toHaveBeenCalledWith('record_kind', 'policy_simulation')
+  })
+
   it('renders channel and sender free-text inputs, calling setFilter (#16)', () => {
     const setFilter = vi.fn()
     renderBar({ setFilter })

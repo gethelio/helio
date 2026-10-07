@@ -65,6 +65,7 @@ export interface AuditRecord {
     | 'evaluation_expired'
     | 'policy_reload'
     | 'kill_switch'
+    | 'policy_simulation'
   readonly origin: string
   readonly metadata: Record<string, unknown> | null
 }
