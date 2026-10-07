@@ -1,6 +1,6 @@
 # Simulation fidelity: what the audit trail can replay
 
-> **Status: specification.** This page is written ahead of `helio policy simulate` (issue #490) and is the specification its harness (issue #488) is built from. Every verdict below was derived by running the proxy and reading the rows it wrote, on the code as of 2026-10-05, and the harness re-derives none of it. The harness (issue #488) implements this page; the subsection `What the harness does not rebuild` is what it leaves out. When the command exists this page stays as the reference for what a simulation can and cannot know.
+> **Status: specification.** This page is the specification the harness (issue #488) and `helio policy simulate` (issue #490) are built from. Every verdict below was derived by running the proxy and reading the rows it wrote, on the code as of 2026-10-05, and the harness re-derives none of it. The harness implements this page; the subsection `What the harness does not rebuild` is what it leaves out. The command prints the lines this page freezes, and the page stays as the reference for what a simulation can and cannot know.
 
 ## Why this page exists
 
@@ -210,7 +210,7 @@ One more line, outside the three frozen sentences and printed by `--demo` alone,
 Annotations for --demo came from the sample server's listed definitions, not from the audit trail.
 ```
 
-Per row class the report names: for a warned call, the tool, the door or origin, the rule, the dimension and the instant; for a skipped row, its reason and instant. Never an argument value and never a record id (next section).
+Per row class the report names: for a warned call, the tool, the door or origin, the rule, the dimension and the instant (the command's text names up to five instants under a warning and the count of the rest; its `--format json` names every instant); for a skipped row, its reason and instant. Never an argument value and never a record id (next section).
 
 ### The pot check
 
@@ -239,7 +239,7 @@ When the simulated run is not the most recent the first line opens `Simulated on
 
 Reading the database adds no exposure. The audit database already holds `tool_input`, `upstream_response` (full under `include_responses: true`), `evidence_chain` (argument-derived values such as budget amounts) and `metadata`; it is local and mode `0600`, and `SECURITY.md` already says audit data never leaves the machine. The risk is **output**: a fidelity report pasted into an issue or a CI log, or a candidate policy generated from traffic whose `input` conditions quote argument values. Redaction belongs on the way out.
 
-The default set a report may carry is tool, door, origin and rule names, plus counts and instants. Those names are a subset of what `helio report activation --include-names` restores; a singular door's URL or stdio command and a not-primed door's failure text, which that flag also restores, stay out of a fidelity report. It never carries `tool_input`, `upstream_response`, `upstream_error`, evidence data, metadata values, session ids, record ids, the audit or config path, or any hash. A record id is a join key into the row that holds the arguments; the operator who has the database filters by tool, rule and time instead. One clause stated plainly: an instant beside a tool and a rule still identifies a row for someone who has the database, a weaker join than a record id but a join; the report still carries no argument, session id or record id, and the paste decision stays the operator's, exactly as it does for `--include-names`. Flags that widen or narrow the set belong to `helio policy simulate` (issue #490).
+The default set a report may carry is tool, door, origin and rule names, plus counts and instants. Those names are a subset of what `helio report activation --include-names` restores; a singular door's URL or stdio command and a not-primed door's failure text, which that flag also restores, stay out of a fidelity report. It never carries `tool_input`, `upstream_response`, `upstream_error`, evidence data, metadata values, session ids, record ids, the audit or config path, or any hash. A record id is a join key into the row that holds the arguments; the operator who has the database filters by tool, rule and time instead. One clause stated plainly: an instant beside a tool and a rule still identifies a row for someone who has the database, a weaker join than a record id but a join; the report still carries no argument, session id or record id, and the paste decision stays the operator's, exactly as it does for `--include-names`. The first release of `helio policy simulate` ships no flag that widens or narrows the set: its `--format json` carries the same set as its text, record ids and session ids excluded.
 
 ## Follow-up decisions
 

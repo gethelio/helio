@@ -14,6 +14,7 @@ import { ToolBaselineStore } from '../baseline/store.js'
 import { BudgetEngine } from '../budget/engine.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { compileBudgets } from '../budget/parser.js'
+import { demoAnnotationSource } from '../demo/annotations.js'
 import { DEMO_DEFAULT_PORTS, renderDemoConfig } from '../demo/config.js'
 import { DEMO_TOOLS, DEMO_UPSTREAMS, buildDemoCorpus } from '../demo/corpus.js'
 import { wireTool } from '../demo/upstream.js'
@@ -26,7 +27,6 @@ import { RateLimiter } from '../policy/rate-limiter.js'
 import { SpendLimiter } from '../policy/spend-limiter.js'
 import { simulatePolicy } from '../policy/simulate/index.js'
 import type { AnnotationSource, PolicySimulationCandidate } from '../policy/simulate/index.js'
-import { extractAnnotations } from '../policy/tool-definitions.js'
 import { canonicalize } from '../util/canonical-json.js'
 import { candidateFromYaml, mcpRow } from './helpers/simulation-rows.js'
 
@@ -390,19 +390,8 @@ describe('simulatePolicy over the live trail', () => {
 
 const DEMO_BASE = new Date('2026-09-24T12:00:00.000Z')
 
-/** The sample server's listed definitions, the source `--demo` must hand the harness. */
-const demoSource: AnnotationSource = (() => {
-  const listed = new Map(
-    DEMO_TOOLS.map((tool) => [`${tool.upstream}/${tool.name}`, extractAnnotations(wireTool(tool))]),
-  )
-  return {
-    resolve: (query) => {
-      const key = `${query.upstream ?? ''}/${query.tool}`
-      if (query.origin !== 'mcp' || !listed.has(key)) return { kind: 'unknown' }
-      return { kind: 'known', hints: listed.get(key), source: 'demo' }
-    },
-  }
-})()
+/** The sample server's listed definitions, the source `--demo` hands the harness. */
+const demoSource = demoAnnotationSource()
 
 function demoStore(extraRows: readonly AuditRecord[] = []): {
   readonly store: AuditStore
