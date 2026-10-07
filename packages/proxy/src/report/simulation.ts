@@ -24,7 +24,6 @@ import {
   subjectOf,
 } from '../policy/simulate/fidelity.js'
 import type {
-  BudgetCheck,
   ConfigEpoch,
   FidelityMark,
   FidelityWarning,
@@ -141,7 +140,8 @@ export interface SimulationReport {
   readonly changed: boolean
   readonly deltas: SimulationReportDeltas
   readonly fidelity: SimulationReportFidelity
-  readonly budget_checks: readonly BudgetCheck[]
+  /** The pot and the instant of each snapshot the rebuilt spend did not meet; the amounts stay in the database. */
+  readonly budget_checks: ReadonlyArray<{ readonly budget: string; readonly timestamp: string }>
   readonly budget_check_line: string
   readonly epoch_notice: string
   readonly demo_line: string | null
@@ -374,7 +374,10 @@ export function buildSimulationReport(input: SimulationReportInput): SimulationR
       skipped: result.fidelity.skipped,
       unreported: result.fidelity.unreported,
     },
-    budget_checks: result.budget_checks,
+    budget_checks: result.budget_checks.map((check) => ({
+      budget: check.budget,
+      timestamp: check.timestamp,
+    })),
     budget_check_line: formatBudgetCheckLine(result.budget_checks),
     epoch_notice: formatConfigEpochNotice(result.epochs),
     demo_line: input.annotationSource === 'demo' ? DEMO_ANNOTATION_LINE : null,
@@ -388,6 +391,9 @@ export function buildSimulationReport(input: SimulationReportInput): SimulationR
 // ---------------------------------------------------------------------------
 
 const INSTANTS_SHOWN = 5
+
+/** The baseline line of a replay whose stored decisions were all plain allows under no rule and no budget. */
+const FIRST_POLICY_BASELINE_LINE = 'Baseline: no restrictive rules (default allow)'
 
 function n(value: number): string {
   return value.toLocaleString('en-US')
@@ -501,7 +507,7 @@ function firstPolicyBlock(report: SimulationReport): readonly string[] {
   line(d.allowed, 'would have been allowed')
   entries.push([unaffected, 'unaffected', 2])
   return [
-    'Baseline: no restrictive rules (default allow)',
+    FIRST_POLICY_BASELINE_LINE,
     'This is your first policy, so every restriction is new.',
     '',
     ...alignedLines(entries),
@@ -607,14 +613,15 @@ export function renderSimulationText(report: SimulationReport): string {
   }
 
   // The first-policy framing reads "every restriction is new"; a run that
-  // changes nothing has no restriction to frame, so it prints the standard
-  // block whatever the baseline was.
+  // changes nothing has no restriction to frame, so it names the baseline
+  // on one line and prints the standard block under it.
   lines.push('')
   if (report.replayed === 0) {
     lines.push('No tool calls in the window.')
   } else if (report.baseline.first_policy && report.changed) {
     lines.push(...firstPolicyBlock(report))
   } else {
+    if (report.baseline.first_policy) lines.push(FIRST_POLICY_BASELINE_LINE, '')
     lines.push(...standardBlock(report))
   }
 

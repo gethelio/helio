@@ -758,11 +758,16 @@ describe('renderSimulationText (issue #490)', () => {
     expect(text).not.toContain('Decisions (')
   })
 
-  it('prints the standard block on a zero-delta run over a first-policy baseline', () => {
+  it('prints the baseline line and then the standard block on a zero-delta run over a first-policy baseline', () => {
     const text = render()
     expect(build().baseline.first_policy).toBe(true)
-    expect(text).toContain('Decisions (1 replayed)\n  1 unchanged\n  0 changed')
-    expect(text).not.toContain('Baseline:')
+    expect(text).toContain(
+      'Baseline: no restrictive rules (default allow)\n\nDecisions (1 replayed)\n  1 unchanged\n  0 changed',
+    )
+    expect(text).not.toContain('This is your first policy')
+    const two = reloadRecord({ rules: 2, budgets: 0, defaultAction: 'allow' })
+    const ruled = render({ reloads: [reloads(two, [two])] })
+    expect(ruled).not.toContain('Baseline:')
   })
 
   it('groups the changed lines by tool, door, outcomes and rule in first-seen order with one or two instants', () => {
@@ -913,6 +918,8 @@ describe('the simulation report privacy set (issue #490)', () => {
   it('carries no session id, record id, full epoch or baseline hash in text or JSON', () => {
     const SESSION = 'planted-session-id-7f3a'
     const RECORD = 'planted-record-id-9c1e'
+    const STORED_SPENT = 7_777_777
+    const SIMULATED_SPENT = 8_888_888
     const EPOCH_HASH = 'd'.repeat(64)
     const OTHER_HASH = 'e'.repeat(64)
     const rows = [
@@ -933,6 +940,14 @@ describe('the simulation report privacy set (issue #490)', () => {
           epochs: [
             epoch(OTHER_HASH, 2, at(-5), at(-4), false),
             epoch(EPOCH_HASH, 1, at(0), at(0), true),
+          ],
+          budget_checks: [
+            {
+              budget: 'pot',
+              timestamp: at(0),
+              stored_spent: STORED_SPENT,
+              simulated_spent: SIMULATED_SPENT,
+            },
           ],
           fidelity: {
             lines: [],
@@ -960,6 +975,16 @@ describe('the simulation report privacy set (issue #490)', () => {
     }
     expect(text).not.toContain(RECORD)
     expect(text).not.toContain(CANDIDATE)
+    for (const amount of [
+      String(STORED_SPENT),
+      '7,777,777',
+      String(SIMULATED_SPENT),
+      '8,888,888',
+    ]) {
+      expect(json).not.toContain(amount)
+      expect(text).not.toContain(amount)
+    }
+    expect(Object.keys(report.budget_checks[0] ?? {}).sort()).toEqual(['budget', 'timestamp'])
     expect(json.split(RECORD)).toHaveLength(2)
     expect(json.split(CANDIDATE)).toHaveLength(2)
     expect(json).toContain(EPOCH_HASH.slice(0, 8))

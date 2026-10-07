@@ -11502,7 +11502,10 @@ audit:
       expect(stdout).toContain('Decisions (10 replayed)')
       expect(stdout).toContain('  10 unchanged')
       expect(stdout).toContain('   0 changed')
-      expect(stdout).not.toContain('Baseline:')
+      expect(stdout).toContain(
+        'Baseline: no restrictive rules (default allow)\n\nDecisions (10 replayed)',
+      )
+      expect(stdout).not.toContain('This is your first policy')
       expect(stdout).not.toContain('Retention:')
       expect(lines[lines.length - 1]).toBe('No live tools were called. Nothing was applied.')
       expect(stderr).toContain(`Wrote one policy_simulation record to ${fixture.auditPath}.`)

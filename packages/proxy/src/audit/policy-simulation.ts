@@ -26,7 +26,7 @@ export interface PolicySimulationEvidence {
   /** The selected epoch's hash; null for a null-hash run and under `--across-configs`. */
   readonly baseline_config_sha256: string | null
   readonly epoch_selector: 'latest' | 'all' | 'config_sha'
-  /** 1, or the count of epochs under `--across-configs`. */
+  /** 1, the count of epochs under `--across-configs`, or 0 when the window holds no epoch. */
   readonly epochs_simulated: number
   /** The first replayed row's `timestamp`; null on an empty window. */
   readonly traffic_start: string | null

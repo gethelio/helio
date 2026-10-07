@@ -30,8 +30,11 @@ Maintainer notes:
   frozen fidelity sentences with each unverified call's instants, the
   multi-epoch notice with the flags that move it (`--across-configs`,
   `--config-sha`), and a first-policy framing when the replayed baseline
-  had no rule and no budget. `--since`, `--until`, `--upstream` and
-  `--session` bound the window; `--format json` prints the same object;
+  had no rule and no budget and the candidate changes a decision (a run
+  that changes nothing names the baseline on one line). `--since`,
+  `--until`, `--upstream` and `--session` bound the window; `--audit-db`
+  replays a copy, opened with the deployed retention (older rows are purged
+  at open) and written into; `--format json` prints the same object;
   `--fail-on-change` exits 2 when any decision would change; `--demo`
   replays the `helio init --demo` corpus with the sample server's listed
   definitions as the annotation source. Every run writes one
