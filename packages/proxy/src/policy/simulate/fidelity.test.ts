@@ -389,6 +389,8 @@ describe('formatConfigEpochNotice', () => {
     rows,
     first_timestamp: first,
     last_timestamp: last,
+    first_rowid: 1,
+    last_rowid: rows,
     selected,
   })
 

@@ -1103,6 +1103,8 @@ describe('config epochs', () => {
           rows: 2,
           first_timestamp: at(0),
           last_timestamp: at(1),
+          first_rowid: 1,
+          last_rowid: 2,
           selected: false,
         },
         {
@@ -1110,6 +1112,8 @@ describe('config epochs', () => {
           rows: 1,
           first_timestamp: at(2),
           last_timestamp: at(2),
+          first_rowid: 3,
+          last_rowid: 3,
           selected: false,
         },
         {
@@ -1117,6 +1121,8 @@ describe('config epochs', () => {
           rows: 1,
           first_timestamp: at(3),
           last_timestamp: at(3),
+          first_rowid: 4,
+          last_rowid: 4,
           selected: false,
         },
         {
@@ -1124,6 +1130,8 @@ describe('config epochs', () => {
           rows: 2,
           first_timestamp: at(4),
           last_timestamp: at(5),
+          first_rowid: 5,
+          last_rowid: 6,
           selected: true,
         },
       ])

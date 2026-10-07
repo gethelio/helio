@@ -82,7 +82,11 @@ export interface AuditRecord {
    * `block_reason` and under `evidence_chain.policy_reload`, and the decision
    * column holds the constant `policy_reload` so analytics can exclude the kind;
    * and `'kill_switch'` for an operator kill or resume (issue #402), the same
-   * pattern under `evidence_chain.kill_switch` with the constant `kill_switch`.
+   * pattern under `evidence_chain.kill_switch` with the constant `kill_switch`;
+   * and `'policy_simulation'` for one `helio policy simulate` run (issue
+   * #490), the same pattern under `evidence_chain.policy_simulation` with the
+   * constant `policy_simulation`, the one record a process other than the
+   * proxy writes.
    */
   readonly record_kind:
     | 'tool_call'
@@ -91,6 +95,7 @@ export interface AuditRecord {
     | 'evaluation_expired'
     | 'policy_reload'
     | 'kill_switch'
+    | 'policy_simulation'
   /**
    * Enforcement origin: `'mcp'` for the proxy path, or an adapter-supplied
    * origin string (e.g. `'openclaw'`) for sideband-governed calls. Surfaces
@@ -243,6 +248,28 @@ export interface ConfigEpochRun {
   readonly rows: number
   readonly first_timestamp: string
   readonly last_timestamp: string
+  /**
+   * The `rowid` of the run's first and last rows in the listing's own
+   * `(timestamp, rowid)` order (issue #490): a run boundary is a position
+   * in that order, and a reload at the boundary instant belongs to the side
+   * its rowid puts it on. Join keys for {@link EpochReloads}; a report
+   * copies fields by name and never prints them.
+   */
+  readonly first_rowid: number
+  readonly last_rowid: number
+}
+
+/**
+ * The applied `policy_reload` rows that describe one config epoch (issue
+ * #490): `within` is every applied reload carrying the run's hash between
+ * the neighboring runs, oldest first, and `opener` is the latest of them
+ * that no genuine row of the run precedes (undefined when a row of the run
+ * was inserted before every reload to its hash, and for a null-hash run).
+ * The opener is a member of `within`.
+ */
+export interface EpochReloads {
+  readonly opener: AuditRecord | undefined
+  readonly within: readonly AuditRecord[]
 }
 
 // ---------------------------------------------------------------------------
