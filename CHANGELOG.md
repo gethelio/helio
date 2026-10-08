@@ -44,6 +44,17 @@ Maintainer notes:
   last-policy-write check. The open purges with the deployed retention, as
   the other read commands do, and the report says how many rows it deleted.
 
+- **`docs/policy-simulate.md`, the reference for `helio policy simulate`, with a
+  deterministic CI example.** What the command reads and writes, the candidate
+  and its default rule, the window and the config epochs, the report section by
+  section with the counterfactual limitation stated first, the JSON a CI step
+  may parse, the exit codes, the provenance record and what the report carries.
+  The CI example seeds the sample corpus with `helio init --demo` and replays
+  its current epoch against its own policy under `--demo --fail-on-change`;
+  no database is checked in, no `--at` is needed, and the repository's own CI
+  re-runs the same two commands on every push to main and every pull request
+  from the built proxy.
+
 - **The policy simulation harness.** `policy/simulate/` replays the audit
   trail against a candidate policy row by row on a virtual clock, with the
   limiter, budget, evidence and dependency state rebuilt in the order the
