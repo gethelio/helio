@@ -7509,10 +7509,18 @@ describe('helio init --demo (issue #397)', () => {
       expect(stderr).toContain('Next steps')
       expect(stderr).toContain(`cd ${target}`)
       expect(stderr).toContain('helio report activation -c helio-demo.yaml')
+      expect(stderr).toContain(
+        'helio policy simulate --demo --fail-on-change (no proxy needed; 0 changed over the current epoch)',
+      )
       expect(stderr).toContain('node mcp-demo-server.mjs')
       expect(stderr).toContain('helio start -c helio-demo.yaml')
       expect(stderr).toContain('helio policy status -c helio-demo.yaml')
       expect(stderr).toContain('http://127.0.0.1:3100')
+      // The simulate step comes before the proxy steps: no proxy is needed for it.
+      const simulateAt = stderr.indexOf('helio policy simulate --demo')
+      expect(simulateAt).toBeGreaterThanOrEqual(0)
+      expect(simulateAt).toBeLessThan(stderr.indexOf('node mcp-demo-server.mjs'))
+      expect(stderr).toContain('policy simulate --demo names the file itself')
       expect(stderr).not.toMatch(/[a-f0-9]{64}/)
     } finally {
       rmSync(dir, { recursive: true, force: true })
