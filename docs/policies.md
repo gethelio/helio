@@ -1286,4 +1286,5 @@ longer than Helio itself re-checks that definition for drift. See
 - [Approval Workflows](./approvals.md) — `require_approval` action details
 - [Audit Trail](./audit.md) — How policy decisions are recorded
 - [Simulation fidelity](./policy-fidelity.md): which policy inputs an audit record can replay, per door, and what a simulation reports when it cannot
+- [Policy simulation](./policy-simulate.md): `helio policy simulate`, the candidate, the window, the report, the exit codes and a CI example
 - [Examples](../examples/) — Runnable configurations demonstrating these patterns

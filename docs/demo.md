@@ -213,7 +213,13 @@ tool-door pairs table once a proxy answers (below).
 helio export -c helio-demo.yaml                      # 357 records, every one with "environment": "demo"
 helio export -c helio-demo.yaml --budgets demo-payments   # the 41 ledger rows, newest first
 helio validate -c helio-demo.yaml                    # Config is valid: helio-demo.yaml (2 policy rules, 1 budget)
+helio policy simulate --demo --fail-on-change        # 0 changed over the current epoch; see docs/policy-simulate.md
 ```
+
+`helio policy simulate --demo` is the one exception to the rule above
+that every command takes `-c helio-demo.yaml`: under `--demo` the deployed
+file is `helio-demo.yaml` in the working directory. Its reference, with a CI
+example that replays this corpus, is [Policy simulation](./policy-simulate.md).
 
 ## With a proxy
 

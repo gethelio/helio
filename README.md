@@ -396,6 +396,7 @@ Helio is listed in the official MCP registry as `so.helio/helio`. The entry runs
 - **[Running Helio as a Sidecar](./docs/deployment-sidecar.md)**: Deploy next to a coding agent or dev container with the upstream and the config out of its reach and Helio off its network
 - **[Running Helio as its own user](./docs/deployment-separate-user.md)**: The separate-user tier on Ubuntu 24.04, run end to end
 - **[Sample traffic](./docs/demo.md)**: `helio init --demo` writes a directory of sample history to try every surface before the first real call
+- **[Policy simulation](./docs/policy-simulate.md)**: `helio policy simulate` replays the audit trail against a candidate policy and reports what would change, with a CI example the repository's own CI re-runs
 
 ## Examples
 

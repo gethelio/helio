@@ -131,6 +131,18 @@ jobs:
       - name: Docs drift + config samples check
         run: pnpm docs:check:ci
 
+      # The CI example docs/policy-simulate.md documents, re-proven on every
+      # run from this build: seed the sample corpus and replay its current
+      # epoch against its own policy, exit 2 on any changed decision. The page's
+      # snippet is reviewed by hand; this step proves the run. Written to the
+      # runner's temp directory: the seed writes a README and a config that
+      # `pnpm format:check` would otherwise scan.
+      - name: Run the documented policy simulation example
+        run: |
+          node packages/proxy/dist/cli.js init --demo "$RUNNER_TEMP/helio-demo"
+          cd "$RUNNER_TEMP/helio-demo"
+          node "$GITHUB_WORKSPACE/packages/proxy/dist/cli.js" policy simulate --demo --fail-on-change
+
       - name: No-telemetry guard
         run: pnpm check:no-telemetry
 
