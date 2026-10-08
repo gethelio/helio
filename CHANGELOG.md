@@ -78,6 +78,13 @@ Maintainer notes:
 
 ### Changed
 
+- **`helio init --demo` names `helio policy simulate --demo --fail-on-change`
+  in its printed next steps and its generated README.** The printed block
+  gains step 3 (no proxy needed, `0 changed` over the current epoch) and
+  renumbers the proxy steps to 4 and 5; the README's no-proxy list and its
+  surface list gain the command; both say it is the one command in the
+  directory that takes no `-c`, because `--demo` names the file.
+
 - **The Slack approval card shows up to 2,000 characters of tool input.**
   The cap was 200, which truncated any real command line; the fenced input
   is also clamped so the card's first section stays under Slack's

@@ -1610,8 +1610,9 @@ async function sandboxCommand(dir: string, force: boolean): Promise<void> {
  * traffic so every surface can be tried before the first real call. Mirrors
  * `sandboxCommand`: refuses an existing target without `--force`, prints
  * `Created <path>` per file and the next steps. The one extra line says the
- * traffic is not the reader's own; every next step carries
- * `-c helio-demo.yaml` because a bare command looks for helio.yaml.
+ * traffic is not the reader's own; every next step but the simulate step
+ * carries `-c helio-demo.yaml` (`--demo` names the file); a bare command
+ * looks for helio.yaml.
  */
 async function demoCommand(dir: string, options: { force: boolean; at?: string }): Promise<void> {
   const base = parseDemoBase(options.at)
@@ -1629,13 +1630,16 @@ async function demoCommand(dir: string, options: { force: boolean; at?: string }
     `  2. helio report activation -c ${DEMO_CONFIG_FILE} (no proxy needed; --include-names restores tool, door and rule names)`,
   )
   console.error(
-    `  3. node ${DEMO_UPSTREAM_FILE} in one terminal, then helio start -c ${DEMO_CONFIG_FILE} in another`,
+    '  3. helio policy simulate --demo --fail-on-change (no proxy needed; 0 changed over the current epoch)',
   )
   console.error(
-    `  4. helio policy status -c ${DEMO_CONFIG_FILE}, and open http://127.0.0.1:${String(DEMO_DEFAULT_PORTS.dashboardPort)}`,
+    `  4. node ${DEMO_UPSTREAM_FILE} in one terminal, then helio start -c ${DEMO_CONFIG_FILE} in another`,
   )
   console.error(
-    `Every command in that directory takes -c ${DEMO_CONFIG_FILE}; a bare one looks for helio.yaml.`,
+    `  5. helio policy status -c ${DEMO_CONFIG_FILE}, and open http://127.0.0.1:${String(DEMO_DEFAULT_PORTS.dashboardPort)}`,
+  )
+  console.error(
+    `Every command in that directory takes -c ${DEMO_CONFIG_FILE} (policy simulate --demo names the file itself); a bare one looks for helio.yaml.`,
   )
 }
 

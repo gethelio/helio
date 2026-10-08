@@ -148,7 +148,11 @@ Without a proxy:
 helio report activation -c ${DEMO_CONFIG_FILE}
 helio report activation -c ${DEMO_CONFIG_FILE} --include-names
 helio export -c ${DEMO_CONFIG_FILE} --budgets ${DEMO_BUDGET_NAME}
+helio policy simulate --demo --fail-on-change
 \`\`\`
+
+\`helio policy simulate --demo\` is the one exception to the rule above:
+\`--demo\` names this file itself, so it takes no \`-c\`.
 
 With a proxy, in two terminals:
 
@@ -182,6 +186,13 @@ purpose, and the line is a fact about it, not a fault.
   \`budget_exceeded\`; a \`delete_customer\` is refused by \`block-destructive\`.
 - \`helio policy status\`: the authority surface, the coverage of the two
   rules, and one tool the upstream lists that no row has ever called.
+- \`helio policy simulate --demo --fail-on-change\`: the current epoch's 252
+  replayed calls, checked against the file above: \`252 unchanged / 0 changed\`,
+  exit 0, no proxy needed. To see what a rule would have changed, add it to
+  a copy of the file and run \`helio policy simulate <copy> --demo\`: the copy
+  is the candidate, \`--demo\` keeps the deployed file and the sample server's
+  annotations, and without \`--fail-on-change\` a changed decision reads as a
+  report, not an exit 2.
 - The dashboard: the feed, the audit log and the budgets page over the
   same rows.
 
@@ -190,8 +201,10 @@ purpose, and the line is a fact about it, not a fault.
 The pot's window is 24 hours, so a day after the seed the breach face has
 aged out; the report's windows (7 days by default) empty over the
 following weeks, and the audit retention (90 days) purges the oldest rows
-at the next open. Rerun \`helio init --demo --force\` in the parent
-directory to write a fresh directory against the current schema; pass
+at the next open. About 84 days after the seed, the simulate step's
+\`252\` replayed calls start to fall with them. Rerun
+\`helio init --demo --force\` in the parent directory to write a fresh
+directory against the current schema; pass
 \`--at <iso>\` to pin the base instant so two runs write the same rows.
 `
 }

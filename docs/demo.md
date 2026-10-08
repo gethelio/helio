@@ -13,19 +13,20 @@ It writes a directory named `helio-demo` holding a config, an audit
 database of sample traffic and a sample MCP upstream, and prints:
 
 ```text
-Created helio-demo/helio-demo.yaml
-Created helio-demo/helio-demo-audit.db
-Created helio-demo/mcp-demo-server.mjs
-Created helio-demo/README.md
+Created /tmp/helio-demo/helio-demo.yaml
+Created /tmp/helio-demo/helio-demo-audit.db
+Created /tmp/helio-demo/mcp-demo-server.mjs
+Created /tmp/helio-demo/README.md
 
 Sample traffic, not your own: every row in helio-demo/helio-demo-audit.db was written by helio init --demo.
 
 Next steps:
   1. cd helio-demo
   2. helio report activation -c helio-demo.yaml (no proxy needed; --include-names restores tool, door and rule names)
-  3. node mcp-demo-server.mjs in one terminal, then helio start -c helio-demo.yaml in another
-  4. helio policy status -c helio-demo.yaml, and open http://127.0.0.1:3100
-Every command in that directory takes -c helio-demo.yaml; a bare one looks for helio.yaml.
+  3. helio policy simulate --demo --fail-on-change (no proxy needed; 0 changed over the current epoch)
+  4. node mcp-demo-server.mjs in one terminal, then helio start -c helio-demo.yaml in another
+  5. helio policy status -c helio-demo.yaml, and open http://127.0.0.1:3100
+Every command in that directory takes -c helio-demo.yaml (policy simulate --demo names the file itself); a bare one looks for helio.yaml.
 ```
 
 The `Created` lines print the absolute paths. Pass a directory to write
@@ -371,7 +372,7 @@ tools as `tool (door)`.
 
 | Surface                                     | What it prints from the rows                  | The mark                                                                                                                                          |
 | ------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `helio init --demo`                         | the four paths, the next steps                | the sentence `Sample traffic, not your own`, and `-c helio-demo.yaml` on every next step                                                          |
+| `helio init --demo`                         | the four paths, the next steps                | the sentence `Sample traffic, not your own`, and `-c helio-demo.yaml` on every next step but `policy simulate --demo`, which names the file       |
 | `helio report activation`                   | counts, dates, decision classes               | none from the rows, by design (below)                                                                                                             |
 | `helio report activation --include-names`   | tool, door and rule names                     | `demo-crm`, `demo-billing` (in the JSON's called pairs without a proxy; in the pairs table with one)                                              |
 | `helio start`                               | upstream names, the audit path                | `Upstream[demo-crm]`, `Upstream[demo-billing]`, `Audit: ./helio-demo-audit.db`                                                                    |
