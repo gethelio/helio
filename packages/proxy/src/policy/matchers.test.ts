@@ -204,6 +204,12 @@ describe('matchAnnotations', () => {
     expect(matchAnnotations(required, ctx({ annotations: {} }))).toBe(true)
   })
 
+  it('matches required destructiveHint true when the tool sets only readOnlyHint true', () => {
+    const required: AnnotationMatch = { destructiveHint: true }
+    // a present readOnlyHint does not cancel the MCP default for an omitted destructiveHint
+    expect(matchAnnotations(required, ctx({ annotations: { readOnlyHint: true } }))).toBe(true)
+  })
+
   it('does not match destructiveHint false against MCP default (true)', () => {
     const required: AnnotationMatch = { destructiveHint: false }
     expect(matchAnnotations(required, ctx({ annotations: {} }))).toBe(false)

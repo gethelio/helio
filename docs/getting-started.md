@@ -89,7 +89,7 @@ dashboard:
 
 Omitted fields like `listen.host`, `dashboard.host`, and `audit.path` fall back to safe defaults (`127.0.0.1` for both hosts — loopback only — and `./helio-audit.db`). The section order here (`upstream → listen → policies → audit → dashboard`) follows the canonical order of the [Configuration Reference](./configuration.md) and the `helio init` scaffold (which also stubs the remaining sections: `environment`, `session`, `budgets`, `approval`, and `sdk`).
 
-This example configuration blocks any tool marked as destructive, explicitly allows read-only tools, and falls through to `default: allow` for everything else. Every tool call is recorded to a local SQLite database. (Until you uncomment a `policies` block like this one, the scaffolded config blocks nothing.)
+This example configuration blocks any tool marked as destructive, explicitly allows read-only tools, and falls through to `default: allow` for everything else. Order matters, since Helio applies the first rule that matches: a tool that sets `readOnlyHint: true` but omits `destructiveHint` is destructive by MCP default, so `block-destructive` denies it before `allow-reads` is reached, and `allow-reads` only reaches tools that also set `destructiveHint: false`, as the echo server's `get_weather` does. Every tool call is recorded to a local SQLite database. (Until you uncomment a `policies` block like this one, the scaffolded config blocks nothing.)
 
 If you use the `${HELIO_DASHBOARD_SECRET}` placeholder above, export it before starting:
 

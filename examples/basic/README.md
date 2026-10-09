@@ -133,11 +133,11 @@ policies:
       action: allow
 ```
 
-`default: allow` means any tool call that doesn't match a rule is permitted. `flag_destructive: log` adds an audit flag when tools have `destructiveHint: true` (even if they're explicitly denied by a rule).
+`default: allow` means any tool call that doesn't match a rule is permitted. `flag_destructive: log` marks the audit record (`flagged_destructive: true`) of a call no rule matched when the tool is destructive, by its own `destructiveHint: true` or by the MCP default for an omitted hint; a call `block-destructive` already denied is not marked. In this config the first rule matches every such tool, so no row carries the flag.
 
 The `rules:` array is nested inside the `policies:` section. The first rule, `block-destructive`, denies any tool with `destructiveHint: true` in its MCP annotations; its `feedback` block provides structured self-repair information to the calling agent.
 
-The `allow-reads` rule explicitly allows read-only tools. This is redundant with `default: allow` but demonstrates the pattern — in production you'd typically use `default: deny` and explicitly allow specific tools.
+The `allow-reads` rule explicitly allows read-only tools. Against this echo server it allows what `default: allow` already allows, because `get_weather` also sets `destructiveHint: false`; a tool that sets only `readOnlyHint: true` is destructive by MCP default and is denied by the first rule before `allow-reads` is reached. The rule demonstrates the pattern; in production you'd typically use `default: deny` and explicitly allow specific tools.
 
 ```yaml
 approval:

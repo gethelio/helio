@@ -403,12 +403,6 @@ describe('Policy evaluation (Streamable HTTP)', () => {
       const error = body['error'] as { code: number; data: Record<string, unknown> }
       expect(error.code).toBe(-32001)
       expect(error.data['blocked']).toBe(true)
-
-      // get_weather has readOnlyHint: true (no destructiveHint) in the test server
-      // MCP default for destructiveHint is true, so it will also match unless
-      // the server explicitly sets destructiveHint: false
-      // The test server only sets readOnlyHint: true, so destructiveHint defaults to true
-      // This means get_weather is ALSO blocked — which is correct per MCP spec behavior
     } finally {
       await proxy.close()
     }
