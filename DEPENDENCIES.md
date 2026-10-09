@@ -16,7 +16,7 @@ This document records the purpose and justification for every direct production 
 | `hono`              | HTTP framework for the proxy and dashboard API servers     | Lightweight, fast, web-standard Request/Response API; supports SSE natively           |
 | `js-yaml`           | YAML parser for `helio.yaml` configuration                 | Standard YAML parser; no native dependencies                                          |
 | `picomatch`         | Glob pattern matching for policy rule tool name matchers   | Fast, well-tested glob matching; subset of micromatch with no dependencies            |
-| `safe-regex2`       | Rejects ReDoS-prone regex patterns at policy load time     | Fastify-maintained static analyzer; blocks nested-quantifier patterns before compile  |
+| `safe-regex2`       | Rejects ReDoS-prone regex patterns at policy load time     | Fastify-maintained static analyzer; runs at load on a pattern `new RegExp` accepts    |
 | `zod`               | Schema validation for config, policy rules, and API inputs | TypeScript-first schema validation; also required by the MCP SDK                      |
 
 The dashboard source lives in the internal workspace package `packages/dashboard`, but that package is not published and is not a runtime dependency of `@gethelio/proxy`. Proxy build scripts bundle dashboard static assets into `packages/proxy/dist/dashboard-assets/` before publish.

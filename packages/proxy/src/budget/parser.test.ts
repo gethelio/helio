@@ -201,13 +201,12 @@ describe('compileBudgets', () => {
     })
 
     it('rejects a malformed contributor regex with a budget-labeled error', () => {
-      // 'a{2,1}' passes the safe-regex2 analyzer (safe = true, verified on
-      // the installed package) and throws at RegExp construction ("numbers
-      // out of order in {} quantifier") — the invalid-regex branch, distinct
-      // from the ReDoS branch the '(a+)+$' test covers. Do NOT copy the
-      // policy suite's '[invalid(' probe here: safe-regex2 rejects it
-      // (safe = false), so it hits the catastrophic branch despite those
-      // tests' "invalid regex" titles.
+      // 'a{2,1}' passes the safe-regex2 analyzer and throws at RegExp
+      // construction ("numbers out of order in {} quantifier"): the
+      // invalid-regex branch, distinct from the ReDoS branch the '(a+)+$'
+      // test covers. The pattern compiles first and is analyzed second
+      // (issue #387), so a pattern the analyzer cannot parse, such as '(abc'
+      // in the next test, also reaches this branch.
       expect(() =>
         compileBudgets([
           budgetConfig({
@@ -220,6 +219,23 @@ describe('compileBudgets', () => {
           }),
         ]),
       ).toThrow(/Budget "daily-cap": contributor 0: invalid regex/)
+    })
+
+    it('reports a contributor regex syntax error as invalid with the engine reason, not catastrophic', () => {
+      expect(() =>
+        compileBudgets([
+          budgetConfig({
+            contributors: [
+              {
+                match: { tool: 'stripe_*', input: { '$.memo': { regex: '(abc' } } },
+                field: '$.a',
+              },
+            ],
+          }),
+        ]),
+      ).toThrow(
+        /Budget "daily-cap": contributor 0: invalid regex "\(abc" for input path "\$\.memo": .*Unterminated group/,
+      )
     })
   })
 })

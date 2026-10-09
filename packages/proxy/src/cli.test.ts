@@ -329,6 +329,16 @@ const BUDGET_CATASTROPHIC_TAIL = `budgets:
               regex: '(a+)+$'
         field: '$.amount'
 `
+const RULE_SYNTAX_ERROR_TAIL = `policies:
+  default: allow
+  rules:
+    - name: bad
+      match:
+        input:
+          '$.memo':
+            regex: '(abc'
+      action: deny
+`
 const RULE_CATASTROPHIC_LINE =
   'Invalid policy: Policy rule 0 ("bad"): catastrophic regex "(a+)+$" for input path "$.memo": pattern is vulnerable to ReDoS and has been rejected. Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.'
 const COMPILE_FAILURE_FACES: Array<[string, string, string]> = [
@@ -337,6 +347,11 @@ const COMPILE_FAILURE_FACES: Array<[string, string, string]> = [
     'a malformed rule input regex',
     RULE_INVALID_TAIL,
     'Invalid policy: Policy rule 0 ("bad"): invalid regex "[z-a]" for input path "$.memo": Invalid regular expression: /[z-a]/: Range out of order in character class',
+  ],
+  [
+    'a rule input regex that does not compile (issue #387: invalid, not catastrophic)',
+    RULE_SYNTAX_ERROR_TAIL,
+    'Invalid policy: Policy rule 0 ("bad"): invalid regex "(abc" for input path "$.memo": Invalid regular expression: /(abc/: Unterminated group',
   ],
   [
     'a catastrophic rule metadata regex',

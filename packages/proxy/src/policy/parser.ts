@@ -158,6 +158,46 @@ export function compileToolMatcher(
 }
 
 /**
+ * Compile a `regex` condition value and reject it when it is catastrophic.
+ *
+ * The order matters (issue #387): `new RegExp` runs first so a pattern that
+ * does not compile is reported as invalid with the engine's reason, and only
+ * a pattern that compiles reaches the ReDoS analyzer, which returns `false`
+ * for anything its own parser cannot read as well as for a catastrophic
+ * pattern. The analyzer runs on the original string, never on
+ * `compiled.source`, which rewrites `/` and line terminators.
+ *
+ * `where` labels the condition (`input path "$.x"` or `metadata key "k"`)
+ * and `makeError` wraps the message in the caller's error type.
+ */
+function compileRegexCondition(
+  value: string,
+  where: string,
+  makeError: (message: string) => Error,
+): RegExp {
+  let compiled: RegExp
+  try {
+    compiled = new RegExp(value)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw makeError(`invalid regex "${value}" for ${where}: ${msg}`)
+  }
+  // Reject catastrophic-backtracking patterns at compile time so a
+  // fat-fingered operator regex cannot hang the policy hot path on a large
+  // tool input. safe-regex2 is a static analyzer (zero runtime cost after
+  // load) that rejects nested-quantifier and overlapping-alternation
+  // patterns that ret's AST walker flags as exponential.
+  if (!safeRegex(value)) {
+    throw makeError(
+      `catastrophic regex "${value}" for ${where}: ` +
+        `pattern is vulnerable to ReDoS and has been rejected. ` +
+        `Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.`,
+    )
+  }
+  return compiled
+}
+
+/**
  * Flatten a `match.input`-shaped record into InputCondition entries, with
  * regex values type-checked, ReDoS-rejected (safe-regex2), and pre-compiled.
  * Shared by policy rules and budget contributors (issue #177); `makeError`
@@ -178,26 +218,7 @@ export function flattenInputConditionsWith(
         if (typeof value !== 'string') {
           throw makeError(`regex value for input path "${path}" must be a string`)
         }
-        // Reject catastrophic-backtracking patterns at compile time so a
-        // fat-fingered operator regex cannot hang the policy hot path on a
-        // large tool input. safe-regex2 is a static analyzer — zero runtime
-        // cost after load — and rejects nested-quantifier and
-        // overlapping-alternation patterns that ret's AST walker flags as
-        // exponential.
-        if (!safeRegex(value)) {
-          throw makeError(
-            `catastrophic regex "${value}" for input path "${path}": ` +
-              `pattern is vulnerable to ReDoS and has been rejected. ` +
-              `Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.`,
-          )
-        }
-        let compiledRegex: RegExp
-        try {
-          compiledRegex = new RegExp(value)
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          throw makeError(`invalid regex "${value}" for input path "${path}": ${msg}`)
-        }
+        const compiledRegex = compileRegexCondition(value, `input path "${path}"`, makeError)
         conditions.push({ path, operator: op, value, regex: compiledRegex })
       } else {
         conditions.push({ path, operator: op, value })
@@ -238,28 +259,13 @@ function flattenMetadataConditions(
       if (value === undefined) continue
 
       if (op === 'regex') {
-        // Reuse the same ReDoS analyzer + compile path as input regexes so a
+        // The same compile-then-analyze path as input regexes, so a
         // fat-fingered metadata regex cannot hang the policy hot path.
-        if (!safeRegex(value)) {
-          throw new PolicyParseError(
-            `catastrophic regex "${value}" for metadata key "${key}": ` +
-              `pattern is vulnerable to ReDoS and has been rejected. ` +
-              `Rewrite with bounded quantifiers (e.g. {1,100}) or split into simpler rules.`,
-            ruleIndex,
-            ruleName,
-          )
-        }
-        let compiledRegex: RegExp
-        try {
-          compiledRegex = new RegExp(value)
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          throw new PolicyParseError(
-            `invalid regex "${value}" for metadata key "${key}": ${msg}`,
-            ruleIndex,
-            ruleName,
-          )
-        }
+        const compiledRegex = compileRegexCondition(
+          value,
+          `metadata key "${key}"`,
+          (message) => new PolicyParseError(message, ruleIndex, ruleName),
+        )
         conditions.push({ key, operator: op, value, regex: compiledRegex })
       } else {
         conditions.push({ key, operator: op, value })
