@@ -124,7 +124,7 @@ listen:
 policies:
   default: allow
   rules:
-    # Deny anything the tool marks as destructive.
+    # Deny anything the tool marks as destructive, or leaves unmarked (destructive by MCP default).
     - name: block-destructive
       match:
         annotations:
@@ -133,7 +133,7 @@ policies:
       feedback:
         message: 'Destructive actions are blocked by policy.'
         suggestion: 'Use a non-destructive alternative or request approval.'
-    # Allow read-only tools.
+    # Allow read-only tools; one that omits destructiveHint was already denied above.
     - name: allow-reads
       match:
         annotations:

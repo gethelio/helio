@@ -90,7 +90,7 @@ Four annotation hints are available:
 | `idempotentHint`  | Safe to call repeatedly with same args   | `false`     |
 | `openWorldHint`   | Tool can affect systems beyond its scope | `true`      |
 
-> **Important:** The MCP spec defaults `destructiveHint` to `true` when a tool does not explicitly set it. This means a rule matching `destructiveHint: true` will match _most_ tools unless they explicitly opt out with `destructiveHint: false`. Always set annotations explicitly on your MCP server tools. `helio scan` prints, per tool, whether each hint was set by the server or is this default ([Scanning an upstream](#scanning-an-upstream-helio-scan)).
+> **Important:** The MCP spec defaults `destructiveHint` to `true` when a tool does not explicitly set it. This means a rule matching `destructiveHint: true` will match _most_ tools unless they explicitly opt out with `destructiveHint: false`. A present `readOnlyHint: true` does not cancel an omitted `destructiveHint`: Helio reads each hint on its own, so a tool that sets only `readOnlyHint: true` still matches `destructiveHint: true`. Always set annotations explicitly on your MCP server tools. `helio scan` prints, per tool, whether each hint was set by the server or is this default ([Scanning an upstream](#scanning-an-upstream-helio-scan)).
 >
 > Helio startup now auto-primes annotations with a synthetic upstream `tools/list`. If upstream is temporarily unavailable, Helio retries priming in the background. Until priming succeeds, annotation checks intentionally remain fail-closed using these MCP defaults.
 
@@ -792,7 +792,7 @@ policies:
 - **`log`** — The call is allowed but flagged in the audit trail as `flagged_destructive: true`.
 - **`require_approval`** — The call is automatically escalated to the approval workflow, even though no explicit rule matched.
 
-> **Note:** Remember that the MCP spec defaults `destructiveHint` to `true` for tools that don't set it. With `flag_destructive: require_approval`, any tool that hasn't explicitly set `destructiveHint: false` will trigger an approval request.
+> **Note:** Remember that the MCP spec defaults `destructiveHint` to `true` for tools that don't set it. With `flag_destructive: require_approval`, any tool that hasn't explicitly set `destructiveHint: false` will trigger an approval request. Both modes apply only when the decision still has no matched rule, after rule evaluation and, for a drifted tool under `on_tool_drift: log`, after the stricter of the baseline and current decisions is kept. A tool that set `readOnlyHint: true` and omitted `destructiveHint` counts as destructive there too, so when that decision has no matched rule, `log` flags the call and `require_approval` escalates it. On a drifted tool the [drift gate](#tool-definition-drift) runs after the flag: `on_tool_drift: block` denies the call, and `on_tool_drift: require_approval` escalates it.
 > Because the escalation ticket always routes to the dashboard channel,
 > `flag_destructive: require_approval` requires `dashboard.enabled: true`
 > (startup-checked).
@@ -878,6 +878,8 @@ policies:
           readOnlyHint: true
       action: allow
 ```
+
+Under this order a tool that sets `readOnlyHint: true` and omits `destructiveHint` is destructive by MCP default, so it matches `block-destructive` first and is denied; `allow-reads` only reaches tools that also set `destructiveHint: false`. To allow every read-only tool, put `allow-reads` first, as the demo config written by `helio init --demo` does.
 
 ### Default deny with explicit allows
 
@@ -1015,7 +1017,7 @@ Tools
 Summary: 7 tools exposed, 1 destructive (0 by MCP default), 0 governed
 ```
 
-- **Provenance.** Each hint cell says where its value came from: `(server)` when the tool's `annotations` set the key, `(MCP default)` when it did not. An unset `readOnlyHint` reads **not read-only** and an unset `destructiveHint` reads **destructive**, the MCP defaults from the table above. The `Authority surface` and `Policy coverage` lines are the two `helio start` prints, with the config path in parentheses when one was loaded; without a config the coverage line classifies against no rule and `default allow`, and the summary says `0 governed`.
+- **Provenance.** Each hint cell says where its value came from: `(server)` when the tool's `annotations` set the key, `(MCP default)` when it did not. An unset `readOnlyHint` reads **not read-only** and an unset `destructiveHint` reads **destructive**, the MCP defaults from the table above. The two cells are read independently: a tool whose server set `readOnlyHint: true` and left `destructiveHint` unset prints `read-only (server)` and `destructive (MCP default)`, and the summary counts it among the destructive by MCP default. The `Authority surface` and `Policy coverage` lines are the two `helio start` prints, with the config path in parentheses when one was loaded; without a config the coverage line classifies against no rule and `default allow`, and the summary says `0 governed`.
 - **Action and rule.** The action column is the effective action of an argument-less call, and the rule column names what decided it in the words `helio policy status` uses: `rule "name"`, `no rule, default allow`, `no rule, flag_destructive`, followed by `; "name" only when arguments match` for a rule ahead of it that fires only for some calls.
 - **Candidates.** `candidate: amount $.amount` names an argument a `budgets` contributor, a `spend_limit` or an `input` matcher could read, found by deterministic name-and-type rules over the tool's `inputSchema`:
 
