@@ -249,7 +249,7 @@ policies:
         channel: slack
 ```
 
-All metadata conditions are AND-combined with each other and with the rest of the `match` block. A `regex` is validated for catastrophic backtracking at load time, exactly like `match.input` regexes. Because metadata is absent on the MCP path, prefer pairing a metadata `deny` rule with a separate MCP-path control if you need both doors covered.
+All metadata conditions are AND-combined with each other and with the rest of the `match` block. A `regex` is compiled first (a malformed pattern is reported as invalid with the engine's reason) and then checked for catastrophic backtracking at load time, exactly like `match.input` regexes. Because metadata is absent on the MCP path, prefer pairing a metadata `deny` rule with a separate MCP-path control if you need both doors covered.
 
 ## Actions
 

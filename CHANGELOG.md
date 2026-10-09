@@ -92,6 +92,15 @@ Maintainer notes:
 
 ### Fixed
 
+- **A `regex` that does not compile is reported as invalid, not catastrophic.**
+  On a rule's `match.input`, a rule's `match.metadata` and a budget
+  contributor's `match.input`, a pattern the engine rejects is now reported
+  as `invalid regex` with the engine's reason, where it was reported as
+  catastrophic backtracking before. For `regex: '(abc'` the line is now
+  `invalid regex "(abc" for input path "$.memo": Invalid regular expression: /(abc/: Unterminated group`
+  instead of the ReDoS advice to bound a quantifier that is not there. The
+  pattern is compiled first and analyzed second, so the set of accepted
+  patterns does not change.
 - **One tag push now leaves one Release run.** `release.yml` carries a
   concurrency group keyed on the tag with `cancel-in-progress: true`: when
   GitHub delivers a tag push twice, one run survives and the other is

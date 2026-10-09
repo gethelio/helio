@@ -337,7 +337,19 @@ describe('metadata condition flattening (issue #13)', () => {
           rules: [{ match: { metadata: { sender_id: { regex: '[invalid(' } } }, action: 'deny' }],
         }),
       ),
-    ).toThrow(PolicyParseError)
+    ).toThrow(
+      /invalid regex "\[invalid\(" for metadata key "sender_id": .*Unterminated character class/,
+    )
+  })
+
+  it('reports a regex syntax error as invalid with the engine reason, not catastrophic', () => {
+    expect(() =>
+      compilePolicies(
+        minimalPolicies({
+          rules: [{ match: { metadata: { sender_id: { regex: '(abc' } } }, action: 'deny' }],
+        }),
+      ),
+    ).toThrow(/invalid regex "\(abc" for metadata key "sender_id": .*Unterminated group/)
   })
 })
 
@@ -443,7 +455,25 @@ describe('input condition flattening', () => {
           ],
         }),
       ),
-    ).toThrow(PolicyParseError)
+    ).toThrow(
+      /invalid regex "a\{2,1\}" for input path "\$\.name": .*numbers out of order in \{\} quantifier/,
+    )
+  })
+
+  it('reports a regex syntax error as invalid with the engine reason, not catastrophic', () => {
+    expect(() =>
+      compilePolicies(
+        minimalPolicies({
+          rules: [
+            {
+              name: 'bad',
+              match: { input: { '$.memo': { regex: '(abc' } } },
+              action: 'deny',
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/invalid regex "\(abc" for input path "\$\.memo": .*Unterminated group/)
   })
 
   it('invalid regex error includes path and rule index', () => {
