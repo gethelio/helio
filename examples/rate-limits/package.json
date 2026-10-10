@@ -1,0 +1,8 @@
+{
+  "name": "@gethelio/example-rate-limits",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node start.mjs"
+  }
+}
