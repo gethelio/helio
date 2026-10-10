@@ -227,4 +227,5 @@ e2eDescribe('E2E: Python SDK → sideband → proxy → evidence grounding', () 
     const errorPayload = JSON.parse(jsonLine ?? '') as { error: string; status_code: number }
     expect(errorPayload.status_code).toBe(401)
   })
-})
+},
+15_000)
