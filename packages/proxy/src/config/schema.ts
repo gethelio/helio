@@ -293,7 +293,8 @@ function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1'
 }
 
-function hasDashboardApiSecret(secret: string | undefined): boolean {
+/** Whether `dashboard.api_secret` is set: the half of the approval gate `allow_open_mode` never waives. */
+export function hasDashboardApiSecret(secret: string | undefined): boolean {
   return typeof secret === 'string' && secret.length > 0
 }
 
@@ -519,7 +520,8 @@ const feedbackSchema = z
   })
   .strict()
 
-const policyRuleSchema = z
+/** One `policies.rules` entry; exported so a generated rule can be validated on its own (issue #522). */
+export const policyRuleSchema = z
   .object({
     name: z.string().optional(),
     match: matchSchema,

@@ -158,7 +158,7 @@ export function parseStatusWindow(
 // ---------------------------------------------------------------------------
 
 /** The door a persisted row belongs to: `mcp` rows to the MCP door named by `upstream`, any other origin to that adapter. */
-function doorOfRow(row: {
+export function doorOfRow(row: {
   readonly upstream: string | null
   readonly origin: string
 }): SurfaceDoorRef {
@@ -167,8 +167,21 @@ function doorOfRow(row: {
     : { kind: 'adapter', origin: row.origin }
 }
 
-function pairKey(door: SurfaceDoorRef, tool: string): string {
+/** One key per tool-door pair, the same for a surface pair and a persisted row on that door. */
+export function pairKey(door: SurfaceDoorRef, tool: string): string {
   return JSON.stringify([door.kind, door.kind === 'upstream' ? door.name : door.origin, tool])
+}
+
+/** The six policy-level facts the report states, from the compiled policy. */
+export function describePolicy(policy: CompiledPolicy): PolicyStatusPolicy {
+  return {
+    rule_count: policy.rules.length,
+    default_action: policy.defaultAction,
+    dry_run: policy.dryRun === true,
+    flag_destructive: policy.flagDestructive ?? null,
+    on_tool_drift: policy.onToolDrift ?? 'block',
+    enforces_nothing: enforcesNothing(policy),
+  }
 }
 
 /** The readiness block: the window's activity against the floor, suppressed by any enforcement. */
@@ -209,14 +222,7 @@ export function buildPolicyStatus(input: PolicyStatusInput): PolicyStatusReport 
     generated_at: input.now.toISOString(),
     window,
     kill_switch: killSwitchStatus(input.killSwitch),
-    policy: {
-      rule_count: policy.rules.length,
-      default_action: policy.defaultAction,
-      dry_run: policy.dryRun === true,
-      flag_destructive: policy.flagDestructive ?? null,
-      on_tool_drift: policy.onToolDrift ?? 'block',
-      enforces_nothing: enforcesNothing(policy),
-    },
+    policy: describePolicy(policy),
     surface,
     coverage,
     persisted: {
@@ -278,6 +284,34 @@ function killSwitchField(report: PolicyStatusReport): KillSwitchStatus | undefin
   return partial.kill_switch
 }
 
+/**
+ * The `Policy coverage` block: the heading, the two count lines, the
+ * effective-action histogram and the policy settings that bend a pair's
+ * action. Shared with the generation report so the two never drift;
+ * `pairs` is the surface's pair count the first line counts against.
+ */
+export function renderPolicyCoverageLines(
+  coverage: SurfaceCoverage,
+  pairs: number,
+  policy: PolicyStatusPolicy,
+  heading = 'Policy coverage',
+): string[] {
+  const lines: string[] = [heading]
+  lines.push(`  ${n(coverage.matched)} of ${n(pairs)} have a rule that can match them`)
+  if (coverage.conditional > 0) {
+    lines.push(`  ${n(coverage.conditional)} covered only when ${conditionalWhenClause(coverage)}`)
+  }
+  lines.push(`  ${n(coverage.uncovered)} fall through to the default: ${coverage.default_action}`)
+  const histogram = ACTION_ORDER.filter((a) => coverage.by_effective_action[a] > 0).map(
+    (a) => `${a} ${n(coverage.by_effective_action[a])}`,
+  )
+  if (histogram.length > 0) lines.push(`  Effective action: ${histogram.join(', ')}`)
+  if (policy.flag_destructive !== null) lines.push(`  flag_destructive: ${policy.flag_destructive}`)
+  lines.push(`  on_tool_drift: ${policy.on_tool_drift}`)
+  if (policy.dry_run) lines.push('  Dry-run: enabled (no call is blocked)')
+  return lines
+}
+
 /** The full report as text, for `helio policy status` without `--format json`. */
 export function renderPolicyStatusText(report: PolicyStatusReport): string {
   const { surface, coverage, persisted, readiness, window } = report
@@ -324,21 +358,7 @@ export function renderPolicyStatusText(report: PolicyStatusReport): string {
 
   // Policy coverage
   lines.push('')
-  lines.push('Policy coverage')
-  lines.push(`  ${n(coverage.matched)} of ${n(surface.pairs)} have a rule that can match them`)
-  if (coverage.conditional > 0) {
-    lines.push(`  ${n(coverage.conditional)} covered only when ${conditionalWhenClause(coverage)}`)
-  }
-  lines.push(`  ${n(coverage.uncovered)} fall through to the default: ${coverage.default_action}`)
-  const histogram = ACTION_ORDER.filter((a) => coverage.by_effective_action[a] > 0).map(
-    (a) => `${a} ${n(coverage.by_effective_action[a])}`,
-  )
-  if (histogram.length > 0) lines.push(`  Effective action: ${histogram.join(', ')}`)
-  if (report.policy.flag_destructive !== null) {
-    lines.push(`  flag_destructive: ${report.policy.flag_destructive}`)
-  }
-  lines.push(`  on_tool_drift: ${report.policy.on_tool_drift}`)
-  if (report.policy.dry_run) lines.push('  Dry-run: enabled (no call is blocked)')
+  lines.push(...renderPolicyCoverageLines(coverage, surface.pairs, report.policy))
 
   // Persisted
   lines.push('')
