@@ -66,6 +66,7 @@ export interface AuditRecord {
     | 'policy_reload'
     | 'kill_switch'
     | 'policy_simulation'
+    | 'policy_generation'
   readonly origin: string
   readonly metadata: Record<string, unknown> | null
 }

@@ -33,8 +33,24 @@ Maintainer notes:
   was written and carrying none otherwise; the kind is excluded from the
   decision aggregates, the top-tools ranking, the status counts and the
   last-policy-write check, and the activation report's `First generation`
-  stage is dated from the earliest such record (`none: no policy_generation
-record within retention` without one). The command that runs generation
+  stage is dated from the earliest such record and reads
+  `none: no policy_generation record within retention` without one. The model
+  writes a rule only for an eligible pair observed in the window that no source
+  rule already matches (by name or by annotation) and that the
+  `flag_destructive: require_approval` posture does not already decide: `allow`
+  for a confident read, `require_approval` for a confident restrict, never
+  `deny`, with no call-count gate and nothing inferred from maxima or approval
+  history. The rule names the tool exactly, is scoped to its door in
+  multi-upstream mode, and is appended after the last source rule into a
+  verbatim copy of the source text, so comments and `${VAR}` placeholders
+  survive and no interpolated value is ever written; a shape the splice will
+  not touch is refused by name and the rules are listed to write by hand. A
+  `require_approval` candidate is written only when the source already carries
+  `dashboard.api_secret` and has the dashboard enabled; otherwise the pair is
+  reported under the failing half. The report prints `Policy coverage` for the
+  source and, when a candidate was written, for the candidate, lists every
+  pair by class with its reason and its call count as a column, and the
+  dashboard labels the record `Generation`. The command that runs generation
   ships separately.
 - **`helio policy simulate [candidate]`: replay the audit trail against a
   candidate policy and report what would change, without a running proxy.**
