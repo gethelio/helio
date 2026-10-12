@@ -64,15 +64,25 @@ const POLICY_RELOAD_KIND_SQL = "'policy_reload'"
 const POLICY_SIMULATION_KIND_SQL = "'policy_simulation'"
 
 /**
- * Every record_kind written about the proxy or the trail rather than about
- * a call: config reloads (issue #341), kill-switch transitions (issue #402)
- * and policy simulations (issue #490), the one record a process other than
- * the proxy writes. Excluded from every decision aggregate (they are not
- * decisions about calls) and kept in the raw total and the per-hour series.
- * A `record_kind` list, never a `policy_decision` one: the decision list
- * names decisions on tool calls that carry no real tool.
+ * The kind of a policy generation run's record (issue #522), written by the
+ * generating process and stamped with the candidate's hash when a candidate
+ * was written. The last-policy-write seek excludes it: a generation writes
+ * no policy either.
  */
-const NON_TOOL_KINDS_SQL = "('kill_switch', 'policy_reload', 'policy_simulation')"
+const POLICY_GENERATION_KIND_SQL = "'policy_generation'"
+
+/**
+ * Every record_kind written about the proxy or the trail rather than about
+ * a call: config reloads (issue #341), kill-switch transitions (issue #402),
+ * policy simulations (issue #490) and policy generations (issue #522), the
+ * two records a process other than the proxy writes. Excluded from every
+ * decision aggregate (they are not decisions about calls) and kept in the
+ * raw total and the per-hour series. A `record_kind` list, never a
+ * `policy_decision` one: the decision list names decisions on tool calls
+ * that carry no real tool.
+ */
+const NON_TOOL_KINDS_SQL =
+  "('kill_switch', 'policy_reload', 'policy_simulation', 'policy_generation')"
 
 /**
  * Maximum records a single bulk export may return. Shared by the dashboard
@@ -159,7 +169,8 @@ const KIND_CREATED_AT_INDEX = 'idx_audit_kind_created_at'
  * @internal Exported so the store tests can assert the query plan.
  */
 export const PERSISTED_SUMMARY_SQL = {
-  totals: `SELECT COUNT(*) AS calls, COUNT(DISTINCT session_id) AS sessions, MIN(created_at) AS first_seen_in_window
+  totals: `SELECT COUNT(*) AS calls, COUNT(DISTINCT session_id) AS sessions,
+      MIN(created_at) AS first_seen_in_window, MAX(created_at) AS last_seen_in_window
     FROM audit_records
     WHERE record_kind = 'tool_call' AND created_at >= ? AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}`,
   pairs: `SELECT tool_name, upstream, origin, COUNT(*) AS calls
@@ -294,6 +305,10 @@ export const ACTIVATION_TIMELINE_SQL = {
     FROM audit_records
     WHERE record_kind = ${POLICY_RELOAD_KIND_SQL} AND block_reason IS NULL
     ORDER BY created_at LIMIT 1`,
+  first_policy_generation: `SELECT created_at
+    FROM audit_records
+    WHERE record_kind = ${POLICY_GENERATION_KIND_SQL}
+    ORDER BY created_at LIMIT 1`,
   any_policy_block: buildAnyPolicyBlockSql(NON_BLOCK_REASONS),
   first_blocked_call: `SELECT created_at, block_reason, tool_name
     FROM audit_records
@@ -302,7 +317,7 @@ export const ACTIVATION_TIMELINE_SQL = {
       AND policy_decision NOT IN ${NON_TOOL_DECISIONS_SQL}
     ORDER BY created_at LIMIT 1`,
   newest_record_hash: `SELECT config_sha256 FROM audit_records
-    WHERE record_kind <> ${POLICY_SIMULATION_KIND_SQL}
+    WHERE record_kind NOT IN (${POLICY_SIMULATION_KIND_SQL}, ${POLICY_GENERATION_KIND_SQL})
     ORDER BY created_at DESC LIMIT 1`,
 } as const
 
@@ -1115,6 +1130,7 @@ export class AuditStore {
       calls: number
       sessions: number
       first_seen_in_window: string | null
+      last_seen_in_window: string | null
     }
     const pairs = this.db.prepare(PERSISTED_SUMMARY_SQL.pairs).all(sinceIso) as Array<{
       tool_name: string
@@ -1130,6 +1146,7 @@ export class AuditStore {
       calls: totals.calls,
       sessions: totals.sessions,
       first_seen_in_window: totals.first_seen_in_window,
+      last_seen_in_window: totals.last_seen_in_window,
       pairs,
       first_seen: first.first_seen,
     }
@@ -1185,7 +1202,9 @@ export class AuditStore {
    * force when it was written (the writer stamps every record at push), so
    * that one seek is the "last policy write" the report compares the config
    * file against; a simulation record is stamped with the candidate's hash
-   * and writes no policy, so the seek steps over it (issue #490).
+   * and writes no policy, so the seek steps over it (issue #490), and so is
+   * a generation record (issue #522), whose own earliest row is the
+   * `first_policy_generation` seek.
    */
   activationTimeline(): ActivationTimeline {
     const firstRule = this.db.prepare(ACTIVATION_TIMELINE_SQL.first_rule_decided_call).get() as
@@ -1194,6 +1213,9 @@ export class AuditStore {
     const firstReload = this.db.prepare(ACTIVATION_TIMELINE_SQL.first_applied_reload).get() as
       | { created_at: string }
       | undefined
+    const firstGeneration = this.db
+      .prepare(ACTIVATION_TIMELINE_SQL.first_policy_generation)
+      .get() as { created_at: string } | undefined
     const anyBlock = this.db.prepare(ACTIVATION_TIMELINE_SQL.any_policy_block).get() !== undefined
     const firstBlocked = anyBlock
       ? (this.db.prepare(ACTIVATION_TIMELINE_SQL.first_blocked_call).get() as
@@ -1206,6 +1228,7 @@ export class AuditStore {
     return {
       first_rule_decided_call: firstRule ?? null,
       first_applied_reload: firstReload ?? null,
+      first_policy_generation: firstGeneration ?? null,
       any_policy_block: anyBlock,
       first_blocked_call: firstBlocked ?? null,
       newest_record_hash: newest === undefined ? null : { hash: newest.config_sha256 },

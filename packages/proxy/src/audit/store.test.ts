@@ -2092,6 +2092,7 @@ describe('AuditStore.persistedSummary', () => {
         calls: 0,
         sessions: 0,
         first_seen_in_window: null,
+        last_seen_in_window: null,
         pairs: [],
         first_seen: null,
       })
@@ -2193,7 +2194,27 @@ describe('AuditStore.persistedSummary', () => {
       expect(summary.calls).toBe(0)
       expect(summary.pairs).toEqual([])
       expect(summary.first_seen_in_window).toBeNull()
+      expect(summary.last_seen_in_window).toBeNull()
       expect(summary.first_seen).toBe(tenDaysAgo)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('dates last_seen_in_window from the newest row in the window, rows after it excluded (issue #522)', () => {
+    const s = createStore()
+    try {
+      const hour = 60 * 60 * 1000
+      const oldest = new Date(Date.now() - 10 * 24 * hour).toISOString()
+      const early = new Date(Date.now() - 3 * hour).toISOString()
+      const late = new Date(Date.now() - 1 * hour).toISOString()
+      s.insert(makeRecord({ tool_name: 'old' }), oldest)
+      s.insert(makeRecord({ tool_name: 'a' }), late)
+      s.insert(makeRecord({ tool_name: 'b' }), early)
+      const summary = s.persistedSummary(since())
+      expect(summary.first_seen_in_window).toBe(early)
+      expect(summary.last_seen_in_window).toBe(late)
+      expect(summary.first_seen).toBe(oldest)
     } finally {
       s.close()
     }
@@ -2462,6 +2483,7 @@ describe('AuditStore activation statements (issue #400)', () => {
         expect(s.activationTimeline()).toEqual({
           first_rule_decided_call: null,
           first_applied_reload: null,
+          first_policy_generation: null,
           any_policy_block: false,
           first_blocked_call: null,
           newest_record_hash: null,
@@ -2730,6 +2752,7 @@ describe('AuditStore activation statements (issue #400)', () => {
           for (const label of [
             'first_rule_decided_call',
             'first_applied_reload',
+            'first_policy_generation',
             'first_blocked_call',
           ] as const) {
             expect(explain(ACTIVATION_TIMELINE_SQL[label], []).join(' | '), label).toContain(
@@ -3393,6 +3416,156 @@ describe('policy_simulation records and the aggregates (issue #490)', () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Policy generation records (issue #522)
+// ---------------------------------------------------------------------------
+
+describe('policy_generation records and the aggregates (issue #522)', () => {
+  const HOUR = 3_600_000
+  const DAY = 24 * HOUR
+  const HASH_A = 'a'.repeat(64)
+  const HASH_C = 'c'.repeat(64)
+  const ago = (ms: number): string => new Date(Date.now() - ms).toISOString()
+
+  /** A generation record in the store's own shape; `hash` null when no candidate was written. */
+  function generationRecord(hash: string | null, tool = 'helio.candidate.yaml'): InsertRecord {
+    return makeRecord({
+      tool_name: tool,
+      tool_input: {},
+      policy_decision: 'policy_generation',
+      block_reason: null,
+      record_kind: 'policy_generation',
+      origin: 'operator',
+      upstream_response: null,
+      upstream_http_status: null,
+      upstream_latency_ms: null,
+      evidence_chain: { policy_generation: { candidate_sha256: hash } },
+      config_sha256: hash,
+    })
+  }
+
+  it('keeps the record in total and per_hour and out of every decision aggregate', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ tool_name: 'get_weather' }))
+      s.insert(makeRecord({ tool_name: 'send_email' }))
+      s.insert(
+        makeRecord({
+          tool_name: 'delete_record',
+          policy_decision: 'deny',
+          block_reason: 'policy_denied',
+        }),
+      )
+      s.insert(generationRecord(HASH_C))
+      const stats = s.aggregate()
+      expect(stats.total).toBe(4)
+      expect(stats.allowed_total).toBe(2)
+      expect(stats.blocked_total).toBe(1)
+      expect(stats.dry_run_total).toBe(0)
+      expect(stats.applied_total).toBe(3)
+      expect(stats.by_decision.map((d) => d.decision)).not.toContain('policy_generation')
+      expect(stats.by_decision.reduce((sum, d) => sum + d.count, 0)).toBe(3)
+      expect(stats.by_block_reason).toEqual([{ reason: 'policy_denied', count: 1 }])
+      expect(stats.top_tools.map((t) => t.tool_name)).not.toContain('helio.candidate.yaml')
+      expect(stats.per_hour.reduce((sum, b) => sum + b.count, 0)).toBe(4)
+      const rows = s.list({ record_kind: 'policy_generation' })
+      expect(rows.total).toBe(1)
+      expect(rows.records[0]?.tool_name).toBe('helio.candidate.yaml')
+    } finally {
+      s.close()
+    }
+  })
+
+  it('does not count the record in the persisted summary or the activation window', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ tool_name: 'get_weather' }))
+      s.insert(generationRecord(HASH_C))
+      s.insert(generationRecord(null, '<policy_generation>'))
+      const since = ago(4 * HOUR)
+      expect(s.persistedSummary(since).calls).toBe(1)
+      expect(s.persistedSummary(since).pairs).toHaveLength(1)
+      const window = s.activationWindow(since)
+      expect(window.permitted).toBe(1)
+      expect(window.blocked).toBe(0)
+      expect(window.reloads_recorded).toBe(0)
+      expect(window.reloads_applied).toBe(0)
+    } finally {
+      s.close()
+    }
+  })
+
+  it('ignores a hash-bearing generation record newer than the last call for the last-policy-write seek', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ config_sha256: HASH_A }), ago(2 * DAY))
+      s.insert(generationRecord(HASH_C), ago(1 * DAY))
+      expect(s.activationTimeline().newest_record_hash).toEqual({ hash: HASH_A })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('ignores a null-hashed generation record newer than the last call for the last-policy-write seek', () => {
+    const s = createStore()
+    try {
+      s.insert(makeRecord({ config_sha256: HASH_A }), ago(2 * DAY))
+      s.insert(generationRecord(null, '<policy_generation>'), ago(1 * DAY))
+      expect(s.activationTimeline().newest_record_hash).toEqual({ hash: HASH_A })
+    } finally {
+      s.close()
+    }
+  })
+
+  it('answers no record for the last-policy-write seek when only a generation record exists', () => {
+    const s = createStore()
+    try {
+      s.insert(generationRecord(HASH_C))
+      expect(s.activationTimeline().newest_record_hash).toBeNull()
+    } finally {
+      s.close()
+    }
+  })
+
+  it('dates first_policy_generation from the earliest generation record by created_at', () => {
+    const s = createStore()
+    try {
+      expect(s.activationTimeline().first_policy_generation).toBeNull()
+      s.insert(makeRecord({ tool_name: 'get_weather' }), ago(5 * DAY))
+      s.insert(generationRecord(HASH_C), ago(1 * DAY))
+      expect(s.activationTimeline().first_policy_generation?.created_at.slice(0, 13)).toBe(
+        ago(1 * DAY).slice(0, 13),
+      )
+      // A zero-rule run inserted later but dated earlier wins: created_at, not insert order.
+      s.insert(generationRecord(null, '<policy_generation>'), ago(3 * DAY))
+      expect(s.activationTimeline().first_policy_generation?.created_at.slice(0, 13)).toBe(
+        ago(3 * DAY).slice(0, 13),
+      )
+    } finally {
+      s.close()
+    }
+  })
+
+  it('does not date first_policy_generation from a simulation record', () => {
+    const s = createStore()
+    try {
+      s.insert(
+        makeRecord({
+          tool_name: 'helio.candidate.yaml',
+          policy_decision: 'policy_simulation',
+          record_kind: 'policy_simulation',
+          origin: 'operator',
+          config_sha256: HASH_C,
+        }),
+        ago(1 * DAY),
+      )
+      expect(s.activationTimeline().first_policy_generation).toBeNull()
+    } finally {
+      s.close()
     }
   })
 })

@@ -17,6 +17,14 @@ export {
   readKillSwitchEvidence,
 } from './kill-switch.js'
 export type { KillSwitchEvidence } from './kill-switch.js'
+export {
+  POLICY_GENERATION_DECISION,
+  POLICY_GENERATION_TOOL_NAME,
+  buildPolicyGenerationRecord,
+  readPolicyGenerationEvidence,
+  writePolicyGenerationRecord,
+} from './policy-generation.js'
+export type { PolicyGenerationEvidence } from './policy-generation.js'
 export type {
   AuditRecord,
   AuditQueryFilters,

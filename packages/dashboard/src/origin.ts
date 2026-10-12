@@ -22,6 +22,7 @@ const RECORD_KIND_LABELS: Record<string, string> = {
   policy_reload: 'Reload',
   kill_switch: 'Kill Switch',
   policy_simulation: 'Simulation',
+  policy_generation: 'Generation',
 }
 
 export function formatRecordKind(kind: string): string | null {

@@ -2,7 +2,15 @@ import { writeFile } from 'node:fs/promises'
 import yaml from 'js-yaml'
 import { formatUtcMinute } from '../util/format-time.js'
 import { StartupError } from '../startup-error.js'
-import { compileToolMatcher } from '../policy/parser.js'
+import {
+  allowRule,
+  approvalRule,
+  commentSafe,
+  exactlyMatchable,
+  globLiteral,
+  quoted,
+  unmatchableNote,
+} from '../policy/rule-text.js'
 import type { ScanReport, ScanReportTool } from './report.js'
 import { stripUserinfoTextually } from './target.js'
 
@@ -22,70 +30,6 @@ export interface ScanScaffoldInput {
   readonly rawUpstream: unknown
   /** The `sha256:` digest of the freshly minted dashboard secret. */
   readonly apiSecretDigest: string
-}
-
-/**
- * A scalar the upstream chose (a tool name, a dot-path), written as a JSON
- * string: a valid YAML double-quoted scalar on one line, whatever the value
- * carries (a newline, a quote, a `#`, YAML structure). Never interpolate an
- * upstream-controlled string into the template any other way.
- */
-function quoted(value: string): string {
-  return JSON.stringify(value)
-}
-
-/** An upstream-chosen string inside a `#` comment: escaped so it stays on its line. */
-function commentSafe(value: string): string {
-  return JSON.stringify(value).slice(1, -1)
-}
-
-/**
- * A tool name as a `match.tool` pattern. The policy compiles that field as a
- * picomatch glob, so every ASCII character outside `[A-Za-z0-9_]` is escaped
- * with a backslash, and a backslash itself is written as the bracket class
- * `[\\]`, the one form picomatch reads as a literal backslash. The pattern
- * then matches that one name and nothing else, whatever the upstream chose
- * (exact over every one- and two-character ASCII name).
- */
-function exactPattern(name: string): string {
-  return name.replaceAll(/[^A-Za-z0-9_\u0080-￿]/g, (char) =>
-    char === '\\' ? '[\\\\]' : `\\${char}`,
-  )
-}
-
-/** The `match.tool` value for a tool name, as a one-line YAML scalar. */
-function globLiteral(name: string): string {
-  return quoted(exactPattern(name))
-}
-
-/**
- * Whether the policy compiler will accept the exact pattern for this name
- * and evaluate it: the pattern is compiled with the compiler's own builder
- * and tested against the name here, because the glob engine refuses a
- * pattern above 65,536 characters at compile time and one at exactly that
- * length compiles and then throws when evaluated. An empty name has no
- * pattern at all.
- */
-function exactlyMatchable(name: string): boolean {
-  if (name === '') return false
-  try {
-    const matcher = compileToolMatcher(exactPattern(name), 0)
-    return matcher.test(name) && !matcher.test(`${name}_`)
-  } catch {
-    return false
-  }
-}
-
-/** The comment written in place of a rule for a tool no pattern can name. */
-function unmatchableNote(tool: ScanReportTool, prefix: string): string {
-  if (tool.name === '') {
-    return `${prefix}# a tool with an empty name was skipped: match.tool cannot name it\n`
-  }
-  const excerpt = tool.name.length > 60 ? `${tool.name.slice(0, 60)}...` : tool.name
-  return (
-    `${prefix}# ${commentSafe(excerpt)} (${String(tool.name.length)} characters) cannot be named ` +
-    `by a match.tool pattern: the glob engine refuses it; write its rule by hand\n`
-  )
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -121,26 +65,6 @@ function upstreamBlock(input: ScanScaffoldInput): string {
   return `${block}#   headers:\n#     Authorization: "Bearer \${UPSTREAM_TOKEN}"\n`
 }
 
-function approvalRule(tool: ScanReportTool, prefix: string): string {
-  return (
-    `${prefix}- name: ${quoted(`approve-${tool.name}`)}\n` +
-    `${prefix}  match:\n` +
-    `${prefix}    tool: ${globLiteral(tool.name)}\n` +
-    `${prefix}  action: require_approval\n` +
-    `${prefix}  approval:\n` +
-    `${prefix}    channel: dashboard\n`
-  )
-}
-
-function allowRule(tool: ScanReportTool, prefix: string): string {
-  return (
-    `${prefix}- name: ${quoted(`allow-${tool.name}`)}\n` +
-    `${prefix}  match:\n` +
-    `${prefix}    tool: ${globLiteral(tool.name)}\n` +
-    `${prefix}  action: allow\n`
-  )
-}
-
 function rulesBlock(tools: readonly ScanReportTool[]): string {
   const annotatedDestructive = tools.filter((tool) => tool.destructive === 'annotated')
   const readOnly = tools.filter((tool) => tool.hints.readOnlyHint.value)
@@ -152,25 +76,25 @@ function rulesBlock(tools: readonly ScanReportTool[]): string {
   } else {
     lines.push('  rules:\n')
     for (const tool of annotatedDestructive) {
-      if (exactlyMatchable(tool.name)) lines.push(approvalRule(tool, '    '))
+      if (exactlyMatchable(tool.name)) lines.push(approvalRule(tool.name, '    '))
     }
     for (const tool of readOnly) {
-      if (exactlyMatchable(tool.name)) lines.push(allowRule(tool, '    '))
+      if (exactlyMatchable(tool.name)) lines.push(allowRule(tool.name, '    '))
     }
   }
   // A name no pattern can carry has no rule: the note says so where it would sit.
   for (const tool of [...annotatedDestructive, ...readOnly]) {
-    if (!exactlyMatchable(tool.name)) lines.push(unmatchableNote(tool, '    '))
+    if (!exactlyMatchable(tool.name)) lines.push(unmatchableNote(tool.name, '    '))
   }
   for (const tool of defaultDestructive) {
     if (!exactlyMatchable(tool.name)) {
-      lines.push(unmatchableNote(tool, '    '))
+      lines.push(unmatchableNote(tool.name, '    '))
       continue
     }
     lines.push(
       `    # ${commentSafe(tool.name)} sets no destructiveHint: destructive by MCP default\n`,
     )
-    lines.push(approvalRule(tool, '    # '))
+    lines.push(approvalRule(tool.name, '    # '))
   }
   return lines.join('')
 }

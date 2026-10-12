@@ -212,6 +212,16 @@ describe('policy_simulation outcome (issue #490)', () => {
   })
 })
 
+describe('policy_generation outcome (issue #522)', () => {
+  it('renders a generation record as Allow beside its chip, the simulation precedent', () => {
+    // A generation refuses nothing, so block_reason is null and the badge
+    // reads Allow. The row title and the label-aware tool filters are #442's.
+    expect(deriveDisplayOutcome({ policy_decision: 'policy_generation', block_reason: null })).toBe(
+      'allow',
+    )
+  })
+})
+
 describe('policy_reload outcome (issue #341)', () => {
   it('renders a refused reload as Rejected, never Allow, and an applied one as Allow beside the Reload chip', () => {
     const refused = deriveDisplayOutcome({

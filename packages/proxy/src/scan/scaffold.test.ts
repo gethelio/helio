@@ -9,7 +9,10 @@ import { buildScanReport, emptyAllowPolicy } from './report.js'
 import type { ScanReport } from './report.js'
 import { surfaceToolsFromList } from './tools.js'
 import { helioConfigSchema } from '../config/schema.js'
+import { parseConfigSource } from '../config/loader.js'
+import { createHash } from 'node:crypto'
 import { compilePolicies } from '../policy/parser.js'
+import { ruleLabel } from '../policy/rule-text.js'
 import { compileBudgets } from '../budget/parser.js'
 
 // ---------------------------------------------------------------------------
@@ -505,7 +508,7 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     expect(policy.rules).toHaveLength(list.length)
     for (const name of list) {
       const rule = policy.rules.find(
-        (r) => r.name === `approve-${name}` || r.name === `allow-${name}`,
+        (r) => r.name === ruleLabel('approve', name) || r.name === ruleLabel('allow', name),
       )
       const matcher = rule?.match.tool
       if (matcher === undefined) throw new Error(`no rule for ${JSON.stringify(name)}`)
@@ -529,7 +532,7 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     expect(text).not.toContain('cannot be matched exactly')
     for (const name of names) {
       const rule = policy.rules.find(
-        (r) => r.name === `approve-${name}` || r.name === `allow-${name}`,
+        (r) => r.name === ruleLabel('approve', name) || r.name === ruleLabel('allow', name),
       )
       const matcher = rule?.match.tool
       if (matcher === undefined) throw new Error(`no live rule for ${JSON.stringify(name)}`)
@@ -585,6 +588,35 @@ describe('renderScanTemplate exact-name matchers under metacharacter interaction
     expect(contributors).toHaveLength(2)
     expect(contributors[0]?.match.tool.test('pay\\slash')).toBe(true)
     expect(contributors[0]?.match.tool.test('payslash')).toBe(false)
+  })
+})
+
+describe('renderScanTemplate against a placeholder-shaped tool name', () => {
+  it('writes the rule under a label the config loader will not interpolate, with the exact tool', () => {
+    const text = renderScanTemplate({
+      report: report([
+        {
+          name: 'read_${HELIO_SCAN_UNSET_ZZZ}',
+          annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+      ]),
+      rawUpstream: undefined,
+      apiSecretDigest: DIGEST,
+    })
+    expect(text).toContain(
+      '    - name: "allow-read__{HELIO_SCAN_UNSET_ZZZ}"\n' +
+        '      match:\n' +
+        '        tool: "read_\\\\$\\\\{HELIO_SCAN_UNSET_ZZZ\\\\}"\n' +
+        '      action: allow\n',
+    )
+    // The written file loads through the real loader with the variable unset.
+    const parsed = parseConfigSource(
+      { raw: text, sha256: createHash('sha256').update(text).digest('hex') },
+      'helio.yaml',
+      {},
+    ).config
+    expect(parsed.policies.rules.map((r) => r.name)).toEqual(['allow-read__{HELIO_SCAN_UNSET_ZZZ}'])
+    expect(parsed.policies.rules[0]?.match.tool).toBe('read_\\$\\{HELIO_SCAN_UNSET_ZZZ\\}')
   })
 })
 

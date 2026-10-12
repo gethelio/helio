@@ -6667,7 +6667,7 @@ ${dashboard}audit:
         expect(stdout).toContain(
           `  First rule                     ${dayOf(new Date(base.getTime() + 31 * MINUTE))}   first call a rule decided\n` +
             '                                 Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.\n' +
-            '  First generation               not available in this version\n' +
+            '  First generation               none: no policy_generation record within retention\n' +
             '  First simulation               not available in this version\n' +
             '  First apply                    not available in this version\n' +
             `  First enforcement decision     ${dayOf(new Date(base.getTime() + 31 * MINUTE))}   first blocked call (policy_denied)\n`,

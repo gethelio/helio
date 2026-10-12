@@ -258,6 +258,7 @@ export function AuditFilterBar({
           <option value="policy_reload">Reload</option>
           <option value="kill_switch">Kill Switch</option>
           <option value="policy_simulation">Simulation</option>
+          <option value="policy_generation">Generation</option>
         </select>
 
         {/* Session identity source (issue #250) — the raw five-value config
