@@ -211,6 +211,7 @@ function persistedFixture(since: string): PersistedSummary {
     calls: 123,
     sessions: 7,
     first_seen_in_window: '2026-09-23T09:27:35.880Z',
+    last_seen_in_window: '2026-09-23T12:20:00.000Z',
     pairs: [
       { tool_name: PLANTED.otherTool, upstream: null, origin: 'mcp', calls: 35 },
       { tool_name: PLANTED.toolName, upstream: null, origin: 'mcp', calls: 34 },
@@ -247,6 +248,7 @@ function timelineFixture(): ActivationTimeline {
       matched_rule: PLANTED.decidingRule,
     },
     first_applied_reload: { created_at: '2026-09-23T11:00:00.000Z' },
+    first_policy_generation: { created_at: '2026-09-24T08:15:00.000Z' },
     any_policy_block: true,
     first_blocked_call: {
       created_at: '2026-09-23T10:27:35.885Z',
@@ -404,6 +406,13 @@ describe('buildActivationReport', () => {
     })
   })
 
+  it('leaves the generation stage undated when no policy_generation record exists', () => {
+    const { timeline } = buildActivationReport(
+      input({ timeline: { ...timelineFixture(), first_policy_generation: null } }),
+    )
+    expect(timeline.first_generation).toEqual({ at: null, source: null })
+  })
+
   it('states the six stages with their sources and maps an unknown block reason to other', () => {
     const { timeline } = buildActivationReport(input())
     expect(timeline.first_call_observed).toEqual({
@@ -414,7 +423,10 @@ describe('buildActivationReport', () => {
       at: '2026-09-23T10:27:35.880Z',
       source: 'first_rule_decided_call',
     })
-    expect(timeline.first_generation).toEqual({ available: false, reason: 'not in this version' })
+    expect(timeline.first_generation).toEqual({
+      at: '2026-09-24T08:15:00.000Z',
+      source: 'first_policy_generation_record',
+    })
     expect(timeline.first_simulation).toEqual({ available: false, reason: 'not in this version' })
     expect(timeline.first_apply).toEqual({ available: false, reason: 'not in this version' })
     expect(timeline.first_enforcement_decision).toEqual({
@@ -650,7 +662,7 @@ describe('renderActivationText', () => {
         '  First call observed            2026-09-23   earliest persisted tool call\n' +
         '  First rule                     2026-09-23   first call a rule decided\n' +
         `${CAVEAT}\n` +
-        '  First generation               not available in this version\n' +
+        '  First generation               2026-09-24   first policy_generation record\n' +
         '  First simulation               not available in this version\n' +
         '  First apply                    not available in this version\n' +
         '  First enforcement decision     2026-09-23   first blocked call (other)\n' +
@@ -684,6 +696,7 @@ describe('renderActivationText', () => {
           timeline: {
             first_rule_decided_call: null,
             first_applied_reload: null,
+            first_policy_generation: null,
             any_policy_block: false,
             first_blocked_call: null,
             newest_record_hash: null,
@@ -702,6 +715,10 @@ describe('renderActivationText', () => {
     expect(text).toContain(
       '  First rule                     none: no call decided by a rule and no applied reload within retention (a rule may be in the file and never have matched)\n' +
         `${CAVEAT}\n`,
+    )
+    expect(text).toContain(
+      '  First generation               none: no policy_generation record within retention\n' +
+        '  First simulation               not available in this version\n',
     )
     expect(text).toContain(
       '  First enforcement decision     none: no call blocked within retention\n',

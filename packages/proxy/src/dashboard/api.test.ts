@@ -2979,6 +2979,7 @@ describe('GET /api/policy/status', () => {
             calls: 0,
             sessions: 0,
             first_seen_in_window: null,
+            last_seen_in_window: null,
             pairs: [],
             first_seen: null,
           },

@@ -54,6 +54,9 @@ export interface ActivationSources {
 
 export type FirstRuleSource = 'first_rule_decided_call' | 'first_applied_reload'
 
+/** The one source a dated `First generation` stage has (issue #522). */
+export type FirstGenerationSource = 'first_policy_generation_record'
+
 /** A stage this build does not have; never rendered as something the user did not do. */
 export interface UnavailableStage {
   readonly available: false
@@ -70,7 +73,11 @@ export interface ActivationReportTimeline {
     readonly source: FirstRuleSource | null
     readonly rule_name?: string
   }
-  readonly first_generation: UnavailableStage
+  /** Dated from the earliest `policy_generation` record within retention; `at` null without one. */
+  readonly first_generation: {
+    readonly at: string | null
+    readonly source: FirstGenerationSource | null
+  }
   readonly first_simulation: UnavailableStage
   readonly first_apply: UnavailableStage
   readonly first_enforcement_decision: {
@@ -345,10 +352,14 @@ function buildTimeline(
       ? { at: reload.created_at, source: 'first_applied_reload' }
       : { at: null, source: null }
   const blocked = timeline.first_blocked_call
+  const generation = timeline.first_policy_generation
   return {
     first_call_observed: { at: persisted.first_seen, source: 'first_persisted_tool_call' },
     first_rule: firstRule,
-    first_generation: UNAVAILABLE_STAGE,
+    first_generation:
+      generation === null
+        ? { at: null, source: null }
+        : { at: generation.created_at, source: 'first_policy_generation_record' },
     first_simulation: UNAVAILABLE_STAGE,
     first_apply: UNAVAILABLE_STAGE,
     first_enforcement_decision:
@@ -653,7 +664,12 @@ export function renderActivationText(report: ActivationReport): string {
     lines.push(datedStage('First rule', rule.at, source))
   }
   lines.push(`${' '.repeat(STAGE_LABEL_WIDTH + 2)}${FIRST_RULE_CAVEAT}`)
-  lines.push(stageLine('First generation', 'not available in this version'))
+  const generation = timeline.first_generation
+  lines.push(
+    generation.at === null
+      ? stageLine('First generation', 'none: no policy_generation record within retention')
+      : datedStage('First generation', generation.at, 'first policy_generation record'),
+  )
   lines.push(stageLine('First simulation', 'not available in this version'))
   lines.push(stageLine('First apply', 'not available in this version'))
   const enforcement = timeline.first_enforcement_decision

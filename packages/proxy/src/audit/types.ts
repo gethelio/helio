@@ -86,7 +86,10 @@ export interface AuditRecord {
    * and `'policy_simulation'` for one `helio policy simulate` run (issue
    * #490), the same pattern under `evidence_chain.policy_simulation` with the
    * constant `policy_simulation`, the one record a process other than the
-   * proxy writes.
+   * proxy writes; and `'policy_generation'` for one policy generation run
+   * (issue #522), the same pattern under `evidence_chain.policy_generation`
+   * with the constant `policy_generation`, stamped with the candidate's hash
+   * when a candidate was written and carrying none otherwise.
    */
   readonly record_kind:
     | 'tool_call'
@@ -96,6 +99,7 @@ export interface AuditRecord {
     | 'policy_reload'
     | 'kill_switch'
     | 'policy_simulation'
+    | 'policy_generation'
   /**
    * Enforcement origin: `'mcp'` for the proxy path, or an adapter-supplied
    * origin string (e.g. `'openclaw'`) for sideband-governed calls. Surfaces
@@ -304,6 +308,8 @@ export interface PersistedSummary {
   readonly calls: number
   readonly sessions: number
   readonly first_seen_in_window: string | null
+  /** The newest persisted tool call within the window; null on an empty window (issue #522). */
+  readonly last_seen_in_window: string | null
   readonly pairs: readonly PersistedPair[]
   readonly first_seen: string | null
 }
@@ -388,7 +394,9 @@ export interface ActivationWindow {
  * the row's `created_at` (insert time). `any_policy_block` is the existence
  * check that decides whether `first_blocked_call` was walked for at all;
  * `newest_record_hash` is null on an empty table, and its `hash` is null
- * when the newest row of any kind carries no config hash.
+ * when the newest row of any kind carries no config hash;
+ * `first_policy_generation` is the earliest `policy_generation` record
+ * within retention (issue #522).
  */
 export interface ActivationTimeline {
   readonly first_rule_decided_call: {
@@ -396,6 +404,7 @@ export interface ActivationTimeline {
     readonly matched_rule: string
   } | null
   readonly first_applied_reload: { readonly created_at: string } | null
+  readonly first_policy_generation: { readonly created_at: string } | null
   readonly any_policy_block: boolean
   readonly first_blocked_call: {
     readonly created_at: string

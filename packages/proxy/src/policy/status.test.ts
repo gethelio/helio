@@ -50,6 +50,7 @@ function persisted(overrides: Partial<PersistedSummary> = {}): PersistedSummary 
     calls: 0,
     sessions: 0,
     first_seen_in_window: null,
+    last_seen_in_window: null,
     pairs: [],
     first_seen: null,
     ...overrides,

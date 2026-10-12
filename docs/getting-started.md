@@ -518,7 +518,7 @@ Timeline (dates within retention)
   First call observed            2026-09-27   earliest persisted tool call
   First rule                     2026-09-27   first call a rule decided
                                  Rules present at the first start, or edited between runs, leave no reload record; a rule is visible here only once it decides a call or arrives by a live reload.
-  First generation               not available in this version
+  First generation               none: no policy_generation record within retention
   First simulation               not available in this version
   First apply                    not available in this version
   First enforcement decision     2026-09-27   first blocked call (policy_denied)
