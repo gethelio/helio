@@ -364,7 +364,12 @@ function asList(value: unknown): readonly unknown[] | null {
 export function verifySplice(source: string, candidate: string, fragment: string): boolean {
   const before = loadRoot(source)
   const after = loadRoot(candidate)
-  const appended = asList(yaml.load(fragment))
+  let appended: readonly unknown[] | null
+  try {
+    appended = asList(yaml.load(fragment))
+  } catch {
+    appended = null
+  }
   if (before === null || after === null || appended === null) return false
   const beforeKeys = Object.keys(before)
   const afterKeys = Object.keys(after).filter((key) => key !== 'policies' || key in before)

@@ -407,6 +407,13 @@ describe('verifySplice', () => {
     expect(verifySplice(source, `${good}oops: [\n`, fragment)).toBe(false)
   })
 
+  it('answers false, never throws, for a fragment that does not load', () => {
+    const source = `${MINIMAL_HEAD}policies:\n  rules: []\n`
+    const candidate = `${MINIMAL_HEAD}policies:\n  rules:\n    - name: x\n`
+    expect(verifySplice(source, candidate, '- name: "a\n  b: [\n')).toBe(false)
+    expect(verifySplice(source, candidate, '- name: "allow-x"\nmatch: {\n')).toBe(false)
+  })
+
   it('compares an uninterpolated placeholder as the literal it is', () => {
     const source = `${BARE_HEAD}policies:\n  rules: []\ndashboard:\n  api_secret: '\${HELIO_DASHBOARD_SECRET}'\n`
     const candidate = text(appendRules(source, RULE))

@@ -11,6 +11,10 @@ import type { GenerationModel, GenerationPair } from './model.js'
 import type { GenerationDefinition } from './classify.js'
 import type { PersistedPair, PersistedSummary } from '../audit/types.js'
 import { parseConfigSource } from '../config/loader.js'
+import { compilePolicies } from '../policy/parser.js'
+import { classifySurface } from '../policy/surface.js'
+import type { SurfaceDoor } from '../policy/surface.js'
+import { pickHints } from '../policy/tool-definitions.js'
 import { demoGenerationInput } from './__fixtures__/demo-input.js'
 
 // ---------------------------------------------------------------------------
@@ -92,11 +96,35 @@ function run(args: {
   }>
   readonly observed?: PersistedSummary
 }): GenerationModel {
+  const doors = args.doors ?? [{ name: undefined, tools: args.tools ?? [READ_FILE] }]
+  LAST_DOORS = doors
   return buildGenerationModel({
     source: args.source ?? source(),
-    doors: args.doors ?? [{ name: undefined, tools: args.tools ?? [READ_FILE] }],
+    doors,
     observed: args.observed ?? observed([{ tool_name: 'read_file', calls: 5 }]),
   })
+}
+
+/** The doors the last `run()` classified, for the surface the written FILE is classified over. */
+let LAST_DOORS: ReadonlyArray<{
+  name: string | undefined
+  tools: readonly GenerationDefinition[]
+}> = []
+
+function lastSurfaceDoors(): SurfaceDoor[] {
+  return LAST_DOORS.map((door) => ({
+    kind: 'upstream',
+    name: door.name,
+    tools: door.tools.map((def) => {
+      const hints = pickHints(def.annotations)
+      return {
+        name: def.name,
+        annotations: hints,
+        current_annotations: hints,
+        drifted: def.baseline?.drifted ?? false,
+      }
+    }),
+  }))
 }
 
 function pair(model: GenerationModel, tool: string, door?: string): GenerationPair {
@@ -139,7 +167,8 @@ function expectInsertion(model: GenerationModel): void {
       expect(pairAfter.matched_rule).toEqual(pairBefore.matched_rule)
     }
   }
-  // The candidate passes the real schema, with every placeholder of the source left as it was.
+  // The candidate passes the real schema, with every placeholder of the source left as it was,
+  // and the policy the FILE parses back to classifies every pair as the in-memory surface does.
   const text = candidateText(model)
   const parsed = parseConfigSource(
     { raw: text, sha256: createHash('sha256').update(text).digest('hex') },
@@ -150,6 +179,19 @@ function expectInsertion(model: GenerationModel): void {
     model.source.policy.rules.length +
       model.pairs.filter((p) => p.disposition === 'written').length,
   )
+  const fromFile = classifySurface({
+    doors: lastSurfaceDoors(),
+    policy: compilePolicies(parsed.policies).policy,
+    environment: parsed.environment,
+  }).coverage.pairs
+  expect(fromFile).toHaveLength(after.length)
+  for (const [i, pairAfter] of after.entries()) {
+    const fromFilePair = fromFile[i]
+    expect(fromFilePair?.tool, pairAfter.tool).toBe(pairAfter.tool)
+    expect(fromFilePair?.matched_rule, pairAfter.tool).toEqual(pairAfter.matched_rule)
+    expect(fromFilePair?.effective_action, pairAfter.tool).toBe(pairAfter.effective_action)
+    expect(fromFilePair?.effective_source, pairAfter.tool).toBe(pairAfter.effective_source)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +551,64 @@ describe('buildGenerationModel dispositions', () => {
     expectInsertion(model)
     const after = candidateSurface(model).coverage.pairs[0]
     expect(after?.conditional_rules.map((r) => r.name)).toEqual(['allow-read_file'])
+  })
+
+  it('compiles the candidate policy from the exact pattern the file carries, so a glob sibling is not swallowed', () => {
+    // read_file* is a confident read (the first token is read); read_file is its unwritten sibling
+    // on a deny default. The raw name as a glob would allow the sibling in memory while the file,
+    // which carries the escaped pattern, denies it.
+    const model = run({
+      source: source({ policies: 'policies:\n  default: deny\n  rules: []\n' }),
+      tools: [
+        def({ name: 'read_file*' }),
+        def({ name: 'read_file' }),
+        def({ name: 'read_file[id]' }),
+      ],
+      observed: observed([
+        { tool_name: 'read_file*', calls: 2 },
+        { tool_name: 'read_file[id]', calls: 1 },
+      ]),
+    })
+    expect(pair(model, 'read_file*').disposition).toBe('written')
+    expect(pair(model, 'read_file[id]').disposition).toBe('written')
+    expect(pair(model, 'read_file').disposition).toBe('eligible_unobserved')
+    const after = candidateSurface(model).coverage.pairs
+    const sibling = after.find((p) => p.tool === 'read_file')
+    expect(sibling?.matched_rule).toBeNull()
+    expect(sibling?.effective_action).toBe('deny')
+    expect(candidateSurface(model).coverage.matched).toBe(2)
+    expect(candidateText(model)).toContain('tool: "read_file\\\\*"\n')
+    expect(candidateText(model)).toContain('tool: "read_file\\\\[id\\\\]"\n')
+    expectInsertion(model)
+  })
+
+  it('keeps a dollar sign in a colliding name literal when the -generated suffix is applied', () => {
+    const collide = (tool: string) =>
+      source({
+        policies: `policies:\n  default: allow\n  rules:\n    - name: ${JSON.stringify(`allow-${tool}`)}\n      match:\n        tool: other_tool\n      action: deny\n`,
+      })
+    for (const tool of ['get_$$amount', 'get_$&file', "get_$'tail", 'get_$`head', 'get_$1']) {
+      const model = run({
+        source: collide(tool),
+        tools: [def({ name: tool })],
+        observed: observed([{ tool_name: tool, calls: 1 }]),
+      })
+      const p = pair(model, tool)
+      expect(p.disposition, tool).toBe('written')
+      expect(p.rule?.name, tool).toBe(`allow-${tool}-generated`)
+      const text = candidateText(model)
+      expect(text, tool).toContain(`- name: ${JSON.stringify(`allow-${tool}-generated`)}\n`)
+      const parsed = parseConfigSource(
+        { raw: text, sha256: createHash('sha256').update(text).digest('hex') },
+        'candidate.yaml',
+        {},
+      ).config
+      expect(
+        parsed.policies.rules.map((r) => r.name),
+        tool,
+      ).toEqual([`allow-${tool}`, `allow-${tool}-generated`])
+      expectInsertion(model)
+    }
   })
 
   it('counts observed rows on no listed door and never classifies them', () => {

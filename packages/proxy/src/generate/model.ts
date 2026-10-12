@@ -4,7 +4,13 @@ import type { PolicyGenerationEvidence } from '../audit/policy-generation.js'
 import { hasDashboardApiSecret, policyRuleSchema } from '../config/schema.js'
 import type { HelioConfig } from '../config/schema.js'
 import { compilePolicies } from '../policy/parser.js'
-import { allowRule, approvalRule, exactlyMatchable, quoted } from '../policy/rule-text.js'
+import {
+  allowRule,
+  approvalRule,
+  exactPattern,
+  exactlyMatchable,
+  quoted,
+} from '../policy/rule-text.js'
 import { doorOfRow, pairKey } from '../policy/status.js'
 import { classifySurface } from '../policy/surface.js'
 import type {
@@ -254,11 +260,13 @@ function ruleText(
   const base = `${action === 'allow' ? 'allow' : 'approve'}-${tool}`
   const name = taken.has(base) ? `${base}-generated` : base
   const rendered = action === 'allow' ? allowRule(tool, '', scope) : approvalRule(tool, '', scope)
-  // The renderers name the rule from the tool; the collision suffix is this module's.
+  // The renderers name the rule from the tool; the collision suffix is this module's. The
+  // one name line is swapped by split and join, never String.replace, whose replacement
+  // string reads `$&`, `$'`, `$\`` and `$$` as patterns.
   const named =
     name === base
       ? rendered
-      : rendered.replace(`- name: ${quoted(base)}\n`, `- name: ${quoted(name)}\n`)
+      : rendered.split(`- name: ${quoted(base)}\n`).join(`- name: ${quoted(name)}\n`)
   const comment = `# generated: ${classWords(classified.class)}, ${classified.reason}; ${frequencyWords(calls)}\n`
   return { name, action, text: `${comment}${named}` }
 }
@@ -411,9 +419,11 @@ export function buildGenerationModel(input: GenerationModelInput): GenerationMod
 /**
  * Append the written rules, in report order, after the last source rule in
  * a copy of the source text; compile the candidate's policy from the source
- * policy plus the same rules validated one by one through the rule schema
- * (the splice's self-check proves text and object agree, and the model has
- * no environment to re-interpolate the text with); classify its surface.
+ * policy plus the same rules validated one by one through the rule schema,
+ * each with the EXACT pattern the file carries as its `match.tool` (the raw
+ * name would be read as a glob and swallow siblings the file does not match;
+ * the model has no environment to re-interpolate the text with); classify
+ * its surface.
  */
 function writeCandidate(
   source: GenerationSource,
@@ -432,7 +442,7 @@ function writeCandidate(
     const rule = pair.rule as GenerationRule
     return policyRuleSchema.parse({
       name: rule.name,
-      match: { tool: pair.tool, ...scope },
+      match: { tool: exactPattern(pair.tool), ...scope },
       action: rule.action,
       ...(rule.action === 'require_approval' ? { approval: { channel: 'dashboard' } } : {}),
     })
