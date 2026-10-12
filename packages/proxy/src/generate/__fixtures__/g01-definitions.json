@@ -1,0 +1,1064 @@
+{
+  "oracle": "metrics.py, issue #487, measured 2026-10-09",
+  "servers": [
+    {
+      "file": "11-filesystem-sdk.json",
+      "server": "secure-filesystem-server 0.2.0",
+      "tools": [
+        {
+          "name": "read_file",
+          "description": "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.tail", "$.head"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "read_text_file",
+          "description": "Read the complete contents of a file from the file system as text. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Use the 'head' parameter to read only the first N lines of a file, or the 'tail' parameter to read only the last N lines of a file. Operates on the file as text regardless of extension. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.tail", "$.head"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "read_media_file",
+          "description": "Read a file and return it as a base64-encoded content block with its MIME type. Image and audio files are returned as image/audio content; any other file type is returned as an embedded resource. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "read_multiple_files",
+          "description": "Read the contents of multiple files simultaneously. This is more efficient than reading files one by one when you need to analyze or compare multiple files. Each file's content is returned with its path as a reference. Failed reads for individual files won't stop the entire operation. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.paths"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "write_file",
+          "description": "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles text content with proper encoding. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.content"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "edit_file",
+          "description": "Make line-based edits to a text file. Each edit replaces exact line sequences with new content. Returns a git-style diff showing the changes made. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.edits", "$.dryRun"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "create_directory",
+          "description": "Create a new directory or ensure a directory exists. Can create multiple nested directories in one operation. If the directory already exists, this operation will succeed silently. Perfect for setting up directory structures for projects or ensuring required paths exist. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "write-class name"
+          }
+        },
+        {
+          "name": "list_directory",
+          "description": "Get a detailed listing of all files and directories in a specified path. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is essential for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "list_directory_with_sizes",
+          "description": "Get a detailed listing of all files and directories in a specified path, including sizes. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is useful for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.sortBy"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "directory_tree",
+          "description": "Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.excludePatterns"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "move_file",
+          "description": "Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.",
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.source", "$.destination"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "search_files",
+          "description": "Recursively search for files and directories matching a pattern. The patterns should be glob-style patterns that match paths relative to the working directory. Use pattern like '*.ext' to match files in current directory, and '**/*.ext' to match files in all subdirectories. Returns full paths to all matching items. Great for finding files when you don't know their exact location. Only searches within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path", "$.pattern", "$.excludePatterns"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "get_file_info",
+          "description": "Retrieve detailed metadata about a file or directory. Returns comprehensive information including size, creation time, last modified time, permissions, and type. This tool is perfect for understanding file characteristics without reading the actual content. Only works within allowed directories.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.path"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "list_allowed_directories",
+          "description": "Returns the list of directories that this server is allowed to access. Subdirectories within these allowed directories are also accessible. Use this to understand which directories and their nested paths are available before trying to access files.",
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": [],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        }
+      ]
+    },
+    {
+      "file": "12-time-sdk.json",
+      "server": "mcp-time 1.30.0",
+      "tools": [
+        {
+          "name": "get_current_time",
+          "description": "Get current time in a specific timezone",
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.timezone"],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "convert_time",
+          "description": "Convert time between timezones",
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+          },
+          "input_keys": ["$.source_timezone", "$.time", "$.target_timezone"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        }
+      ]
+    },
+    {
+      "file": "13-playwright-sdk.json",
+      "server": "Playwright 1.64.0-alpha-1789764292000",
+      "tools": [
+        {
+          "name": "browser_close",
+          "description": "Close the page",
+          "annotations": {
+            "title": "Close browser",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": [],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_resize",
+          "description": "Resize the browser window",
+          "annotations": {
+            "title": "Resize browser window",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.width", "$.height"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_console_messages",
+          "description": "Returns all console messages",
+          "annotations": {
+            "title": "Get console messages",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.level", "$.all", "$.filename"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "browser_handle_dialog",
+          "description": "Handle a dialog",
+          "annotations": {
+            "title": "Handle a dialog",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.accept", "$.promptText"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_emulate_media",
+          "description": "Emulate CSS media features for the page, for example switch between the light and dark color scheme. Omitted parameters are left unchanged; null clears an override.",
+          "annotations": {
+            "title": "Emulate media features",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": [
+            "$.colorScheme",
+            "$.reducedMotion",
+            "$.forcedColors",
+            "$.contrast",
+            "$.media"
+          ],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_evaluate",
+          "description": "Evaluate JavaScript expression on page or element",
+          "annotations": {
+            "title": "Evaluate JavaScript",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.function", "$.filename"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_file_upload",
+          "description": "Upload one or multiple files",
+          "annotations": {
+            "title": "Upload files",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.paths"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_drop",
+          "description": "Drop files or MIME-typed data onto an element, as if dragged from outside the page. At least one of \"paths\" or \"data\" must be provided.",
+          "annotations": {
+            "title": "Drop files or data onto an element",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.paths", "$.data"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_find",
+          "description": "Search the accessibility snapshot of the current page for text or a regular expression. Returns matching snapshot nodes with a few lines of surrounding context (like search snippets), each shown under its path from the root of the tree, which is cheaper than capturing the whole snapshot when you only need to locate an element and its ref.",
+          "annotations": {
+            "title": "Find in page snapshot",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.text", "$.regex"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "open-world read"
+          }
+        },
+        {
+          "name": "browser_fill_form",
+          "description": "Fill multiple form fields",
+          "annotations": {
+            "title": "Fill form",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.fields"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_press_key",
+          "description": "Press a key on the keyboard",
+          "annotations": {
+            "title": "Press a key",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.key"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_type",
+          "description": "Type text into editable element",
+          "annotations": {
+            "title": "Type text",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.text", "$.submit", "$.slowly"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_navigate",
+          "description": "Navigate to a URL",
+          "annotations": {
+            "title": "Navigate to a URL",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.url"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_navigate_back",
+          "description": "Go back to the previous page in the history",
+          "annotations": {
+            "title": "Go back",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": [],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_network_requests",
+          "description": "Returns a numbered list of network requests since loading the page. Use browser_network_request with the number to get full details.",
+          "annotations": {
+            "title": "List network requests",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.static", "$.filter", "$.filename"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "browser_network_request",
+          "description": "Returns full details (headers and body) of a single network request, or a single part if `part` is set. Use the number from browser_network_requests.",
+          "annotations": {
+            "title": "Show network request details",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.index", "$.part", "$.filename"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "browser_run_code_unsafe",
+          "description": "Run a Playwright code snippet. Unsafe: executes arbitrary JavaScript in the Playwright server process and is RCE-equivalent.",
+          "annotations": {
+            "title": "Run Playwright code (unsafe)",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.code", "$.filename"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_take_screenshot",
+          "description": "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions.",
+          "annotations": {
+            "title": "Take a screenshot",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.type", "$.filename", "$.fullPage", "$.scale"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "browser_snapshot",
+          "description": "Capture accessibility snapshot of the current page, this is better than screenshot",
+          "annotations": {
+            "title": "Page snapshot",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.target", "$.filename", "$.depth", "$.boxes"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "browser_click",
+          "description": "Perform click on a web page",
+          "annotations": {
+            "title": "Click",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.doubleClick", "$.button", "$.modifiers"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_drag",
+          "description": "Perform drag and drop between two elements",
+          "annotations": {
+            "title": "Drag mouse",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.startElement", "$.startTarget", "$.endElement", "$.endTarget"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_hover",
+          "description": "Hover over element on page",
+          "annotations": {
+            "title": "Hover mouse",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_select_option",
+          "description": "Select an option in a dropdown",
+          "annotations": {
+            "title": "Select option",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.element", "$.target", "$.values"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_tabs",
+          "description": "List, create, close, or select a browser tab.",
+          "annotations": {
+            "title": "Manage tabs",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.action", "$.index", "$.url"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructiveHint: true"
+          }
+        },
+        {
+          "name": "browser_wait_for",
+          "description": "Wait for text to appear or disappear or a specified time to pass",
+          "annotations": {
+            "title": "Wait for",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.time", "$.text", "$.textGone"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        }
+      ]
+    },
+    {
+      "file": "14-context7-sdk.json",
+      "server": "Context7 4.1.1",
+      "tools": [
+        {
+          "name": "resolve-library-id",
+          "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'Query Documentation' tool to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nEach result includes:\n- Library ID: Context7-compatible identifier (format: /org/project)\n- Name: Library or package name\n- Description: Short summary\n- Code Snippets: Number of available code examples\n- Source Reputation: Authority indicator (High, Medium, Low, or Unknown)\n- Benchmark Score: Quality indicator (100 is the highest score)\n- Versions: List of versions if available. Use one of those versions if the user provides a version in their query. The format of the version is /org/project/version.\n\nFor best results, select libraries based on name match, source reputation, snippet coverage, benchmark score, and relevance to your use case.\n\nSelection Process:\n1. Analyze the query to understand what library/package the user is looking for\n2. Return the most relevant match based on:\n- Name similarity to the query (exact matches prioritized)\n- Description relevance to the query's intent\n- Documentation coverage (prioritize libraries with higher Code Snippet counts)\n- Source reputation (consider libraries with High or Medium reputation more authoritative)\n- Benchmark Score: Quality indicator (100 is the highest score)\n\nResponse Format:\n- Return the selected library ID in a clearly marked section\n- Provide a brief explanation for why this library was chosen\n- If multiple good matches exist, acknowledge this but proceed with the most relevant one\n- If no good matches exist, clearly state this and suggest query refinements\n\nFor ambiguous queries, request clarification before proceeding with a best-guess match.\n\nIMPORTANT: Do not call this tool more than 3 times per question. If you cannot find what you need after 3 calls, use the best result you have.",
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.query", "$.libraryName"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "query-docs",
+          "description": "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework.\n\nYou must call 'Resolve Context7 Library ID' tool first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nDo not call this tool more than 3 times per question.",
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+          },
+          "input_keys": ["$.libraryId", "$.query"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "open-world read"
+          }
+        }
+      ]
+    },
+    {
+      "file": "15-chrome-devtools-sdk.json",
+      "server": "chrome_devtools 1.10.1",
+      "tools": [
+        {
+          "name": "click",
+          "description": "Clicks on the provided element",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.uid", "$.dblClick", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "close_page",
+          "description": "Closes the page by its index. The last open page cannot be closed.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "drag",
+          "description": "Drag an element onto another element",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.from_uid", "$.to_uid", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "emulate",
+          "description": "Emulates various features on the target page.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": [
+            "$.pageId",
+            "$.networkConditions",
+            "$.cpuThrottlingRate",
+            "$.geolocation",
+            "$.userAgent",
+            "$.colorScheme",
+            "$.viewport",
+            "$.extraHttpHeaders"
+          ],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "evaluate_script",
+          "description": "Evaluate a JavaScript function inside the target page. Returns the response as JSON, so returned values have to be JSON-serializable.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": [
+            "$.pageId",
+            "$.function",
+            "$.args",
+            "$.filePath",
+            "$.dialogAction",
+            "$.waitForStableDom"
+          ],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "fill",
+          "description": "Type text into an input, text area or select an option from a <select> element.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.uid", "$.value", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "fill_form",
+          "description": "Fill out multiple form elements (inputs, selects, checkboxes, radios) at once. ALWAYS prefer this tool over multiple individual 'fill' or 'click' calls when interacting with forms. It is significantly faster, more reliable, and reduces turn count. Example: Fill username, password, and check \"Remember Me\" in one call.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.elements", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "get_console_message",
+          "description": "Gets a console message by its ID. You can get all messages by calling list_console_messages.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": ["$.pageId", "$.msgid"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "description silent"
+          }
+        },
+        {
+          "name": "get_css_styles",
+          "description": "Retrieve matched CSS rules, inline styles, inherited styles, and cascade information for an element identified by its UID.\nUse this tool to debug why specific CSS properties are applied, overridden, or conflicting. Results are paginated and return 10 rules per page by default; use pageIdx to page through the remaining rules. Requires a UID from take_snapshot.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": ["$.pageId", "$.uid", "$.pageSize", "$.pageIdx"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "description silent"
+          }
+        },
+        {
+          "name": "get_network_request",
+          "description": "Gets a network request by an optional reqid, if omitted returns the currently selected request in the DevTools Network panel. Useful for inspecting request headers (including 'Cookie') and response headers (including 'Set-Cookie' and directives).",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.reqid", "$.requestFilePath", "$.responseFilePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "annotation not read-only"
+          }
+        },
+        {
+          "name": "handle_dialog",
+          "description": "If a browser dialog was opened, use this command to handle it",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.action", "$.promptText"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructive description"
+          }
+        },
+        {
+          "name": "hover",
+          "description": "Hover over the provided element",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.uid", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "lighthouse_audit",
+          "description": "Get Lighthouse score and reports for accessibility, SEO, best practices, and agentic browsing. This excludes performance. For performance audits, run performance_start_trace",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.mode", "$.device", "$.outputDirPath"],
+          "expected": {
+            "class": "confident_restrict",
+            "reason": "destructive description"
+          }
+        },
+        {
+          "name": "list_console_messages",
+          "description": "List all console messages for the target page since the last navigation.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": [
+            "$.pageId",
+            "$.pageSize",
+            "$.pageIdx",
+            "$.types",
+            "$.includePreservedMessages",
+            "$.includeStackTraces",
+            "$.serviceWorkerId"
+          ],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "list_network_requests",
+          "description": "Lists the most recent requests for the target page since the last navigation.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": [
+            "$.pageId",
+            "$.pageSize",
+            "$.pageIdx",
+            "$.resourceTypes",
+            "$.includePreservedRequests"
+          ],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "description silent"
+          }
+        },
+        {
+          "name": "list_pages",
+          "description": "Get a list of pages open in the browser.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": [],
+          "expected": {
+            "class": "confident_read",
+            "reason": "name, hint and description agree"
+          }
+        },
+        {
+          "name": "navigate_page",
+          "description": "Go to a URL, or back, forward, or reload. Use project URL if not specified otherwise.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": [
+            "$.pageId",
+            "$.type",
+            "$.url",
+            "$.ignoreCache",
+            "$.handleBeforeUnload",
+            "$.initScript",
+            "$.timeout"
+          ],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "new_page",
+          "description": "Open a new tab and load a URL. Use project URL if not specified otherwise.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.url", "$.background", "$.isolatedContext", "$.timeout"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "performance_analyze_insight",
+          "description": "Provides more detailed information on a specific Performance Insight of an insight set that was highlighted in the results of a trace recording.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": ["$.pageId", "$.insightSetId", "$.insightName"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "performance_start_trace",
+          "description": "Start a performance trace on the target webpage. Use to find frontend performance issues, Core Web Vitals (LCP, INP, CLS), and improve page load speed.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.reload", "$.autoStop", "$.filePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "performance_stop_trace",
+          "description": "Stop the active performance trace recording on the target webpage.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.filePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "press_key",
+          "description": "Press a key or key combination. Use this when other input methods like fill() cannot be used (e.g., keyboard shortcuts, navigation keys, or special key combinations).",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.key", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "resize_page",
+          "description": "Resizes the page's window so that the page has specified dimension",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.width", "$.height"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "select_page",
+          "description": "Select a page as a context for future tool calls.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": ["$.pageId", "$.bringToFront"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "take_heapsnapshot",
+          "description": "Capture a heap snapshot of the target page. Use to analyze the memory distribution of JavaScript objects and debug memory leaks.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.filePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "take_screenshot",
+          "description": "Take a screenshot of the page or element.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.format", "$.quality", "$.uid", "$.fullPage", "$.filePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "take_snapshot",
+          "description": "Take a text snapshot of the target page based on the a11y tree. The snapshot lists page elements along with a unique\nidentifier (uid). Always use the latest snapshot. Prefer taking a snapshot over taking a screenshot. The snapshot indicates the element selected\nin the DevTools Elements panel (if any).",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.verbose", "$.filePath"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "type_text",
+          "description": "Type text using keyboard into a previously focused input",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.text", "$.submitKey"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        },
+        {
+          "name": "upload_file",
+          "description": "Upload a file through a provided element.",
+          "annotations": {
+            "readOnlyHint": false
+          },
+          "input_keys": ["$.pageId", "$.uid", "$.filePaths", "$.includeSnapshot"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "write-class name"
+          }
+        },
+        {
+          "name": "wait_for",
+          "description": "Wait for the specified text to appear on the selected page.",
+          "annotations": {
+            "readOnlyHint": true
+          },
+          "input_keys": ["$.pageId", "$.text", "$.timeout"],
+          "expected": {
+            "class": "needs_decision",
+            "reason": "unknown name"
+          }
+        }
+      ]
+    }
+  ]
+}

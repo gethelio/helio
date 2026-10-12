@@ -21,6 +21,21 @@ Maintainer notes:
 
 ### Added
 
+- **The policy generation model and its `policy_generation` audit record.**
+  The classifier reads tool definitions alone: the name's first token, the
+  description's whole words, the hints a definition presents (read with
+  `pickHints()` and tested `=== true`, never an MCP default), execute-shaped
+  argument paths and the running proxy's baseline state, under the frozen
+  lexicons of issue #487, into three classes with one primary reason each
+  (confident read, confident restrict, needs decision). Every generation run
+  that classified definitions writes one `policy_generation` record into the
+  audit database it read, stamped with the candidate's hash when a candidate
+  was written and carrying none otherwise; the kind is excluded from the
+  decision aggregates, the top-tools ranking, the status counts and the
+  last-policy-write check, and the activation report's `First generation`
+  stage is dated from the earliest such record (`none: no policy_generation
+record within retention` without one). The command that runs generation
+  ships separately.
 - **`helio policy simulate [candidate]`: replay the audit trail against a
   candidate policy and report what would change, without a running proxy.**
   The candidate is any complete `helio.yaml` (default `helio.candidate.yaml`
