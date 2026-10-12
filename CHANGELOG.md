@@ -40,9 +40,11 @@ Maintainer notes:
   `flag_destructive: require_approval` posture does not already decide: `allow`
   for a confident read, `require_approval` for a confident restrict, never
   `deny`, with no call-count gate and nothing inferred from maxima or approval
-  history. The rule names the tool exactly, is scoped to its door in
-  multi-upstream mode, and is appended after the last source rule into a
-  verbatim copy of the source text, so comments and `${VAR}` placeholders
+  history. The rule matches the tool by its exact name under a rule name
+  that writes a dollar sign as an underscore (so the loader never reads the
+  name as a `${VAR}` placeholder), is scoped to its door in multi-upstream
+  mode, and is appended after the last source rule into a verbatim copy of
+  the source text, so comments and `${VAR}` placeholders
   survive and no interpolated value is ever written; a shape the splice will
   not touch is refused by name and the rules are listed to write by hand. A
   `require_approval` candidate is written only when the source already carries

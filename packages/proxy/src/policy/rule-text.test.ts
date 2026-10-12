@@ -7,9 +7,11 @@ import {
   exactlyMatchable,
   globLiteral,
   quoted,
+  ruleLabel,
   unmatchableNote,
 } from './rule-text.js'
 import { compileToolMatcher } from './parser.js'
+import { ENV_VAR_PATTERN } from '../config/loader.js'
 
 // ---------------------------------------------------------------------------
 // The exact-name pattern
@@ -91,6 +93,29 @@ describe('unmatchableNote', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The rule label
+// ---------------------------------------------------------------------------
+
+describe('ruleLabel', () => {
+  it('prefixes the tool name and leaves a name without a dollar sign as it is', () => {
+    expect(ruleLabel('allow', 'read_file')).toBe('allow-read_file')
+    expect(ruleLabel('approve', 'delete_record')).toBe('approve-delete_record')
+    expect(ruleLabel('allow', 'a: b #c')).toBe('allow-a: b #c')
+  })
+
+  it('writes every dollar sign as an underscore so the loader never reads the name as a placeholder', () => {
+    expect(ruleLabel('allow', 'read_${HELIO_R2_UNSET_ZZZ}')).toBe(
+      'allow-read__{HELIO_R2_UNSET_ZZZ}',
+    )
+    expect(ruleLabel('approve', 'delete_${PATH}')).toBe('approve-delete__{PATH}')
+    expect(ruleLabel('allow', 'get_$$amount')).toBe('allow-get___amount')
+    for (const name of ['read_${X}', 'x${A}${B}y', '${_}']) {
+      expect(ruleLabel('allow', name).search(ENV_VAR_PATTERN)).toBe(-1)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The two rule renderers
 // ---------------------------------------------------------------------------
 
@@ -129,6 +154,18 @@ describe('allowRule and approvalRule', () => {
         '    approval:\n' +
         '      channel: dashboard\n',
     )
+  })
+
+  it('write a placeholder-shaped name under a label the loader will not interpolate, with the exact tool', () => {
+    const text = allowRule('read_${HELIO_R2_UNSET_ZZZ}', '')
+    expect(text).toBe(
+      '- name: "allow-read__{HELIO_R2_UNSET_ZZZ}"\n' +
+        '  match:\n' +
+        '    tool: "read_\\\\$\\\\{HELIO_R2_UNSET_ZZZ\\\\}"\n' +
+        '  action: allow\n',
+    )
+    expect(text.search(ENV_VAR_PATTERN)).toBe(-1)
+    expect(approvalRule('delete_${PATH}', '')).toContain('- name: "approve-delete__{PATH}"\n')
   })
 
   it('quote a name that carries YAML structure', () => {

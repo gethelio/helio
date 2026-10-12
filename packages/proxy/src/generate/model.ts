@@ -10,6 +10,7 @@ import {
   exactPattern,
   exactlyMatchable,
   quoted,
+  ruleLabel,
 } from '../policy/rule-text.js'
 import { doorOfRow, pairKey } from '../policy/status.js'
 import { classifySurface } from '../policy/surface.js'
@@ -257,7 +258,7 @@ function ruleText(
   scope: { readonly upstream: string } | undefined,
   taken: ReadonlySet<string>,
 ): GenerationRule {
-  const base = `${action === 'allow' ? 'allow' : 'approve'}-${tool}`
+  const base = ruleLabel(action === 'allow' ? 'allow' : 'approve', tool)
   const name = taken.has(base) ? `${base}-generated` : base
   const rendered = action === 'allow' ? allowRule(tool, '', scope) : approvalRule(tool, '', scope)
   // The renderers name the rule from the tool; the collision suffix is this module's. The

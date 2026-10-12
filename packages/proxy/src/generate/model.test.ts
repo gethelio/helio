@@ -583,9 +583,11 @@ describe('buildGenerationModel dispositions', () => {
   })
 
   it('keeps a dollar sign in a colliding name literal when the -generated suffix is applied', () => {
+    // The source names its rule by the LABEL (a dollar sign written as an underscore), which is
+    // the name a generated rule would take, so the collision suffix applies.
     const collide = (tool: string) =>
       source({
-        policies: `policies:\n  default: allow\n  rules:\n    - name: ${JSON.stringify(`allow-${tool}`)}\n      match:\n        tool: other_tool\n      action: deny\n`,
+        policies: `policies:\n  default: allow\n  rules:\n    - name: ${JSON.stringify(`allow-${tool.replaceAll('$', '_')}`)}\n      match:\n        tool: other_tool\n      action: deny\n`,
       })
     for (const tool of ['get_$$amount', 'get_$&file', "get_$'tail", 'get_$`head', 'get_$1']) {
       const model = run({
@@ -594,10 +596,11 @@ describe('buildGenerationModel dispositions', () => {
         observed: observed([{ tool_name: tool, calls: 1 }]),
       })
       const p = pair(model, tool)
+      const label = `allow-${tool.replaceAll('$', '_')}`
       expect(p.disposition, tool).toBe('written')
-      expect(p.rule?.name, tool).toBe(`allow-${tool}-generated`)
+      expect(p.rule?.name, tool).toBe(`${label}-generated`)
       const text = candidateText(model)
-      expect(text, tool).toContain(`- name: ${JSON.stringify(`allow-${tool}-generated`)}\n`)
+      expect(text, tool).toContain(`- name: ${JSON.stringify(`${label}-generated`)}\n`)
       const parsed = parseConfigSource(
         { raw: text, sha256: createHash('sha256').update(text).digest('hex') },
         'candidate.yaml',
@@ -606,9 +609,52 @@ describe('buildGenerationModel dispositions', () => {
       expect(
         parsed.policies.rules.map((r) => r.name),
         tool,
-      ).toEqual([`allow-${tool}`, `allow-${tool}-generated`])
+      ).toEqual([label, `${label}-generated`])
       expectInsertion(model)
     }
+  })
+
+  it('writes a tool whose name is shaped like a placeholder under a label the loader will not interpolate', () => {
+    const model = run({
+      tools: [
+        def({ name: 'read_${HELIO_R2_UNSET_ZZZ}' }),
+        { ...DELETE_RECORD, name: 'delete_${HELIO_R2_UNSET_ZZZ}' },
+        def({ name: 'read_${PATH}' }),
+      ],
+      observed: observed([
+        { tool_name: 'read_${HELIO_R2_UNSET_ZZZ}', calls: 2 },
+        { tool_name: 'delete_${HELIO_R2_UNSET_ZZZ}', calls: 1 },
+        { tool_name: 'read_${PATH}', calls: 3 },
+      ]),
+    })
+    expect(pair(model, 'read_${HELIO_R2_UNSET_ZZZ}').rule?.name).toBe(
+      'allow-read__{HELIO_R2_UNSET_ZZZ}',
+    )
+    expect(pair(model, 'delete_${HELIO_R2_UNSET_ZZZ}').rule?.name).toBe(
+      'approve-delete__{HELIO_R2_UNSET_ZZZ}',
+    )
+    const text = candidateText(model)
+    // The candidate loads with the variable unset (the empty environment) and with it set, and
+    // the rule names the loader reads back are the names the model stored.
+    for (const env of [{}, { HELIO_R2_UNSET_ZZZ: 'planted', PATH: '/usr/bin' }, process.env]) {
+      const parsed = parseConfigSource(
+        { raw: text, sha256: createHash('sha256').update(text).digest('hex') },
+        'candidate.yaml',
+        env as Record<string, string | undefined>,
+      ).config
+      expect(parsed.policies.rules.map((r) => r.name)).toEqual([
+        'approve-delete__{HELIO_R2_UNSET_ZZZ}',
+        'allow-read__{HELIO_R2_UNSET_ZZZ}',
+        'allow-read__{PATH}',
+      ])
+      expect(parsed.policies.rules.map((r) => r.match.tool)).toEqual([
+        'delete_\\$\\{HELIO_R2_UNSET_ZZZ\\}',
+        'read_\\$\\{HELIO_R2_UNSET_ZZZ\\}',
+        'read_\\$\\{PATH\\}',
+      ])
+    }
+    expect(text).not.toContain('allow-read_${')
+    expectInsertion(model)
   })
 
   it('counts observed rows on no listed door and never classifies them', () => {

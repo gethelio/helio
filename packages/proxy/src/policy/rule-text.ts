@@ -72,6 +72,18 @@ export function unmatchableNote(name: string, prefix: string): string {
   )
 }
 
+/**
+ * The name of a generated rule: the action's prefix and the tool name with
+ * every `$` written as `_`. The config loader interpolates `${IDENT}` in
+ * every string it loads, the rule's name included, so a tool whose name is
+ * shaped like a placeholder would make the written file fail to load when
+ * the variable is unset and load under another name when it is set. The
+ * `match.tool` beside it stays the exact tool name, escaped as a glob.
+ */
+export function ruleLabel(prefix: 'allow' | 'approve', name: string): string {
+  return `${prefix}-${name.replaceAll('$', '_')}`
+}
+
 /** The door a generated rule is pinned to in multi-upstream mode (issue #522). */
 export interface RuleScope {
   readonly upstream: string
@@ -88,7 +100,7 @@ function matchBlock(name: string, prefix: string, scope: RuleScope | undefined):
 /** A `require_approval` rule on the exact name, routed to the dashboard channel. */
 export function approvalRule(name: string, prefix: string, scope?: RuleScope): string {
   return (
-    `${prefix}- name: ${quoted(`approve-${name}`)}\n` +
+    `${prefix}- name: ${quoted(ruleLabel('approve', name))}\n` +
     matchBlock(name, prefix, scope) +
     `${prefix}  action: require_approval\n` +
     `${prefix}  approval:\n` +
@@ -99,7 +111,7 @@ export function approvalRule(name: string, prefix: string, scope?: RuleScope): s
 /** An `allow` rule on the exact name. */
 export function allowRule(name: string, prefix: string, scope?: RuleScope): string {
   return (
-    `${prefix}- name: ${quoted(`allow-${name}`)}\n` +
+    `${prefix}- name: ${quoted(ruleLabel('allow', name))}\n` +
     matchBlock(name, prefix, scope) +
     `${prefix}  action: allow\n`
   )
