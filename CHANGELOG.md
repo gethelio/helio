@@ -125,6 +125,10 @@ Maintainer notes:
 
 ### Fixed
 
+- **`AuditStore.list()` and `listForExport()` accept any numeric limit.**
+  `clamp()` now returns `min` for NaN or Infinity and floors fractional
+  values, so the limit always binds to SQLite instead of throwing
+  `datatype mismatch` (#136).
 - **A `regex` that does not compile is reported as invalid, not catastrophic.**
   On a rule's `match.input`, a rule's `match.metadata` and a budget
   contributor's `match.input`, a pattern the engine rejects is now reported

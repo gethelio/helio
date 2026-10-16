@@ -1,10 +1,12 @@
 /**
- * Clamp a number to an inclusive `[min, max]` range.
+ * Clamp a number to an inclusive `[min, max]` range, floored to an integer.
+ * Non-finite input (NaN, ±Infinity) returns `min`.
  *
  * Used by list endpoints and store queries to enforce pagination limits.
  */
 export function clamp(n: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, n))
+  if (!Number.isFinite(n)) return min
+  return Math.max(min, Math.min(max, Math.floor(n)))
 }
 
 /**
