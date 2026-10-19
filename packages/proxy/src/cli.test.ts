@@ -10591,7 +10591,7 @@ describe('no telemetry (issue #401)', () => {
   // empty set and is not the pin; the `contains` clause is. On a stock Ubuntu
   // image whose `localhost` resolves to IPv4 only, test 5's upstream attempt is
   // a plain `connect:` line and a `connect/multiple` drop would be invisible
-  // there; CI runs on `ubuntu-latest`, whose hosts file lists `localhost` on
+  // there; CI runs on `ubuntu-24.04`, whose hosts file lists `localhost` on
   // both loopback lines.
   //
   // What this suite does not see. A stdio upstream is the operator's process,

@@ -16,7 +16,7 @@ permissions:
 jobs:
   secret-scan:
     name: Secret Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -30,7 +30,7 @@ jobs:
 
   ci:
     name: Docs, Audit, Lint, Typecheck, Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -179,7 +179,7 @@ jobs:
 
   docker:
     name: Docker Build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     # A registry on localhost for the SBOM attestation check below: BuildKit
