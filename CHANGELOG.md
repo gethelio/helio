@@ -19,6 +19,8 @@ Maintainer notes:
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-19
+
 ### Added
 
 - **The policy generation model and its `policy_generation` audit record.**
@@ -2046,7 +2048,8 @@ Helio's first public release.
 - Secret scanning is now part of the default quality gate (pre-commit + CI),
   designed to prevent accidental credential commits before merge.
 
-[Unreleased]: https://github.com/gethelio/helio/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/gethelio/helio/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/gethelio/helio/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/gethelio/helio/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/gethelio/helio/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/gethelio/helio/compare/v0.13.0...v0.13.1
