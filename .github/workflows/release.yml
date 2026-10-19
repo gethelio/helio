@@ -21,7 +21,7 @@ concurrency:
 jobs:
   verify-tag-on-main:
     name: Verify tag ancestry on main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -43,7 +43,7 @@ jobs:
   ci:
     name: CI
     needs: verify-tag-on-main
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -118,7 +118,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: npm
     permissions:
@@ -164,7 +164,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: pypi
     permissions:
@@ -200,7 +200,7 @@ jobs:
   publish-registry:
     name: Publish to MCP registry
     needs: publish-npm
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: mcp-registry
     permissions:
@@ -285,7 +285,7 @@ jobs:
   docker:
     name: Docker Build & Push
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -386,7 +386,7 @@ jobs:
   sbom:
     name: Generate SBOM
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -451,7 +451,7 @@ jobs:
   release:
     name: GitHub Release
     needs: [publish-npm, publish-pypi, docker, sbom]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
