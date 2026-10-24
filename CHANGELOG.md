@@ -19,6 +19,20 @@ Maintainer notes:
 
 ## [Unreleased]
 
+### Fixed
+
+- **An output path that cannot be written is refused in one line.**
+  `helio init -o` and `helio report activation --out` pointed at a path that
+  cannot be written (a missing directory, a directory in the file's place, a
+  read-only directory) now print one line naming the path and the error code,
+  the line `helio init --demo` already prints, for example
+  `Error: cannot write missing/helio.yaml (ENOENT).`
+  and exit 1, where they printed an unhandled-rejection stack before. Neither
+  command creates the directory. `helio report activation` refuses a missing
+  directory, or a file where the directory should be, before it opens the
+  audit database; `helio init` prints no dashboard secret when its write is
+  refused.
+
 ## [0.16.0] - 2026-10-19
 
 ### Added

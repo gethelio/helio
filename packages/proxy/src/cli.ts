@@ -43,6 +43,7 @@ import {
 import { DEMO_DEFAULT_PORTS } from './demo/config.js'
 import { demoAnnotationSource } from './demo/annotations.js'
 import { parseDemoBase, seedDemoDirectory } from './demo/seed.js'
+import { cannotWriteFrom, cannotWriteLine, writeOrRefuse } from './util/write-or-refuse.js'
 import {
   BACKUP_SUFFIX,
   MANIFEST_FILE,
@@ -1554,7 +1555,7 @@ async function initCommand(outputPath: string, force: boolean): Promise<void> {
   }
 
   const secret = randomBytes(32).toString('hex')
-  await writeFile(outputPath, renderConfigTemplate(secretDigest(secret)), 'utf-8')
+  await writeOrRefuse(outputPath, renderConfigTemplate(secretDigest(secret)))
   printMintedSecret(outputPath, secret)
 }
 
@@ -2509,6 +2510,15 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
   if (opts.out !== undefined && !opts.force && existsSync(opts.out)) {
     throw new StartupError(`Error: ${opts.out} already exists. Pass --force to overwrite it.`)
   }
+  if (opts.out !== undefined) {
+    let parent: Stats
+    try {
+      parent = statSync(dirname(opts.out))
+    } catch (err) {
+      throw new StartupError(cannotWriteFrom(opts.out, err))
+    }
+    if (!parent.isDirectory()) throw new StartupError(cannotWriteLine(opts.out, 'ENOTDIR'))
+  }
 
   const config = await loadConfigForReader(opts.config, {
     command: 'helio report activation',
@@ -2559,9 +2569,9 @@ async function reportActivationCommand(opts: ReportActivationOptions): Promise<v
     console.log(rendered)
     return
   }
-  const bytes = Buffer.from(`${rendered}\n`, 'utf-8')
-  await writeFile(opts.out, bytes)
-  console.error(`Wrote ${opts.out} (${opts.format}, ${String(bytes.length)} bytes)`)
+  const text = `${rendered}\n`
+  await writeOrRefuse(opts.out, text)
+  console.error(`Wrote ${opts.out} (${opts.format}, ${String(Buffer.byteLength(text))} bytes)`)
 }
 
 /**
@@ -3311,7 +3321,9 @@ program
           ...(opts.at === undefined ? {} : { at: opts.at }),
         }).catch(exitOnStartupError)
       }
-      if (opts.sandbox === undefined) return initCommand(opts.output, opts.force)
+      if (opts.sandbox === undefined) {
+        return initCommand(opts.output, opts.force).catch(exitOnStartupError)
+      }
       if (command.getOptionValueSource('output') === 'cli') {
         console.error(
           'Error: --output does not apply to --sandbox; pass the directory as --sandbox <dir>.',

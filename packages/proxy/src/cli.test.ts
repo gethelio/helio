@@ -789,6 +789,62 @@ describe('CLI', () => {
       }
     })
 
+    it('refuses an output path under a missing directory with one line and creates nothing (issue #471)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const outPath = join(dir, 'missing', 'helio.yaml')
+
+      try {
+        const { code, stderr } = await runCli(['init', '-o', outPath])
+        expect(code).toBe(1)
+        expect(stderr.trim()).toBe(`Error: cannot write ${outPath} (ENOENT).`)
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(stderr).not.toContain('Dashboard secret')
+        expect(existsSync(join(dir, 'missing'))).toBe(false)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('refuses a directory at the output path under --force with one line (issue #471)', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+      const outPath = join(dir, 'adir')
+      mkdirSync(outPath)
+
+      try {
+        const { code, stderr } = await runCli(['init', '-o', outPath, '--force'])
+        expect(code).toBe(1)
+        expect(stderr.trim()).toBe(`Error: cannot write ${outPath} (EISDIR).`)
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(stderr).not.toContain('Dashboard secret')
+        expect(statSync(outPath).isDirectory()).toBe(true)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'refuses an output path in a read-only directory with one line (issue #471)',
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
+        const ro = join(dir, 'ro')
+        const outPath = join(ro, 'helio.yaml')
+        mkdirSync(ro)
+        chmodSync(ro, 0o500)
+
+        try {
+          const { code, stderr } = await runCli(['init', '-o', outPath])
+          expect(code).toBe(1)
+          expect(stderr.trim()).toBe(`Error: cannot write ${outPath} (EACCES).`)
+          expect(stderr).not.toContain('Unhandled promise rejection')
+          expect(stderr).not.toContain('Dashboard secret')
+          expect(existsSync(outPath)).toBe(false)
+        } finally {
+          chmodSync(ro, 0o700)
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+    )
+
     it('scaffolds a commented upstreams: pointer stub (issue #293)', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'helio-cli-test-'))
       const outPath = join(dir, 'helio.yaml')
@@ -6902,6 +6958,130 @@ ${dashboard}audit:
         rmSync(fixture.dir, { recursive: true, force: true })
       }
     }, 15_000)
+
+    // No database is seeded in the next two: a refusal that came after the
+    // config load would print the missing-database line instead.
+    it('refuses an --out file under a missing directory before any open or socket (issue #471)', async () => {
+      const fixture = writeReportConfig({})
+      const out = join(fixture.dir, 'missing', 'r.json')
+      try {
+        const { code, stdout, stderr, connects } = await runReport([
+          '-c',
+          fixture.configPath,
+          '--out',
+          out,
+        ])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(`Error: cannot write ${out} (ENOENT).`)
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(connects).toEqual([])
+        expect(readdirSync(fixture.dir)).toEqual(['helio.yaml'])
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses an --out file under a regular file before any open or socket (issue #471)', async () => {
+      const fixture = writeReportConfig({})
+      writeFileSync(join(fixture.dir, 'file.txt'), 'not a directory')
+      const out = join(fixture.dir, 'file.txt', 'r.json')
+      try {
+        const { code, stdout, stderr, connects } = await runReport([
+          '-c',
+          fixture.configPath,
+          '--out',
+          out,
+        ])
+        expect(code).toBe(1)
+        expect(stdout).toBe('')
+        expect(stderr.trim()).toBe(`Error: cannot write ${out} (ENOTDIR).`)
+        expect(stderr).not.toContain('Unhandled promise rejection')
+        expect(connects).toEqual([])
+        expect(existsSync(fixture.auditPath)).toBe(false)
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 15_000)
+
+    it('refuses an --out write that fails once the report is built with one line (issue #471)', async () => {
+      const fixture = writeReportConfig({})
+      const base = new Date(Date.now() - 3 * HOUR)
+      const rdir = join(fixture.dir, 'rdir')
+      const missing = join(fixture.dir, 'missing')
+      try {
+        seedActivationHistory(fixture.auditPath, base)
+        mkdirSync(rdir)
+        const forced = await runCli([
+          'report',
+          'activation',
+          '-c',
+          fixture.configPath,
+          '--out',
+          rdir,
+          '--force',
+        ])
+        expect(forced.code).toBe(1)
+        expect(forced.stdout).toBe('')
+        expect(forced.stderr.trim().split('\n').at(-1)).toBe(
+          `Error: cannot write ${rdir} (EISDIR).`,
+        )
+        expect(forced.stderr).not.toContain('Unhandled promise rejection')
+        expect(readdirSync(rdir)).toEqual([])
+
+        // dirname drops a trailing separator, so this spelling passes the
+        // parent check and is refused by the write itself.
+        const slashed = await runCli([
+          'report',
+          'activation',
+          '-c',
+          fixture.configPath,
+          '--out',
+          `${missing}/`,
+        ])
+        expect(slashed.code).toBe(1)
+        expect(slashed.stdout).toBe('')
+        expect(slashed.stderr.trim().split('\n').at(-1)).toBe(
+          `Error: cannot write ${missing}/ (ENOENT).`,
+        )
+        expect(slashed.stderr).not.toContain('Unhandled promise rejection')
+        expect(existsSync(missing)).toBe(false)
+      } finally {
+        rmSync(fixture.dir, { recursive: true, force: true })
+      }
+    }, 30_000)
+
+    it.skipIf(!CAN_TEST_UNWRITABLE)(
+      'refuses an --out file in a read-only directory once the report is built with one line (issue #471)',
+      async () => {
+        const fixture = writeReportConfig({})
+        const base = new Date(Date.now() - 3 * HOUR)
+        const ro = join(fixture.dir, 'ro')
+        const out = join(ro, 'r.json')
+        mkdirSync(ro)
+        try {
+          seedActivationHistory(fixture.auditPath, base)
+          chmodSync(ro, 0o500)
+          const { code, stdout, stderr } = await runCli([
+            'report',
+            'activation',
+            '-c',
+            fixture.configPath,
+            '--out',
+            out,
+          ])
+          expect(code).toBe(1)
+          expect(stdout).toBe('')
+          expect(stderr.trim().split('\n').at(-1)).toBe(`Error: cannot write ${out} (EACCES).`)
+          expect(stderr).not.toContain('Unhandled promise rejection')
+          expect(existsSync(out)).toBe(false)
+        } finally {
+          chmodSync(ro, 0o700)
+          rmSync(fixture.dir, { recursive: true, force: true })
+        }
+      },
+      30_000,
+    )
 
     it('refuses a :memory: audit path as a missing database', async () => {
       const fixture = writeReportConfig({ auditPath: ':memory:' })
