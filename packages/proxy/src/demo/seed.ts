@@ -11,13 +11,14 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { AuditStore } from '../audit/store.js'
 import { ToolBaselineStore } from '../baseline/store.js'
 import { BudgetLedger } from '../budget/ledger.js'
 import { StartupError } from '../startup-error.js'
 import { canonicalize } from '../util/canonical-json.js'
+import { writeOrRefuse } from '../util/write-or-refuse.js'
 import {
   DEMO_AUDIT_RETENTION,
   DEMO_DEFAULT_PORTS,
@@ -92,15 +93,6 @@ export interface SeedDemoResult {
 function errnoCode(err: unknown): string {
   const code = (err as { code?: unknown }).code
   return typeof code === 'string' ? code : 'unknown error'
-}
-
-/** Write one file, or refuse with one line naming the path and the code. */
-async function writeOrRefuse(path: string, content: string): Promise<void> {
-  try {
-    await writeFile(path, content, 'utf-8')
-  } catch (err) {
-    throw new StartupError(`Error: cannot write ${path} (${errnoCode(err)}).`)
-  }
 }
 
 /**
