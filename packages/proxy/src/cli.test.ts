@@ -7030,7 +7030,9 @@ ${dashboard}audit:
         expect(readdirSync(rdir)).toEqual([])
 
         // dirname drops a trailing separator, so this spelling passes the
-        // parent check and is refused by the write itself.
+        // parent check and is refused by the write itself. The kernel picks
+        // the code: Linux reports EISDIR for a missing path ending in a
+        // separator, macOS ENOENT.
         const slashed = await runCli([
           'report',
           'activation',
@@ -7041,9 +7043,10 @@ ${dashboard}audit:
         ])
         expect(slashed.code).toBe(1)
         expect(slashed.stdout).toBe('')
-        expect(slashed.stderr.trim().split('\n').at(-1)).toBe(
+        expect([
           `Error: cannot write ${missing}/ (ENOENT).`,
-        )
+          `Error: cannot write ${missing}/ (EISDIR).`,
+        ]).toContain(slashed.stderr.trim().split('\n').at(-1))
         expect(slashed.stderr).not.toContain('Unhandled promise rejection')
         expect(existsSync(missing)).toBe(false)
       } finally {
