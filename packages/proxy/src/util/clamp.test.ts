@@ -22,6 +22,17 @@ describe('clamp', () => {
     expect(clamp(1, 1, 100)).toBe(1)
     expect(clamp(100, 1, 100)).toBe(100)
   })
+
+  it('returns min for non-finite input', () => {
+    expect(clamp(NaN, 1, 100)).toBe(1)
+    expect(clamp(Infinity, 1, 100)).toBe(1)
+    expect(clamp(-Infinity, 1, 100)).toBe(1)
+  })
+
+  it('floors fractional input', () => {
+    expect(clamp(2.5, 1, 100)).toBe(2)
+    expect(clamp(0.5, 1, 100)).toBe(1)
+  })
 })
 
 // ---------------------------------------------------------------------------
